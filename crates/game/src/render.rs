@@ -1,5 +1,6 @@
-//! Scene renderer: sky, opaque terrain and water into an HDR target, then a tonemap
-//! pass to whatever the output is (window or screenshot texture).
+//! Scene renderer. Each frame: shadow maps from the sun, then sky, far view, voxel
+//! terrain and water into an HDR target, then bloom and a tonemap pass to whatever the
+//! output is (window or screenshot texture).
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
@@ -15,6 +16,12 @@ use crate::{
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const SHADOW_SIZE: u32 = 2048;
+const CASCADES: usize = 3;
+/// View-depth at which each shadow cascade ends.
+const CASCADE_ENDS: [f32; CASCADES] = [40.0, 160.0, 640.0];
+/// Height of the cloud layer above sea level.
+const CLOUD_HEIGHT: f32 = 300.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -29,15 +36,30 @@ struct Globals {
     sky_horizon: [f32; 4],
     fog: [f32; 4],
     cam_wrapped: [f32; 4],
+    mist: [f32; 4],
+    cascades: [f32; 4],
 }
 
-/// Per-chunk instance data.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Shadows {
+    light_vp: [[[f32; 4]; 4]; CASCADES],
+    texel: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CascadeUniform {
+    light_vp: [[f32; 4]; 4],
+}
+
+/// Per-chunk (or per-continent) instance data.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Instance {
-    /// Chunk origin relative to the camera.
+    /// Origin relative to the camera.
     offset: [f32; 3],
-    /// Chunk origin in world voxels (for stable per-voxel hashing).
+    /// Origin in world voxels (for stable per-voxel hashing).
     origin: [i32; 3],
 }
 
@@ -57,22 +79,57 @@ pub struct DrawStats {
     pub far_tiles: u32,
 }
 
+/// A texture used as a render target and later sampled.
+struct Target {
+    view: wgpu::TextureView,
+}
+
+fn make_target(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::TextureFormat) -> Target {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: w.max(1),
+            height: h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    Target {
+        view: tex.create_view(&Default::default()),
+    }
+}
+
 pub struct Renderer {
     width: u32,
     height: u32,
     globals: wgpu::Buffer,
-    globals_bind: wgpu::BindGroup,
-    hdr_view: wgpu::TextureView,
-    hdr_layout: wgpu::BindGroupLayout,
-    hdr_bind: wgpu::BindGroup,
-    depth_view: wgpu::TextureView,
+    shadows: wgpu::Buffer,
+    scene_bind: wgpu::BindGroup,
+    cascade_binds: Vec<(wgpu::Buffer, wgpu::BindGroup)>,
+    shadow_views: Vec<wgpu::TextureView>,
+    hdr: Target,
+    depth: Target,
+    bloom_a: Target,
+    bloom_b: Target,
+    image_layout: wgpu::BindGroupLayout,
+    depth_layout: wgpu::BindGroupLayout,
+    depth_bind: wgpu::BindGroup,
+    linear_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
     opaque: wgpu::RenderPipeline,
     water: wgpu::RenderPipeline,
     far: wgpu::RenderPipeline,
-    /// One huge quad at sea level.
-    sea: wgpu::Buffer,
+    shadow: wgpu::RenderPipeline,
+    bright: wgpu::RenderPipeline,
+    blur_h: wgpu::RenderPipeline,
+    blur_v: wgpu::RenderPipeline,
     tonemap: wgpu::RenderPipeline,
+    sea: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_capacity: usize,
     quad_indices: wgpu::Buffer,
@@ -86,38 +143,6 @@ fn shader(device: &wgpu::Device, label: &str, source: String) -> wgpu::ShaderMod
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     })
-}
-
-fn hdr_target(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    width: u32,
-    height: u32,
-) -> (wgpu::TextureView, wgpu::BindGroup) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("hdr"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: HDR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&Default::default());
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("hdr"),
-        layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&view),
-        }],
-    });
-    (view, bind)
 }
 
 fn quad_index_buffer(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
@@ -135,11 +160,41 @@ fn quad_index_buffer(device: &wgpu::Device, quads: u32) -> wgpu::Buffer {
 
 fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("chunk instances"),
+        label: Some("instances"),
         size: (capacity * size_of::<Instance>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType, dim: wgpu::TextureViewDimension) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: dim,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn fullscreen_triangle() -> wgpu::PrimitiveState {
+    Default::default()
 }
 
 impl Renderer {
@@ -148,57 +203,169 @@ impl Renderer {
         let device = &gpu.device;
         let common = include_str!("shaders/common.wgsl");
 
+        // --- Uniforms and the scene bind group (globals, shadows) -----------------
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
             size: size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+        let shadows = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadows"),
+            size: size_of::<Shadows>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            }],
+        let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow maps"),
+            size: wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: CASCADES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_array_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let shadow_views = (0..CASCADES as u32)
+            .map(|layer| {
+                shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let scene_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene"),
+            entries: &[
+                uniform_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                uniform_entry(1, wgpu::ShaderStages::FRAGMENT),
+                texture_entry(2, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2Array),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let scene_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene"),
+            layout: &scene_layout_bg,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: globals.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: shadows.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&shadow_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+        });
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene depth"),
+            entries: &[texture_entry(0, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2)],
         });
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
-            bind_group_layouts: &[Some(&globals_layout)],
+            bind_group_layouts: &[Some(&scene_layout_bg)],
+            immediate_size: 0,
+        });
+        let water_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("water"),
+            bind_group_layouts: &[Some(&scene_layout_bg), Some(&depth_layout)],
             immediate_size: 0,
         });
 
-        let hdr_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("hdr"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
+        // --- Shadow cascades -----------------------------------------------------
+        let cascade_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cascade"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
         });
-        let (hdr_view, hdr_bind) = hdr_target(device, &hdr_layout, width, height);
-        let depth_view = create_depth(device, width, height);
+        let cascade_binds = (0..CASCADES)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("cascade"),
+                    size: size_of::<CascadeUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("cascade"),
+                    layout: &cascade_layout_bg,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                (buffer, bind)
+            })
+            .collect();
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow"),
+            bind_group_layouts: &[Some(&cascade_layout_bg)],
+            immediate_size: 0,
+        });
 
-        // Reverse-Z: nearer is greater. The sky draws first and ignores depth.
-        let depth = |write: bool, compare: wgpu::CompareFunction| {
+        // --- Targets -------------------------------------------------------------
+        let hdr = make_target(device, "hdr", width, height, HDR_FORMAT);
+        let depth = Target {
+            view: create_depth(device, width, height),
+        };
+        let bloom_a = make_target(device, "bloom a", width / 4, height / 4, HDR_FORMAT);
+        let bloom_b = make_target(device, "bloom b", width / 4, height / 4, HDR_FORMAT);
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image"),
+            entries: &[
+                texture_entry(0, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                texture_entry(2, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
+            ],
+        });
+        let depth_bind = Self::depth_bind_group(device, &depth_layout, &depth.view);
+
+        // --- Pipelines -----------------------------------------------------------
+        let depth_state = |write: bool, compare: wgpu::CompareFunction| {
             Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(write),
@@ -207,7 +374,7 @@ impl Renderer {
                 bias: Default::default(),
             })
         };
-        let hdr_target_state = |blend: Option<wgpu::BlendState>| {
+        let hdr_targets = |blend: Option<wgpu::BlendState>| {
             [Some(wgpu::ColorTargetState {
                 format: HDR_FORMAT,
                 blend,
@@ -225,24 +392,20 @@ impl Renderer {
                 compilation_options: Default::default(),
                 buffers: &[],
             },
-            primitive: Default::default(),
-            depth_stencil: depth(false, wgpu::CompareFunction::Always),
+            primitive: fullscreen_triangle(),
+            depth_stencil: depth_state(false, wgpu::CompareFunction::Always),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &sky_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &hdr_target_state(None),
+                targets: &hdr_targets(None),
             }),
             multiview_mask: None,
             cache: None,
         });
 
-        let terrain_module = shader(
-            device,
-            "terrain",
-            format!("{common}\n{}", include_str!("shaders/terrain.wgsl")),
-        );
+        let terrain_module = shader(device, "terrain", format!("{common}\n{}", include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
         let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3];
         let terrain_buffers = [
@@ -257,44 +420,83 @@ impl Renderer {
                 attributes: &instance_attrs,
             }),
         ];
-        let terrain_pipeline = |label: &str,
-                                fs: &str,
-                                cull: Option<wgpu::Face>,
-                                depth_write: bool,
-                                blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&scene_layout),
-                vertex: wgpu::VertexState {
-                    module: &terrain_module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &terrain_buffers,
+        let opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("opaque"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &terrain_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let water = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water"),
+            layout: Some(&water_layout),
+            vertex: wgpu::VertexState {
+                module: &terrain_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            primitive: Default::default(),
+            depth_stencil: depth_state(false, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_module,
+                entry_point: Some("fs_water"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(Some(wgpu::BlendState::ALPHA_BLENDING)),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let shadow_module = shader(device, "shadow", include_str!("shaders/shadow.wgsl").to_string());
+        let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            // Both faces: thin leaf shells must cast from either side.
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
                 },
-                primitive: wgpu::PrimitiveState {
-                    cull_mode: cull,
-                    ..Default::default()
-                },
-                depth_stencil: depth(depth_write, wgpu::CompareFunction::Greater),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &terrain_module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &hdr_target_state(blend),
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        let opaque = terrain_pipeline("opaque", "fs", Some(wgpu::Face::Back), true, None);
-        let water = terrain_pipeline(
-            "water",
-            "fs_water",
-            None,
-            false,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-        );
+            }),
+            multisample: Default::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
 
         let far_module = shader(device, "far", format!("{common}\n{}", include_str!("shaders/far.wgsl")));
         let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2];
@@ -320,18 +522,17 @@ impl Renderer {
                 ],
             },
             primitive: Default::default(),
-            depth_stencil: depth(true, wgpu::CompareFunction::Greater),
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &far_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &hdr_target_state(None),
+                targets: &hdr_targets(None),
             }),
             multiview_mask: None,
             cache: None,
         });
-        // The sea: a quad far larger than the view distance, centred under the camera.
         let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
         let sea_vertex = |x: f32, z: f32| FarVertex {
             pos: [x, -0.125, z],
@@ -351,45 +552,67 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let tonemap_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("tonemap"),
-            bind_group_layouts: &[Some(&hdr_layout)],
+        // Post-processing: one layout, several entry points.
+        let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post"),
+            bind_group_layouts: &[Some(&image_layout)],
             immediate_size: 0,
         });
-        let tonemap_module = shader(
-            device,
-            "tonemap",
-            format!(
-                "const ENCODE_SRGB: bool = {};\n{}",
-                !output_format.is_srgb(),
-                include_str!("shaders/tonemap.wgsl")
-            ),
+        let post = |label: &str, entry: &str, defines: &str, format: wgpu::TextureFormat| {
+            let module = shader(
+                device,
+                label,
+                format!("{defines}\n{}", include_str!("shaders/post.wgsl")),
+            );
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&post_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: fullscreen_triangle(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let no_dir = "const DIR: vec2<f32> = vec2<f32>(0.0, 0.0);\nconst ENCODE_SRGB: bool = false;";
+        let bright = post("bright", "fs_bright", no_dir, HDR_FORMAT);
+        let blur_h = post(
+            "blur h",
+            "fs_blur",
+            "const DIR: vec2<f32> = vec2<f32>(1.0, 0.0);\nconst ENCODE_SRGB: bool = false;",
+            HDR_FORMAT,
         );
-        let tonemap = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tonemap"),
-            layout: Some(&tonemap_layout),
-            vertex: wgpu::VertexState {
-                module: &tonemap_module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &tonemap_module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let blur_v = post(
+            "blur v",
+            "fs_blur",
+            "const DIR: vec2<f32> = vec2<f32>(0.0, 1.0);\nconst ENCODE_SRGB: bool = false;",
+            HDR_FORMAT,
+        );
+        let tonemap = post(
+            "tonemap",
+            "fs_tonemap",
+            &format!(
+                "const DIR: vec2<f32> = vec2<f32>(0.0, 0.0);\nconst ENCODE_SRGB: bool = {};",
+                !output_format.is_srgb()
+            ),
+            output_format,
+        );
 
         let instance_capacity = 4096;
         let quad_capacity = 16384;
@@ -397,17 +620,28 @@ impl Renderer {
             width,
             height,
             globals,
-            globals_bind,
-            hdr_view,
-            hdr_layout,
-            hdr_bind,
-            depth_view,
+            shadows,
+            scene_bind,
+            cascade_binds,
+            shadow_views,
+            hdr,
+            depth,
+            bloom_a,
+            bloom_b,
+            image_layout,
+            depth_layout,
+            depth_bind,
+            linear_sampler,
             sky,
             opaque,
             water,
             far,
-            sea,
+            shadow,
+            bright,
+            blur_h,
+            blur_v,
             tonemap,
+            sea,
             instances: instance_buffer(device, instance_capacity),
             instance_capacity,
             quad_indices: quad_index_buffer(device, quad_capacity),
@@ -417,24 +651,106 @@ impl Renderer {
         }
     }
 
+    fn depth_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene depth"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        })
+    }
+
+    fn image_bind_group(&self, device: &wgpu::Device, src: &wgpu::TextureView, extra: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image"),
+            layout: &self.image_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(extra),
+                },
+            ],
+        })
+    }
+
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
         if width == 0 || height == 0 || (width, height) == (self.width, self.height) {
             return;
         }
+        let device = &gpu.device;
         (self.width, self.height) = (width, height);
-        (self.hdr_view, self.hdr_bind) = hdr_target(&gpu.device, &self.hdr_layout, width, height);
-        self.depth_view = create_depth(&gpu.device, width, height);
+        self.hdr = make_target(device, "hdr", width, height, HDR_FORMAT);
+        self.depth = Target {
+            view: create_depth(device, width, height),
+        };
+        self.depth_bind = Self::depth_bind_group(device, &self.depth_layout, &self.depth.view);
+        self.bloom_a = make_target(device, "bloom a", width / 4, height / 4, HDR_FORMAT);
+        self.bloom_b = make_target(device, "bloom b", width / 4, height / 4, HDR_FORMAT);
+    }
+
+    /// Light view-projection for one cascade, in camera-relative space, and its texel
+    /// size in voxels.
+    fn cascade_matrix(camera: &Camera, aspect: f32, sun: Vec3, near: f32, far: f32) -> (Mat4, f32) {
+        // Bounding sphere of this slice of the view frustum.
+        let fwd = camera.forward();
+        let right = camera.right();
+        let up = right.cross(fwd);
+        let tan_y = (camera.fov_y * 0.5).tan();
+        let tan_x = tan_y * aspect;
+        let corner = |d: f32, sx: f32, sy: f32| fwd * d + right * (d * tan_x * sx) + up * (d * tan_y * sy);
+        let corners = [
+            corner(near, -1.0, -1.0),
+            corner(near, 1.0, 1.0),
+            corner(far, -1.0, -1.0),
+            corner(far, 1.0, 1.0),
+            corner(far, 1.0, -1.0),
+            corner(far, -1.0, 1.0),
+        ];
+        let center = fwd * ((near + far) * 0.5);
+        let radius = corners.iter().map(|c| (*c - center).length()).fold(0.0, f32::max) * 1.05;
+        let texel = 2.0 * radius / SHADOW_SIZE as f32;
+
+        // Light view looking along the sun direction; snap the centre to texels so
+        // the map does not shimmer as the camera moves.
+        let light_up = if sun.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
+        let s = sun.cross(light_up).normalize();
+        let u = s.cross(sun);
+        let snapped = s * ((center.dot(s) / texel).floor() * texel) + u * ((center.dot(u) / texel).floor() * texel)
+            + sun * center.dot(sun);
+        // Casters well outside the slice (tall trees, hills toward the sun) still count.
+        let reach = radius + 400.0;
+        let eye = snapped + sun * reach;
+        let view = Mat4::from_cols(
+            Vec4::new(s.x, u.x, sun.x, 0.0),
+            Vec4::new(s.y, u.y, sun.y, 0.0),
+            Vec4::new(s.z, u.z, sun.z, 0.0),
+            Vec4::new(-eye.dot(s), -eye.dot(u), -eye.dot(sun), 1.0),
+        );
+        // Orthographic, depth 0..1 over [0, 2 * reach] along -z (toward the ground).
+        let depth_range = reach * 2.0;
+        let proj = Mat4::from_cols(
+            Vec4::new(1.0 / radius, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 1.0 / radius, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, -1.0 / depth_range, 0.0),
+            Vec4::new(0.0, 0.0, 0.0, 1.0),
+        );
+        (proj * view, texel)
     }
 
     /// Renders the scene and writes the tonemapped image to `target`.
-    pub fn render(
-        &mut self,
-        gpu: &Gpu,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        scene: &Scene,
-    ) {
+    pub fn render(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, scene: &Scene) {
         let Scene { camera, env, far, .. } = *scene;
+        let device = &gpu.device;
         // Horizontal distance out to which voxel terrain is fully loaded.
         let voxel_radius = scene.terrain.complete_radius();
         let aspect = self.width as f32 / self.height as f32;
@@ -443,37 +759,68 @@ impl Renderer {
         let fwd = camera.forward();
         let right = camera.right();
         let up = right.cross(fwd);
+        let time = self.start.elapsed().as_secs_f32();
         let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
+
+        // Shadow cascades.
+        let mut light_vp = [[[0.0; 4]; 4]; CASCADES];
+        let mut texels = [0.0; 4];
+        let mut near = 0.1;
+        for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
+            let (m, texel) = Self::cascade_matrix(camera, aspect, env.sun_dir, near, far_end);
+            light_vp[i] = m.to_cols_array_2d();
+            texels[i] = texel;
+            gpu.queue.write_buffer(
+                &self.cascade_binds[i].0,
+                0,
+                bytemuck::bytes_of(&CascadeUniform {
+                    light_vp: light_vp[i],
+                }),
+            );
+            near = far_end;
+        }
+        gpu.queue
+            .write_buffer(&self.shadows, 0, bytemuck::bytes_of(&Shadows { light_vp, texel: texels }));
+
+        let cam_wrapped = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_right: v4(right * tan * aspect, 0.0),
             cam_up: v4(up * tan, 0.0),
             cam_fwd: v4(fwd, 0.0),
-            sun_dir: v4(env.sun_dir, self.start.elapsed().as_secs_f32()),
-            sun_color: v4(env.sun_color, 0.0),
+            sun_dir: v4(env.sun_dir, time),
+            sun_color: v4(env.sun_color, env.daylight as u8 as f32),
             sky_zenith: v4(env.sky_zenith, 0.0),
             sky_horizon: v4(env.sky_horizon, 0.0),
-            fog: [env.fog_density, voxel_radius, 0.0, 0.0],
-            cam_wrapped: {
-                let p = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
-                [p.x, p.y, p.z, 0.0]
-            },
+            fog: [env.fog_density, voxel_radius, env.clouds, time * 6.0],
+            cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, 0.0],
+            mist: [env.mist, 35.0, -15.0, 0.0],
+            cascades: [
+                CASCADE_ENDS[0],
+                CASCADE_ENDS[1],
+                CASCADE_ENDS[2],
+                CLOUD_HEIGHT - camera.pos.y as f32,
+            ],
         };
-        gpu.queue
-            .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
         // Visible chunks, with their camera-relative offsets computed in f64.
         let frustum = Frustum::new(view_proj);
         let size = CHUNK as f32;
         let mut instances: Vec<Instance> = Vec::new();
         let mut opaque: Vec<(&MeshBuf, u32)> = Vec::new();
+        let mut casters: Vec<(&MeshBuf, u32)> = Vec::new();
         let mut water: Vec<(&MeshBuf, u32, f32)> = Vec::new();
         let mut stats = DrawStats::default();
         let mut max_quads = 0;
+        let shadow_reach = CASCADE_ENDS[CASCADES - 1] + 64.0;
         for chunk in scene.terrain.chunks() {
             let origin = chunk.pos * CHUNK;
             let offset = (origin.as_dvec3() - camera.pos).as_vec3();
-            if !frustum.intersects_box(offset, offset + Vec3::splat(size)) {
+            let visible = frustum.intersects_box(offset, offset + Vec3::splat(size));
+            let center = offset + Vec3::splat(size * 0.5);
+            let casts = center.length() < shadow_reach && env.daylight;
+            if !visible && !casts {
                 stats.chunks_culled += 1;
                 continue;
             }
@@ -482,19 +829,26 @@ impl Renderer {
                 offset: offset.to_array(),
                 origin: origin.to_array(),
             });
-            stats.chunks_drawn += 1;
             if let Some(m) = &chunk.opaque {
-                opaque.push((m, index));
-                stats.quads_drawn += m.quads as u64;
                 max_quads = max_quads.max(m.quads);
+                if casts {
+                    casters.push((m, index));
+                }
+                if visible {
+                    opaque.push((m, index));
+                    stats.quads_drawn += m.quads as u64;
+                }
             }
-            if let Some(m) = &chunk.water {
-                let center = offset + Vec3::splat(size * 0.5);
-                water.push((m, index, center.length_squared()));
-                stats.quads_drawn += m.quads as u64;
-                max_quads = max_quads.max(m.quads);
+            if visible {
+                stats.chunks_drawn += 1;
+                if let Some(m) = &chunk.water {
+                    water.push((m, index, center.length_squared()));
+                    stats.quads_drawn += m.quads as u64;
+                    max_quads = max_quads.max(m.quads);
+                }
             }
         }
+
         // Far view: one instance per continent (plus one for the sea), tiles culled
         // against the frustum.
         let mut far_tiles: Vec<(&wgpu::Buffer, usize, u32)> = Vec::new();
@@ -529,20 +883,49 @@ impl Renderer {
 
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
-            self.instances = instance_buffer(&gpu.device, self.instance_capacity);
+            self.instances = instance_buffer(device, self.instance_capacity);
         }
         if max_quads > self.quad_capacity {
             self.quad_capacity = max_quads.next_power_of_two();
-            self.quad_indices = quad_index_buffer(&gpu.device, self.quad_capacity);
+            self.quad_indices = quad_index_buffer(device, self.quad_capacity);
         }
-        gpu.queue
-            .write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
 
+        // --- Shadow passes -------------------------------------------------------
+        for (i, view) in self.shadow_views.iter().enumerate() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !casters.is_empty() {
+                pass.set_pipeline(&self.shadow);
+                pass.set_bind_group(0, &self.cascade_binds[i].1, &[]);
+                pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(1, self.instances.slice(..));
+                for (mesh, index) in &casters {
+                    pass.set_vertex_buffer(0, mesh.buffer.slice(..));
+                    pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
+                }
+            }
+        }
+
+        // --- Opaque scene --------------------------------------------------------
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.hdr_view,
+                    view: &self.hdr.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -551,7 +934,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: &self.depth.view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -562,7 +945,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_bind_group(0, &self.globals_bind, &[]);
+            pass.set_bind_group(0, &self.scene_bind, &[]);
             pass.set_pipeline(&self.sky);
             pass.draw(0..3, 0..1);
 
@@ -588,22 +971,51 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.sea.slice(..));
             pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
 
-            if !opaque.is_empty() || !water.is_empty() {
-                pass.set_pipeline(&self.opaque);
-                for (mesh, index) in &opaque {
-                    pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                    pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
-                }
-                pass.set_pipeline(&self.water);
-                for (mesh, index, _) in &water {
-                    pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                    pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
-                }
+            pass.set_pipeline(&self.opaque);
+            for (mesh, index) in &opaque {
+                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
+                pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
             }
         }
-        {
+
+        // --- Water, reading the depth of what lies beneath -----------------------
+        if !water.is_empty() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("tonemap"),
+                label: Some("water"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    // Read-only, so the same texture can be sampled in the shader.
+                    depth_ops: None,
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.water);
+            pass.set_bind_group(0, &self.scene_bind, &[]);
+            pass.set_bind_group(1, &self.depth_bind, &[]);
+            pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, self.instances.slice(..));
+            for (mesh, index, _) in &water {
+                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
+                pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
+            }
+        }
+
+        // --- Bloom and tonemap ---------------------------------------------------
+        let fullscreen = |encoder: &mut wgpu::CommandEncoder, label: &str, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, target: &wgpu::TextureView| {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     depth_slice: None,
@@ -618,10 +1030,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.tonemap);
-            pass.set_bind_group(0, &self.hdr_bind, &[]);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
-        }
+        };
+        // The third slot of each bind group must not be the pass's own target, so an
+        // unused texture is bound there.
+        let hdr_bind = self.image_bind_group(device, &self.hdr.view, &self.bloom_b.view);
+        fullscreen(encoder, "bright", &self.bright, &hdr_bind, &self.bloom_a.view);
+        let a_bind = self.image_bind_group(device, &self.bloom_a.view, &self.hdr.view);
+        fullscreen(encoder, "blur h", &self.blur_h, &a_bind, &self.bloom_b.view);
+        let b_bind = self.image_bind_group(device, &self.bloom_b.view, &self.hdr.view);
+        fullscreen(encoder, "blur v", &self.blur_v, &b_bind, &self.bloom_a.view);
+        let final_bind = self.image_bind_group(device, &self.hdr.view, &self.bloom_a.view);
+        fullscreen(encoder, "tonemap", &self.tonemap, &final_bind, target);
     }
 }
 
@@ -633,12 +1055,7 @@ struct Frustum {
 
 impl Frustum {
     fn new(view_proj: Mat4) -> Self {
-        let (r0, r1, r2, r3) = (
-            view_proj.row(0),
-            view_proj.row(1),
-            view_proj.row(2),
-            view_proj.row(3),
-        );
+        let (r0, r1, r2, r3) = (view_proj.row(0), view_proj.row(1), view_proj.row(2), view_proj.row(3));
         Self {
             planes: [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 - r2],
         }

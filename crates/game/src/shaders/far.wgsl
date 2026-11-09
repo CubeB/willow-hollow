@@ -58,8 +58,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // reads as a blend of the two, the sides counting for more the steeper it is.
         let steep = length(in.grad);
         let side_n = normalize(vec3<f32>(-in.grad.x, 0.0, -in.grad.y) + vec3<f32>(1e-5, 0.0, 0.0));
-        let top = G.sun_color.rgb * max(G.sun_dir.y, 0.0) + ambient(up);
-        let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 + ambient(side_n) * 0.7;
+        let vis = sun_visibility(in.rel, up);
+        let top = G.sun_color.rgb * max(G.sun_dir.y, 0.0) * vis + ambient(up);
+        let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
         color = in.color * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.
         color *= 1.0 - clamp(steep * 0.9, 0.0, 0.35);
