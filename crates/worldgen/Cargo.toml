@@ -1,0 +1,8 @@
+[package]
+name = "worldgen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = "0.34.3"
+voxel = { version = "0.1.0", path = "../voxel" }

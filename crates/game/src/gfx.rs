@@ -68,7 +68,9 @@ impl Gpu {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .context("surface not supported by adapter")?;
         let caps = surface.get_capabilities(&adapter);
-        if let Some(f) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
+        // A plain (non-sRGB) format: the tonemap pass encodes sRGB itself, and egui
+        // expects to write already-encoded colours.
+        if let Some(f) = caps.formats.iter().copied().find(|f| !f.is_srgb()) {
             config.format = f;
         }
         config.present_mode = if vsync {
