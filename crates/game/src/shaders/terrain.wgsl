@@ -97,6 +97,6 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
     let body = in.color * (G.sun_color.rgb * ndl * 0.5 + ambient(n));
     let color = mix(body, reflected, fresnel);
-    let alpha = mix(0.72, 0.97, fresnel);
+    let alpha = mix(0.82, 0.98, fresnel);
     return vec4<f32>(apply_fog(color, in.rel), alpha);
 }

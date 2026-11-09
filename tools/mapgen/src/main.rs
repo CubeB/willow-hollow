@@ -8,7 +8,7 @@ use image::{Rgb, RgbImage};
 use worldgen::{
     biome::Biome,
     continent::{self, Continent, NO_LAKE, SimConfig},
-    macro_layout::cell_desc,
+    macro_layout::{MACRO_SIZE, cell_desc},
 };
 
 const USAGE: &str = "\
@@ -18,7 +18,8 @@ usage: mapgen [options]
   --size N           simulation grid size, power of two (default 1024)
   --out DIR          output directory (default maps)
   --zoom CX,CZ,SPAN  also render a close-up centred on cell CX,CZ, SPAN cells wide
-  --px N             output image size in pixels (default 1024)";
+  --px N             output image size in pixels (default 1024)
+  --poi              list points of interest with world voxel coordinates";
 
 struct Options {
     seed: u32,
@@ -27,6 +28,7 @@ struct Options {
     out: PathBuf,
     zoom: Option<(f32, f32, f32)>,
     px: u32,
+    poi: bool,
 }
 
 fn parse_args() -> Result<Options> {
@@ -37,6 +39,7 @@ fn parse_args() -> Result<Options> {
         out: "maps".into(),
         zoom: None,
         px: 1024,
+        poi: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -65,6 +68,7 @@ fn parse_args() -> Result<Options> {
                 o.zoom = Some((v[0], v[1], v[2]));
             }
             "--px" => o.px = value()?.parse()?,
+            "--poi" => o.poi = true,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -289,6 +293,102 @@ fn print_stats(c: &Continent) {
     );
 }
 
+/// Lists places worth looking at, with world voxel coordinates for `game --over`.
+fn print_poi(c: &Continent) {
+    let n = c.size * c.size;
+    let cell = c.cell_size();
+    let world = |i: usize| {
+        let x = c.desc.mx as f32 * MACRO_SIZE as f32 + ((i % c.size) as f32 + 0.5) * cell;
+        let z = c.desc.mz as f32 * MACRO_SIZE as f32 + ((i / c.size) as f32 + 0.5) * cell;
+        format!("{x:.0},{z:.0}")
+    };
+    let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
+    // Highest-scoring cells that are at least `spacing` cells apart.
+    let top = |mut v: Vec<(f32, usize)>, count: usize, spacing: f32| -> Vec<(f32, usize)> {
+        v.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut out: Vec<(f32, usize)> = Vec::new();
+        for (score, i) in v {
+            let far = out.iter().all(|&(_, j)| {
+                let dx = (i % c.size) as f32 - (j % c.size) as f32;
+                let dz = (i / c.size) as f32 - (j / c.size) as f32;
+                dx.hypot(dz) > spacing
+            });
+            if far {
+                out.push((score, i));
+                if out.len() == count {
+                    break;
+                }
+            }
+        }
+        out
+    };
+
+    let mouths = land
+        .iter()
+        .filter(|&&i| c.ocean[c.rcv[i] as usize])
+        .map(|&i| (c.discharge[i], i))
+        .collect();
+    for (q, i) in top(mouths, 3, 60.0) {
+        println!("  poi mouth      {}  width {:.0}", world(i), Continent::river_width(q));
+    }
+
+    let falls = land
+        .iter()
+        .filter(|&&i| c.discharge[i] > 600.0 && !c.ocean[c.rcv[i] as usize])
+        .map(|&i| (c.water_level[i] - c.water_level[c.rcv[i] as usize], i))
+        .collect();
+    for (drop, i) in top(falls, 5, 40.0) {
+        println!(
+            "  poi falls      {}  drop {drop:.0}, width {:.0}, level {:.0}",
+            world(i),
+            Continent::river_width(c.discharge[i]),
+            c.water_level[i]
+        );
+    }
+
+    // Confluences: a cell whose second-largest tributary is itself a real river.
+    let mut second = vec![0.0f32; n];
+    let mut first = vec![0.0f32; n];
+    for &i in &land {
+        let (r, q) = (c.rcv[i] as usize, c.discharge[i]);
+        if q > first[r] {
+            second[r] = first[r];
+            first[r] = q;
+        } else if q > second[r] {
+            second[r] = q;
+        }
+    }
+    let joins = land.iter().map(|&i| (second[i], i)).collect();
+    for (q, i) in top(joins, 3, 60.0) {
+        println!(
+            "  poi confluence {}  widths {:.0} + {:.0}",
+            world(i),
+            Continent::river_width(first[i]),
+            Continent::river_width(q)
+        );
+    }
+
+    let mut lakes: std::collections::HashMap<u32, (usize, f32, f32)> = Default::default();
+    for &i in &land {
+        if c.lake[i] != NO_LAKE {
+            let e = lakes.entry(c.lake[i].to_bits()).or_default();
+            e.0 += 1;
+            e.1 += (i % c.size) as f32;
+            e.2 += (i / c.size) as f32;
+        }
+    }
+    let mut lakes: Vec<_> = lakes.into_iter().collect();
+    lakes.sort_by_key(|l| std::cmp::Reverse(l.1.0));
+    for (level, (count, sx, sz)) in lakes.into_iter().take(4) {
+        let i = (sz / count as f32) as usize * c.size + (sx / count as f32) as usize;
+        println!(
+            "  poi lake       {}  {count} cells, level {:.0}",
+            world(i),
+            f32::from_bits(level)
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let o = parse_args()?;
     let desc = cell_desc(o.seed, o.cell.0, o.cell.1);
@@ -300,6 +400,9 @@ fn main() -> Result<()> {
     let c = continent::generate(desc, SimConfig { size: o.size });
     println!("  simulated {0}x{0} in {1:.2} s", o.size, t.elapsed().as_secs_f32());
     print_stats(&c);
+    if o.poi {
+        print_poi(&c);
+    }
 
     std::fs::create_dir_all(&o.out)?;
     let name = |kind: &str| o.out.join(format!("s{}_{}_{}_{kind}.png", o.seed, o.cell.0, o.cell.1));

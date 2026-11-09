@@ -6,6 +6,8 @@ pub mod macro_layout;
 pub mod materials;
 pub mod noise;
 pub mod placeholder;
+pub mod surface;
+pub mod world;
 
 use voxel::{Materials, PaddedChunk};
 
@@ -20,3 +22,6 @@ pub trait World: Send + Sync {
     /// `(chunk y, voxels)`. Chunks that are entirely air or entirely buried are omitted.
     fn generate_column(&self, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)>;
 }
+
+#[cfg(test)]
+mod world_tests;

@@ -40,14 +40,16 @@ pub struct Continent {
     pub height: Vec<f32>,
     /// Lake surface level where a cell holds standing water, else [`NO_LAKE`].
     pub lake: Vec<f32>,
-    /// Level that water flowing through a land cell has: the terrain height, or the
-    /// spill level inside a depression. Strictly decreasing along every flow path, so
-    /// rivers built from it can never run uphill. 0 for ocean cells.
+    /// Level that water flowing through a land cell has: roughly the terrain height,
+    /// the spill level inside a depression, or the flat surface of a lake. It never
+    /// rises along a flow path, so rivers built from it cannot run uphill. 0 for ocean.
     pub water_level: Vec<f32>,
     /// Index of the cell each land cell drains into; ocean cells point to themselves.
     pub rcv: Vec<u32>,
     /// Water carried through each cell, in units of one cell's rainfall at rain = 1.
     pub discharge: Vec<f32>,
+    /// Largest value in `discharge`.
+    pub max_discharge: f32,
     pub ocean: Vec<bool>,
     /// Rainfall relative to the continent average.
     pub rain: Vec<f32>,
@@ -291,6 +293,21 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
 
     let (level, flow, rain) = last.expect("at least one level");
     let lake = find_lakes(&level, &flow, &mut height);
+    // Flatten the water level across each lake, then make sure nothing downstream sits
+    // above what feeds it (a lake's surface is its lowest point, so an outlet cell can
+    // otherwise end up a hair higher than the lake).
+    let mut water_level = flow.filled.clone();
+    for i in 0..water_level.len() {
+        if lake[i] != NO_LAKE {
+            water_level[i] = lake[i];
+        }
+    }
+    for &i in flow.order.iter().rev() {
+        let r = flow.rcv[i as usize] as usize;
+        if !level.ocean[r] && water_level[r] > water_level[i as usize] {
+            water_level[r] = water_level[i as usize];
+        }
+    }
     let temperature = climate::temperature(level.w, &height, &desc);
     let biome = (0..height.len())
         .map(|i| {
@@ -306,8 +323,12 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         size: cfg.size,
         height,
         lake,
-        water_level: flow.filled,
+        water_level,
         rcv: flow.rcv,
+        max_discharge: (0..flow.discharge.len())
+            .filter(|&i| !level.ocean[i])
+            .map(|i| flow.discharge[i])
+            .fold(0.0, f32::max),
         discharge: flow.discharge,
         ocean: level.ocean,
         rain,
@@ -334,6 +355,7 @@ fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
         water_level: vec![0.0; n],
         rcv: (0..n as u32).collect(),
         discharge: vec![0.0; n],
+        max_discharge: 0.0,
         ocean: vec![true; n],
         rain: vec![desc.wetness; n],
         temperature: vec![desc.temperature; n],
@@ -406,11 +428,15 @@ fn dam_lakes(level: &Level, flow: &Flow, height: &mut [f32], seed: u32) {
 /// Labels each connected body of standing water left by routing with one flat surface
 /// at its outlet level, and deepens the beds so lakes are more than puddles.
 fn find_lakes(level: &Level, flow: &Flow, height: &mut [f32]) -> Vec<f32> {
-    const MIN_DEPTH: f32 = 1.5;
+    /// Depth at which a cell counts as part of a body of water. Kept small so the
+    /// whole depression shares the lake's level, shallow margins included.
+    const WET: f32 = 0.25;
+    /// Depth that counts toward a body being a lake rather than a damp hollow.
+    const DEEP: f32 = 1.5;
     let min_cells = (6 * level.w * level.w / (1024 * 1024)).max(3);
     let n = level.w * level.w;
     let mut lake = vec![NO_LAKE; n];
-    let wet = |i: usize, height: &[f32]| !level.ocean[i] && flow.filled[i] - height[i] > MIN_DEPTH;
+    let wet = |i: usize, height: &[f32]| !level.ocean[i] && flow.filled[i] - height[i] > WET;
     let mut seen = vec![false; n];
     let mut body = Vec::new();
     for start in 0..n {
@@ -434,7 +460,8 @@ fn find_lakes(level: &Level, flow: &Flow, height: &mut [f32]) -> Vec<f32> {
                 }
             }
         }
-        if body.len() >= min_cells {
+        let deep = body.iter().filter(|&&i| flow.filled[i] - height[i] > DEEP).count();
+        if deep >= min_cells {
             for &i in &body {
                 lake[i] = surface;
                 // Deepen in proportion to existing depth: shores stay shallow.

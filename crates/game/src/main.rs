@@ -16,7 +16,7 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
-use worldgen::{World, placeholder::PlaceholderWorld};
+use worldgen::world::GameWorld;
 
 use camera::{Camera, FlyController};
 use env::Environment;
@@ -29,6 +29,8 @@ struct Options {
     seed: u32,
     /// Camera start: world position, then yaw and pitch in degrees.
     pos: DVec3,
+    /// If set, start at this (x, z) and this far above the ground or water there.
+    over: Option<(i32, i32, f64)>,
     look: (f32, f32),
     /// Time of day in hours.
     time: f32,
@@ -47,6 +49,7 @@ impl Default for Options {
         Self {
             seed: 1,
             pos: DVec3::new(0.0, 90.0, 0.0),
+            over: Some((16384, 16384, 40.0)),
             look: (35.0, -18.0),
             time: 10.0,
             radius: 12,
@@ -62,6 +65,7 @@ const USAGE: &str = "\
 usage: game [options]
   --seed N              world seed (default 1)
   --pos X,Y,Z           camera start position in voxels
+  --over X,Z,H          start H voxels above the ground (or water) at X,Z
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24 (default 10)
   --radius N            chunk load radius (default 12)
@@ -92,6 +96,11 @@ fn parse_args() -> Result<Options> {
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
+                o.over = None;
+            }
+            "--over" => {
+                let v = list::<f64>(&value()?, ',', 3)?;
+                o.over = Some((v[0] as i32, v[1] as i32, v[2]));
             }
             "--look" => {
                 let v = list::<f32>(&value()?, ',', 2)?;
@@ -116,12 +125,20 @@ fn parse_args() -> Result<Options> {
     Ok(o)
 }
 
-fn make_world(opts: &Options) -> Arc<dyn World> {
-    Arc::new(PlaceholderWorld::new(opts.seed))
+fn make_world(opts: &Options) -> Arc<GameWorld> {
+    Arc::new(GameWorld::new(opts.seed))
 }
 
-fn make_camera(opts: &Options) -> Camera {
-    Camera::new(opts.pos, opts.look.0, opts.look.1)
+fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
+    let pos = match opts.over {
+        Some((x, z, h)) => {
+            let col = world.column(x, z);
+            let surface = col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1);
+            DVec3::new(x as f64 + 0.5, surface as f64 + h, z as f64 + 0.5)
+        }
+        None => opts.pos,
+    };
+    Camera::new(pos, opts.look.0, opts.look.1)
 }
 
 struct Running {
@@ -160,13 +177,14 @@ impl Running {
             surface.config.width,
             surface.config.height,
         );
+        let world = make_world(opts);
         Ok(Self {
             window,
             overlay,
             renderer,
-            streamer: Streamer::new(make_world(opts), opts.radius),
+            camera: make_camera(opts, &world),
+            streamer: Streamer::new(world, opts.radius),
             env: Environment::at_time(opts.time),
-            camera: make_camera(opts),
             fly: FlyController { speed: 20.0 },
             keys: HashSet::new(),
             grabbed: false,
@@ -366,13 +384,15 @@ fn main() -> Result<()> {
 
     if let Some(path) = &opts.screenshot {
         let gpu = Gpu::headless()?;
-        let mut streamer = Streamer::new(make_world(&opts), opts.radius);
+        let world = make_world(&opts);
+        let camera = make_camera(&opts, &world);
+        let mut streamer = Streamer::new(world, opts.radius);
         let t = Instant::now();
         render::screenshot(
             &gpu,
             path,
             opts.size,
-            &make_camera(&opts),
+            &camera,
             &Environment::at_time(opts.time),
             &mut streamer,
         )?;
