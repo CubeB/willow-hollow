@@ -133,6 +133,25 @@ impl Streamer {
         }
     }
 
+    /// Horizontal distance from the camera within which every column is loaded, in
+    /// voxels. Outside it the far view must cover for terrain still being generated.
+    pub fn complete_radius(&self) -> f32 {
+        let Some(center) = self.center else { return 0.0 };
+        let dist = |c: &Col| {
+            let (dx, dz) = ((c.0 - center.0) as f32, (c.1 - center.1) as f32);
+            dx.hypot(dz)
+        };
+        // `wanted` is sorted farthest first, so its last entry is the nearest gap.
+        let nearest_missing = self
+            .pending
+            .iter()
+            .map(dist)
+            .chain(self.wanted.last().map(dist))
+            .fold(self.radius() as f32 + 1.0, f32::min);
+        // The camera can be anywhere in its column, and columns are square.
+        ((nearest_missing - 1.5) * CHUNK as f32).max(0.0)
+    }
+
     pub fn is_idle(&self) -> bool {
         self.wanted.is_empty() && self.pending.is_empty()
     }

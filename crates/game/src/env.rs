@@ -57,7 +57,7 @@ impl Environment {
             sun_color: sun_color * exposure,
             sky_zenith: zenith * exposure,
             sky_horizon: horizon * exposure,
-            fog_density: 0.0015,
+            fog_density: 0.00013,
         }
     }
 }

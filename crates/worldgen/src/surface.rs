@@ -67,8 +67,9 @@ impl Column {
 /// One smooth stretch of river: a quadratic curve from the midpoint of one network
 /// edge, past a node, to the midpoint of the next. Consecutive pieces share endpoints
 /// and tangents, so a river is a continuous smooth line however the grid routed it.
-struct Piece {
-    pts: [Vec2; SEGS + 1],
+pub struct Piece {
+    /// The curve flattened into line segments, in continent-local voxels.
+    pub pts: [Vec2; SEGS + 1],
     /// Channel width at the start and end.
     w0: f32,
     w1: f32,
@@ -123,11 +124,13 @@ impl Piece {
         (best.sqrt(), best_t)
     }
 
-    fn half_width(&self, t: f32) -> f32 {
+    /// Channel half-width at curve parameter `t` (0..1).
+    pub fn half_width(&self, t: f32) -> f32 {
         ((self.w0 + (self.w1 - self.w0) * t) * 0.5).max(MIN_HALF_WIDTH)
     }
 
-    fn level(&self, t: f32) -> f32 {
+    /// Simulated water level at curve parameter `t`, before pooling.
+    pub fn level(&self, t: f32) -> f32 {
         if t < 0.5 {
             self.l0 + (self.l1 - self.l0) * (t * 2.0)
         } else {
@@ -329,7 +332,7 @@ impl<'a> Sampler<'a> {
 }
 
 /// Adds the river pieces that pass node `i`.
-fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
+pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     let is_river = |j: usize| !c.ocean[j] && c.discharge[j] >= MIN_RIVER_Q;
     if !is_river(i) {
         return;

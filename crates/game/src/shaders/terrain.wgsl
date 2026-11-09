@@ -51,25 +51,11 @@ fn vs(in: VIn) -> VOut {
     return out;
 }
 
-fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
-    let dist = length(rel);
-    let amount = 1.0 - exp(-dist * G.fog.x);
-    // Fog takes the colour of the sky at the horizon in that direction.
-    let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
-    return mix(color, sky_color(dir), amount);
-}
-
-fn ambient(n: vec3<f32>) -> vec3<f32> {
-    let sky = mix(G.sky_horizon.rgb, G.sky_zenith.rgb, 0.6) * (0.55 + 0.45 * n.y) * 0.8;
-    // Light bounced off the ground, tinted warm, scaled by how much sun there is.
-    // Reaches sideways and downward faces, which the sky lights least.
-    let bounce = G.sun_color.rgb * vec3<f32>(0.20, 0.17, 0.12) * (0.65 - 0.35 * n.y)
-        * max(G.sun_dir.y, 0.0);
-    return sky + bounce;
-}
-
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    if (beyond_voxels(in.rel)) {
+        discard;
+    }
     let n = face_normal(in.face);
     // The voxel this fragment belongs to: step half a voxel inward from the face.
     let voxel = vec3<i32>(floor(in.local - n * 0.5)) + in.origin;
@@ -90,6 +76,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_water(in: VOut) -> @location(0) vec4<f32> {
+    if (beyond_voxels(in.rel)) {
+        discard;
+    }
     let n = face_normal(in.face);
     let view = normalize(in.rel);
     let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);

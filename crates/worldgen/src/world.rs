@@ -60,6 +60,17 @@ impl GameWorld {
         .clone()
     }
 
+    /// The macro-cell if it has already been simulated. Never blocks.
+    pub fn continent_if_ready(&self, mx: i32, mz: i32) -> Option<Arc<Continent>> {
+        let slot = self
+            .continents
+            .lock()
+            .expect("continent map poisoned")
+            .get(&(mx, mz))
+            .cloned()?;
+        slot.get().cloned()
+    }
+
     /// The surface at one world voxel column. For spawn placement and tools; chunk
     /// generation samples in bulk instead.
     pub fn column(&self, x: i32, z: i32) -> Column {
@@ -151,7 +162,7 @@ pub struct Spawn {
 /// Picks the voxel for the top of a column and for the layers just beneath it.
 ///
 /// `roll` is per-voxel noise; `patch` varies smoothly over several voxels.
-fn surface_materials(col: &Column, steepness: i32, roll: f32, patch: f32) -> (Voxel, Voxel) {
+fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Voxel, Voxel) {
     let cover = mat::ground_cover(col.biome);
     match col.cover {
         // Beds change in broad patches: speckle shows through the water as static.
@@ -162,7 +173,8 @@ fn surface_materials(col: &Column, steepness: i32, roll: f32, patch: f32) -> (Vo
         Cover::Bank if roll < 0.42 => (mat::MUD, mat::DIRT),
         Cover::Bank | Cover::Land => {
             // Ground too steep to hold soil shows bare rock.
-            let rocky = steepness >= 3 || (steepness == 2 && roll < 0.5);
+            // Soil gives way to rock between about 35 and 50 degrees, raggedly.
+            let rocky = steepness > 0.72 + roll * 0.45;
             if rocky {
                 let rock = if roll < 0.25 { mat::ROCK_DARK } else { mat::STONE };
                 (rock, mat::STONE)
@@ -202,21 +214,19 @@ impl World for GameWorld {
                 columns.push(col);
             }
         }
-        let top_of = |px: usize, pz: usize| columns[px * PAD + pz].top();
 
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         for px in 0..PAD {
             for pz in 0..PAD {
-                let top = top_of(px, pz);
-                // Largest step to a neighbour, as a measure of steepness.
-                let mut steep = 0;
-                for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                    let (nx, nz) = (px as i32 + dx, pz as i32 + dz);
-                    if nx >= 0 && nz >= 0 && nx < PAD as i32 && nz < PAD as i32 {
-                        steep = steep.max((top - top_of(nx as usize, nz as usize)).abs());
-                    }
-                }
+                let top = columns[px * PAD + pz].top();
+                // Slope of the ground here, in voxels of rise per voxel.
+                let ground = |x: usize, z: usize| columns[x * PAD + z].ground;
+                let (x0, x1) = (px.saturating_sub(1), (px + 1).min(PAD - 1));
+                let (z0, z1) = (pz.saturating_sub(1), (pz + 1).min(PAD - 1));
+                let gx = (ground(x1, pz) - ground(x0, pz)) / (x1 - x0) as f32;
+                let gz = (ground(px, z1) - ground(px, z0)) / (z1 - z0) as f32;
+                let steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = perlin2(self.seed ^ 0x9a7c, wx / 9.0, wz / 9.0) * 0.5 + 0.5;

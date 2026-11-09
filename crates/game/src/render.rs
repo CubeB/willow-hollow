@@ -9,8 +9,9 @@ use wgpu::util::DeviceExt;
 use crate::{
     camera::Camera,
     env::Environment,
+    farview::{FarVertex, FarView},
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
-    terrain::{GpuChunk, MeshBuf},
+    terrain::{MeshBuf, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -27,6 +28,7 @@ struct Globals {
     sky_zenith: [f32; 4],
     sky_horizon: [f32; 4],
     fog: [f32; 4],
+    cam_wrapped: [f32; 4],
 }
 
 /// Per-chunk instance data.
@@ -39,11 +41,20 @@ struct Instance {
     origin: [i32; 3],
 }
 
+/// Everything one frame draws.
+pub struct Scene<'a> {
+    pub camera: &'a Camera,
+    pub env: &'a Environment,
+    pub terrain: &'a Streamer,
+    pub far: &'a FarView,
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct DrawStats {
     pub chunks_drawn: u32,
     pub chunks_culled: u32,
     pub quads_drawn: u64,
+    pub far_tiles: u32,
 }
 
 pub struct Renderer {
@@ -58,6 +69,9 @@ pub struct Renderer {
     sky: wgpu::RenderPipeline,
     opaque: wgpu::RenderPipeline,
     water: wgpu::RenderPipeline,
+    far: wgpu::RenderPipeline,
+    /// One huge quad at sea level.
+    sea: wgpu::Buffer,
     tonemap: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
     instance_capacity: usize,
@@ -282,6 +296,61 @@ impl Renderer {
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
 
+        let far_module = shader(device, "far", format!("{common}\n{}", include_str!("shaders/far.wgsl")));
+        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2];
+        let far_instance_attrs = wgpu::vertex_attr_array![3 => Float32x3];
+        let far = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("far"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &far_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<FarVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &far_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Instance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &far_instance_attrs,
+                    }),
+                ],
+            },
+            primitive: Default::default(),
+            depth_stencil: depth(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &far_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &hdr_target_state(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        // The sea: a quad far larger than the view distance, centred under the camera.
+        let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
+        let sea_vertex = |x: f32, z: f32| FarVertex {
+            pos: [x, -0.125, z],
+            color: sea_color,
+            flags: crate::farview::FLAG_WATER,
+            grad: [0, 0],
+        };
+        const SEA_EXTENT: f32 = 400_000.0;
+        let sea = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sea"),
+            contents: bytemuck::cast_slice(&[
+                sea_vertex(-SEA_EXTENT, -SEA_EXTENT),
+                sea_vertex(-SEA_EXTENT, SEA_EXTENT),
+                sea_vertex(SEA_EXTENT, SEA_EXTENT),
+                sea_vertex(SEA_EXTENT, -SEA_EXTENT),
+            ]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let tonemap_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("tonemap"),
             bind_group_layouts: &[Some(&hdr_layout)],
@@ -336,6 +405,8 @@ impl Renderer {
             sky,
             opaque,
             water,
+            far,
+            sea,
             tonemap,
             instances: instance_buffer(device, instance_capacity),
             instance_capacity,
@@ -356,15 +427,16 @@ impl Renderer {
     }
 
     /// Renders the scene and writes the tonemapped image to `target`.
-    pub fn render<'a>(
+    pub fn render(
         &mut self,
         gpu: &Gpu,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        camera: &Camera,
-        env: &Environment,
-        chunks: impl Iterator<Item = &'a GpuChunk>,
+        scene: &Scene,
     ) {
+        let Scene { camera, env, far, .. } = *scene;
+        // Horizontal distance out to which voxel terrain is fully loaded.
+        let voxel_radius = scene.terrain.complete_radius();
         let aspect = self.width as f32 / self.height as f32;
         let view_proj = camera.view_proj(aspect);
         let tan = (camera.fov_y * 0.5).tan();
@@ -381,7 +453,11 @@ impl Renderer {
             sun_color: v4(env.sun_color, 0.0),
             sky_zenith: v4(env.sky_zenith, 0.0),
             sky_horizon: v4(env.sky_horizon, 0.0),
-            fog: [env.fog_density, 0.0, 0.0, 0.0],
+            fog: [env.fog_density, voxel_radius, 0.0, 0.0],
+            cam_wrapped: {
+                let p = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
+                [p.x, p.y, p.z, 0.0]
+            },
         };
         gpu.queue
             .write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -394,7 +470,7 @@ impl Renderer {
         let mut water: Vec<(&MeshBuf, u32, f32)> = Vec::new();
         let mut stats = DrawStats::default();
         let mut max_quads = 0;
-        for chunk in chunks {
+        for chunk in scene.terrain.chunks() {
             let origin = chunk.pos * CHUNK;
             let offset = (origin.as_dvec3() - camera.pos).as_vec3();
             if !frustum.intersects_box(offset, offset + Vec3::splat(size)) {
@@ -419,6 +495,34 @@ impl Renderer {
                 max_quads = max_quads.max(m.quads);
             }
         }
+        // Far view: one instance per continent (plus one for the sea), tiles culled
+        // against the frustum.
+        let mut far_tiles: Vec<(&wgpu::Buffer, usize, u32)> = Vec::new();
+        let mut far_rivers: Vec<(&wgpu::Buffer, u32, u32)> = Vec::new();
+        for cell in far.cells() {
+            let offset = cell.offset(camera.pos);
+            let index = instances.len() as u32;
+            instances.push(Instance {
+                offset: offset.to_array(),
+                origin: [0; 3],
+            });
+            for tile in &cell.tiles {
+                if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
+                    far_tiles.push((&tile.buffer, cell.stride, index));
+                }
+            }
+            if let Some((buffer, quads)) = &cell.rivers {
+                far_rivers.push((buffer, *quads, index));
+                max_quads = max_quads.max(*quads);
+            }
+        }
+        let sea_instance = instances.len() as u32;
+        instances.push(Instance {
+            offset: [0.0, -camera.pos.y as f32, 0.0],
+            origin: [0; 3],
+        });
+        stats.far_tiles = far_tiles.len() as u32;
+
         // Translucent water blends correctly only when drawn far to near.
         water.sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
         self.stats = stats;
@@ -462,9 +566,29 @@ impl Renderer {
             pass.set_pipeline(&self.sky);
             pass.draw(0..3, 0..1);
 
-            if !instances.is_empty() {
-                pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.set_vertex_buffer(1, self.instances.slice(..));
+            // Far view first: land tiles, then river ribbons and the sea over them.
+            pass.set_vertex_buffer(1, self.instances.slice(..));
+            pass.set_pipeline(&self.far);
+            let mut bound_stride = 0;
+            let mut grid_count = 0;
+            for (buffer, stride, index) in &far_tiles {
+                if *stride != bound_stride {
+                    let (grid, count) = far.grid(*stride);
+                    pass.set_index_buffer(grid.slice(..), wgpu::IndexFormat::Uint16);
+                    (bound_stride, grid_count) = (*stride, count);
+                }
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw_indexed(0..grid_count, 0, *index..*index + 1);
+            }
+            pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (buffer, quads, index) in &far_rivers {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw_indexed(0..quads * 6, 0, *index..*index + 1);
+            }
+            pass.set_vertex_buffer(0, self.sea.slice(..));
+            pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
+
+            if !opaque.is_empty() || !water.is_empty() {
                 pass.set_pipeline(&self.opaque);
                 for (mesh, index) in &opaque {
                     pass.set_vertex_buffer(0, mesh.buffer.slice(..));
@@ -536,12 +660,14 @@ pub fn screenshot(
     size: (u32, u32),
     camera: &Camera,
     env: &Environment,
-    streamer: &mut crate::terrain::Streamer,
+    streamer: &mut Streamer,
+    far: &mut FarView,
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = Renderer::new(gpu, format, width, height);
     streamer.wait_idle(gpu, camera.pos);
+    far.wait_ready(gpu, camera.pos);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("screenshot"),
@@ -568,7 +694,13 @@ pub fn screenshot(
     });
 
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    renderer.render(gpu, &mut encoder, &view, camera, env, streamer.chunks());
+    let scene = Scene {
+        camera,
+        env,
+        terrain: streamer,
+        far,
+    };
+    renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {

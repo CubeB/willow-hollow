@@ -1,5 +1,6 @@
 mod camera;
 mod env;
+mod farview;
 mod gfx;
 mod overlay;
 mod player;
@@ -21,6 +22,7 @@ use worldgen::world::GameWorld;
 
 use camera::{Camera, FlyController};
 use env::Environment;
+use farview::FarView;
 use gfx::{Gpu, WindowSurface};
 use overlay::Overlay;
 use player::{Controls, Player, WorldVoxels};
@@ -166,6 +168,7 @@ struct Running {
     overlay: Overlay,
     renderer: Renderer,
     streamer: Streamer,
+    far: FarView,
     env: Environment,
     camera: Camera,
     /// On foot, or flying free of collision.
@@ -210,6 +213,7 @@ impl Running {
             walking: !opts.fly,
             player: Player::new(feet),
             voxels: WorldVoxels::new(world.clone()),
+            far: FarView::new(&gpu, world.clone()),
             streamer: Streamer::new(world, opts.radius),
             env: Environment::at_time(opts.time),
             fly: FlyController { speed: 20.0 },
@@ -282,20 +286,20 @@ impl Running {
             self.fly.update(&mut self.camera, &self.keys, dt);
         }
         self.streamer.update(&self.gpu, self.camera.pos, 6);
+        self.far.update(&self.gpu, self.camera.pos);
 
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
-        self.renderer.render(
-            &self.gpu,
-            &mut encoder,
-            &view,
-            &self.camera,
-            &self.env,
-            self.streamer.chunks(),
-        );
+        let scene = render::Scene {
+            camera: &self.camera,
+            env: &self.env,
+            terrain: &self.streamer,
+            far: &self.far,
+        };
+        self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;
@@ -328,8 +332,8 @@ impl Running {
                             cam.pitch.to_degrees()
                         ));
                         ui.label(format!(
-                            "chunks {} in {} columns, drawn {} (culled {})",
-                            s.chunks, s.columns, d.chunks_drawn, d.chunks_culled
+                            "chunks {} in {} columns, drawn {} (culled {}), far tiles {}",
+                            s.chunks, s.columns, d.chunks_drawn, d.chunks_culled, d.far_tiles
                         ));
                         ui.label(format!(
                             "quads {:.2} M loaded, {:.2} M drawn   mesh {:.0} MB",
@@ -413,6 +417,16 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 r.redraw();
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
+                    let (s, d) = (r.streamer.stats, r.renderer.stats);
+                    log::info!(
+                        "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles",
+                        r.frame,
+                        r.frame_ms,
+                        1000.0 / r.frame_ms,
+                        s.chunks,
+                        d.quads_drawn as f64 / 1e6,
+                        d.far_tiles
+                    );
                     el.exit();
                 }
             }
@@ -450,6 +464,7 @@ fn main() -> Result<()> {
         let gpu = Gpu::headless()?;
         let world = make_world(&opts);
         let camera = make_camera(&opts, &world);
+        let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(world, opts.radius);
         let t = Instant::now();
         render::screenshot(
@@ -459,6 +474,7 @@ fn main() -> Result<()> {
             &camera,
             &Environment::at_time(opts.time),
             &mut streamer,
+            &mut far,
         )?;
         let s = streamer.stats;
         log::info!(
