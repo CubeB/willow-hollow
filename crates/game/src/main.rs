@@ -242,7 +242,16 @@ struct Running {
     voxels: WorldVoxels,
     fly: FlyController,
     keys: HashSet<KeyCode>,
+    /// Whether the mouse is currently captured for looking around.
     grabbed: bool,
+    /// Whether it should be: grabbing can fail until the window has focus, so it is
+    /// retried every frame while this is set.
+    want_grab: bool,
+    /// Raw mouse motion has arrived at least once; until then, cursor position deltas
+    /// (with the cursor re-centred each frame) drive the look instead.
+    raw_motion_seen: bool,
+    last_cursor: Option<(f64, f64)>,
+    show_debug: bool,
     last_frame: Instant,
     start: Instant,
     frame: u64,
@@ -293,6 +302,10 @@ impl Running {
             fly: FlyController { speed: 20.0 },
             keys: HashSet::new(),
             grabbed: false,
+            want_grab: true,
+            raw_motion_seen: false,
+            last_cursor: None,
+            show_debug: true,
             last_frame: Instant::now(),
             start: Instant::now(),
             frame: 0,
@@ -302,8 +315,13 @@ impl Running {
         })
     }
 
+    /// Captures or releases the mouse. Capturing can fail (no focus yet); the caller
+    /// keeps `want_grab` set and tries again later.
     fn set_grab(&mut self, grab: bool) {
         if grab {
+            if !self.window.has_focus() {
+                return;
+            }
             let ok = self
                 .window
                 .set_cursor_grab(CursorGrabMode::Locked)
@@ -312,12 +330,42 @@ impl Running {
             if !ok {
                 return;
             }
+            self.last_cursor = None;
+            self.centre_cursor();
         } else {
             let _ = self.window.set_cursor_grab(CursorGrabMode::None);
             self.keys.clear();
         }
         self.window.set_cursor_visible(!grab);
         self.grabbed = grab;
+    }
+
+    fn centre_cursor(&mut self) {
+        let size = self.window.inner_size();
+        let centre = winit::dpi::PhysicalPosition::new(size.width as f64 / 2.0, size.height as f64 / 2.0);
+        if self.window.set_cursor_position(centre).is_ok() {
+            self.last_cursor = Some((centre.x, centre.y));
+        }
+    }
+
+    /// Mouse look from cursor positions, used only if raw motion events never arrive.
+    fn cursor_moved(&mut self, x: f64, y: f64) {
+        if !self.grabbed || self.raw_motion_seen {
+            return;
+        }
+        if let Some((lx, ly)) = self.last_cursor {
+            let (dx, dy) = (x - lx, y - ly);
+            if dx != 0.0 || dy != 0.0 {
+                self.camera.add_look(dx as f32, dy as f32);
+            }
+        }
+        self.last_cursor = Some((x, y));
+        // Keep the cursor away from the window edges.
+        let size = self.window.inner_size();
+        let (cx, cy) = (size.width as f64 / 2.0, size.height as f64 / 2.0);
+        if (x - cx).abs() > cx * 0.5 || (y - cy).abs() > cy * 0.5 {
+            self.centre_cursor();
+        }
     }
 
     fn scan_surroundings(&mut self) {
@@ -340,6 +388,9 @@ impl Running {
     }
 
     fn redraw(&mut self) {
+        if self.want_grab && !self.grabbed {
+            self.set_grab(true);
+        }
         let now = Instant::now();
         let raw_dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -424,8 +475,19 @@ impl Running {
         };
         let mut time = self.env.time;
         let mut radius = self.streamer.radius();
+        let (show_debug, grabbed) = (self.show_debug, self.grabbed);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
+                if !grabbed {
+                    egui::Area::new(egui::Id::unique("hint"))
+                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
+                        .show(ctx, |ui| {
+                            ui.label(egui::RichText::new("Click the view (or press Tab) to look around").size(18.0));
+                        });
+                }
+                if !show_debug {
+                    return;
+                }
                 egui::Window::new("Debug")
                     .default_pos([8.0, 8.0])
                     .show(ctx, |ui| {
@@ -458,8 +520,8 @@ impl Running {
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.add(egui::Slider::new(&mut radius, 2..=32).text("load radius"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
-                        ui.label("Click to look, Esc to release. WASD, Space = jump/swim up, Shift = sprint");
-                        ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed)");
+                        ui.label("Click or Tab to look, Esc to free the mouse. WASD, Space = jump/swim up, Shift = sprint");
+                        ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel");
                     });
             });
         if time != self.env.time {
@@ -497,11 +559,20 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) => r.resize(s.width, s.height),
             WindowEvent::Focused(false) => r.set_grab(false),
+            WindowEvent::Focused(true) => {
+                if r.want_grab {
+                    r.set_grab(true);
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => r.cursor_moved(position.x, position.y),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !r.grabbed => r.set_grab(true),
+            } if !r.grabbed => {
+                r.want_grab = true;
+                r.set_grab(true);
+            }
             WindowEvent::MouseWheel { delta, .. } if r.grabbed => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
@@ -513,7 +584,13 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if event.state == ElementState::Pressed {
                         if code == KeyCode::Escape {
+                            r.want_grab = false;
                             r.set_grab(false);
+                        } else if code == KeyCode::Tab && !event.repeat {
+                            r.want_grab = !r.grabbed;
+                            r.set_grab(r.want_grab);
+                        } else if code == KeyCode::F3 && !event.repeat {
+                            r.show_debug = !r.show_debug;
                         } else if code == KeyCode::KeyF && !event.repeat {
                             r.toggle_flying();
                         } else if r.grabbed {
@@ -549,6 +626,7 @@ impl ApplicationHandler for App {
         if let DeviceEvent::MouseMotion { delta } = event
             && r.grabbed
         {
+            r.raw_motion_seen = true;
             r.camera.add_look(delta.0 as f32, delta.1 as f32);
         }
     }
