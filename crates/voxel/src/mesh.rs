@@ -138,7 +138,10 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         let uniform = ao[0] == ao[1] && ao[1] == ao[2] && ao[2] == ao[3];
                         let ao_bits = ao[0] | ao[1] << 2 | ao[2] << 4 | ao[3] << 6;
                         let m = mats.get(voxels[PaddedChunk::idx(x, y, z)]);
-                        let fl = (m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK;
+                        let mut fl = (m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK;
+                        if m.kind == Kind::Foliage {
+                            fl |= flags::FOLIAGE;
+                        }
                         let key = 1
                             | (uniform as u64) << 2
                             | color_bits(m.color) << 8

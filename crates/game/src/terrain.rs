@@ -17,7 +17,7 @@ use voxel::{
     mesh::{ChunkMesh, Vertex, mesh_chunk},
 };
 use wgpu::util::DeviceExt;
-use worldgen::World;
+use worldgen::{Cascade, World};
 
 use crate::gfx::Gpu;
 
@@ -39,6 +39,7 @@ struct ColumnResult {
     col: Col,
     /// None if the job was skipped because the camera had moved away.
     chunks: Option<Vec<(i32, ChunkMesh)>>,
+    cascades: Vec<Cascade>,
     gen_ms: f32,
     mesh_ms: f32,
 }
@@ -78,6 +79,8 @@ pub struct Streamer {
     tx: Sender<ColumnResult>,
     rx: Receiver<ColumnResult>,
     columns: HashMap<Col, Vec<GpuChunk>>,
+    /// Cascade lips in each loaded column, for spray and sound.
+    cascades: HashMap<Col, Vec<Cascade>>,
     pending: HashSet<Col>,
     /// Columns still to request, farthest first (so the nearest is popped first).
     wanted: Vec<Col>,
@@ -109,6 +112,7 @@ impl Streamer {
             tx,
             rx,
             columns: HashMap::new(),
+            cascades: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
             center: None,
@@ -160,6 +164,18 @@ impl Streamer {
         self.columns.values().flatten()
     }
 
+    /// Cascade lips within `radius` voxels of `pos` (horizontally), from loaded columns.
+    pub fn cascades_near(&self, pos: DVec3, radius: f32) -> impl Iterator<Item = &Cascade> {
+        let r = (radius / CHUNK as f32).ceil() as i32 + 1;
+        let (cx, cz) = ((pos.x / CHUNK as f64).floor() as i32, (pos.z / CHUNK as f64).floor() as i32);
+        let p = pos.as_vec3();
+        (-r..=r)
+            .flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)))
+            .filter_map(move |col| self.cascades.get(&col))
+            .flatten()
+            .filter(move |c| (c.pos.x - p.x).hypot(c.pos.z - p.z) <= radius)
+    }
+
     /// Call once per frame. Uploads at most `upload_budget` finished columns.
     pub fn update(&mut self, gpu: &Gpu, cam: DVec3, upload_budget: usize) {
         let center = (
@@ -197,6 +213,9 @@ impl Streamer {
                         .map(|(cy, mesh)| self.upload(gpu, IVec3::new(result.col.0, cy, result.col.1), mesh))
                         .collect();
                     self.columns.insert(result.col, chunks);
+                    if !result.cascades.is_empty() {
+                        self.cascades.insert(result.col, result.cascades);
+                    }
                 }
                 // Skipped by the worker but wanted again by now: put it back in the queue.
                 None if self.focus.in_range(result.col, 0) => self.wanted.push(result.col),
@@ -228,6 +247,7 @@ impl Streamer {
         };
         let before = self.columns.len();
         self.columns.retain(|c, _| dist2(c) <= unload * unload);
+        self.cascades.retain(|c, _| dist2(c) <= unload * unload);
         if self.columns.len() != before {
             self.recount();
         }
@@ -290,14 +310,16 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
         return ColumnResult {
             col,
             chunks: None,
+            cascades: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
         };
     }
     let t0 = Instant::now();
-    let voxels = world.generate_column(col.0, col.1);
+    let output = world.generate_column(col.0, col.1);
     let t1 = Instant::now();
-    let chunks = voxels
+    let chunks = output
+        .chunks
         .iter()
         .map(|(cy, chunk)| (*cy, mesh_chunk(chunk, world.materials())))
         .filter(|(_, mesh)| !mesh.is_empty())
@@ -306,6 +328,7 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
     ColumnResult {
         col,
         chunks: Some(chunks),
+        cascades: output.cascades,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
     }

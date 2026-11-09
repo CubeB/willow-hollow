@@ -108,7 +108,7 @@ fn water_is_held_in_by_its_banks() {
 fn chunks_are_generated_only_where_there_is_a_surface() {
     let w = world();
     let (cx, cz) = river_chunks(&w, 4)[1];
-    let chunks = w.generate_column(cx, cz);
+    let chunks = w.generate_column(cx, cz).chunks;
     assert!(!chunks.is_empty() && chunks.len() <= 8, "{} chunks", chunks.len());
     let has_water = chunks
         .iter()
@@ -119,7 +119,7 @@ fn chunks_are_generated_only_where_there_is_a_surface() {
         assert_eq!(pair[1].0, pair[0].0 + 1);
     }
     // Far out to sea: a single chunk holding the sea bed and surface.
-    let sea = w.generate_column(2, MACRO_SIZE / CHUNK / 2);
+    let sea = w.generate_column(2, MACRO_SIZE / CHUNK / 2).chunks;
     assert!(sea.len() <= 4);
     assert!(sea.iter().all(|(_, chunk)| chunk.voxels().contains(&mat::WATER)));
 }

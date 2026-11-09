@@ -230,6 +230,28 @@ impl WorldVoxels {
     }
 }
 
+impl WorldVoxels {
+    /// The voxel id at a world position (air outside generated chunks).
+    pub fn voxel(&mut self, x: i32, y: i32, z: i32) -> voxel::Voxel {
+        let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        let world = &self.world;
+        let chunks = self
+            .columns
+            .entry(col)
+            .or_insert_with(|| world.generate_column(col.0, col.1).chunks);
+        let cy = y.div_euclid(CHUNK);
+        match chunks.iter().find(|(c, _)| *c == cy) {
+            Some((_, chunk)) => chunk.get(
+                x.rem_euclid(CHUNK) as usize + 1,
+                y.rem_euclid(CHUNK) as usize + 1,
+                z.rem_euclid(CHUNK) as usize + 1,
+            ),
+            None if chunks.first().is_some_and(|(lowest, _)| cy < *lowest) => worldgen::materials::STONE,
+            None => voxel::AIR,
+        }
+    }
+}
+
 impl Voxels for WorldVoxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
@@ -237,7 +259,7 @@ impl Voxels for WorldVoxels {
         let chunks = self
             .columns
             .entry(col)
-            .or_insert_with(|| world.generate_column(col.0, col.1));
+            .or_insert_with(|| world.generate_column(col.0, col.1).chunks);
         let cy = y.div_euclid(CHUNK);
         match chunks.iter().find(|(c, _)| *c == cy) {
             Some((_, chunk)) => {

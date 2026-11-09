@@ -3,6 +3,7 @@ mod env;
 mod farview;
 mod gfx;
 mod overlay;
+mod particles;
 mod player;
 mod render;
 mod terrain;
@@ -18,13 +19,14 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
-use worldgen::world::GameWorld;
+use worldgen::{World, world::GameWorld};
 
 use camera::{Camera, FlyController};
 use env::Environment;
 use farview::FarView;
 use gfx::{Gpu, WindowSurface};
 use overlay::Overlay;
+use particles::{Particles, Surroundings};
 use player::{Controls, Player, WorldVoxels};
 use render::Renderer;
 use terrain::Streamer;
@@ -45,6 +47,8 @@ struct Options {
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     size: (u32, u32),
+    /// Real minutes per in-game day; 0 freezes the time of day.
+    day_minutes: f32,
     /// Exit after this many frames (smoke tests).
     frames: Option<u64>,
     no_vsync: bool,
@@ -62,6 +66,7 @@ impl Default for Options {
             radius: 12,
             screenshot: None,
             size: (1280, 720),
+            day_minutes: 40.0,
             frames: None,
             no_vsync: false,
         }
@@ -79,6 +84,7 @@ usage: game [options]
   --radius N            chunk load radius (default 12)
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --size WxH            screenshot size (default 1280x720)
+  --day-minutes M       real minutes per day, 0 to freeze time (default 40)
   --frames N            exit after N frames
   --no-vsync            uncapped frame rate";
 
@@ -124,6 +130,7 @@ fn parse_args() -> Result<Options> {
                 let v = list::<u32>(&value()?, 'x', 2)?;
                 o.size = (v[0].max(1), v[1].max(1));
             }
+            "--day-minutes" => o.day_minutes = value()?.parse()?,
             "--frames" => o.frames = Some(value()?.parse()?),
             "--no-vsync" => o.no_vsync = true,
             "--help" | "-h" => {
@@ -161,6 +168,52 @@ fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
     Camera::new(pos, spawn.yaw, -4.0)
 }
 
+/// Samples voxels around the camera for leaves (to shed) and flowers (for butterflies),
+/// and reads the biome. Cheap enough to do every couple of seconds.
+fn scan_surroundings(
+    world: &GameWorld,
+    voxels: &mut WorldVoxels,
+    camera: DVec3,
+    salt: u32,
+) -> (worldgen::biome::Biome, Vec<(DVec3, [f32; 3])>, Vec<(DVec3, [f32; 3])>) {
+    use worldgen::materials as mat;
+    let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
+    let biome = world.column(cx, cz).biome;
+    let (mut leaves, mut flowers) = (Vec::new(), Vec::new());
+    let mats = world.materials();
+    let to_linear = |c: [u8; 3]| c.map(|v| (v as f32 / 255.0).powf(2.2));
+    let mut rng = salt.wrapping_mul(0x9e37_79b9) ^ (cx as u32).wrapping_mul(31) ^ (cz as u32).wrapping_mul(17) | 1;
+    for _ in 0..700 {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        let x = cx + (rng % 61) as i32 - 30;
+        let z = cz + ((rng >> 8) % 61) as i32 - 30;
+        let top = camera.y as i32 + 40;
+        let mut below = voxel::AIR;
+        for y in ((camera.y as i32 - 12)..=top).rev() {
+            let v = voxels.voxel(x, y, z);
+            let kind = mats.get(v).kind;
+            if kind == voxel::Kind::Foliage && mats.get(below).kind == voxel::Kind::Air {
+                leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color)));
+                break;
+            }
+            if kind == voxel::Kind::Solid {
+                if matches!(
+                    v,
+                    mat::FLOWER_RED | mat::FLOWER_YELLOW | mat::FLOWER_WHITE | mat::FLOWER_PURPLE
+                        | mat::FLOWER_BLUE | mat::FLOWER_PINK | mat::HEATHER
+                ) {
+                    flowers.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color)));
+                }
+                break;
+            }
+            below = v;
+        }
+    }
+    (biome, leaves, flowers)
+}
+
 struct Running {
     window: Arc<Window>,
     gpu: Gpu,
@@ -170,6 +223,15 @@ struct Running {
     streamer: Streamer,
     far: FarView,
     env: Environment,
+    particles: Particles,
+    /// Leaf and flower voxels near the player, refreshed now and then.
+    leaves: Vec<(DVec3, [f32; 3])>,
+    flowers: Vec<(DVec3, [f32; 3])>,
+    scan_timer: f32,
+    biome: worldgen::biome::Biome,
+    day_minutes: f32,
+    was_swimming: bool,
+    world: Arc<GameWorld>,
     camera: Camera,
     /// On foot, or flying free of collision.
     walking: bool,
@@ -179,6 +241,7 @@ struct Running {
     keys: HashSet<KeyCode>,
     grabbed: bool,
     last_frame: Instant,
+    start: Instant,
     frame: u64,
     frame_ms: f32,
 }
@@ -214,12 +277,21 @@ impl Running {
             player: Player::new(feet),
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
-            streamer: Streamer::new(world, opts.radius),
+            streamer: Streamer::new(world.clone(), opts.radius),
             env: Environment::at_time(opts.time),
+            particles: Particles::new(),
+            leaves: Vec::new(),
+            flowers: Vec::new(),
+            scan_timer: 0.0,
+            biome: worldgen::biome::Biome::Grassland,
+            day_minutes: opts.day_minutes,
+            was_swimming: false,
+            world,
             fly: FlyController { speed: 20.0 },
             keys: HashSet::new(),
             grabbed: false,
             last_frame: Instant::now(),
+            start: Instant::now(),
             frame: 0,
             frame_ms: 16.0,
             gpu,
@@ -243,6 +315,11 @@ impl Running {
         }
         self.window.set_cursor_visible(!grab);
         self.grabbed = grab;
+    }
+
+    fn scan_surroundings(&mut self) {
+        let found = scan_surroundings(&self.world, &mut self.voxels, self.camera.pos, self.frame as u32);
+        (self.biome, self.leaves, self.flowers) = found;
     }
 
     fn toggle_flying(&mut self) {
@@ -288,6 +365,33 @@ impl Running {
         self.streamer.update(&self.gpu, self.camera.pos, 6);
         self.far.update(&self.gpu, self.camera.pos);
 
+        // The day turns.
+        if self.day_minutes > 0.0 {
+            self.env = Environment::at_time(self.env.time + dt * 24.0 / (self.day_minutes * 60.0));
+        }
+
+        // Ambient life. Every so often, look around for leaves and flowers to spawn from.
+        self.scan_timer -= dt;
+        if self.scan_timer <= 0.0 {
+            self.scan_timer = 2.0;
+            self.scan_surroundings();
+        }
+        let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
+            .then(|| self.player.pos + DVec3::new(0.0, 1.0, 0.0));
+        self.was_swimming = self.player.swimming;
+        let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, 150.0).copied().collect();
+        let surroundings = Surroundings {
+            camera: self.camera.pos,
+            biome: self.biome,
+            sun_elevation: self.env.sun_elevation,
+            cascades: &cascades,
+            leaves: &self.leaves,
+            flowers: &self.flowers,
+            player_entered_water: entered_water,
+            time: self.last_frame.duration_since(self.start).as_secs_f64(),
+        };
+        self.particles.update(dt, &surroundings, &mut self.voxels);
+
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
@@ -298,6 +402,8 @@ impl Running {
             env: &self.env,
             terrain: &self.streamer,
             far: &self.far,
+            particles: self.particles.instances(),
+            wind: self.particles.wind.lagged,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
 
@@ -306,6 +412,7 @@ impl Running {
         let (frame_ms, speed) = (self.frame_ms, self.fly.speed);
         let gpu_name = &self.gpu.adapter_name;
         let (s, d) = (self.streamer.stats, self.renderer.stats);
+        let (particle_count, biome) = (self.particles.len(), self.biome);
         let mode = match (self.walking, self.player.swimming, self.player.on_ground) {
             (false, ..) => "flying",
             (true, true, _) => "swimming",
@@ -347,7 +454,7 @@ impl Running {
                         ));
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.add(egui::Slider::new(&mut radius, 2..=32).text("load radius"));
-                        ui.label(format!("mode: {mode}"));
+                        ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Click to look, Esc to release. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed)");
                     });
@@ -465,16 +572,38 @@ fn main() -> Result<()> {
         let world = make_world(&opts);
         let camera = make_camera(&opts, &world);
         let mut far = FarView::new(&gpu, world.clone());
-        let mut streamer = Streamer::new(world, opts.radius);
+        let mut streamer = Streamer::new(world.clone(), opts.radius);
         let t = Instant::now();
+        let env = Environment::at_time(opts.time);
+        // A few seconds of ambient life, so stills show spray, leaves and fireflies.
+        streamer.wait_idle(&gpu, camera.pos);
+        let mut voxels = WorldVoxels::new(world.clone());
+        let (biome, leaves, flowers) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
+        let cascades: Vec<_> = streamer.cascades_near(camera.pos, 150.0).copied().collect();
+        let mut particles = Particles::new();
+        for step in 0..480 {
+            let surroundings = Surroundings {
+                camera: camera.pos,
+                biome,
+                sun_elevation: env.sun_elevation,
+                cascades: &cascades,
+                leaves: &leaves,
+                flowers: &flowers,
+                player_entered_water: None,
+                time: step as f64 / 60.0,
+            };
+            particles.update(1.0 / 60.0, &surroundings, &mut voxels);
+        }
         render::screenshot(
             &gpu,
             path,
             opts.size,
             &camera,
-            &Environment::at_time(opts.time),
+            &env,
             &mut streamer,
             &mut far,
+            particles.instances(),
+            particles.wind.lagged,
         )?;
         let s = streamer.stats;
         log::info!(

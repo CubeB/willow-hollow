@@ -22,6 +22,8 @@ struct Globals {
     mist: vec4<f32>,
     // Cascade far distances (view depth) in xyz; w = cloud layer height, camera-relative.
     cascades: vec4<f32>,
+    // xyz: wind vector in voxels per second.
+    wind: vec4<f32>,
 };
 
 struct Shadows {

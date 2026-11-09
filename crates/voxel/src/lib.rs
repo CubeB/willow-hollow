@@ -91,6 +91,8 @@ pub mod flags {
     /// Two bits of per-voxel colour jitter strength (0..=3).
     pub const JITTER_SHIFT: u8 = 1;
     pub const JITTER_MASK: u8 = 0b11 << JITTER_SHIFT;
+    /// Leaves and vines: swayed by the wind in the vertex shader.
+    pub const FOLIAGE: u8 = 1 << 3;
 }
 
 #[derive(Clone, Copy, Debug)]

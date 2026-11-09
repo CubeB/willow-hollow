@@ -9,7 +9,27 @@ pub mod noise;
 pub mod surface;
 pub mod world;
 
+use glam::Vec3;
 use voxel::{Materials, PaddedChunk};
+
+/// A place where flowing water drops to a lower level: the lip of a fall or the step
+/// of a cascade. Spray and sound come from here.
+#[derive(Clone, Copy, Debug)]
+pub struct Cascade {
+    /// World position of the water surface at the lip.
+    pub pos: Vec3,
+    /// Horizontal direction the water falls toward (unit length).
+    pub dir: Vec3,
+    /// Height of the drop in voxels.
+    pub drop: f32,
+}
+
+/// Everything generated for one chunk column.
+pub struct ColumnOutput {
+    /// `(chunk y, voxels)`, lowest first with none skipped.
+    pub chunks: Vec<(i32, PaddedChunk)>,
+    pub cascades: Vec<Cascade>,
+}
 
 /// A source of voxel terrain, generated one chunk column at a time.
 ///
@@ -18,10 +38,10 @@ use voxel::{Materials, PaddedChunk};
 pub trait World: Send + Sync {
     fn materials(&self) -> &Materials;
 
-    /// The chunks of column `(cx, cz)` as `(chunk y, voxels)`, lowest first: every
-    /// chunk from just under the lowest ground to the top of the highest thing in the
-    /// column, with none skipped. Below that range is solid rock and above it is air.
-    fn generate_column(&self, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)>;
+    /// The chunks of column `(cx, cz)`: every chunk from just under the lowest ground
+    /// to the top of the highest thing in the column, with none skipped. Below that
+    /// range is solid rock and above it is air.
+    fn generate_column(&self, cx: i32, cz: i32) -> ColumnOutput;
 }
 
 #[cfg(test)]

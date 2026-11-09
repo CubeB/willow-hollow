@@ -15,6 +15,8 @@ pub struct Environment {
     /// Ground mist strength (dawn and dusk), and the cloud cover 0..1.
     pub mist: f32,
     pub clouds: f32,
+    /// Sine of the sun's elevation; negative at night.
+    pub sun_elevation: f32,
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -71,6 +73,7 @@ impl Environment {
             daylight,
             mist,
             clouds: 0.45,
+            sun_elevation: elev,
         }
     }
 }

@@ -5,12 +5,12 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use glam::IVec3;
+use glam::{IVec3, Vec3};
 
 use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel};
 
 use crate::{
-    World,
+    Cascade, ColumnOutput, World,
     continent::{self, Continent, NO_LAKE, SimConfig},
     features::{self, Library},
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
@@ -204,7 +204,7 @@ impl World for GameWorld {
         &self.materials
     }
 
-    fn generate_column(&self, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)> {
+    fn generate_column(&self, cx: i32, cz: i32) -> ColumnOutput {
         // A chunk never straddles macro-cells, and its one-voxel border can only reach
         // into the uniform deep sea that separates them.
         let (mx, mz) = cell_of(cx * CHUNK, cz * CHUNK);
@@ -310,6 +310,32 @@ impl World for GameWorld {
             out.push((cy, chunk));
         }
 
+        // Cascade lips: water columns whose neighbour's water surface is lower.
+        let mut cascades = Vec::new();
+        for px in 1..PAD - 1 {
+            for pz in 1..PAD - 1 {
+                let Some(k) = columns[px * PAD + pz].water_surface() else { continue };
+                let (mut total, mut dir) = (0.0f32, Vec3::ZERO);
+                for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let n = &columns[(px as i32 + dx) as usize * PAD + (pz as i32 + dz) as usize];
+                    if let Some(nk) = n.water_surface()
+                        && nk < k
+                    {
+                        let drop = (k - nk) as f32;
+                        total += drop;
+                        dir += Vec3::new(dx as f32, 0.0, dz as f32) * drop;
+                    }
+                }
+                if total > 0.0 {
+                    cascades.push(Cascade {
+                        pos: Vec3::new((wx0 + px as i32) as f32 + 0.5, k as f32, (wz0 + pz as i32) as f32 + 0.5),
+                        dir: dir.normalize_or_zero(),
+                        drop: total,
+                    });
+                }
+            }
+        }
+
         let base_y = cy_min * CHUNK - 1;
         for p in &placements {
             features::stamp(lib, &self.materials, p, |q: IVec3, v, force| {
@@ -340,6 +366,9 @@ impl World for GameWorld {
                 }
             });
         }
-        out
+        ColumnOutput {
+            chunks: out,
+            cascades,
+        }
     }
 }

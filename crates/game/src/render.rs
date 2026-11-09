@@ -11,6 +11,7 @@ use crate::{
     camera::Camera,
     env::Environment,
     farview::{FarVertex, FarView},
+    particles::ParticleInstance,
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
     terrain::{MeshBuf, Streamer},
 };
@@ -38,6 +39,7 @@ struct Globals {
     cam_wrapped: [f32; 4],
     mist: [f32; 4],
     cascades: [f32; 4],
+    wind: [f32; 4],
 }
 
 #[repr(C)]
@@ -69,6 +71,8 @@ pub struct Scene<'a> {
     pub env: &'a Environment,
     pub terrain: &'a Streamer,
     pub far: &'a FarView,
+    pub particles: &'a [ParticleInstance],
+    pub wind: Vec3,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -129,6 +133,10 @@ pub struct Renderer {
     blur_h: wgpu::RenderPipeline,
     blur_v: wgpu::RenderPipeline,
     tonemap: wgpu::RenderPipeline,
+    particles: wgpu::RenderPipeline,
+    cube: wgpu::Buffer,
+    particle_instances: wgpu::Buffer,
+    particle_capacity: usize,
     sea: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_capacity: usize,
@@ -552,6 +560,75 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        // Particles: a unit cube with normals, instanced.
+        let particle_module = shader(device, "particles", format!("{common}\n{}", include_str!("shaders/particles.wgsl")));
+        let mut cube_verts: Vec<[f32; 6]> = Vec::new();
+        for (n, u, v) in [
+            ([1.0f32, 0.0, 0.0], [0.0f32, 1.0, 0.0], [0.0f32, 0.0, 1.0]),
+            ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),
+            ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+        ] {
+            let (n, u, v) = (Vec3::from(n), Vec3::from(u), Vec3::from(v));
+            let corner = |su: f32, sv: f32| {
+                let p = n * 0.5 + u * su * 0.5 + v * sv * 0.5;
+                [p.x, p.y, p.z, n.x, n.y, n.z]
+            };
+            let (a, b, c, d) = (corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0));
+            cube_verts.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+        let cube = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cube"),
+            contents: bytemuck::cast_slice(&cube_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let cube_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        let particle_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 5 => Float32, 6 => Float32x4];
+        let particles = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("particles"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &particle_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &cube_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<ParticleInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &particle_attrs,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(false, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(Some(wgpu::BlendState::ALPHA_BLENDING)),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let particle_capacity = 8192;
+        let particle_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("particle instances"),
+            size: (particle_capacity * size_of::<ParticleInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Post-processing: one layout, several entry points.
         let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post"),
@@ -641,6 +718,10 @@ impl Renderer {
             blur_h,
             blur_v,
             tonemap,
+            particles,
+            cube,
+            particle_instances,
+            particle_capacity,
             sea,
             instances: instance_buffer(device, instance_capacity),
             instance_capacity,
@@ -801,6 +882,7 @@ impl Renderer {
                 CASCADE_ENDS[2],
                 CLOUD_HEIGHT - camera.pos.y as f32,
             ],
+            wind: v4(scene.wind, 0.0),
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -978,8 +1060,12 @@ impl Renderer {
             }
         }
 
-        // --- Water, reading the depth of what lies beneath -----------------------
-        if !water.is_empty() {
+        // --- Water, reading the depth of what lies beneath, then particles ---------
+        let particle_count = scene.particles.len().min(self.particle_capacity);
+        if particle_count > 0 {
+            gpu.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&scene.particles[..particle_count]));
+        }
+        if !water.is_empty() || particle_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1009,6 +1095,13 @@ impl Renderer {
             for (mesh, index, _) in &water {
                 pass.set_vertex_buffer(0, mesh.buffer.slice(..));
                 pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
+            }
+            if particle_count > 0 {
+                pass.set_pipeline(&self.particles);
+                pass.set_bind_group(0, &self.scene_bind, &[]);
+                pass.set_vertex_buffer(0, self.cube.slice(..));
+                pass.set_vertex_buffer(1, self.particle_instances.slice(..));
+                pass.draw(0..36, 0..particle_count as u32);
             }
         }
 
@@ -1079,6 +1172,8 @@ pub fn screenshot(
     env: &Environment,
     streamer: &mut Streamer,
     far: &mut FarView,
+    particles: &[ParticleInstance],
+    wind: Vec3,
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -1116,6 +1211,8 @@ pub fn screenshot(
         env,
         terrain: streamer,
         far,
+        particles,
+        wind,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(

@@ -29,6 +29,7 @@ fn face_normal(face: u32) -> vec3<f32> {
 }
 
 const FLAG_WATER: u32 = 1u;
+const FLAG_FOLIAGE: u32 = 8u;
 const NEAR: f32 = 0.1;
 
 @vertex
@@ -43,6 +44,16 @@ fn vs(in: VIn) -> VOut {
     if ((out.flags & FLAG_WATER) != 0u && out.face == 2u) {
         // Water surfaces sit a little below the top of their voxel.
         rel.y -= 0.125;
+    }
+    if ((out.flags & FLAG_FOLIAGE) != 0u) {
+        // Leaves stir in the wind. The offset is a smooth function of world position,
+        // so neighbouring leaf voxels move together and no gaps open between them.
+        let world = vec3<f32>(in.origin) + local;
+        let t = G.sun_dir.w;
+        let wave = sin(world.x * 0.35 + world.z * 0.27 + world.y * 0.2 + t * 1.7)
+            + 0.5 * sin(world.x * 0.9 - world.z * 0.6 + t * 2.9);
+        let strength = length(G.wind.xz) * 0.03;
+        rel += vec3<f32>(G.wind.x, 0.0, G.wind.z) * (0.02 + wave * strength) + vec3<f32>(0.0, wave * strength * 0.5, 0.0);
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
