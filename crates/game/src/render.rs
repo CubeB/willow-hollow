@@ -1164,6 +1164,7 @@ impl Frustum {
 }
 
 /// Renders one frame headless and saves it as a PNG.
+#[allow(clippy::too_many_arguments)]
 pub fn screenshot(
     gpu: &Gpu,
     path: &std::path::Path,

@@ -168,6 +168,9 @@ fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
     Camera::new(pos, spawn.yaw, -4.0)
 }
 
+/// Voxel positions with their linear colours.
+type Spots = Vec<(DVec3, [f32; 3])>;
+
 /// Samples voxels around the camera for leaves (to shed) and flowers (for butterflies),
 /// and reads the biome. Cheap enough to do every couple of seconds.
 fn scan_surroundings(
@@ -175,7 +178,7 @@ fn scan_surroundings(
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
-) -> (worldgen::biome::Biome, Vec<(DVec3, [f32; 3])>, Vec<(DVec3, [f32; 3])>) {
+) -> (worldgen::biome::Biome, Spots, Spots) {
     use worldgen::materials as mat;
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;

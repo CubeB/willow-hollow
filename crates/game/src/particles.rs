@@ -196,7 +196,7 @@ impl Particles {
                     life: self.range(9.0, 14.0),
                     size: Vec3::new(0.22, 0.08, 0.22),
                     color,
-                    phase: self.range(0.0, 6.28),
+                    phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                 };
                 self.spawn(particle);
@@ -238,7 +238,7 @@ impl Particles {
                     life: self.range(5.0, 9.0),
                     size: Vec3::splat(0.05),
                     color: [1.0, 0.95, 0.75],
-                    phase: self.range(0.0, 6.28),
+                    phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                 };
                 self.spawn(particle);
@@ -256,7 +256,7 @@ impl Particles {
                 life: self.range(18.0, 30.0),
                 size: Vec3::new(0.3, 0.05, 0.22),
                 color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
-                phase: self.range(0.0, 6.28),
+                phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
             };
             self.spawn(particle);
@@ -283,7 +283,7 @@ impl Particles {
                     life: 55.0,
                     size: Vec3::new(0.5, 0.12, 0.9),
                     color: [0.08, 0.08, 0.1],
-                    phase: self.range(0.0, 6.28),
+                    phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                 };
                 self.spawn(particle);
