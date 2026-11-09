@@ -46,6 +46,41 @@ palette! {
     GRAVEL         = (146, 140, 132), Solid, 2;
     SNOW           = (238, 242, 248), Solid, 1;
     WATER          = ( 46, 112, 168), Water, 0;
+    // Wood.
+    BARK_OAK       = ( 94,  72,  50), Solid, 2;
+    BARK_BIRCH     = (228, 226, 216), Solid, 3;
+    BARK_PINE      = ( 86,  62,  46), Solid, 2;
+    BARK_REDWOOD   = (138,  74,  50), Solid, 2;
+    BARK_JUNGLE    = (108,  94,  74), Solid, 2;
+    BARK_PALM      = (152, 126,  90), Solid, 2;
+    BARK_WILLOW    = (104,  90,  66), Solid, 2;
+    BARK_ACACIA    = (120,  96,  70), Solid, 2;
+    BARK_BAOBAB    = (150, 124, 100), Solid, 1;
+    WOOD_DEAD      = (156, 146, 130), Solid, 2;
+    // Foliage: walked through, not into.
+    LEAVES_OAK     = ( 66, 130,  48), Foliage, 3;
+    LEAVES_BIRCH   = (124, 172,  62), Foliage, 3;
+    NEEDLES        = ( 40,  90,  60), Foliage, 3;
+    NEEDLES_REDWOOD= ( 50, 104,  60), Foliage, 3;
+    LEAVES_JUNGLE  = ( 42, 122,  52), Foliage, 3;
+    LEAVES_ACACIA  = (112, 142,  62), Foliage, 3;
+    LEAVES_WILLOW  = (120, 162,  76), Foliage, 3;
+    LEAVES_PALM    = ( 76, 142,  62), Foliage, 3;
+    LEAVES_MAPLE   = (216, 122,  42), Foliage, 3;
+    LEAVES_MAPLE_RED = (192,  62,  46), Foliage, 3;
+    LEAVES_CHERRY  = (242, 174, 198), Foliage, 3;
+    LEAVES_BAOBAB  = ( 98, 136,  58), Foliage, 3;
+    VINE           = ( 54, 112,  50), Foliage, 2;
+    MOSS           = ( 84, 124,  54), Solid, 2;
+    CACTUS         = ( 78, 134,  70), Solid, 2;
+    // Flowering ground: grass tops carrying a drift of colour.
+    FLOWER_RED     = (206,  78,  72), Solid, 2;
+    FLOWER_YELLOW  = (232, 206,  86), Solid, 2;
+    FLOWER_WHITE   = (236, 236, 226), Solid, 1;
+    FLOWER_PURPLE  = (156, 104, 188), Solid, 2;
+    FLOWER_BLUE    = (104, 132, 214), Solid, 2;
+    FLOWER_PINK    = (232, 158, 190), Solid, 2;
+    HEATHER        = (164, 112, 160), Solid, 2;
 }
 
 /// The ground cover a biome grows.

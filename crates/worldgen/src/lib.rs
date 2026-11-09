@@ -2,6 +2,7 @@
 
 pub mod biome;
 pub mod continent;
+pub mod features;
 pub mod macro_layout;
 pub mod materials;
 pub mod noise;

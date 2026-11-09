@@ -1,0 +1,359 @@
+//! Things standing on the terrain: trees, bushes, boulders, logs. Where they go and
+//! how they are stamped into chunks.
+//!
+//! Placement works on fixed grids of cells in world space, one grid per size class,
+//! with at most one feature per cell at a hashed position. Any chunk can therefore
+//! work out which features overlap it by looking at the cells around it, so a tree
+//! spanning many chunks is stamped identically by each of them.
+
+pub mod shape;
+pub mod trees;
+
+use std::collections::HashMap;
+
+use glam::IVec3;
+use voxel::{Kind, Materials, Voxel};
+
+use crate::{
+    biome::Biome,
+    materials as mat,
+    noise::{fbm2, hash3, unit},
+    surface::{Column, Cover, Sampler},
+};
+use shape::{Template, rotate};
+use trees::Species;
+
+/// Every species' pre-built variants. Built once per process.
+pub struct Library {
+    templates: HashMap<Species, Vec<Template>>,
+}
+
+impl Default for Library {
+    fn default() -> Self {
+        Self::build()
+    }
+}
+
+impl Library {
+    pub fn build() -> Self {
+        let templates = Species::ALL
+            .iter()
+            .map(|&sp| {
+                let variants = (0..sp.variants())
+                    .map(|i| sp.build(0x51_7e3d ^ (i as u32).wrapping_mul(0x9e37_79b9)))
+                    .collect();
+                (sp, variants)
+            })
+            .collect();
+        Self { templates }
+    }
+
+    pub fn get(&self, species: Species, variant: usize) -> &Template {
+        let v = &self.templates[&species];
+        &v[variant % v.len()]
+    }
+}
+
+/// One feature to stamp: species variant at a world position (`y` is the ground
+/// surface, where the model's origin goes), turned by quarter turns.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement {
+    pub pos: IVec3,
+    pub species: Species,
+    pub variant: usize,
+    pub turns: u32,
+}
+
+/// Size classes. Each is a grid of square cells in world space.
+#[derive(Clone, Copy)]
+struct Layer {
+    cell: i32,
+    /// Farthest any model in this layer reaches from its origin, horizontally.
+    reach: i32,
+    salt: u32,
+}
+
+const GIANTS: Layer = Layer {
+    cell: 48,
+    reach: 24,
+    salt: 0x61a7,
+};
+const TREES: Layer = Layer {
+    cell: 11,
+    reach: 10,
+    salt: 0x7ee5,
+};
+const SMALL: Layer = Layer {
+    cell: 6,
+    reach: 5,
+    salt: 0x5a11,
+};
+
+/// What grows in a biome: weighted species per layer and how full each layer is.
+struct Flora {
+    giants: &'static [(Species, f32)],
+    giant_density: f32,
+    trees: &'static [(Species, f32)],
+    tree_density: f32,
+    small: &'static [(Species, f32)],
+    small_density: f32,
+}
+
+fn flora(biome: Biome) -> Flora {
+    use Species::*;
+    macro_rules! f {
+        ($g:expr, $gd:expr, $t:expr, $td:expr, $s:expr, $sd:expr) => {
+            Flora {
+                giants: &$g,
+                giant_density: $gd,
+                trees: &$t,
+                tree_density: $td,
+                small: &$s,
+                small_density: $sd,
+            }
+        };
+    }
+    match biome {
+        Biome::Ocean | Biome::Alpine => f!([], 0.0, [], 0.0, [(Boulder, 1.0)], 0.06),
+        Biome::Tundra => f!([], 0.0, [(DeadSnag, 1.0)], 0.01, [(Boulder, 3.0), (Bush, 1.0)], 0.08),
+        Biome::Taiga => f!(
+            [(TallPine, 1.0)],
+            0.12,
+            [(Spruce, 10.0), (Birch, 1.0), (DeadSnag, 0.4)],
+            0.62,
+            [(Boulder, 2.0), (MossyBoulder, 2.0), (FallenLog, 2.0), (Bush, 1.0), (Stump, 0.5)],
+            0.14
+        ),
+        Biome::Heath => f!([], 0.0, [(Birch, 2.0), (Spruce, 1.0), (DeadSnag, 0.5)], 0.05, [(Boulder, 3.0), (Bush, 2.0)], 0.1),
+        Biome::Grassland => f!([(ElderOak, 1.0)], 0.02, [(Oak, 3.0), (Birch, 1.0)], 0.04, [(Bush, 2.0), (Boulder, 1.0)], 0.07),
+        Biome::Deciduous => f!(
+            [(ElderOak, 1.0)],
+            0.05,
+            [(Oak, 7.0), (Birch, 2.5), (Maple, 1.5), (Cherry, 0.4)],
+            0.58,
+            [(Bush, 4.0), (FallenLog, 1.5), (Stump, 0.6), (MossyBoulder, 0.8), (Boulder, 0.4)],
+            0.16
+        ),
+        Biome::OldGrowth => f!(
+            [(Redwood, 1.0)],
+            0.6,
+            [(Spruce, 2.0), (Oak, 1.0), (Birch, 0.5)],
+            0.2,
+            [(Fern, 5.0), (MossyBoulder, 2.0), (FallenLog, 2.5), (Stump, 0.8)],
+            0.24
+        ),
+        Biome::Desert => f!([], 0.0, [(Cactus, 1.0)], 0.03, [(Boulder, 2.0), (Cactus, 1.0)], 0.05),
+        Biome::Savanna => f!([(Baobab, 1.0)], 0.1, [(Acacia, 1.0)], 0.07, [(Bush, 3.0), (Boulder, 1.0)], 0.08),
+        Biome::Woodland => f!(
+            [(ElderOak, 1.0)],
+            0.03,
+            [(Oak, 5.0), (Cherry, 2.0), (Birch, 1.5), (Acacia, 0.5)],
+            0.4,
+            [(Bush, 4.0), (FallenLog, 1.0), (Boulder, 0.6)],
+            0.14
+        ),
+        Biome::Rainforest => f!(
+            [(Kapok, 1.0)],
+            0.45,
+            [(Jungle, 8.0), (Palm, 1.0)],
+            0.7,
+            [(Fern, 6.0), (Bush, 3.0), (FallenLog, 1.5), (MossyBoulder, 1.0)],
+            0.3
+        ),
+    }
+}
+
+/// Canopy colour and relative cover of a biome's forest, for drawing it from afar.
+pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
+    let fl = flora(biome);
+    let (species, _) = fl.trees.iter().chain(fl.giants).max_by(|a, b| a.1.total_cmp(&b.1))?;
+    let leaves = match species {
+        Species::Spruce | Species::TallPine => mat::NEEDLES,
+        Species::Redwood => mat::NEEDLES_REDWOOD,
+        Species::Jungle | Species::Kapok => mat::LEAVES_JUNGLE,
+        Species::Acacia | Species::Baobab => mat::LEAVES_ACACIA,
+        Species::Birch => mat::LEAVES_BIRCH,
+        Species::Cactus | Species::DeadSnag => return None,
+        _ => mat::LEAVES_OAK,
+    };
+    let cover = (fl.tree_density * 1.3 + fl.giant_density * 0.6).min(1.0);
+    let height = match species {
+        Species::Redwood => 60.0,
+        Species::Kapok => 40.0,
+        Species::TallPine => 30.0,
+        _ => 14.0,
+    };
+    Some((mats.get(leaves).color, cover, height))
+}
+
+fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
+    let total: f32 = list.iter().map(|w| w.1).sum();
+    let mut r = roll * total;
+    for &(sp, w) in list {
+        if r < w {
+            return sp;
+        }
+        r -= w;
+    }
+    list[list.len() - 1].0
+}
+
+/// Features overlapping the square of columns at continent-local `(lx0, lz0)`, `span`
+/// wide. `sampler` must cover that square plus the largest reach.
+pub fn place(
+    world_seed: u32,
+    sampler: &Sampler,
+    lx0: i32,
+    lz0: i32,
+    span: i32,
+    macro_origin: (i32, i32),
+) -> Vec<Placement> {
+    let mut out = Vec::new();
+    let mut giants: Vec<IVec3> = Vec::new();
+    for layer in [GIANTS, TREES, SMALL] {
+        let (wx0, wz0) = (macro_origin.0 + lx0, macro_origin.1 + lz0);
+        let (c0x, c1x) = ((wx0 - layer.reach).div_euclid(layer.cell), (wx0 + span + layer.reach).div_euclid(layer.cell));
+        let (c0z, c1z) = ((wz0 - layer.reach).div_euclid(layer.cell), (wz0 + span + layer.reach).div_euclid(layer.cell));
+        for cz in c0z..=c1z {
+            for cx in c0x..=c1x {
+                let h = hash3(world_seed ^ layer.salt, cx, cz, 0);
+                let roll = |k: u32| unit(h.rotate_left(k * 5).wrapping_mul(0x2c1b_3c6d ^ k));
+                // Position within the cell, keeping a margin so neighbours do not touch.
+                let x = cx * layer.cell + 1 + (roll(1) * (layer.cell - 2) as f32) as i32;
+                let z = cz * layer.cell + 1 + (roll(2) * (layer.cell - 2) as f32) as i32;
+                let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
+                let col = sampler.column(lx, lz);
+                let Some(species) = choose(&col, &layer, roll(3), roll(4), x, z, world_seed) else {
+                    continue;
+                };
+                let pos = IVec3::new(x, col.top() + 1, z);
+                if layer.salt == GIANTS.salt {
+                    giants.push(pos);
+                } else if layer.salt == TREES.salt
+                    && giants.iter().any(|g| (g.x - x).abs() < 6 && (g.z - z).abs() < 6)
+                {
+                    continue;
+                }
+                // Steep ground: nothing roots there but the rock itself.
+                let rise = (sampler.column(lx + 1, lz).ground - sampler.column(lx - 1, lz).ground)
+                    .abs()
+                    .max((sampler.column(lx, lz + 1).ground - sampler.column(lx, lz - 1).ground).abs());
+                if rise > 1.6 && !matches!(species, Species::Boulder | Species::MossyBoulder) {
+                    continue;
+                }
+                out.push(Placement {
+                    pos,
+                    species,
+                    variant: (roll(5) * 64.0) as usize,
+                    turns: (roll(6) * 4.0) as u32,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Decides whether a feature grows at a column and which, or None.
+fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: i32, z: i32, seed: u32) -> Option<Species> {
+    let fl = flora(col.biome);
+    // Forests thin out and open into clearings on a slow noise, so they are not
+    // uniform carpets.
+    let openness = fbm2(seed ^ 0xc1ea, x as f64 / 95.0, z as f64 / 95.0, 3, 2.0, 0.5);
+    let clearing = ((openness + 0.35) / 0.5).clamp(0.0, 1.0);
+    let (list, density): (&[(Species, f32)], f32) = match layer.salt {
+        s if s == GIANTS.salt => (fl.giants, fl.giant_density * (0.5 + 0.5 * clearing)),
+        s if s == TREES.salt => (fl.trees, fl.tree_density * clearing),
+        _ => (fl.small, fl.small_density),
+    };
+    let too_cold = col.temperature < 0.13;
+    match col.cover {
+        Cover::Beach if layer.salt == TREES.salt && col.temperature > 0.6 && roll_density < 0.12 => {
+            return Some(Species::Palm);
+        }
+        Cover::Land => {}
+        Cover::Bank if layer.salt == SMALL.salt => {}
+        _ => return None,
+    }
+    if col.water_surface().is_some() {
+        return None;
+    }
+    // Riverbanks in temperate and warm country grow willows.
+    if layer.salt == TREES.salt
+        && col.river < 9.0
+        && col.temperature > 0.3
+        && !matches!(col.biome, Biome::Desert | Biome::Savanna)
+        && roll_density < 0.35
+    {
+        return Some(Species::Willow);
+    }
+    if list.is_empty() || roll_density >= density {
+        return None;
+    }
+    let mut species = weighted(list, roll_species);
+    // Trees grow in groves of their own kind rather than evenly mixed: a slow noise
+    // hands whole stretches of forest to one of the minority species.
+    if layer.salt == TREES.salt && matches!(species, Species::Oak | Species::Birch | Species::Maple | Species::Cherry) {
+        let grove = fbm2(seed ^ 0x9e0f, x as f64 / 140.0, z as f64 / 140.0, 2, 2.0, 0.5);
+        species = match col.biome {
+            Biome::Deciduous | Biome::Woodland if grove > 0.38 => Species::Maple,
+            Biome::Woodland if grove < -0.40 => Species::Cherry,
+            Biome::Deciduous if grove < -0.42 => Species::Birch,
+            Biome::Deciduous | Biome::Woodland if matches!(species, Species::Maple | Species::Cherry) => Species::Oak,
+            _ => species,
+        };
+    }
+    if too_cold && !matches!(species, Species::Boulder | Species::MossyBoulder) {
+        return None;
+    }
+    Some(species)
+}
+
+/// Writes a placed feature into a column of chunks. `set` receives world voxel
+/// positions and is expected to ignore anything outside its range.
+pub fn stamp(lib: &Library, mats: &Materials, p: &Placement, mut set: impl FnMut(IVec3, Voxel, bool)) {
+    let t = lib.get(p.species, p.variant);
+    for &(offset, v) in &t.voxels {
+        let q = p.pos + rotate(offset, p.turns);
+        // Wood and rock displace whatever is there; leaves only fill empty space.
+        let force = mats.get(v).kind == Kind::Solid;
+        set(q, v, force);
+    }
+}
+
+/// How high a feature's top can be above its origin, over all templates. Chunk
+/// columns use it to know how far up to generate.
+pub fn max_top(lib: &Library) -> i32 {
+    lib.templates
+        .values()
+        .flatten()
+        .map(|t| t.top)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The tallest feature reach, for sizing sampler margins.
+pub const MAX_REACH: i32 = GIANTS.reach;
+
+/// Flowers and heather: drifts of colour on grass, one species per drift.
+pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxel> {
+    let (kinds, density): (&[Voxel], f32) = match biome {
+        Biome::Grassland => (
+            &[mat::FLOWER_YELLOW, mat::FLOWER_WHITE, mat::FLOWER_RED, mat::FLOWER_BLUE, mat::FLOWER_PURPLE],
+            0.28,
+        ),
+        Biome::Deciduous | Biome::Woodland => (&[mat::FLOWER_WHITE, mat::FLOWER_YELLOW, mat::FLOWER_BLUE], 0.16),
+        Biome::Heath => (&[mat::HEATHER, mat::HEATHER, mat::FLOWER_YELLOW], 0.5),
+        Biome::Tundra => (&[mat::FLOWER_WHITE, mat::FLOWER_PURPLE], 0.1),
+        Biome::Savanna => (&[mat::FLOWER_YELLOW], 0.08),
+        Biome::Rainforest => (&[mat::FLOWER_RED, mat::FLOWER_PINK], 0.08),
+        _ => return None,
+    };
+    // A fast noise marks the drifts; a slow one chooses what grows in each.
+    let patch = fbm2(seed ^ 0xf10a, x as f64 / 34.0, z as f64 / 34.0, 2, 2.0, 0.5);
+    if patch < 0.22 {
+        return None;
+    }
+    let which = fbm2(seed ^ 0xf10b, x as f64 / 160.0, z as f64 / 160.0, 2, 2.0, 0.5) * 0.5 + 0.5;
+    let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
+    (roll < density * edge).then(|| kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)])
+}

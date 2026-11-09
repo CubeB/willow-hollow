@@ -54,8 +54,12 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 
     // One bit per voxel along y for each (x, z) column, so face visibility in all six
     // directions is a handful of bit operations per column rather than a test per voxel.
+    // Foliage is meshed exactly like solid rock; the difference is only for collision.
     let kind_of: Vec<u8> = (0..mats.len())
-        .map(|i| mats.get(i as crate::Voxel).kind as u8)
+        .map(|i| match mats.get(i as crate::Voxel).kind {
+            Kind::Foliage => SOLID,
+            k => k as u8,
+        })
         .collect();
     let mut solid = [[0u64; PAD]; PAD];
     let mut water = [[0u64; PAD]; PAD];

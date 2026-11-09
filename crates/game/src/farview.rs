@@ -255,6 +255,15 @@ fn cell_color(c: &Continent, mats: &voxel::Materials, i: usize, slope: f32) -> (
         return (color(mat::WATER), FLAG_WATER);
     }
     let biome = Biome::from_u8(c.biome[i]);
+    // Forest shows as its canopy colour from a distance.
+    if slope <= 1.6 && c.temperature[i] >= 0.13
+        && let Some((canopy, cover, _)) = worldgen::features::canopy(biome, mats)
+    {
+        let ground = color(mat::ground_cover(biome));
+        let t = cover * 0.85;
+        let mixed = [0, 1, 2].map(|k| (ground[k] as f32 * (1.0 - t) + canopy[k] as f32 * t) as u8);
+        return (mixed, 0);
+    }
     let v = if slope > 1.6 {
         mat::STONE
     } else if c.temperature[i] < 0.10 {
@@ -315,7 +324,11 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                     let y = if flags == FLAG_WATER {
                         surface::pool_level(c.desc.seed, c.lake[idx]) as f32 - 0.125
                     } else {
-                        c.height[idx] - SINK
+                        // Forested land stands higher by about the height of its canopy.
+                        let lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
+                            .filter(|_| c.temperature[idx] >= 0.13 && gx.hypot(gz) <= 1.6)
+                            .map_or(0.0, |(_, cover, height)| cover * height * 0.6);
+                        c.height[idx] - SINK + lift
                     };
                     let pos = Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     lo = lo.min(pos);

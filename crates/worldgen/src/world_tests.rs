@@ -109,7 +109,7 @@ fn chunks_are_generated_only_where_there_is_a_surface() {
     let w = world();
     let (cx, cz) = river_chunks(&w, 4)[1];
     let chunks = w.generate_column(cx, cz);
-    assert!(!chunks.is_empty() && chunks.len() <= 4, "{} chunks", chunks.len());
+    assert!(!chunks.is_empty() && chunks.len() <= 8, "{} chunks", chunks.len());
     let has_water = chunks
         .iter()
         .any(|(_, chunk)| chunk.voxels().contains(&mat::WATER));

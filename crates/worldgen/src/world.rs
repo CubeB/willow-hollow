@@ -5,11 +5,14 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+use glam::IVec3;
+
 use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel};
 
 use crate::{
     World,
     continent::{self, Continent, NO_LAKE, SimConfig},
+    features::{self, Library},
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
     materials as mat,
     noise::{hash3, perlin2, unit},
@@ -22,6 +25,8 @@ pub struct GameWorld {
     seed: u32,
     materials: Materials,
     config: SimConfig,
+    /// Tree and feature models, built on first use.
+    library: OnceLock<Library>,
     /// Simulated macro-cells. Each slot is filled once, by whichever thread asks first;
     /// others asking for the same cell wait for it rather than simulating it again.
     continents: Mutex<HashMap<(i32, i32), Slot>>,
@@ -37,12 +42,17 @@ impl GameWorld {
             seed,
             materials: mat::build(),
             config,
+            library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn seed(&self) -> u32 {
         self.seed
+    }
+
+    pub fn library(&self) -> &Library {
+        self.library.get_or_init(Library::build)
     }
 
     /// The simulated macro-cell `(mx, mz)`, generating it if needed (about 3 seconds).
@@ -201,7 +211,9 @@ impl World for GameWorld {
         let continent = self.continent(mx, mz);
         let (wx0, wz0) = (cx * CHUNK - 1, cz * CHUNK - 1);
         let (lx0, lz0) = (wx0 - mx * MACRO_SIZE, wz0 - mz * MACRO_SIZE);
-        let sampler = Sampler::new(&continent, self.seed, lx0, lz0, PAD as i32);
+        // Features up to MAX_REACH away can lean into this column, so sample that far.
+        let margin = features::MAX_REACH + 1;
+        let sampler = Sampler::new(&continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
 
         let mut columns = Vec::with_capacity(PAD * PAD);
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
@@ -230,12 +242,45 @@ impl World for GameWorld {
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = perlin2(self.seed ^ 0x9a7c, wx / 9.0, wz / 9.0) * 0.5 + 0.5;
-                skins.push(surface_materials(&columns[px * PAD + pz], steep, roll, patch));
+                let col = &columns[px * PAD + pz];
+                let mut skin = surface_materials(col, steep, roll, patch);
+                if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
+                    && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
+                {
+                    skin.0 = f;
+                }
+                skins.push(skin);
             }
         }
 
+        let lib = self.library();
+        let placements = features::place(
+            self.seed,
+            &sampler,
+            lx0,
+            lz0,
+            PAD as i32,
+            (mx * MACRO_SIZE, mz * MACRO_SIZE),
+        );
+        // Only the features whose model can touch this column.
+        let placements: Vec<_> = placements
+            .into_iter()
+            .filter(|p| {
+                let t = lib.get(p.species, p.variant);
+                p.pos.x + t.reach >= wx0
+                    && p.pos.x - t.reach < wx0 + PAD as i32
+                    && p.pos.z + t.reach >= wz0
+                    && p.pos.z - t.reach < wz0 + PAD as i32
+            })
+            .collect();
+        for p in &placements {
+            let t = lib.get(p.species, p.variant);
+            hi = hi.max(p.pos.y + t.top);
+            lo = lo.min(p.pos.y - 4);
+        }
+
         // Only chunks that can hold a visible face: from just under the lowest ground
-        // to the highest ground or water.
+        // to the highest ground or water or tree top.
         let cy_min = (lo - 2).div_euclid(CHUNK);
         let cy_max = hi.div_euclid(CHUNK);
         let mut out = Vec::new();
@@ -263,6 +308,37 @@ impl World for GameWorld {
                 }
             }
             out.push((cy, chunk));
+        }
+
+        let base_y = cy_min * CHUNK - 1;
+        for p in &placements {
+            features::stamp(lib, &self.materials, p, |q: IVec3, v, force| {
+                let (px, pz) = (q.x - wx0, q.z - wz0);
+                let py = q.y - base_y;
+                if px < 0 || pz < 0 || py < 0 || px >= PAD as i32 || pz >= PAD as i32 {
+                    return;
+                }
+                let (ci, ly) = ((py / CHUNK) as usize, py.rem_euclid(CHUNK) as usize);
+                // Chunk `ci` holds padded y 0..PAD; rows 0 and 33 are the borders
+                // of neighbouring chunks and are written there too.
+                let mut write = |chunk_index: usize, padded_y: usize| {
+                    if let Some((_, chunk)) = out.get_mut(chunk_index) {
+                        let (ux, uz) = (px as usize, pz as usize);
+                        if force || chunk.get(ux, padded_y, uz) == AIR {
+                            chunk.set(ux, padded_y, uz, v);
+                        }
+                    }
+                };
+                // World y maps to padded y + 1 in its own chunk...
+                write(ci, ly + 1);
+                // ...and to the borders of the chunks below and above.
+                if ly == 0 && ci > 0 {
+                    write(ci - 1, PAD - 1);
+                }
+                if ly == CHUNK as usize - 1 {
+                    write(ci + 1, 0);
+                }
+            });
         }
         out
     }

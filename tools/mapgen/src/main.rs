@@ -368,6 +368,35 @@ fn print_poi(c: &Continent) {
         );
     }
 
+    // One solidly typical spot per biome: the land cell whose 9x9 surroundings are
+    // most uniformly that biome, searched on a coarse stride.
+    for b in Biome::ALL {
+        let mut best: Option<(usize, usize)> = None;
+        for z in (8..c.size - 8).step_by(6) {
+            for x in (8..c.size - 8).step_by(6) {
+                let i = z * c.size + x;
+                if c.ocean[i] || c.biome[i] != b as u8 {
+                    continue;
+                }
+                let same = (-4..=4i32)
+                    .flat_map(|dz| (-4..=4i32).map(move |dx| (dx, dz)))
+                    .filter(|&(dx, dz)| {
+                        c.biome[((z as i32 + dz) as usize) * c.size + (x as i32 + dx) as usize] == b as u8
+                    })
+                    .count();
+                if best.is_none_or(|(s, _)| same > s) {
+                    best = Some((same, i));
+                }
+                if same == 81 {
+                    break;
+                }
+            }
+        }
+        if let Some((_, i)) = best {
+            println!("  poi biome      {}  {b:?}", world(i));
+        }
+    }
+
     let mut lakes: std::collections::HashMap<u32, (usize, f32, f32)> = Default::default();
     for &i in &land {
         if c.lake[i] != NO_LAKE {

@@ -74,6 +74,15 @@ pub enum Kind {
     Air = 0,
     Solid = 1,
     Water = 2,
+    /// Drawn like a solid, but not an obstacle: leaves, vines.
+    Foliage = 3,
+}
+
+impl Kind {
+    /// Blocks light and hides faces behind it.
+    pub fn is_opaque(self) -> bool {
+        matches!(self, Kind::Solid | Kind::Foliage)
+    }
 }
 
 /// Vertex flag bits carried to the shader.

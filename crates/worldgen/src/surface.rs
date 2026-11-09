@@ -51,6 +51,9 @@ pub struct Column {
     pub biome: Biome,
     /// 0 = polar, 1 = tropical.
     pub temperature: f32,
+    /// Distance to the edge of the nearest river channel (negative inside it), or
+    /// `f32::MAX` with no river nearby.
+    pub river: f32,
 }
 
 impl Column {
@@ -250,6 +253,7 @@ impl<'a> Sampler<'a> {
         let mut ground = base + detail * ((base - 0.5).abs() / 4.0).clamp(0.12, 1.0);
         let mut water: Option<i32> = None;
         let mut cover = Cover::Land;
+        let mut river = f32::MAX;
 
         // Standing water this column could be under: it must not be given river banks.
         let lake_level = (lake != NO_LAKE).then(|| pool_level(c.desc.seed, lake));
@@ -273,6 +277,7 @@ impl<'a> Sampler<'a> {
             }
         }
         if let Some((sd, hw, level, upstream_level)) = nearest {
+            river = sd;
             let k = pool_level(c.desc.seed, level);
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
@@ -327,6 +332,7 @@ impl<'a> Sampler<'a> {
             cover,
             biome: Biome::from_u8(c.biome[bz * c.size + bx]),
             temperature: bilinear(&c.temperature),
+            river,
         }
     }
 }
