@@ -122,7 +122,7 @@ fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
     let top = trunk(s, rng, h * 0.6, r0, 0.7, lean, mat::BARK_OAK);
     // Main limbs fan out from the top of the trunk, each ending in a mass of leaves.
     let limbs = rng.int(4, 6);
-    let base_angle = rng.range(0.0, 6.28);
+    let base_angle = rng.range(0.0, std::f32::consts::TAU);
     for i in 0..limbs {
         let angle = base_angle + i as f32 / limbs as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
         let out = Vec3::new(angle.cos(), 0.0, angle.sin());
@@ -224,7 +224,7 @@ fn redwood(s: &mut Shape, rng: &mut Rng) {
     while y < h * 0.95 {
         let frac = (y - crown_base) / (h - crown_base);
         let count = rng.int(3, 5);
-        let base_angle = rng.range(0.0, 6.28);
+        let base_angle = rng.range(0.0, std::f32::consts::TAU);
         for i in 0..count {
             let angle = base_angle + i as f32 / count as f32 * std::f32::consts::TAU + rng.range(-0.25, 0.25);
             let out = Vec3::new(angle.cos(), 0.0, angle.sin());
