@@ -2,6 +2,7 @@ mod camera;
 mod env;
 mod gfx;
 mod overlay;
+mod player;
 mod render;
 mod terrain;
 
@@ -22,6 +23,7 @@ use camera::{Camera, FlyController};
 use env::Environment;
 use gfx::{Gpu, WindowSurface};
 use overlay::Overlay;
+use player::{Controls, Player, WorldVoxels};
 use render::Renderer;
 use terrain::Streamer;
 
@@ -31,6 +33,8 @@ struct Options {
     pos: DVec3,
     /// If set, start at this (x, z) and this far above the ground or water there.
     over: Option<(i32, i32, f64)>,
+    /// Start flying instead of on foot. Implied by --pos and --over.
+    fly: bool,
     look: (f32, f32),
     /// Time of day in hours.
     time: f32,
@@ -49,7 +53,8 @@ impl Default for Options {
         Self {
             seed: 1,
             pos: DVec3::new(0.0, 90.0, 0.0),
-            over: Some((16384, 16384, 40.0)),
+            over: None,
+            fly: false,
             look: (35.0, -18.0),
             time: 10.0,
             radius: 12,
@@ -66,6 +71,7 @@ usage: game [options]
   --seed N              world seed (default 1)
   --pos X,Y,Z           camera start position in voxels
   --over X,Z,H          start H voxels above the ground (or water) at X,Z
+  --fly                 start in free-fly mode (F toggles in game)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24 (default 10)
   --radius N            chunk load radius (default 12)
@@ -97,10 +103,13 @@ fn parse_args() -> Result<Options> {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
                 o.over = None;
+                o.fly = true;
             }
+            "--fly" => o.fly = true,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
+                o.fly = true;
             }
             "--look" => {
                 let v = list::<f32>(&value()?, ',', 2)?;
@@ -129,16 +138,25 @@ fn make_world(opts: &Options) -> Arc<GameWorld> {
     Arc::new(GameWorld::new(opts.seed))
 }
 
+/// Height of the walkable or swimmable surface at a column.
+fn surface_height(world: &GameWorld, x: i32, z: i32) -> f64 {
+    let col = world.column(x, z);
+    col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1) as f64
+}
+
+/// The starting view: an explicit position if one was given, else the spawn point.
 fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
-    let pos = match opts.over {
-        Some((x, z, h)) => {
-            let col = world.column(x, z);
-            let surface = col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1);
-            DVec3::new(x as f64 + 0.5, surface as f64 + h, z as f64 + 0.5)
-        }
-        None => opts.pos,
-    };
-    Camera::new(pos, opts.look.0, opts.look.1)
+    if let Some((x, z, h)) = opts.over {
+        let pos = DVec3::new(x as f64 + 0.5, surface_height(world, x, z) + h, z as f64 + 0.5);
+        return Camera::new(pos, opts.look.0, opts.look.1);
+    }
+    if opts.fly {
+        return Camera::new(opts.pos, opts.look.0, opts.look.1);
+    }
+    let spawn = world.spawn_point();
+    let feet = surface_height(world, spawn.x, spawn.z);
+    let pos = DVec3::new(spawn.x as f64 + 0.5, feet + player::EYE_HEIGHT, spawn.z as f64 + 0.5);
+    Camera::new(pos, spawn.yaw, -4.0)
 }
 
 struct Running {
@@ -150,6 +168,10 @@ struct Running {
     streamer: Streamer,
     env: Environment,
     camera: Camera,
+    /// On foot, or flying free of collision.
+    walking: bool,
+    player: Player,
+    voxels: WorldVoxels,
     fly: FlyController,
     keys: HashSet<KeyCode>,
     grabbed: bool,
@@ -178,11 +200,16 @@ impl Running {
             surface.config.height,
         );
         let world = make_world(opts);
+        let camera = make_camera(opts, &world);
+        let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
         Ok(Self {
             window,
             overlay,
             renderer,
-            camera: make_camera(opts, &world),
+            camera,
+            walking: !opts.fly,
+            player: Player::new(feet),
+            voxels: WorldVoxels::new(world.clone()),
             streamer: Streamer::new(world, opts.radius),
             env: Environment::at_time(opts.time),
             fly: FlyController { speed: 20.0 },
@@ -214,6 +241,15 @@ impl Running {
         self.grabbed = grab;
     }
 
+    fn toggle_flying(&mut self) {
+        self.walking = !self.walking;
+        if self.walking {
+            // Drop in wherever the camera is.
+            let feet = self.camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+            self.player = Player::new(feet);
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.surface.resize(&self.gpu, width, height);
         self.renderer.resize(&self.gpu, width, height);
@@ -226,7 +262,25 @@ impl Running {
         self.frame_ms += (raw_dt * 1000.0 - self.frame_ms) * 0.05;
         let dt = raw_dt.min(0.1);
 
-        self.fly.update(&mut self.camera, &self.keys, dt);
+        if self.walking {
+            let fwd = self.camera.forward();
+            let fwd = glam::Vec3::new(fwd.x, 0.0, fwd.z).normalize_or_zero();
+            let right = self.camera.right();
+            let axis = |pos: KeyCode, neg: KeyCode| {
+                self.keys.contains(&pos) as i32 as f32 - self.keys.contains(&neg) as i32 as f32
+            };
+            let controls = Controls {
+                wish: fwd * axis(KeyCode::KeyW, KeyCode::KeyS)
+                    + right * axis(KeyCode::KeyD, KeyCode::KeyA),
+                jump: self.keys.contains(&KeyCode::Space),
+                sprint: self.keys.contains(&KeyCode::ShiftLeft),
+            };
+            self.player.update(&mut self.voxels, controls, dt);
+            self.voxels.trim(self.player.pos);
+            self.camera.pos = self.player.eye();
+        } else {
+            self.fly.update(&mut self.camera, &self.keys, dt);
+        }
         self.streamer.update(&self.gpu, self.camera.pos, 6);
 
         let Some(frame) = self.surface.acquire(&self.gpu) else {
@@ -248,6 +302,12 @@ impl Running {
         let (frame_ms, speed) = (self.frame_ms, self.fly.speed);
         let gpu_name = &self.gpu.adapter_name;
         let (s, d) = (self.streamer.stats, self.renderer.stats);
+        let mode = match (self.walking, self.player.swimming, self.player.on_ground) {
+            (false, ..) => "flying",
+            (true, true, _) => "swimming",
+            (true, false, true) => "walking",
+            (true, false, false) => "in the air",
+        };
         let mut time = self.env.time;
         let mut radius = self.streamer.radius();
         self.overlay
@@ -283,7 +343,9 @@ impl Running {
                         ));
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.add(egui::Slider::new(&mut radius, 2..=32).text("load radius"));
-                        ui.label("Click to look, Esc to release. WASD, Space/Ctrl, Shift = fast, wheel = speed");
+                        ui.label(format!("mode: {mode}"));
+                        ui.label("Click to look, Esc to release. WASD, Space = jump/swim up, Shift = sprint");
+                        ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed)");
                     });
             });
         if time != self.env.time {
@@ -338,6 +400,8 @@ impl ApplicationHandler for App {
                     if event.state == ElementState::Pressed {
                         if code == KeyCode::Escape {
                             r.set_grab(false);
+                        } else if code == KeyCode::KeyF && !event.repeat {
+                            r.toggle_flying();
                         } else if r.grabbed {
                             r.keys.insert(code);
                         }

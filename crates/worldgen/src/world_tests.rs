@@ -114,11 +114,28 @@ fn chunks_are_generated_only_where_there_is_a_surface() {
         .iter()
         .any(|(_, chunk)| chunk.voxels().contains(&mat::WATER));
     assert!(has_water, "river chunk column contains no water");
-    for (_, chunk) in &chunks {
-        assert!(!chunk.is_uniform());
+    // Lowest first with no gaps, as collision lookups rely on.
+    for pair in chunks.windows(2) {
+        assert_eq!(pair[1].0, pair[0].0 + 1);
     }
     // Far out to sea: a single chunk holding the sea bed and surface.
     let sea = w.generate_column(2, MACRO_SIZE / CHUNK / 2);
     assert!(sea.len() <= 4);
     assert!(sea.iter().all(|(_, chunk)| chunk.voxels().contains(&mat::WATER)));
+}
+
+#[test]
+fn spawn_is_on_dry_land_beside_a_river() {
+    let w = world();
+    let spawn = w.spawn_point();
+    let here = w.column(spawn.x, spawn.z);
+    assert!(here.water_surface().is_none(), "spawn is in water");
+    assert!(here.top() >= 0);
+    // Water within a short walk, in the direction the player faces.
+    let (dx, dz) = (spawn.yaw.to_radians().cos(), spawn.yaw.to_radians().sin());
+    let found = (1..80).any(|d| {
+        let col = w.column(spawn.x + (dx * d as f32) as i32, spawn.z + (dz * d as f32) as i32);
+        col.water_surface().is_some()
+    });
+    assert!(found, "no water ahead of the spawn point");
 }

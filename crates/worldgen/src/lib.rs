@@ -5,7 +5,6 @@ pub mod continent;
 pub mod macro_layout;
 pub mod materials;
 pub mod noise;
-pub mod placeholder;
 pub mod surface;
 pub mod world;
 
@@ -18,8 +17,9 @@ use voxel::{Materials, PaddedChunk};
 pub trait World: Send + Sync {
     fn materials(&self) -> &Materials;
 
-    /// All chunks in column `(cx, cz)` that can contain a visible face, as
-    /// `(chunk y, voxels)`. Chunks that are entirely air or entirely buried are omitted.
+    /// The chunks of column `(cx, cz)` as `(chunk y, voxels)`, lowest first: every
+    /// chunk from just under the lowest ground to the top of the highest thing in the
+    /// column, with none skipped. Below that range is solid rock and above it is air.
     fn generate_column(&self, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)>;
 }
 

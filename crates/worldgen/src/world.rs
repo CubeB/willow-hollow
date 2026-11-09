@@ -9,11 +9,11 @@ use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel};
 
 use crate::{
     World,
-    continent::{self, Continent, SimConfig},
+    continent::{self, Continent, NO_LAKE, SimConfig},
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
     materials as mat,
     noise::{hash3, perlin2, unit},
-    surface::{Column, Cover, Sampler},
+    surface::{Column, Cover, Sampler, node},
 };
 
 type Slot = Arc<OnceLock<Arc<Continent>>>;
@@ -68,6 +68,84 @@ impl GameWorld {
         let (lx, lz) = (x - mx * MACRO_SIZE, z - mz * MACRO_SIZE);
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
     }
+
+    /// A good place to begin: on the bank of a river in the origin continent, in a
+    /// valley with high ground around it, looking at the water.
+    pub fn spawn_point(&self) -> Spawn {
+        let c = self.continent(0, 0);
+        let n = c.size as i32;
+        // Score river cells by how much the land rises around them.
+        let reach = (24 * n / 1024).max(4);
+        let stride = (reach / 4).max(1) as usize;
+        let mut best: Option<(f32, usize)> = None;
+        for i in (0..c.size * c.size).step_by(3) {
+            let q = c.discharge[i];
+            if c.ocean[i] || c.lake[i] != NO_LAKE || !(2500.0..=40_000.0).contains(&q) {
+                continue;
+            }
+            let (x, z) = ((i % c.size) as i32, (i / c.size) as i32);
+            if c.height[i] < 8.0 || x < reach || z < reach || x >= n - reach || z >= n - reach {
+                continue;
+            }
+            let mut relief = 0.0f32;
+            for dz in (-reach..=reach).step_by(stride) {
+                for dx in (-reach..=reach).step_by(stride) {
+                    let j = ((z + dz) * n + x + dx) as usize;
+                    relief = relief.max(c.height[j] - c.height[i]);
+                }
+            }
+            // Hills to look at, but not so steep the start is a gorge.
+            let score = relief.min(160.0) + q.ln() * 4.0;
+            if best.is_none_or(|b| score > b.0) {
+                best = Some((score, i));
+            }
+        }
+        let Some((_, cell)) = best else {
+            // No suitable river: the middle of the continent will do.
+            return Spawn {
+                x: MACRO_SIZE / 2,
+                z: MACRO_SIZE / 2,
+                yaw: 0.0,
+            };
+        };
+
+        // Walk outward from the river until there is dry, open ground just above it.
+        let river = node(&c, cell);
+        let sampler_at = |x: i32, z: i32| Sampler::new(&c, self.seed, x, z, 1).column(x, z);
+        for ring in 0..40 {
+            let dist = 8.0 + ring as f32 * 1.5;
+            for step in 0..16 {
+                let angle = step as f32 / 16.0 * std::f32::consts::TAU;
+                let (x, z) = (
+                    (river.x + angle.cos() * dist) as i32,
+                    (river.y + angle.sin() * dist) as i32,
+                );
+                let col = sampler_at(x, z);
+                if col.cover == Cover::Land && col.water_surface().is_none() {
+                    let (dx, dz) = (river.x - x as f32, river.y - z as f32);
+                    return Spawn {
+                        x,
+                        z,
+                        yaw: dz.atan2(dx).to_degrees(),
+                    };
+                }
+            }
+        }
+        Spawn {
+            x: river.x as i32,
+            z: river.y as i32,
+            yaw: 0.0,
+        }
+    }
+}
+
+/// Where and which way a new player starts.
+#[derive(Clone, Copy, Debug)]
+pub struct Spawn {
+    pub x: i32,
+    pub z: i32,
+    /// Degrees; 0 looks along +X.
+    pub yaw: f32,
 }
 
 /// Picks the voxel for the top of a column and for the layers just beneath it.
@@ -174,9 +252,7 @@ impl World for GameWorld {
                     }
                 }
             }
-            if !chunk.is_uniform() {
-                out.push((cy, chunk));
-            }
+            out.push((cy, chunk));
         }
         out
     }
