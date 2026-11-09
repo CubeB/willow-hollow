@@ -94,7 +94,7 @@ Tracked as issues. In short: trails and landmarks with bridges and lanterns, a g
 
 ## Logo
 
-`docs/images/logo.png` (and a transparent variant) are rendered by `tools/logo/logo.py` with Pillow and the Georgia typeface; run `python tools/logo/logo.py docs/images` to regenerate.
+`docs/images/logo.png` (and a transparent variant) are rendered by `docs/logo.py` with Pillow and the Georgia typeface; run `python docs/logo.py docs/images` to regenerate.
 
 ## Licence
 

@@ -1,6 +1,6 @@
 """Renders the Willow Hollow wordmark as PNGs (card and transparent variants).
 
-usage: python tools/logo/logo.py OUT_DIR
+usage: python docs/logo.py OUT_DIR
 """
 import math
 import os
