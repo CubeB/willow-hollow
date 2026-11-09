@@ -1,5 +1,8 @@
 //! World generation. Pure CPU: everything here is a deterministic function of the seed.
 
+pub mod biome;
+pub mod continent;
+pub mod macro_layout;
 pub mod materials;
 pub mod noise;
 pub mod placeholder;

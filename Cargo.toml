@@ -1,10 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "tools/*"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# Grid code indexes several parallel arrays with one loop variable; rewriting those
+# loops as iterator chains makes them harder to read, not easier.
+[workspace.lints.clippy]
+needless_range_loop = "allow"
 
 # Worldgen and meshing are far too slow unoptimised, so even dev builds optimise.
 [profile.dev]

@@ -19,3 +19,6 @@ voxel = { version = "0.1.0", path = "../voxel" }
 wgpu = "30"
 winit = "0.30"
 worldgen = { version = "0.1.0", path = "../worldgen" }
+
+[lints]
+workspace = true
