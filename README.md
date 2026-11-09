@@ -1,6 +1,6 @@
-# Voxel
+<p align="center"><img src="docs/images/logo.png" alt="Willow Hollow" width="720"></p>
 
-A peaceful first-person exploration game in Rust: an endless world of coloured cubes and light, built around real rivers. Springs gather into streams, streams cascade into rivers, rivers fill lakes and reach the sea — every drop flowing downhill because the land it crosses was shaped by erosion before you arrived.
+**Willow Hollow** is a peaceful first-person exploration game in Rust: an endless world of coloured cubes and light, built around real rivers. Springs gather into streams, streams cascade into rivers, rivers fill lakes and reach the sea — every drop flowing downhill because the land it crosses was shaped by erosion before you arrived.
 
 No textures. Form comes from the shapes of things, sunlight and shadow, mist and water.
 
@@ -91,6 +91,10 @@ Cube World for the scale and feel; Veloren's erosion-based world generation; and
 ## Roadmap
 
 Tracked as issues. In short: trails and landmarks with bridges and lanterns, a glider and a boat to reach the next continent, ambient sound, more biomes and continent archetypes, tree impostors in the far view, and a performance pass.
+
+## Logo
+
+`docs/images/logo.png` (and a transparent variant) are rendered by `tools/logo/logo.py` with Pillow and the Georgia typeface; run `python tools/logo/logo.py docs/images` to regenerate.
 
 ## Licence
 

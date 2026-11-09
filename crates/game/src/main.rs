@@ -266,7 +266,7 @@ struct App {
 impl Running {
     fn new(el: &ActiveEventLoop, opts: &Options) -> Result<Self> {
         let attrs = Window::default_attributes()
-            .with_title("Voxel")
+            .with_title("Willow Hollow")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(el.create_window(attrs)?);
         let (gpu, surface) = Gpu::for_window(window.clone(), !opts.no_vsync)?;
