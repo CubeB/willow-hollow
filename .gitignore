@@ -1,0 +1,5 @@
+/target
+/cache
+/screenshots
+*.png
+!docs/**/*.png

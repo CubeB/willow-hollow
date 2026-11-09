@@ -1,0 +1,124 @@
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use winit::window::Window;
+
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Device and queue, independent of any window so screenshots can render headless.
+pub struct Gpu {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub adapter_name: String,
+}
+
+/// A window's swapchain.
+pub struct WindowSurface {
+    pub surface: wgpu::Surface<'static>,
+    pub config: wgpu::SurfaceConfiguration,
+}
+
+fn instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle())
+}
+
+async fn request(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'static>>,
+) -> Result<(wgpu::Adapter, Gpu)> {
+    // HighPerformance matters on laptops: it selects the discrete GPU over the integrated one.
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: surface,
+            ..Default::default()
+        })
+        .await
+        .context("no suitable GPU adapter")?;
+    let info = adapter.get_info();
+    log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("device"),
+            ..Default::default()
+        })
+        .await
+        .context("device request failed")?;
+    let gpu = Gpu {
+        device,
+        queue,
+        adapter_name: info.name,
+    };
+    Ok((adapter, gpu))
+}
+
+impl Gpu {
+    pub fn headless() -> Result<Gpu> {
+        let instance = instance();
+        let (_, gpu) = pollster::block_on(request(&instance, None))?;
+        Ok(gpu)
+    }
+
+    pub fn for_window(window: Arc<Window>, vsync: bool) -> Result<(Gpu, WindowSurface)> {
+        let instance = instance();
+        let size = window.inner_size();
+        let surface = instance.create_surface(window)?;
+        let (adapter, gpu) = pollster::block_on(request(&instance, Some(&surface)))?;
+        let mut config = surface
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .context("surface not supported by adapter")?;
+        let caps = surface.get_capabilities(&adapter);
+        if let Some(f) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
+            config.format = f;
+        }
+        config.present_mode = if vsync {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        surface.configure(&gpu.device, &config);
+        Ok((gpu, WindowSurface { surface, config }))
+    }
+}
+
+impl WindowSurface {
+    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&gpu.device, &self.config);
+    }
+
+    /// Next swapchain image, or None if this frame should be skipped.
+    pub fn acquire(&mut self, gpu: &Gpu) -> Option<wgpu::SurfaceTexture> {
+        use wgpu::CurrentSurfaceTexture as C;
+        match self.surface.get_current_texture() {
+            C::Success(t) | C::Suboptimal(t) => Some(t),
+            C::Outdated | C::Lost => {
+                self.surface.configure(&gpu.device, &self.config);
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+pub fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    tex.create_view(&Default::default())
+}
