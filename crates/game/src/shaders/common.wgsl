@@ -32,7 +32,11 @@ struct Globals {
     // z: ice on still water. w: the summit snowline, metres (see ground.wgsl).
     season: vec4<f32>,
     // x: how wet the ground is (0..1). y: how much more snow the hills hold this winter.
+    // (season.yzw and weather.y are the ground where the camera is.)
     weather: vec4<f32>,
+    // Each biome's ground, by biome id: x snow at sea level, y ice on still water, z how
+    // much more snow the hills hold, w the summit snowline (see ground.wgsl).
+    snow: array<vec4<f32>, 24>,
 };
 
 struct Shadows {

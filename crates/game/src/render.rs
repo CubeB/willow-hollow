@@ -64,7 +64,14 @@ struct Globals {
     season: [f32; 4],
     /// x: how wet the ground is. y: how much more snow the hills hold this winter.
     weather: [f32; 4],
+    /// Each biome's ground, by biome id: x snow at sea level, y ice on water, z how much
+    /// more snow the hills hold, w the summit snowline in metres (see ground.wgsl).
+    snow: [[f32; 4]; SNOW_SLOTS],
 }
+
+/// Entries in the globals' snow table: every biome, rounded up.
+const SNOW_SLOTS: usize = 24;
+const _: () = assert!(worldgen::biome::Biome::ALL.len() <= SNOW_SLOTS);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -140,6 +147,8 @@ struct Instance {
     scale: f32,
     /// The range of horizontal distances this chunk's ring is drawn in.
     band: [f32; 2],
+    /// Terrain: the biomes at its corners, for the snow (see `GpuChunk::biomes`).
+    biomes: u32,
 }
 
 /// The camera's position for the far trees' whole-voxel placement.
@@ -164,8 +173,8 @@ pub struct Scene<'a> {
     /// Solid moving models (boats, the glider), drawn with the opaque scene.
     pub props: &'a [ParticleInstance],
     pub wind: Vec3,
-    /// Snow, ice and wetness on the ground.
-    pub ground: crate::season::Ground,
+    /// Snow, ice and wetness on the ground, here and in each biome.
+    pub ground: crate::season::Places,
     /// Lit lantern voxels near the camera (world voxels), which light the ground around them.
     pub lamps: &'a [DVec3],
 }
@@ -579,7 +588,7 @@ impl Renderer {
 
         let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
-        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2];
+        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32];
         let terrain_buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<Vertex>() as u64,
@@ -695,7 +704,7 @@ impl Renderer {
         });
 
         let far_module = shader(device, "far", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/far.wgsl")));
-        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2, 4 => Unorm8x4];
+        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2, 4 => Unorm8x4, 5 => Uint8x4];
         let far_instance_attrs = wgpu::vertex_attr_array![3 => Float32x3];
         let far = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("far"),
@@ -1225,8 +1234,12 @@ impl Renderer {
             wind: v4(scene.wind, 0.0),
             lights: nearest_glows(scene.particles),
             lamps: nearest_lamps(scene.lamps, camera.pos),
-            season: [env.date, scene.ground.snow, scene.ground.frozen, scene.ground.snowline],
-            weather: [scene.ground.wet, scene.ground.highland, 0.0, 0.0],
+            season: [env.date, scene.ground.here.snow, scene.ground.here.frozen, scene.ground.here.snowline],
+            weather: [scene.ground.here.wet, scene.ground.here.highland, 0.0, 0.0],
+            snow: std::array::from_fn(|k| {
+                let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
+                [g.snow, g.frozen, g.highland, g.snowline]
+            }),
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1296,6 +1309,7 @@ impl Renderer {
                 origin: origin.to_array(),
                 scale: scale as f32,
                 band,
+                biomes: chunk.biomes,
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
@@ -1340,6 +1354,7 @@ impl Renderer {
                 origin: [0; 3],
                 scale: 1.0,
                 band: [0.0; 2],
+                biomes: 0,
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -1357,6 +1372,7 @@ impl Renderer {
             origin: [0; 3],
             scale: 1.0,
             band: [0.0; 2],
+            biomes: 0,
         });
         stats.far_tiles = far_tiles.len() as u32;
 
@@ -1688,7 +1704,7 @@ pub fn screenshot(
     particles: &[ParticleInstance],
     props: &[ParticleInstance],
     wind: Vec3,
-    ground: crate::season::Ground,
+    ground: crate::season::Places,
     lamps: &[DVec3],
 ) -> anyhow::Result<()> {
     let (width, height) = size;

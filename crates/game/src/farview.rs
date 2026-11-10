@@ -57,6 +57,9 @@ pub struct FarVertex {
     /// over the ground; then how far standing water rises above the ground, 128 at the
     /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
     pub far: [u8; 4],
+    /// The biome (as u8), for the snow lying there (see `season::Places`); then the plant
+    /// kind (voxel::plant) of its forest's canopy, 0 with none; two spare.
+    pub place: [u8; 4],
 }
 
 impl FarVertex {
@@ -68,6 +71,8 @@ impl FarVertex {
             flags,
             grad: [0, 0],
             far: [color[0], color[1], color[2], 0],
+            // The sea takes the snow and ice of where the camera is (`Biome::Ocean`).
+            place: [Biome::Ocean as u8, 0, 0, 0],
         }
     }
 }
@@ -280,6 +285,8 @@ struct Canopy {
     cover: f32,
     /// How tall they stand, in voxels.
     height: f32,
+    /// Their crowns' plant kind (voxel::plant), 0 if unknown.
+    plant: u8,
 }
 
 /// Each biome's forest, indexed by biome, or None where too few trees grow to tell.
@@ -292,11 +299,14 @@ fn canopies(world: &GameWorld) -> Vec<Option<Canopy>> {
             // The crown the far tree models give the biome's commonest tree, so its
             // forest keeps its colour where they hand over to the canopy: willow in a
             // mangrove, palms on a volcano.
-            let crown = features::canopy_tree(biome)
+            let top = features::canopy_tree(biome)
                 .and_then(|species| trees::impostor(lib.get(species, 0), mats).into_iter().max_by_key(|b| b.hi.y))
-                .map_or(leaves, |b| mats.get(b.voxel).color);
+                .map(|b| mats.get(b.voxel));
+            let crown = top.map_or(leaves, |m| m.color);
             Some(Canopy {
                 color: crown.map(f32::from),
+                // Palms and pines stay green through the winter, whatever their colour.
+                plant: top.map_or(0, |m| m.plant),
                 cover,
                 height: height * OLD_VOXEL,
             })
@@ -319,6 +329,8 @@ struct Look {
     ground: [f32; 3],
     /// The ground under its forest's canopy, as seen from beyond the tree models.
     far: [f32; 3],
+    /// The plant kind of the canopy (voxel::plant), 0 with none.
+    plant: u8,
     /// How high that canopy stands above the ground, in voxels.
     lift: f32,
 }
@@ -331,7 +343,7 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     if c.ocean[i] {
         // Under the sea plane; only seen through gaps, so keep it sandy.
         let sand = color(mat::SAND);
-        return Look { ground: sand, far: sand, lift: 0.0 };
+        return Look { ground: sand, far: sand, plant: 0, lift: 0.0 };
     }
     let biome = Biome::from_u8(c.biome[i]);
     let beach = c.height[i] < 2.5 && near_ocean(c, i);
@@ -347,12 +359,13 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
 
     // Trees take no root on rock, on the beach, or where it is too cold.
     let Some(canopy) = canopies[biome as usize].filter(|_| !beach) else {
-        return Look { ground, far: ground, lift: 0.0 };
+        return Look { ground, far: ground, plant: 0, lift: 0.0 };
     };
     let grows = (1.0 - rocky) * smoothstep(0.125, 0.14, c.temperature[i]);
     Look {
         ground,
         far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),
+        plant: canopy.plant,
         lift: canopy.cover * canopy.height * 0.6 * grows,
     }
 }
@@ -406,6 +419,22 @@ pub fn shows_water(c: &Continent, lx: f32, lz: f32) -> bool {
     }
     // The shader's triangles and this square differ a little: half a voxel's grace.
     wet > -0.5 || (ocean && height < SEA_LEVEL + 1.0)
+}
+
+/// The biome (as u8) of the continent's grid cell holding continent-local voxel `(lx, lz)`.
+pub fn biome_in(c: &Continent, lx: f32, lz: f32) -> u8 {
+    let cs = c.cell_size();
+    let cell = |v: f32| ((v / cs).max(0.0) as usize).min(c.size - 1);
+    c.biome[cell(lz) * c.size + cell(lx)]
+}
+
+/// The biome (as u8) at world voxel column `(x, z)`, or `Biome::Ocean`, which stands
+/// for wherever the camera is, while its continent has not been simulated. Never blocks.
+pub fn biome_at(world: &GameWorld, x: i32, z: i32) -> u8 {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or(Biome::Ocean as u8, |c| {
+        biome_in(&c, (x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32)
+    })
 }
 
 /// The far surface's height at a vertex whose ground is at `h`, beside water at `level`
@@ -575,6 +604,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         flags,
                         grad: [pack(gx), pack(gz)],
                         far: [far[0], far[1], far[2], wet],
+                        place: [c.biome[idx], land.plant, 0, 0],
                     });
                 }
             }
@@ -617,6 +647,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     [1.0f32, -1.0].map(|sign| {
                         let q = p + side * (hw * sign);
                         let mut v = FarVertex::water([q.x, y, q.y], water, FLAG_RIBBON);
+                        v.place[0] = biome_in(c, p.x, p.y);
                         // The shader widens the ribbon to a pixel along this.
                         let pack = |g: f32| (g.clamp(-1.0, 1.0) * 32767.0) as i16;
                         v.grad = [pack(side.x * sign), pack(side.y * sign)];

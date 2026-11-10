@@ -12,7 +12,7 @@
 //! (season::NEVER_SNOWS) never see snow at all.
 
 use glam::Vec3;
-use worldgen::{noise, scale::VOXELS_PER_METRE};
+use worldgen::{biome::Biome, noise, scale::VOXELS_PER_METRE};
 
 use crate::{env::Environment, season};
 
@@ -64,6 +64,10 @@ pub struct Weather {
     /// The date and warmth `lying` was last worked out for, and what it gave.
     lying_for: Option<(f32, f32)>,
     lying: (f32, f32),
+    /// The date each biome's lying snow and ice (`lying`, by `season::warmth`) was last
+    /// worked out for, and what they were.
+    places_for: Option<f32>,
+    places: [(f32, f32); Biome::ALL.len()],
 }
 
 /// A value that changes through the year: linear between dated keys, wrapping around.
@@ -179,6 +183,11 @@ pub fn lying(date: f32, year_days: f32, warmth: f32, seed: u32) -> (f32, f32) {
     (snow, ice)
 }
 
+/// Game days between two dates, the short way round the year.
+fn days_apart(a: f32, b: f32, year_days: f32) -> f32 {
+    (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0)) * year_days.max(1.0)
+}
+
 fn forced_sky(f: Forced) -> Sky {
     match f {
         Forced::Clear => Sky::default(),
@@ -192,7 +201,7 @@ fn forced_sky(f: Forced) -> Sky {
 
 impl Weather {
     pub fn new(forced: Option<Forced>) -> Self {
-        let mut w = Self { now: Sky::default(), wet: 0.0, snowpack: 0.0, ice: 0.0, forced, lying_for: None, lying: (0.0, 0.0) };
+        let mut w = Self { now: Sky::default(), wet: 0.0, snowpack: 0.0, ice: 0.0, forced, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
         if let Some(f) = forced {
             // A forced weather is already in place, and has been for a while.
             w.now = forced_sky(f);
@@ -205,10 +214,7 @@ impl Weather {
     /// The snow and ice the season has left lying (see `lying`), worked out again only when
     /// the date or the biome has moved on enough to change it.
     fn lying_now(&mut self, date: f32, year_days: f32, warmth: f32, seed: u32) -> (f32, f32) {
-        let stale = self.lying_for.map_or(true, |(d, w)| {
-            let moved = (date - d).rem_euclid(1.0).min((d - date).rem_euclid(1.0)) * year_days.max(1.0);
-            moved > 0.05 || (warmth - w).abs() > 0.01
-        });
+        let stale = self.lying_for.map_or(true, |(d, w)| days_apart(date, d, year_days) > 0.05 || (warmth - w).abs() > 0.01);
         if stale {
             self.lying = lying(date, year_days, warmth, seed);
             self.lying_for = Some((date, warmth));
@@ -224,9 +230,43 @@ impl Weather {
         self.ice = ice;
     }
 
-    /// What the ground carries now, for the shaders.
+    /// What the ground carries now where the camera is, in a biome of `warmth`.
     pub fn ground(&self, date: f32, warmth: f32) -> season::Ground {
         season::Ground::at(date, warmth, self.snowpack, self.ice, self.wet)
+    }
+
+    /// What the ground carries now in every biome, for the shaders: the snow and ice the
+    /// season has left lying in each (worked out again only when the date has moved on),
+    /// with what a forced snow has added here added everywhere it can snow. Call after
+    /// `settle` or `update`.
+    pub fn places(&mut self, date: f32, year_days: f32, warmth: f32, seed: u32) -> season::Places {
+        if self.places_for.is_none_or(|d| days_apart(date, d, year_days) > 0.05) {
+            let mut known: Vec<(f32, (f32, f32))> = Vec::new();
+            for (k, b) in Biome::ALL.iter().enumerate() {
+                let w = season::warmth(*b);
+                let got = match known.iter().find(|(kw, _)| *kw == w) {
+                    Some(&(_, got)) => got,
+                    None => {
+                        let got = lying(date, year_days, w, seed);
+                        known.push((w, got));
+                        got
+                    }
+                };
+                self.places[k] = got;
+            }
+            self.places_for = Some(date);
+        }
+        let here = self.ground(date, warmth);
+        // The natural weather's snowpack only eases toward what lies here; a forced snow
+        // falls on all the country in view.
+        let fallen = if self.forced.is_some() { (self.snowpack - self.lying.0).max(0.0) } else { 0.0 };
+        let mut biomes = [here; Biome::ALL.len()];
+        for (k, b) in Biome::ALL.iter().enumerate() {
+            let (snow, ice) = self.places[k];
+            biomes[k] = season::Ground::at(date, season::warmth(*b), snow + fallen, ice, self.wet);
+        }
+        biomes[Biome::Ocean as usize] = here;
+        season::Places { here, biomes }
     }
 
     /// Moves on by `dt` real seconds. `days` is the game days that passed in them.

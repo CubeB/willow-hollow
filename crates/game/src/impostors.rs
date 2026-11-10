@@ -45,7 +45,8 @@ pub struct BoxInstance {
     /// World voxel position of the box's low corner.
     pub lo: [i32; 3],
     pub size: [u8; 3],
-    pub _pad: u8,
+    /// The biome the tree stands in (as u8), for the snow lying there.
+    pub biome: u8,
     pub color: [u8; 3],
     /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near tree's.
     pub plant: u8,
@@ -275,12 +276,13 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
         // the shore. It would look to be growing out of the lake.
         let (lx, lz) = ((p.pos.x - mx * MACRO_SIZE) as f32 + 0.5, (p.pos.z - mz * MACRO_SIZE) as f32 + 0.5);
         if inside && lod::stands_tall(p.species) && !farview::shows_water(&continent, lx, lz) {
+            let biome = farview::biome_in(&continent, lx, lz);
             for (lo, size, color, plant) in models.get(world, p.species, p.variant, p.turns).iter() {
                 let at = p.pos + *lo;
                 boxes.push(BoxInstance {
                     lo: at.to_array(),
                     size: *size,
-                    _pad: 0,
+                    biome,
                     color: *color,
                     plant: *plant,
                 });

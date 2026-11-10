@@ -213,7 +213,17 @@ pub fn strata(seed: u32, biome: Biome, y: i32, tilt: f32) -> Voxel {
     // Some layers are as thick as two, so thickness varies.
     let k = if layer(band) < 0.4 { band - 1 } else { band };
     let r = unit(hash2(seed ^ 0x57a8, k, 7));
-    let dry = matches!(biome, Biome::Desert | Biome::Savanna | Biome::Heath);
+    // Red rock country is red through and through, in the rock its slopes show (`bedrock`).
+    if biome == Biome::RedRock {
+        return match r {
+            ..0.40 => RED_ROCK,
+            ..0.65 => SANDSTONE_RED,
+            ..0.85 => RED_ROCK_DARK,
+            _ => SANDSTONE,
+        };
+    }
+    // The warm dry country (the dune sea with the rest of the desert) shows sandstone.
+    let dry = matches!(biome, Biome::Desert | Biome::DuneSea | Biome::Savanna | Biome::Heath);
     if dry {
         match r {
             ..0.30 => SANDSTONE,
