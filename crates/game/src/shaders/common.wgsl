@@ -26,6 +26,8 @@ struct Globals {
     wind: vec4<f32>,
     // Nearest glowing fireflies: camera-relative xyz, glow strength in w (0 = unused).
     lights: array<vec4<f32>, 4>,
+    // The nearest lanterns: camera-relative xyz, w 1 where there is one.
+    lamps: array<vec4<f32>, 4>,
     // x: date, 0..1 from the spring equinox (see season.wgsl). y: snow cover at sea level.
     // z: ice on still water.
     season: vec4<f32>,
@@ -143,6 +145,18 @@ fn local_lights(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let wrap = 0.35 + 0.65 * max(dot(n, d / max(length(d), 0.001)), 0.0);
         let reach = clamp(1.0 - dist / 8.0, 0.0, 1.0);
         sum += vec3<f32>(0.85, 1.0, 0.35) * (l.w * 0.045) * wrap * reach * reach / (1.0 + dist * dist * 0.6);
+    }
+    // Lanterns: a warm light that carries a long way after dark, and hardly shows by day.
+    let night = 1.0 - 0.9 * G.sun_color.w;
+    for (var i = 0; i < 4; i++) {
+        let l = G.lamps[i];
+        if (l.w > 0.5) {
+            let d = l.xyz - rel;
+            let dist = length(d) / VOXELS_PER_METRE;
+            let wrap = 0.3 + 0.7 * max(dot(n, d / max(length(d), 0.001)), 0.0);
+            let reach = clamp(1.0 - dist / 16.0, 0.0, 1.0);
+            sum += vec3<f32>(1.0, 0.68, 0.32) * (2.2 * night) * wrap * reach * reach / (1.0 + dist * dist * 0.25);
+        }
     }
     return sum;
 }
