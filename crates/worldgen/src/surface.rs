@@ -14,6 +14,9 @@ mod coast;
 mod current;
 mod ravine;
 mod sea_cliff;
+mod spring;
+
+pub use spring::Spring;
 
 pub use cliff::strata_tilt;
 
@@ -73,6 +76,8 @@ pub enum Cover {
     Shelf,
     /// Wind-blown sand heaped up behind a wide beach.
     Dune,
+    /// Wet, mossy stone around a spring's pool.
+    Spring,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +264,8 @@ pub struct Sampler<'a> {
     pieces: Vec<Piece>,
     /// Waterfalls whose cliff can reach the area.
     falls: Vec<Fall>,
+    /// Springs whose pools can reach the area.
+    springs: Vec<Spring>,
     /// River deltas that can reach the area.
     deltas: Vec<coast::Delta>,
     /// River mouths whose estuaries can reach the area, and the shores of its grid cells.
@@ -282,6 +289,7 @@ impl<'a> Sampler<'a> {
         let (z0, z1) = (cell(lz0 as f32 - margin), cell((lz0 + span) as f32 + margin));
 
         let mut falls = Vec::new();
+        let mut springs = Vec::new();
         let mut deltas = Vec::new();
         let mut pieces = Vec::new();
         for z in z0..=z1 {
@@ -289,6 +297,9 @@ impl<'a> Sampler<'a> {
                 add_pieces(c, z * c.size + x, &mut pieces);
                 if let Some(f) = Fall::at(c, world_seed, z * c.size + x) {
                     falls.push(f);
+                }
+                if let Some(s) = Spring::at(c, world_seed, z * c.size + x) {
+                    springs.push(s);
                 }
                 if let Some(d) = coast::Delta::at(c, world_seed, z * c.size + x) {
                     deltas.push(d);
@@ -322,18 +333,29 @@ impl<'a> Sampler<'a> {
             let (a, b) = (f.pos - r, f.pos + r);
             a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y
         });
+        springs.retain(|s| {
+            let r = Vec2::splat(s.reach());
+            let (a, b) = (s.pos - r, s.pos + r);
+            a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y
+        });
         let (trail_points, pads) = c.trails.gather(lo, hi);
         Self {
             c,
             world_seed,
             pieces,
             falls,
+            springs,
             deltas,
             mouths: coast::mouths(c, lo, hi),
             shores: coast::Shores::new(c, lo, hi),
             trail_points,
             pads,
         }
+    }
+
+    /// Springs whose pools can reach the area.
+    pub fn springs(&self) -> &[Spring] {
+        &self.springs
     }
 
     /// The column at continent-local voxel `(lx, lz)`.
@@ -511,6 +533,24 @@ impl<'a> Sampler<'a> {
                             cliff::Part::None if cover == Cover::Cliff || cover == Cover::Scree => cover = Cover::Land,
                             cliff::Part::None => {}
                         }
+                    }
+                }
+            }
+        }
+
+        // Springs: a small round pool where a stream begins, ringed with wet stone.
+        if lake == NO_LAKE && !near_sea {
+            for s in &self.springs {
+                let d = (p - s.pos).length();
+                // Beside the stream already flowing out, the rim must not dam it.
+                if d < s.reach() && !(d >= s.radius && water.is_some()) {
+                    let (w, edge) = s.shape(d, wx, wz, &mut ground);
+                    river = river.min(edge);
+                    if let Some(w) = w {
+                        water = Some(water.map_or(w, |v| v.max(w)));
+                        cover = Cover::RiverBed;
+                    } else if Spring::wet(edge) && !matches!(cover, Cover::RiverBed | Cover::Cliff) {
+                        cover = Cover::Spring;
                     }
                 }
             }
@@ -1010,6 +1050,38 @@ mod tests {
             }
         }
         best
+    }
+
+    #[test]
+    fn springs_hold_water() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let springs: Vec<Spring> = (0..c.size * c.size).filter_map(|i| Spring::at(&c, 7, i)).collect();
+        eprintln!("{} springs", springs.len());
+        assert!(springs.len() > 20, "only {} springs", springs.len());
+        let (mut wet, mut checked, mut rims) = (0, 0, 0);
+        for sp in springs.iter().step_by((springs.len() / 40).max(1)) {
+            let (x, z) = (sp.pos.x as i32, sp.pos.y as i32);
+            let s = Sampler::new(&c, 7, x - 8, z - 8, 17);
+            assert!(!s.springs().is_empty());
+            let col = s.column(x, z);
+            checked += 1;
+            if col.water.is_some_and(|w| col.ground < w as f32 - 1.0) {
+                wet += 1;
+            }
+            // Just outside the water the rim stands at least as high as the pool's edge.
+            for a in 0..8 {
+                let ang = a as f32 * std::f32::consts::TAU / 8.0;
+                let q = sp.pos + Vec2::from_angle(ang) * (sp.radius + 0.5);
+                let col = s.column(q.x as i32, q.y as i32);
+                if col.cover == Cover::Spring {
+                    rims += 1;
+                    assert!(col.ground >= sp.water as f32 - 1.0, "rim at {} below pool {}", col.ground, sp.water);
+                }
+            }
+        }
+        eprintln!("{wet}/{checked} springs hold water at the centre, {rims} rim columns");
+        assert!(wet * 10 >= checked * 8, "{wet}/{checked} springs hold water");
+        assert!(rims > 0);
     }
 
     #[test]
