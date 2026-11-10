@@ -764,7 +764,7 @@ impl Renderer {
         });
         let impostor_module = shader(device, "impostor", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/impostor.wgsl")));
         let impostor_box_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-        let impostor_instance_attrs = wgpu::vertex_attr_array![2 => Sint32x3, 3 => Uint8x4, 4 => Unorm8x4];
+        let impostor_instance_attrs = wgpu::vertex_attr_array![2 => Sint32x3, 3 => Uint8x4, 4 => Unorm8x4, 5 => Uint8x4];
         let impostor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("impostor"),
             layout: Some(&impostor_layout),

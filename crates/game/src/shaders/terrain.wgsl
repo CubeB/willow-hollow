@@ -77,7 +77,9 @@ fn vs(in: VIn) -> VOut {
     var local = vertex_local(in.a);
     out.face = (in.a >> 18u) & 7u;
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
-    out.flags = in.b >> 24u;
+    // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags.
+    let tag = season_tag(in.b);
+    out.flags = (in.b >> 24u) | (tag << 8u);
     out.local = local;
     out.band = in.band;
     out.snow = corner_snow(in.biomes, local.xz / 32.0);
@@ -107,7 +109,7 @@ fn vs(in: VIn) -> VOut {
         if (kind >= PLANT_GRASS) {
             vox.y = 0;
         }
-        var gone = season_gone(G.season.x, kind, vox);
+        var gone = season_gone(G.season.x, kind, vox, tag);
         if (kind == PLANT_GRASS && !gone) {
             gone = plant_buried(rel, season_hash(vox + vec3<i32>(5, 0, 9)), out.snow);
         }
@@ -148,7 +150,7 @@ fn shade(in: VOut) -> vec4<f32> {
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
-    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x);
+    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, in.flags >> 8u);
     base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, fract(in.local.y), in.snow);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;

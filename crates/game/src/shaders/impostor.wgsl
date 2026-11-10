@@ -17,6 +17,8 @@ struct VIn {
     @location(2) lo: vec3<i32>,
     @location(3) size: vec4<u32>,
     @location(4) color: vec4<f32>,
+    // The tree's tag (season_tree) in x.
+    @location(5) tree: vec4<u32>,
 };
 
 struct VOut {
@@ -40,10 +42,15 @@ fn vs(in: VIn) -> VOut {
     out.snow = biome_snow(in.size.w);
     // The season: leaves turn and fall with the near tree's (a whole box at once, so every
     // corner agrees). The box's plant kind rides in the colour's alpha.
+    // Kind 8 and up is a broadleaf's bare crown, drawn just when its leaves are down. The
+    // tree's tag (season_tree) rides in its own instance byte.
     let kind = u32(round(in.color.a * 255.0));
-    let leaf = season_box_leaf(out.color, in.lo, kind, G.season.x);
-    out.color = leaf.rgb;
-    let fallen = leaf.a < 0.5;
+    let bare = kind >= 8u;
+    let leaf = season_box_leaf(out.color, in.lo, kind & 7u, G.season.x, in.tree.x);
+    if (!bare) {
+        out.color = leaf.rgb;
+    }
+    let fallen = (leaf.a < 0.5) != bare;
     // Nearer than this the real voxel trees are drawn instead.
     if (fallen || length((low + size * 0.5).xz) < G.fog.y) {
         out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);

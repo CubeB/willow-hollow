@@ -41,7 +41,7 @@ fn vs(in: VIn) -> @builtin(position) vec4<f32> {
     if ((kind == PLANT_DECIDUOUS || kind == PLANT_AUTUMN) && (C.season.x < 0.27 || C.season.x > 0.40)) {
         // The same voxel the terrain shader names, so a leaf and its shadow fall together.
         let vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
-        if (season_gone(C.season.x, kind, vox)) {
+        if (season_gone(C.season.x, kind, vox, season_tag(in.b))) {
             return vec4<f32>(0.0, 0.0, 2.0, 1.0);
         }
     }

@@ -695,6 +695,7 @@ impl GameWorld {
             surf,
             currents,
             plants,
+            trees: placements,
         }
     }
 }

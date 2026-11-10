@@ -16,6 +16,8 @@ use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 ///          at 1/8, 5/8 and 7/8 of the voxel. That combination was unused before, so no
 ///          bits were added; see [`half_quarter`].
 /// `b`: r | g << 8 | b << 16 | flags << 24 (flags include a 3-bit plant kind << 29)
+///      Broadleaf leaves (plant kinds `DECIDUOUS` and `AUTUMN`) give up the low two bits
+///      of each colour channel to a 6-bit tree tag; see [`tag_trees`].
 ///
 /// Water faces (those with [`flags::WATER`](crate::flags::WATER)) have no fractions or
 /// corner bits, so `a` bits 23..=31 hold the current instead (see [`pack_current`]):
@@ -287,7 +289,7 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
                         let single = m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN;
                         let key = 1
                             | (uniform && !single) as u64 * 4
-                            | color_bits(m.color) << 8
+                            | leaf_color_bits(m.color, m.plant) << 8
                             | (fl as u64) << 32
                             | ao_bits << 40;
                         let (slice, u, v) = (p[n_axis] - 1, p[u_axis] - 1, p[v_axis] - 1);
@@ -437,7 +439,7 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                 }
                 Vertex {
                     a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27 | corner << 29,
-                    b: color_bits(m.color) as u32 | (fl as u32) << 24,
+                    b: leaf_color_bits(m.color, m.plant) as u32 | (fl as u32) << 24,
                 }
             };
             let order = if positive { [0, 1, 2, 3] } else { [0, 3, 2, 1] };
@@ -450,6 +452,49 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
 #[inline]
 fn color_bits(c: [u8; 3]) -> u64 {
     c[0] as u64 | (c[1] as u64) << 8 | (c[2] as u64) << 16
+}
+
+/// The low two bits of each colour channel of a broadleaf leaf, which hold its tree tag.
+const TAG_BITS: u32 = 0x03_0303;
+
+/// A colour as packed into a vertex: a broadleaf leaf's with its tree tag cleared, to be
+/// filled in by [`tag_trees`].
+#[inline]
+fn leaf_color_bits(c: [u8; 3], kind: u8) -> u64 {
+    let bits = color_bits(c);
+    if kind == plant::DECIDUOUS || kind == plant::AUTUMN { bits & !(TAG_BITS as u64) } else { bits }
+}
+
+/// Gives every broadleaf leaf face in a mesh the tag of the tree it grows on, 1..=63 (0
+/// for none), in the low two bits of each of its colour channels: red holds bits 0..2 of
+/// the tag, green 2..4 and blue 4..6. A change of 3/255 at most, far below the colour's
+/// own jitter. The seasons drop and turn each tree's leaves on its own date from it.
+///
+/// `tag` is asked once per face, with the voxel the face belongs to, in the chunk's own
+/// voxels counted from `origin` (the voxel at the chunk's corner): the same voxel the
+/// shader names from the face's corners.
+pub fn tag_trees(mesh: &mut ChunkMesh, origin: [i32; 3], mut tag: impl FnMut([i32; 3]) -> u8) {
+    for quad in mesh.opaque.chunks_exact_mut(4) {
+        let first = quad[0];
+        let kind = (first.b >> 29) & 7;
+        if kind != plant::DECIDUOUS as u32 && kind != plant::AUTUMN as u32 {
+            continue;
+        }
+        let a = first.a;
+        let mut voxel = [0i32; 3];
+        for (axis, v) in voxel.iter_mut().enumerate() {
+            let p = (a >> (6 * axis)) & 63;
+            let quarter = (a >> (23 + 2 * axis)) & 3;
+            // With no quarter, the corner bit says the corner is on the far side of its voxel.
+            let back = if quarter == 0 { (a >> (29 + axis)) & 1 } else { 0 };
+            *v = origin[axis] + p as i32 - back as i32;
+        }
+        let t = (tag(voxel) & 63) as u32;
+        let bits = (t & 3) | (t >> 2 & 3) << 8 | (t >> 4 & 3) << 16;
+        for v in quad {
+            v.b = (v.b & !TAG_BITS) | bits;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

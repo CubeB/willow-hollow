@@ -66,6 +66,9 @@ pub struct ColumnOutput {
     pub currents: Vec<Current>,
     /// Small plants standing on the columns inside this chunk column.
     pub plants: Vec<PlantBox>,
+    /// The trees and other features reaching into this column, in the order they were
+    /// stamped: what [`features::leaf_tag`] reads to tell whose leaf is whose.
+    pub trees: Vec<features::Placement>,
 }
 
 /// A source of voxel terrain, generated one chunk column at a time.

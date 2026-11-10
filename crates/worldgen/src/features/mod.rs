@@ -525,6 +525,33 @@ pub fn model_voxel(lib: &Library, p: &Placement, q: IVec3) -> Option<Voxel> {
     t.voxels.binary_search_by_key(&(offset.y, offset.x, offset.z), |(v, _)| (v.y, v.x, v.z)).ok().map(|i| t.voxels[i].1)
 }
 
+/// A tree's number for the seasons, 1..=63, from where its trunk stands: each tree turns
+/// and drops its leaves on its own date from it (season.wgsl, `season_tree`). 0 is kept
+/// for leaves of no known tree.
+pub fn tree_tag(pos: IVec3) -> u8 {
+    1 + (hash3(0x7ee7_a9, pos.x, 0, pos.z) % 63) as u8
+}
+
+/// The tag of the tree whose leaf is at world voxel `q`: the first of `placements` (in the
+/// order they were stamped, as [`stamp`] lets the first fill a voxel) whose model holds a
+/// leaf there; else, for a leaf cluster or a creeper grown beside it, the tree whose trunk
+/// is nearest. 0 if there is none.
+pub fn leaf_tag(lib: &Library, mats: &Materials, placements: &[Placement], q: IVec3) -> u8 {
+    let mut nearest = (i32::MAX, 0);
+    for p in placements {
+        if let Some(v) = model_voxel(lib, p, q)
+            && mats.get(v).kind == Kind::Foliage
+        {
+            return tree_tag(p.pos);
+        }
+        let d = (p.pos.x - q.x).pow(2) + (p.pos.z - q.z).pow(2);
+        if d < nearest.0 {
+            nearest = (d, tree_tag(p.pos));
+        }
+    }
+    nearest.1
+}
+
 /// How high a feature's top can be above its origin, over all templates. Chunk
 /// columns use it to know how far up to generate.
 pub fn max_top(lib: &Library) -> i32 {

@@ -16,7 +16,7 @@ use voxel::{AIR, CHUNK, Kind, PAD, PaddedChunk, Voxel};
 use worldgen::{
     World,
     biome::Biome,
-    features::{self, shape::rotate, trees::Species},
+    features::{self, Placement, shape::rotate, trees::Species},
     macro_layout::{MACRO_SIZE, cell_of},
     materials as mat,
     scale::BLOCK,
@@ -178,8 +178,9 @@ fn lowest_ground(sampler: &Sampler, corners: &[Column], lx0: i32, lz0: i32, step
     lowest
 }
 
-/// The chunks of one coarse column: `(chunk y, voxels)`, in coarse cells.
-pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)> {
+/// The chunks of one coarse column: `(chunk y, voxels)`, in coarse cells, and the tall
+/// features stamped into them, in order (for telling whose leaves are whose).
+pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>) {
     let step = 1 << level;
     let span = CHUNK * step;
     let (wx0, wz0) = (cx * span - step, cz * span - step);
@@ -340,7 +341,7 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
             put(IVec3::new(q.x.div_euclid(step), q.y.div_euclid(step), q.z.div_euclid(step)), v, true);
         }
     }
-    chunks
+    (chunks, placements)
 }
 
 #[cfg(test)]

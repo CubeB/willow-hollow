@@ -48,9 +48,11 @@ pub fn declination(date: f32) -> f32 {
 pub const LEAVES_DOWN: f32 = 0.70;
 
 /// How much of the year's leaf fall is happening now, 0 to 1, peaking in mid autumn and
-/// over by `LEAVES_DOWN`. The falling leaf particles follow it.
+/// over by `LEAVES_DOWN`. The falling leaf particles follow it. Each tree drops its leaves
+/// on its own date (season.wgsl's `season_leaf`), the first from about 0.58 (maples) and
+/// the last by 0.70, so the fall is at its height from 0.6 until most trees are bare.
 pub fn leaf_fall(date: f32) -> f32 {
-    smoothstep(0.46, 0.57, date) * (1.0 - smoothstep(0.64, LEAVES_DOWN, date))
+    smoothstep(0.50, 0.60, date) * (1.0 - smoothstep(0.665, LEAVES_DOWN, date))
 }
 
 /// How wintry the date is, 0 in summer and 1 in deep winter: how far below the snowline
@@ -136,7 +138,7 @@ mod tests {
     fn the_year_wraps_and_the_seasons_come_in_order() {
         assert!((advance(0.9, 3.0, 24.0) - 0.025).abs() < 1e-5);
         assert!(declination(0.25) > 0.99 && declination(0.75) < -0.99);
-        assert!(leaf_fall(0.58) > 0.99 && leaf_fall(DEFAULT_DATE) == 0.0 && leaf_fall(0.9) == 0.0);
+        assert!(leaf_fall(0.62) > 0.99 && leaf_fall(DEFAULT_DATE) == 0.0 && leaf_fall(0.9) == 0.0);
         assert!(snow_cover(0.86) > 0.99 && snow_cover(DEFAULT_DATE) == 0.0);
         assert!(snow_cover(0.7) > snow_cover(0.65));
         let temperate = warmth(Biome::Deciduous);
@@ -147,14 +149,21 @@ mod tests {
 
     #[test]
     fn leaves_are_down_by_early_winter() {
-        assert!(leaf_fall(0.57) > 0.99);
+        assert!(leaf_fall(0.62) > 0.99);
         assert_eq!(leaf_fall(LEAVES_DOWN), 0.0);
         assert!(LEAVES_DOWN < 0.75);
-        // The shader's latest fall (season_leaf): the latest tree and leaf, not a maple.
-        let latest = 0.595 + 0.075 + 0.03;
+        // The shader's dates (season_leaf): each tree's own, then a branch's and a leaf's
+        // spread either side of it.
+        let (tree, branch, leaf) = ((0.625, 0.675), 0.008, 0.015);
+        let latest = tree.1 + branch + leaf;
         assert!(latest <= LEAVES_DOWN + 1e-6);
+        // Trees go some way apart, so one can be bare while its neighbour holds half its
+        // leaves.
+        assert!(tree.1 - tree.0 >= 0.04 && tree.1 - tree.0 > 2.0 * (branch + leaf));
         // Maples go a little before the rest.
         assert!(latest - 0.025 < LEAVES_DOWN);
+        // The particles fall while trees are dropping their leaves.
+        assert!(leaf_fall(tree.0) > 0.99 && leaf_fall(0.5 * (tree.0 + tree.1)) > 0.9);
     }
 
     #[test]
