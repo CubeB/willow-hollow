@@ -48,7 +48,7 @@ cargo run --release -p game -- --fly      # free camera
 cargo run --release -p game -- --help     # every option
 ```
 
-The first launch takes a few seconds, because the starting continent has to be simulated before the window opens. On a laptop GTX 1650 Ti it runs at around 75 fps at the default window size.
+The first launch takes a few seconds, because the starting continent has to be simulated before the window opens. On a laptop GTX 1650 Ti it runs at around 135 fps at 1080p.
 
 | Key | What it does |
 |---|---|

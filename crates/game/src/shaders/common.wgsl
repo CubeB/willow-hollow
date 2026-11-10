@@ -80,6 +80,14 @@ fn cloud_density(world_xz: vec2<f32>) -> f32 {
     return smoothstep(0.62 - G.fog.z * 0.42, 0.78 - G.fog.z * 0.2, n);
 }
 
+// The same clouds as they fall on the ground, where their fine detail can't be seen:
+// this runs for every pixel of terrain, so it does a quarter of the work.
+fn cloud_shadow(world_xz: vec2<f32>) -> f32 {
+    let p = (world_xz + vec2<f32>(G.fog.w, G.fog.w * 0.35)) / (336.0 * VOXELS_PER_METRE);
+    let n = vnoise(p) * 0.625;
+    return smoothstep(0.62 - G.fog.z * 0.42, 0.78 - G.fog.z * 0.2, n + vnoise(p * 2.03 + vec2<f32>(17.0, 31.0)) * 0.3125);
+}
+
 // Where voxel terrain hands over to the far view. Both sides call this, so every
 // pixel is drawn by exactly one of them.
 //
@@ -147,15 +155,18 @@ fn sun_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
         let lp = S.light_vp[c] * vec4<f32>(offset, 1.0);
         let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
         if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
+            // Softest up close; further off a texel is already wider than a voxel.
             var sum = 0.0;
             let step = 1.0 / 2048.0;
-            for (var dy = -1; dy <= 1; dy++) {
-                for (var dx = -1; dx <= 1; dx++) {
-                    let o = vec2<f32>(f32(dx), f32(dy)) * step;
+            let taps = 3 - c;
+            let centre = f32(taps - 1) * 0.5;
+            for (var dy = 0; dy < taps; dy++) {
+                for (var dx = 0; dx < taps; dx++) {
+                    let o = (vec2<f32>(f32(dx), f32(dy)) - centre) * step;
                     sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + o, c, lp.z);
                 }
             }
-            vis = sum / 9.0;
+            vis = sum / f32(taps * taps);
             // The last cascade fades out rather than ending in a line.
             vis = mix(vis, 1.0, smoothstep(G.cascades.z * 0.85, G.cascades.z, depth));
         }
@@ -163,7 +174,7 @@ fn sun_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     // Where the sun's ray through this point crosses the cloud layer.
     let to_cloud = (G.cascades.w - rel.y) / max(G.sun_dir.y, 0.05);
     let at_cloud = rel.xz + G.sun_dir.xz * to_cloud + G.cam_wrapped.xz;
-    vis *= 1.0 - cloud_density(at_cloud) * 0.75;
+    vis *= 1.0 - cloud_shadow(at_cloud) * 0.75;
     return vis;
 }
 

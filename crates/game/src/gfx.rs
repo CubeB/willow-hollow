@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result};
 use winit::window::Window;
@@ -10,6 +13,8 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_name: String,
+    /// Set once the GPU is lost or reports an error nothing was waiting for.
+    failed: Arc<AtomicBool>,
 }
 
 /// A window's swapchain.
@@ -19,7 +24,8 @@ pub struct WindowSurface {
 }
 
 fn instance() -> wgpu::Instance {
-    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle())
+    let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    wgpu::Instance::new(descriptor)
 }
 
 async fn request(
@@ -41,7 +47,12 @@ async fn request(
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("device"),
             // Lets the renderer submit chunk lists as multi-draws where available.
-            required_features: adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE,
+            // Timestamps let the debug panel show where each frame's time goes.
+            required_features: adapter.features()
+                & (wgpu::Features::INDIRECT_FIRST_INSTANCE
+                    | wgpu::Features::TIMESTAMP_QUERY
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
             // The chunk arena is one buffer, and can outgrow the 256 MiB default.
             required_limits: wgpu::Limits {
                 max_buffer_size: adapter.limits().max_buffer_size,
@@ -51,15 +62,52 @@ async fn request(
         })
         .await
         .context("device request failed")?;
+    let failed = Arc::new(AtomicBool::new(false));
+    let flag = failed.clone();
+    device.set_device_lost_callback(move |reason, message| {
+        // Destroyed is just the game shutting down.
+        if reason != wgpu::DeviceLostReason::Destroyed {
+            log::error!("GPU device lost ({reason:?}): {message}");
+            flag.store(true, Ordering::Release);
+        }
+    });
+    // wgpu panics on these by default, which would lose the player's position.
+    let flag = failed.clone();
+    device.on_uncaptured_error(Arc::new(move |error| {
+        log::error!("GPU error: {error}");
+        flag.store(true, Ordering::Release);
+    }));
     let gpu = Gpu {
         device,
         queue,
         adapter_name: info.name,
+        failed,
     };
     Ok((adapter, gpu))
 }
 
 impl Gpu {
+    pub fn has_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// A vertex buffer holding `data`, or None if the GPU has no room for it.
+    pub fn try_vertex_buffer(&self, label: &str, data: &[u8]) -> Option<wgpu::Buffer> {
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: data.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if pollster::block_on(scope.pop()).is_some() {
+            log::warn!("no GPU memory for a {} KiB {label} buffer", data.len() >> 10);
+            return None;
+        }
+        self.queue.write_buffer(&buffer, 0, data);
+        Some(buffer)
+    }
+
     pub fn headless() -> Result<Gpu> {
         let instance = instance();
         let (_, gpu) = pollster::block_on(request(&instance, None))?;
@@ -81,6 +129,8 @@ impl Gpu {
             config.format = f;
         }
         config.present_mode = present_mode(vsync);
+        // One frame queued at most, so what's on screen answers the mouse sooner.
+        config.desired_maximum_frame_latency = 1;
         surface.configure(&gpu.device, &config);
         Ok((gpu, WindowSurface { surface, config }))
     }

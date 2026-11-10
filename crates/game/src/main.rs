@@ -7,12 +7,21 @@ mod gfx;
 mod overlay;
 mod particles;
 mod player;
+mod profile;
 mod render;
 mod settings;
 mod terrain;
 mod vehicles;
 
-use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
+    time::Instant,
+};
 
 use anyhow::{Context, Result, bail};
 use audio::{Audio, Ground};
@@ -37,6 +46,7 @@ use gfx::{Gpu, WindowSurface};
 use overlay::Overlay;
 use particles::{Particles, Surroundings};
 use player::{Controls, Mode, Player, WorldVoxels};
+use profile::CpuTimer;
 use render::Renderer;
 use settings::{Overrides, Progress, Settings, Store, Travel};
 use terrain::Streamer;
@@ -62,6 +72,8 @@ struct Options {
     size: (u32, u32),
     /// Exit after this many frames (smoke tests).
     frames: Option<u64>,
+    /// Fly straight ahead at this many metres a second, to measure streaming.
+    drift: Option<f32>,
 }
 
 impl Default for Options {
@@ -78,6 +90,7 @@ impl Default for Options {
             audio: true,
             size: (1280, 720),
             frames: None,
+            drift: None,
         }
     }
 }
@@ -95,9 +108,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
-  --size WxH            screenshot size (default 1280x720)
+  --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
-  --frames N            exit after N frames
+  --frames N            exit after N frames, logging where the time went
+  --drift V             fly straight ahead at V metres a second
   --no-vsync            uncapped frame rate";
 
 fn list<T: std::str::FromStr>(s: &str, sep: char, n: usize) -> Result<Vec<T>> {
@@ -148,6 +162,7 @@ fn parse_args() -> Result<Options> {
             }
             "--day-minutes" => o.overrides.day_minutes = Some(value()?.parse()?),
             "--frames" => o.frames = Some(value()?.parse()?),
+            "--drift" => o.drift = Some(value()?.parse()?),
             "--no-vsync" => o.overrides.vsync = Some(false),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -253,6 +268,50 @@ fn scan_surroundings(
     (biome, leaves, flowers)
 }
 
+type Scan = (worldgen::biome::Biome, Spots, Spots);
+
+/// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
+/// columns that aren't cached, which would stall a frame.
+struct Scanner {
+    ask: Sender<(DVec3, u32)>,
+    answer: Receiver<Scan>,
+    busy: bool,
+}
+
+impl Scanner {
+    fn new(world: Arc<GameWorld>) -> Self {
+        let (ask, questions) = channel::<(DVec3, u32)>();
+        let (reply, answer) = channel();
+        std::thread::Builder::new()
+            .name("scanner".into())
+            .spawn(move || {
+                let mut voxels = WorldVoxels::new(world.clone());
+                // Ends when the game drops `ask`.
+                while let Ok((camera, salt)) = questions.recv() {
+                    let found = scan_surroundings(&world, &mut voxels, camera, salt);
+                    voxels.trim(camera);
+                    if reply.send(found).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("scanner thread");
+        Self { ask, answer, busy: false }
+    }
+
+    fn request(&mut self, camera: DVec3, salt: u32) {
+        if !self.busy {
+            self.busy = self.ask.send((camera, salt)).is_ok();
+        }
+    }
+
+    fn poll(&mut self) -> Option<Scan> {
+        let found = self.answer.try_recv().ok()?;
+        self.busy = false;
+        Some(found)
+    }
+}
+
 struct Running {
     window: Arc<Window>,
     gpu: Gpu,
@@ -267,6 +326,7 @@ struct Running {
     leaves: Vec<(DVec3, [f32; 3])>,
     flowers: Vec<(DVec3, [f32; 3])>,
     scan_timer: f32,
+    scanner: Scanner,
     biome: worldgen::biome::Biome,
     audio: Option<Audio>,
     /// The settings in force.
@@ -310,10 +370,19 @@ struct Running {
     start: Instant,
     frame: u64,
     frame_ms: f32,
+    loaded: bool,
+    cpu: CpuTimer,
+    /// Every frame's length in milliseconds, kept only when measuring.
+    frame_log: Option<Vec<f32>>,
+    drift: Option<f32>,
 }
 
 /// Distance between footsteps.
 const STRIDE: f32 = m(1.7);
+/// How long each frame may spend handing finished terrain to the GPU.
+const UPLOAD_MS: f32 = 3.0;
+/// Frames left out of the measurements, while the first terrain loads in.
+const SETTLE_FRAMES: u64 = 120;
 /// Seconds between saves, so a crash loses little.
 const AUTOSAVE: f32 = 30.0;
 
@@ -324,6 +393,7 @@ struct App {
 
 impl Running {
     fn new(el: &ActiveEventLoop, opts: &Options) -> Result<Self> {
+        let began = Instant::now();
         let store = if opts.frames.is_some() { None } else { Store::find() };
         let saved = store.as_ref().map_or_else(Settings::default, Store::settings);
         let settings = opts.overrides.applied_to(saved);
@@ -332,13 +402,29 @@ impl Running {
             .filter(|_| opts.overrides.keeps_position() && !opts.fresh)
             .and_then(|s| s.progress(settings.seed));
 
+        // Simulating the continent takes seconds, so it starts now, alongside the window
+        // and the GPU, instead of waiting its turn after them.
+        let world = Arc::new(GameWorld::new(settings.seed));
+        let first_column = opts.over.map(|(x, z, _)| (x, z)).or(progress.map(|p| (p.pos.x.floor() as i32, p.pos.z.floor() as i32)));
+        let warming = world.clone();
+        std::thread::spawn(move || {
+            match first_column {
+                Some((x, z)) => drop(warming.column(x, z)),
+                None => drop(warming.spawn_point()),
+            }
+            warming.library();
+        });
+
         let attrs = Window::default_attributes().with_title("Willow Hollow").with_fullscreen(fullscreen(settings.fullscreen));
-        let attrs = match settings.window {
+        // Measurements always use the size asked for, not the player's window.
+        let size = if opts.frames.is_some() { Some(opts.size) } else { settings.window };
+        let attrs = match size {
             Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
             None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
         };
         let window = Arc::new(el.create_window(attrs)?);
         let (gpu, surface) = Gpu::for_window(window.clone(), settings.vsync)?;
+        log::info!("startup: window and GPU after {:.2} s", began.elapsed().as_secs_f32());
         let overlay = Overlay::new(&window, &gpu, surface.config.format);
         let renderer = Renderer::new(
             &gpu,
@@ -346,8 +432,9 @@ impl Running {
             surface.config.width,
             surface.config.height,
         );
-        let world = Arc::new(GameWorld::new(settings.seed));
+        log::info!("startup: pipelines after {:.2} s", began.elapsed().as_secs_f32());
         let mut camera = make_camera(opts, &world, progress.as_ref());
+        log::info!("startup: world after {:.2} s", began.elapsed().as_secs_f32());
         camera.fov_y = settings.fov.to_radians();
         camera.sensitivity = settings.sensitivity;
         let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
@@ -373,6 +460,7 @@ impl Running {
             leaves: Vec::new(),
             flowers: Vec::new(),
             scan_timer: 0.0,
+            scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
@@ -392,13 +480,18 @@ impl Running {
             fly: FlyController { speed: m(16.0) },
             keys: HashSet::new(),
             grabbed: false,
-            want_grab: true,
+            // Measurements must not be disturbed by whatever the mouse is doing.
+            want_grab: opts.frames.is_none(),
             raw_motion_seen: false,
             last_cursor: None,
             last_frame: Instant::now(),
             start: Instant::now(),
             frame: 0,
             frame_ms: 16.0,
+            loaded: false,
+            cpu: CpuTimer::new(),
+            frame_log: opts.frames.map(|n| Vec::with_capacity(n as usize)),
+            drift: opts.drift,
             gpu,
             surface,
         })
@@ -521,11 +614,6 @@ impl Running {
         }
     }
 
-    fn scan_surroundings(&mut self) {
-        let found = scan_surroundings(&self.world, &mut self.voxels, self.camera.pos, self.frame as u32);
-        (self.biome, self.leaves, self.flowers) = found;
-    }
-
     fn toggle_flying(&mut self) {
         self.walking = !self.walking;
         if self.walking {
@@ -579,6 +667,12 @@ impl Running {
     }
 
     fn redraw(&mut self) {
+        if self.gpu.has_failed() {
+            // There is nothing left to draw with. Saving still works, so leave cleanly.
+            log::error!("the graphics device failed, closing the game");
+            self.quit = true;
+            return;
+        }
         if self.want_grab && !self.grabbed {
             self.set_grab(true);
         }
@@ -587,6 +681,19 @@ impl Running {
         self.last_frame = now;
         self.frame_ms += (raw_dt * 1000.0 - self.frame_ms) * 0.05;
         let dt = raw_dt.min(0.1);
+        if let Some(log) = &mut self.frame_log
+            && self.frame > SETTLE_FRAMES
+        {
+            log.push(raw_dt * 1000.0);
+        }
+        if self.frame == SETTLE_FRAMES {
+            self.cpu.reset_worst();
+        }
+        self.cpu.start();
+        if let Some(speed) = self.drift {
+            let ahead = self.camera.forward() * glam::Vec3::new(1.0, 0.0, 1.0);
+            self.camera.pos += (ahead.normalize_or_zero() * m(speed) * dt).as_dvec3();
+        }
 
         if self.walking {
             let fwd = self.camera.forward();
@@ -616,8 +723,10 @@ impl Running {
             self.fly.update(&mut self.camera, &self.keys, dt);
         }
         self.fleet.update(self.player.pos, dt);
-        self.streamer.update(&self.gpu, self.camera.pos, 6);
+        self.cpu.lap(0);
+        self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
         self.far.update(&self.gpu, self.camera.pos);
+        self.cpu.lap(1);
 
         // The day turns.
         if self.settings.day_minutes > 0.0 {
@@ -629,7 +738,10 @@ impl Running {
         self.scan_timer -= dt;
         if self.scan_timer <= 0.0 {
             self.scan_timer = 2.0;
-            self.scan_surroundings();
+            self.scanner.request(self.camera.pos, self.frame as u32);
+        }
+        if let Some(found) = self.scanner.poll() {
+            (self.biome, self.leaves, self.flowers) = found;
         }
         let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
@@ -661,9 +773,11 @@ impl Running {
             }
         }
 
+        self.cpu.lap(2);
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
+        self.cpu.lap(3);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let scene = render::Scene {
@@ -676,6 +790,7 @@ impl Running {
             wind: self.particles.wind.lagged * OLD_VOXEL,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
+        self.cpu.lap(4);
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;
@@ -683,6 +798,7 @@ impl Running {
         let gpu_name = &self.gpu.adapter_name;
         let (s, d) = (self.streamer.stats, self.renderer.stats);
         let (particle_count, biome) = (self.particles.len(), self.biome);
+        let (gpu_line, cpu_line) = (self.renderer.timer.as_ref().map(profile::GpuTimer::summary), self.cpu.summary());
         let mode = match (self.walking, self.player.mode, self.player.swimming, self.player.on_ground) {
             (false, ..) => "flying",
             (true, Mode::Boat, ..) => "sailing",
@@ -752,6 +868,10 @@ impl Running {
                             "per column: gen {:.2} ms, mesh {:.2} ms   queued {} (+{} running)",
                             s.gen_ms, s.mesh_ms, s.queued, s.in_flight
                         ));
+                        if let Some(line) = &gpu_line {
+                            ui.label(line);
+                        }
+                        ui.label(&cpu_line);
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
@@ -762,16 +882,22 @@ impl Running {
         if time != self.env.time {
             self.env = Environment::at_time(time);
         }
-        let was = std::mem::replace(&mut self.settings, settings);
-        self.apply_settings(was);
         if choice.resume {
             self.set_menu(false);
         }
         self.quit |= choice.quit;
+        self.cpu.lap(5);
 
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        // Only now: the surface can't be reconfigured while a frame from it is held.
+        let was = std::mem::replace(&mut self.settings, settings);
+        self.apply_settings(was);
+        if let Some(timer) = &mut self.renderer.timer {
+            timer.after_submit(&self.gpu);
+        }
+        self.cpu.lap(6);
         self.frame += 1;
     }
 }
@@ -866,6 +992,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 r.redraw();
+                if !r.loaded && r.streamer.is_idle() {
+                    r.loaded = true;
+                    log::info!("startup: all terrain in view {:.2} s after the first frame", r.start.elapsed().as_secs_f32());
+                }
                 if r.quit {
                     el.exit();
                 }
@@ -875,6 +1005,20 @@ impl ApplicationHandler for App {
                 }
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
                     let (s, d) = (r.streamer.stats, r.renderer.stats);
+                    let mut times = r.frame_log.take().unwrap_or_default();
+                    times.sort_unstable_by(f32::total_cmp);
+                    log::info!(
+                        "frame ms: median {:.1}, p95 {:.1}, p99 {:.1}, worst {:.1}",
+                        profile::quantile(&times, 0.5),
+                        profile::quantile(&times, 0.95),
+                        profile::quantile(&times, 0.99),
+                        profile::quantile(&times, 1.0)
+                    );
+                    log::info!("{}", r.cpu.summary());
+                    log::info!("{}", r.cpu.worst_summary());
+                    if let Some(timer) = &r.renderer.timer {
+                        log::info!("{}", timer.summary());
+                    }
                     log::info!(
                         "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles",
                         r.frame,

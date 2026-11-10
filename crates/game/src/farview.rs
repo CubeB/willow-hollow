@@ -183,25 +183,24 @@ impl FarView {
 
         while let Ok(mesh) = self.results.try_recv() {
             self.pending.remove(&mesh.cell);
-            let device = &gpu.device;
-            let upload = |verts: &[FarVertex], label| {
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: bytemuck::cast_slice(verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-            };
+            // A tile the GPU has no room for is simply not drawn.
+            let upload = |verts: &[FarVertex], label| gpu.try_vertex_buffer(label, bytemuck::cast_slice(verts));
             let tiles = mesh
                 .tiles
                 .iter()
-                .map(|t| FarTile {
-                    buffer: upload(&t.verts, "far tile"),
-                    lo: t.lo,
-                    hi: t.hi,
+                .filter_map(|t| {
+                    Some(FarTile {
+                        buffer: upload(&t.verts, "far tile")?,
+                        lo: t.lo,
+                        hi: t.hi,
+                    })
                 })
                 .collect();
-            let rivers = (!mesh.rivers.is_empty())
-                .then(|| (upload(&mesh.rivers, "far rivers"), mesh.rivers.len() as u32 / 4));
+            let rivers = if mesh.rivers.is_empty() {
+                None
+            } else {
+                upload(&mesh.rivers, "far rivers").map(|b| (b, mesh.rivers.len() as u32 / 4))
+            };
             self.cells.insert(
                 mesh.cell,
                 FarCell {

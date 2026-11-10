@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3, Vec4};
+use glam::{DVec3, Mat4, Vec2, Vec3, Vec4};
 use voxel::{CHUNK, mesh::Vertex};
 use worldgen::scale::{VOXELS_PER_METRE, m};
 use wgpu::util::DeviceExt;
@@ -17,7 +17,8 @@ use crate::{
     farview::{FarVertex, FarView},
     particles::ParticleInstance,
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
-    terrain::Streamer,
+    profile::GpuTimer,
+    terrain::{PLANT_REACH, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -27,10 +28,15 @@ const CASCADES: usize = 3;
 const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
 /// Height of the cloud layer above sea level.
 const CLOUD_HEIGHT: f32 = m(240.0);
-/// How far from the camera small plants are drawn.
-const PLANT_REACH: f32 = m(100.0);
 /// How many of the shadow cascades, nearest first, include small plants.
 const PLANT_SHADOW_CASCADES: usize = 2;
+/// A cached shadow map is redrawn early once the view has turned this far from it
+/// (the cosine of about ten degrees).
+const CASCADE_SWING: f32 = 0.985;
+/// Or once the camera has travelled this share of the cascade's depth.
+const CASCADE_DRIFT: f64 = 0.06;
+/// Sun heights above which the far cascade can do with only the tops of things.
+const HIGH_SUN: f32 = 0.4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -61,6 +67,26 @@ struct Shadows {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CascadeUniform {
     light_vp: [[f32; 4]; 4],
+}
+
+/// What one cascade's shadow map was last drawn from.
+#[derive(Clone, Copy)]
+struct CascadeView {
+    /// Camera-relative, for the camera as it was then.
+    light_vp: Mat4,
+    texel: f32,
+    camera: DVec3,
+    fwd: Vec3,
+}
+
+/// Whether cascade `i` takes its turn this frame. The far ones cover so much that they
+/// are redrawn in rotation, never two heavy ones in the same frame.
+fn cascade_due(i: usize, frame: u64) -> bool {
+    match i {
+        0 => true,
+        1 => frame % 2 == 1,
+        _ => frame.is_multiple_of(4),
+    }
 }
 
 /// Per-chunk (or per-continent) instance data.
@@ -193,6 +219,7 @@ pub struct Renderer {
     linear_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
     opaque: wgpu::RenderPipeline,
+    opaque_inside: wgpu::RenderPipeline,
     water: wgpu::RenderPipeline,
     far: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
@@ -214,6 +241,9 @@ pub struct Renderer {
     indirect: wgpu::Buffer,
     indirect_capacity: usize,
     multi_draw: bool,
+    cascade_views: [Option<CascadeView>; CASCADES],
+    frame: u64,
+    pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
     start: std::time::Instant,
 }
@@ -525,6 +555,30 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let opaque_inside = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("opaque inside"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &terrain_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &terrain_module,
+                entry_point: Some("fs_inside"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let water = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water"),
             layout: Some(&water_layout),
@@ -825,6 +879,7 @@ impl Renderer {
             linear_sampler,
             sky,
             opaque,
+            opaque_inside,
             water,
             far,
             shadow,
@@ -846,6 +901,9 @@ impl Renderer {
             indirect: indirect_buffer(device, 4096),
             indirect_capacity: 4096,
             multi_draw: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
+            cascade_views: [None; CASCADES],
+            frame: 0,
+            timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
             start: std::time::Instant::now(),
         }
@@ -966,20 +1024,36 @@ impl Renderer {
         let mut light_vp = [[[0.0; 4]; 4]; CASCADES];
         let mut light = Vec::with_capacity(CASCADES);
         let mut texels = [0.0; 4];
+        let mut fresh = [false; CASCADES];
         let mut near = 0.1;
+        let frame = self.frame;
+        self.frame += 1;
         for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
             let (m, texel) = Self::cascade_matrix(camera, aspect, env.sun_dir, near, far_end);
-            light_vp[i] = m.to_cols_array_2d();
             light.push(Frustum::new(m));
-            texels[i] = texel;
-            gpu.queue.write_buffer(
-                &self.cascade_binds[i].0,
-                0,
-                bytemuck::bytes_of(&CascadeUniform {
-                    light_vp: light_vp[i],
-                }),
-            );
             near = far_end;
+            fresh[i] = self.cascade_views[i].is_none_or(|v| {
+                cascade_due(i, frame) || v.fwd.dot(fwd) < CASCADE_SWING || v.camera.distance(camera.pos) > far_end as f64 * CASCADE_DRIFT
+            });
+            if fresh[i] {
+                self.cascade_views[i] = Some(CascadeView {
+                    light_vp: m,
+                    texel,
+                    camera: camera.pos,
+                    fwd,
+                });
+                gpu.queue.write_buffer(
+                    &self.cascade_binds[i].0,
+                    0,
+                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d() }),
+                );
+            }
+            // A map drawn earlier is still right: it is fixed in the world, so only the
+            // camera's movement since then needs allowing for.
+            let view = self.cascade_views[i].expect("just set");
+            let moved = (camera.pos - view.camera).as_vec3();
+            light_vp[i] = (view.light_vp * Mat4::from_translation(moved)).to_cols_array_2d();
+            texels[i] = view.texel;
         }
         gpu.queue
             .write_buffer(&self.shadows, 0, bytemuck::bytes_of(&Shadows { light_vp, texel: texels }));
@@ -1018,9 +1092,15 @@ impl Renderer {
             env.sun_dir.z > -0.001,
             env.sun_dir.z < 0.001,
         ];
+        // The far cascade is coarser than a voxel, so the tops of things are enough for
+        // it until the sun gets low and the sides start to catch the light.
+        let far_casters = if env.sun_dir.y > HIGH_SUN { [false, false, true, false, false, false] } else { toward_sun };
+        // How far a shadow can reach across the ground, for finding what can cast into view.
+        let sweep = -env.sun_dir * (m(120.0) / env.sun_dir.y.clamp(0.15, 1.0));
         let size = CHUNK as f32;
         let mut instances: Vec<Instance> = Vec::new();
         let mut opaque: Vec<ChunkDraw> = Vec::new();
+        let mut opaque_edge: Vec<ChunkDraw> = Vec::new();
         let mut casters: [Vec<ChunkDraw>; CASCADES] = Default::default();
         let mut water: Vec<(ChunkDraw, f32)> = Vec::new();
         let mut stats = DrawStats::default();
@@ -1031,8 +1111,10 @@ impl Renderer {
             let far_corner = offset + Vec3::splat(size);
             let visible = frustum.intersects_box(offset, far_corner);
             let center = offset + Vec3::splat(size * 0.5);
-            // Each cascade only draws what falls inside its own box of light.
-            let casts: [bool; CASCADES] = std::array::from_fn(|i| env.daylight && light[i].intersects_box(offset, far_corner));
+            // Each cascade only draws what falls inside its own box of light, and only
+            // if its shadow could land somewhere the camera can see.
+            let reaches_view = env.daylight && frustum.intersects_swept_box(offset, far_corner, sweep);
+            let casts: [bool; CASCADES] = std::array::from_fn(|i| fresh[i] && reaches_view && light[i].intersects_box(offset, far_corner));
             // Directions whose faces could be seen from the camera. Foliage sways, so
             // leave a little slack.
             let slack = m(1.0);
@@ -1059,15 +1141,18 @@ impl Renderer {
                 // Plants are too small to matter from further away.
                 let near = center.length() < PLANT_REACH;
                 for (i, (list, _)) in casters.iter_mut().zip(casts).enumerate().filter(|(_, (_, casts))| *casts) {
-                    push_faces(list, mesh, terrain, toward_sun, index);
+                    push_faces(list, mesh, terrain, if i == CASCADES - 1 { far_casters } else { toward_sun }, index);
                     if near && i < PLANT_SHADOW_CASCADES {
                         push_faces(list, mesh, plants, toward_sun, index);
                     }
                 }
                 if visible {
-                    push_faces(&mut opaque, mesh, terrain, seen, index);
+                    // Chunks entirely inside the voxel radius never need trimming to it.
+                    let reach = Vec2::new(offset.x.abs().max(far_corner.x.abs()), offset.z.abs().max(far_corner.z.abs())).length();
+                    let list = if reach + m(1.0) < voxel_radius { &mut opaque } else { &mut opaque_edge };
+                    push_faces(list, mesh, terrain, seen, index);
                     if near {
-                        push_faces(&mut opaque, mesh, plants, seen, index);
+                        push_faces(list, mesh, plants, seen, index);
                     }
                 }
             }
@@ -1112,11 +1197,17 @@ impl Renderer {
         // Translucent water blends correctly only when drawn far to near.
         water.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         stats.shadow_draws = std::array::from_fn(|i| casters[i].len() as u32);
-        stats.quads_drawn += opaque.iter().map(|d| d[0] as u64 / 6).sum::<u64>();
+        stats.quads_drawn += opaque.iter().chain(&opaque_edge).map(|d| d[0] as u64 / 6).sum::<u64>();
+        // Nearest first, so that hidden surfaces are rejected instead of shaded.
+        let distance_of = |d: &ChunkDraw| {
+            let [x, y, z] = instances[d[4] as usize].offset;
+            (Vec3::new(x, y, z) + Vec3::splat(size * 0.5)).length_squared()
+        };
+        opaque.sort_by_cached_key(|d| distance_of(d) as u32);
         self.stats = stats;
 
         // All of this frame's chunk draws, in one buffer the passes take slices of.
-        let mut draws: Vec<ChunkDraw> = Vec::with_capacity(opaque.len() + water.len() + casters.iter().map(Vec::len).sum::<usize>());
+        let mut draws: Vec<ChunkDraw> = Vec::with_capacity(opaque.len() + opaque_edge.len() + water.len() + casters.iter().map(Vec::len).sum::<usize>());
         let mut append = |list: &mut dyn Iterator<Item = ChunkDraw>| {
             let start = draws.len();
             draws.extend(list);
@@ -1124,6 +1215,7 @@ impl Renderer {
         };
         let shadow_lists: [Range<usize>; CASCADES] = std::array::from_fn(|i| append(&mut casters[i].iter().copied()));
         let opaque_list = append(&mut opaque.iter().copied());
+        let edge_list = append(&mut opaque_edge.iter().copied());
         let water_list = append(&mut water.iter().map(|w| w.0));
         if draws.len() > self.indirect_capacity {
             self.indirect_capacity = draws.len().next_power_of_two();
@@ -1143,8 +1235,18 @@ impl Renderer {
         }
         gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
 
+        if let Some(t) = &self.timer {
+            t.mark(encoder, 0);
+        }
+
         // --- Shadow passes -------------------------------------------------------
         for (i, view) in self.shadow_views.iter().enumerate() {
+            if !fresh[i] {
+                if let Some(t) = &self.timer {
+                    t.mark(encoder, i as u32 + 1);
+                }
+                continue;
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
                 color_attachments: &[],
@@ -1167,6 +1269,10 @@ impl Renderer {
                 pass.set_vertex_buffer(0, chunk_vertices.slice(..));
                 pass.set_vertex_buffer(1, self.instances.slice(..));
                 draw_chunks(&mut pass, indirect, &draws, shadow_lists[i].clone());
+            }
+            drop(pass);
+            if let Some(t) = &self.timer {
+                t.mark(encoder, i as u32 + 1);
             }
         }
 
@@ -1202,6 +1308,9 @@ impl Renderer {
             pass.set_bind_group(0, &self.scene_bind, &[]);
             pass.set_pipeline(&self.sky);
             pass.draw(0..3, 0..1);
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 4);
+            }
 
             // Far view first: land tiles, then river ribbons and the sea over them.
             pass.set_vertex_buffer(1, self.instances.slice(..));
@@ -1224,16 +1333,24 @@ impl Renderer {
             }
             pass.set_vertex_buffer(0, self.sea.slice(..));
             pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 5);
+            }
 
-            pass.set_pipeline(&self.opaque);
+            pass.set_pipeline(&self.opaque_inside);
             pass.set_vertex_buffer(0, chunk_vertices.slice(..));
             draw_chunks(&mut pass, indirect, &draws, opaque_list);
+            pass.set_pipeline(&self.opaque);
+            draw_chunks(&mut pass, indirect, &draws, edge_list);
 
             if prop_count > 0 {
                 pass.set_pipeline(&self.props);
                 pass.set_vertex_buffer(0, self.cube.slice(..));
                 pass.set_vertex_buffer(1, self.prop_instances.slice(..));
                 pass.draw(0..36, 0..prop_count as u32);
+            }
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 6);
             }
         }
 
@@ -1279,6 +1396,9 @@ impl Renderer {
                 pass.draw(0..36, 0..particle_count as u32);
             }
         }
+        if let Some(t) = &self.timer {
+            t.mark(encoder, 7);
+        }
 
         // --- Bloom and tonemap ---------------------------------------------------
         let fullscreen = |encoder: &mut wgpu::CommandEncoder, label: &str, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, target: &wgpu::TextureView| {
@@ -1310,8 +1430,15 @@ impl Renderer {
         fullscreen(encoder, "blur h", &self.blur_h, &a_bind, &self.bloom_b.view);
         let b_bind = self.image_bind_group(device, &self.bloom_b.view, &self.hdr.view);
         fullscreen(encoder, "blur v", &self.blur_v, &b_bind, &self.bloom_a.view);
+        if let Some(t) = &self.timer {
+            t.mark(encoder, 8);
+        }
         let final_bind = self.image_bind_group(device, &self.hdr.view, &self.bloom_a.view);
         fullscreen(encoder, "tonemap", &self.tonemap, &final_bind, target);
+        if let Some(t) = &mut self.timer {
+            t.mark(encoder, 9);
+            t.resolve(encoder);
+        }
     }
 }
 
@@ -1327,6 +1454,15 @@ impl Frustum {
         Self {
             planes: [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r3 - r2],
         }
+    }
+
+    /// Whether a box could touch the frustum at any point as it slides along `sweep`.
+    fn intersects_swept_box(&self, min: Vec3, max: Vec3, sweep: Vec3) -> bool {
+        self.planes.iter().all(|p| {
+            let n = p.truncate();
+            let v = Vec3::select(n.cmpge(Vec3::ZERO), max, min);
+            n.dot(v) + p.w + n.dot(sweep).max(0.0) >= 0.0
+        })
     }
 
     fn intersects_box(&self, min: Vec3, max: Vec3) -> bool {

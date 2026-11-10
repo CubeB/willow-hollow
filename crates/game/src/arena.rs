@@ -91,12 +91,20 @@ fn try_create(gpu: &Gpu, quads: u32) -> Option<wgpu::Buffer> {
 }
 
 impl VertexArena {
-    pub fn new(gpu: &Gpu) -> Self {
+    /// `expected_bytes` is how much is likely to be needed. Reserving it now avoids
+    /// stopping to copy everything into a larger buffer while the world loads.
+    pub fn new(gpu: &Gpu, expected_bytes: u64) -> Self {
         // Vertex numbers are u32, so four billion vertices is the ceiling regardless.
         let max_quads = (gpu.device.limits().max_buffer_size / QUAD_BYTES).min(u32::MAX as u64 / 4) as u32;
-        let quads = ((INITIAL_BYTES / QUAD_BYTES) as u32).min(max_quads);
+        let smallest = ((INITIAL_BYTES / QUAD_BYTES) as u32).min(max_quads);
+        let hoped = ((expected_bytes.max(INITIAL_BYTES) / QUAD_BYTES).min(max_quads as u64)) as u32;
+        // If the GPU can't spare that much at once, grow into it as usual.
+        let (buffer, quads) = match try_create(gpu, hoped) {
+            Some(buffer) => (buffer, hoped),
+            None => (create(gpu, smallest), smallest),
+        };
         Self {
-            buffer: create(gpu, quads),
+            buffer,
             free: FreeList::new(quads),
             max_quads,
         }

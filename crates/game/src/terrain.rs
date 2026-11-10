@@ -16,7 +16,7 @@ use voxel::{
     CHUNK,
     mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk},
 };
-use worldgen::{Cascade, World};
+use worldgen::{Cascade, World, scale::m};
 
 use crate::{
     arena::{MeshSpan, VertexArena},
@@ -38,6 +38,8 @@ struct ColumnResult {
     col: Col,
     /// None if the job was skipped because the camera had moved away.
     chunks: Option<Vec<(i32, ChunkMesh)>>,
+    /// Whether the small plants are in these meshes.
+    planted: bool,
     cascades: Vec<Cascade>,
     gen_ms: f32,
     mesh_ms: f32,
@@ -79,6 +81,9 @@ pub struct Streamer {
     tx: Sender<ColumnResult>,
     rx: Receiver<ColumnResult>,
     columns: HashMap<Col, Vec<GpuChunk>>,
+    /// Loaded columns that were built without their small plants, being too far away
+    /// for them to be drawn.
+    bare: HashSet<Col>,
     arena: VertexArena,
     /// Cascade lips in each loaded column, for spray and sound.
     cascades: HashMap<Col, Vec<Cascade>>,
@@ -97,6 +102,13 @@ pub struct Streamer {
 const UNLOAD_SLACK: i32 = 2;
 /// The view is never pulled in closer than this for lack of GPU memory.
 const MIN_RADIUS: i32 = 8;
+/// How far from the camera small plants are drawn.
+pub const PLANT_REACH: f32 = m(100.0);
+/// Columns within this many columns of the camera carry their small plants: the reach
+/// of the plants, plus a margin so they are ready before they come into it.
+const PLANT_COLUMNS: i32 = (PLANT_REACH / CHUNK as f32) as i32 + 3;
+/// Roughly what one column takes on the GPU, for sizing the mesh buffer up front.
+const COLUMN_BYTES: u64 = 130 << 10;
 
 impl Streamer {
     pub fn new(gpu: &Gpu, world: Arc<dyn World>, radius: i32) -> Self {
@@ -117,7 +129,8 @@ impl Streamer {
             tx,
             rx,
             columns: HashMap::new(),
-            arena: VertexArena::new(gpu),
+            bare: HashSet::new(),
+            arena: VertexArena::new(gpu, (std::f64::consts::PI * (radius * radius) as f64) as u64 * COLUMN_BYTES),
             cascades: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
@@ -127,7 +140,7 @@ impl Streamer {
                 cz: AtomicI32::new(0),
                 radius: AtomicI32::new(radius),
             }),
-            max_in_flight: threads * 2,
+            max_in_flight: threads * 3,
             radius_limit: i32::MAX,
             stats: Stats::default(),
         }
@@ -153,13 +166,16 @@ impl Streamer {
             let (dx, dz) = ((c.0 - center.0) as f32, (c.1 - center.1) as f32);
             dx.hypot(dz)
         };
-        // `wanted` is sorted farthest first, so its last entry is the nearest gap.
+        // A column being rebuilt with its plants is still there, so it is no gap. And
+        // starting from the edge of the ring that walking uncovers keeps the boundary
+        // still as the camera crosses columns, rather than pulsing in and out.
         let nearest_missing = self
             .pending
             .iter()
+            .chain(&self.wanted)
+            .filter(|c| !self.columns.contains_key(*c))
             .map(dist)
-            .chain(self.wanted.last().map(dist))
-            .fold(self.radius() as f32 + 1.0, f32::min);
+            .fold(self.radius() as f32 - std::f32::consts::SQRT_2, f32::min);
         // The camera can be anywhere in its column, and columns are square.
         ((nearest_missing - 1.5) * CHUNK as f32).max(0.0)
     }
@@ -189,8 +205,8 @@ impl Streamer {
             .filter(move |c| (c.pos.x - p.x).hypot(c.pos.z - p.z) <= radius)
     }
 
-    /// Call once per frame. Uploads at most `upload_budget` finished columns.
-    pub fn update(&mut self, gpu: &Gpu, cam: DVec3, upload_budget: usize) {
+    /// Call once per frame. Uploads finished columns for about `upload_ms` at most.
+    pub fn update(&mut self, gpu: &Gpu, cam: DVec3, upload_ms: f32) {
         let center = (
             (cam.x / CHUNK as f64).floor() as i32,
             (cam.z / CHUNK as f64).floor() as i32,
@@ -205,14 +221,16 @@ impl Streamer {
         while self.pending.len() < self.max_in_flight {
             let Some(col) = self.wanted.pop() else { break };
             self.pending.insert(col);
+            let plants = in_plant_range(col, center, PLANT_COLUMNS + 1);
             let (world, tx, focus) = (self.world.clone(), self.tx.clone(), self.focus.clone());
             self.pool.spawn(move || {
-                let result = build_column(&*world, &focus, col);
+                let result = build_column(&*world, &focus, col, plants);
                 let _ = tx.send(result);
             });
         }
 
-        for _ in 0..upload_budget {
+        let began = Instant::now();
+        while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
             let Ok(result) = self.rx.try_recv() else { break };
             self.pending.remove(&result.col);
             let in_range = self.focus.in_range(result.col, UNLOAD_SLACK);
@@ -228,6 +246,12 @@ impl Streamer {
                     };
                     if let Some(old) = self.columns.insert(result.col, chunks) {
                         release(&mut self.arena, &old);
+                        self.forget(&old);
+                    }
+                    if result.planted {
+                        self.bare.remove(&result.col);
+                    } else {
+                        self.bare.insert(result.col);
                     }
                     if !result.cascades.is_empty() {
                         self.cascades.insert(result.col, result.cascades);
@@ -247,7 +271,7 @@ impl Streamer {
     /// Blocks until everything in range is loaded (used for screenshots).
     pub fn wait_idle(&mut self, gpu: &Gpu, cam: DVec3) {
         loop {
-            self.update(gpu, cam, usize::MAX);
+            self.update(gpu, cam, f32::INFINITY);
             if self.is_idle() {
                 break;
             }
@@ -272,6 +296,7 @@ impl Streamer {
             keep
         });
         self.cascades.retain(|c, _| dist2(c) <= unload * unload);
+        self.bare.retain(|c| dist2(c) <= unload * unload);
         if self.columns.len() != before {
             self.recount();
         }
@@ -280,10 +305,9 @@ impl Streamer {
         for dx in -r..=r {
             for dz in -r..=r {
                 let col = (center.0 + dx, center.1 + dz);
-                if dx * dx + dz * dz <= r * r
-                    && !self.columns.contains_key(&col)
-                    && !self.pending.contains(&col)
-                {
+                // A column that has come within reach of its plants is built again with them.
+                let incomplete = !self.columns.contains_key(&col) || (self.bare.contains(&col) && in_plant_range(col, center, PLANT_COLUMNS));
+                if dx * dx + dz * dz <= r * r && incomplete && !self.pending.contains(&col) {
                     self.wanted.push(col);
                 }
             }
@@ -348,6 +372,16 @@ impl Streamer {
         }
     }
 
+    /// Takes replaced chunks out of the statistics.
+    fn forget(&mut self, chunks: &[GpuChunk]) {
+        let s = &mut self.stats;
+        s.chunks = s.chunks.saturating_sub(chunks.len());
+        for span in chunks.iter().flat_map(|c| c.opaque.iter().chain(&c.water)) {
+            s.quads = s.quads.saturating_sub(span.quads as u64);
+            s.mesh_bytes = s.mesh_bytes.saturating_sub(span.quads as u64 * 4 * size_of::<Vertex>() as u64);
+        }
+    }
+
     fn recount(&mut self) {
         let (mut chunks, mut quads) = (0, 0u64);
         for c in self.columns.values().flatten() {
@@ -361,17 +395,23 @@ impl Streamer {
     }
 }
 
+fn in_plant_range(col: Col, center: Col, columns: i32) -> bool {
+    let (dx, dz) = (col.0 - center.0, col.1 - center.1);
+    dx * dx + dz * dz <= columns * columns
+}
+
 fn release(arena: &mut VertexArena, chunks: &[GpuChunk]) {
     for span in chunks.iter().flat_map(|c| c.opaque.iter().chain(&c.water)) {
         arena.remove(*span);
     }
 }
 
-fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
+fn build_column(world: &dyn World, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
     if !focus.in_range(col, UNLOAD_SLACK) {
         return ColumnResult {
             col,
             chunks: None,
+            planted: false,
             cascades: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
@@ -386,7 +426,8 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
         .map(|(cy, chunk)| {
             let mut mesh = mesh_chunk(chunk, world.materials());
             let origin = [col.0 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.1 * CHUNK * CELLS];
-            let inside = output.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
+            // Run even with no plants: it also records where each face group ends.
+            let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
             add_plants(&mut mesh, inside, origin, world.materials());
             (*cy, mesh)
         })
@@ -396,6 +437,7 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
     ColumnResult {
         col,
         chunks: Some(chunks),
+        planted: plants,
         cascades: output.cascades,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,

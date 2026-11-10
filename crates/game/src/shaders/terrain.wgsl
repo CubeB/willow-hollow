@@ -71,6 +71,17 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (beyond_voxels(in.rel)) {
         discard;
     }
+    return shade(in);
+}
+
+// For chunks wholly inside the voxel radius. Without a discard the GPU can settle depth
+// before running the shader, so hidden surfaces cost nothing.
+@fragment
+fn fs_inside(in: VOut) -> @location(0) vec4<f32> {
+    return shade(in);
+}
+
+fn shade(in: VOut) -> vec4<f32> {
     let n = face_normal(in.face);
     // The voxel this fragment belongs to: step half a voxel inward from the face.
     let voxel = vec3<i32>(floor(in.local - n * 0.5)) + in.origin;
