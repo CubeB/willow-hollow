@@ -553,7 +553,20 @@ impl GameWorld {
             seed: self.seed,
             taken: &standing,
         };
+        let before_moss = plants.len();
         features::moss::grow(&voxels, &self.materials, &soil, &mut plants);
+        // Bark, twigs and leaf clusters, clear of the moss and climbers already there.
+        if placements.iter().any(|p| features::tree_detail::has_detail(p.species)) {
+            features::tree_detail::occupied(&plants[before_moss..], &mut standing);
+            let grove = features::tree_detail::Grove {
+                columns: &columns,
+                x0: wx0,
+                z0: wz0,
+                seed: self.seed,
+                taken: &standing,
+            };
+            features::tree_detail::grow(&out, &voxels, &self.materials, &grove, &mut plants);
+        }
         ColumnOutput {
             chunks: out,
             cascades,

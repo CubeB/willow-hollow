@@ -15,6 +15,7 @@ pub mod parts;
 pub mod pebbles;
 pub mod plants;
 pub mod shape;
+pub mod tree_detail;
 pub mod trees;
 
 use std::collections::HashMap;

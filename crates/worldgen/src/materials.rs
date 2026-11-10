@@ -174,6 +174,15 @@ palette! {
     // Dark streaks in old climber wood, where the stems twist round each other.
     IVY_WOOD_DARK     = ( 98,  88,  78), Foliage, 2;
     LIANA_WOOD        = ( 78,  66,  52), Foliage, 2;
+    // Tree detail: bark relief on trunks and the twigs on limbs (features::tree_detail).
+    BARK_OAK_RIDGE    = (112,  88,  62), Foliage, 2;
+    BARK_REDWOOD_RIDGE = (160,  92,  64), Foliage, 2;
+    BARK_PINE_PLATE   = (106,  80,  60), Foliage, 2;
+    BARK_BIRCH_MARK   = ( 72,  70,  66), Foliage, 1;
+    BARK_BIRCH_PEEL   = (212, 186, 152), Foliage, 2;
+    BARK_PALM_RING    = (128, 104,  74), Foliage, 2;
+    TWIG              = ( 82,  64,  48), Foliage, 2;
+    TWIG_PALE         = (164, 156, 144), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -287,6 +296,8 @@ fn classify(m: &mut Materials) {
             &[
                 VINE, BARK_OAK, BARK_BIRCH, BARK_PINE, BARK_REDWOOD, BARK_JUNGLE, BARK_PALM, BARK_WILLOW, BARK_ACACIA, BARK_BAOBAB,
                 WOOD_DEAD, PLANK, PLANK_PALE, PLANK_DARK, PLANK_RED, IVY_STEM, IVY_WOOD, LIANA_STEM, IVY_WOOD_DARK, LIANA_WOOD,
+                // Bark relief and twigs are wood: they keep their colour, and winter trees show them.
+                BARK_OAK_RIDGE, BARK_REDWOOD_RIDGE, BARK_PINE_PLATE, BARK_BIRCH_MARK, BARK_BIRCH_PEEL, BARK_PALM_RING, TWIG, TWIG_PALE,
             ],
             pk::VINE,
         ),

@@ -465,23 +465,13 @@ fn bush(s: &mut Shape, rng: &mut Rng, leaves: Voxel) {
 
 fn boulder(s: &mut Shape, rng: &mut Rng, mossy: bool) {
     let r = rng.range(1.3, 3.2);
-    let rock = if rng.unit() < 0.3 { mat::ROCK_DARK } else { mat::STONE };
+    // Mossy boulders are the darker, older rock of damp ground. Their moss is grown as
+    // fine pieces (features::moss), not painted voxels, which sat on top as single blocks.
+    let dark = if mossy { 0.6 } else { 0.3 };
+    let rock = if rng.unit() < dark { mat::ROCK_DARK } else { mat::STONE };
     // Sunk into the ground a little, like something that has sat there a long time.
     let c = Vec3::new(0.5, r * 0.4, 0.5);
     s.blob(c, Vec3::new(r * rng.range(0.8, 1.2), r * 0.8, r * rng.range(0.8, 1.2)), rock, rng.next_u32(), 0.3);
-    if mossy {
-        // Moss on the upper faces.
-        let tops: Vec<IVec3> = s
-            .snapshot()
-            .into_iter()
-            .filter(|p| s.get(*p + IVec3::Y).is_none() && p.y >= 0)
-            .collect();
-        for p in tops {
-            if rng.unit() < 0.7 {
-                s.paint(p, mat::MOSS);
-            }
-        }
-    }
 }
 
 fn fallen_log(s: &mut Shape, rng: &mut Rng) {
