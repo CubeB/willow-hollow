@@ -97,7 +97,7 @@ impl Palette {
             moss,
             biome,
         };
-        match biome {
+        match biome.parent() {
             Desert | Savanna => Palette {
                 stone: mat::SANDSTONE,
                 stone_dark: mat::SANDSTONE_DARK,
@@ -114,6 +114,7 @@ impl Palette {
             Rainforest => stone(mat::BARK_JUNGLE, mat::PLANK_PALE, mat::THATCH, mat::CLOTH_RED, 0.55),
             Heath | Grassland => stone(mat::BARK_OAK, mat::PLANK, mat::THATCH, mat::CLOTH_BLUE, 0.14),
             Deciduous | Woodland => stone(mat::BARK_OAK, mat::PLANK, mat::ROOF_TILE, mat::CLOTH_RED, 0.3),
+            other => unreachable!("{other:?} is not an original biome"),
         }
     }
 
@@ -124,12 +125,13 @@ impl Palette {
         use Biome::*;
         let h = seed.wrapping_mul(0x9e37_79b1) ^ 0x5bd1_e995;
         let pick = |list: &[Voxel], k: u32| list[((h >> (k * 4)) as usize) % list.len()];
-        let (roofs, planks): (&[Voxel], &[Voxel]) = match self.biome {
+        let (roofs, planks): (&[Voxel], &[Voxel]) = match self.biome.parent() {
             Desert | Savanna => (&[mat::THATCH, mat::THATCH, mat::PLANK_PALE], &[mat::PLANK_PALE, mat::PLANK]),
             Alpine | Tundra | Ocean | Taiga => (&[mat::SLATE, mat::SLATE, mat::PLANK_DARK], &[mat::PLANK_DARK, mat::PLANK]),
             OldGrowth | Rainforest => (&[mat::THATCH, mat::THATCH, mat::PLANK_RED], &[mat::PLANK_RED, mat::PLANK_PALE]),
             Heath | Grassland => (&[mat::THATCH, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
-            Deciduous | Woodland => (&[mat::ROOF_TILE, mat::ROOF_TILE, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
+            // Deciduous and Woodland; every newer biome has one of the parents above.
+            _ => (&[mat::ROOF_TILE, mat::ROOF_TILE, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
         };
         self.roof = pick(roofs, 0);
         self.plank = pick(planks, 1);

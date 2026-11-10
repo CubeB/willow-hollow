@@ -115,16 +115,21 @@ impl Moss {
 
 /// How damp a place is, from 0 (nothing grows here) to 1.
 fn moisture(col: &Column) -> f32 {
+    // The wettest and driest newer biomes are set here; the rest grow moss as their parent does.
     let base = match col.biome {
-        Biome::Rainforest | Biome::OldGrowth => 1.0,
-        Biome::Taiga => 0.8,
-        Biome::Deciduous => 0.72,
-        Biome::Woodland => 0.55,
-        Biome::Heath => 0.4,
-        Biome::Grassland | Biome::Tundra => 0.28,
-        Biome::Alpine | Biome::Ocean => 0.18,
-        Biome::Savanna => 0.08,
-        Biome::Desert => 0.0,
+        Biome::Marsh | Biome::Bog | Biome::Mangrove => 0.9,
+        Biome::RedRock | Biome::DuneSea | Biome::Volcanic => 0.0,
+        b => match b.parent() {
+            Biome::Rainforest | Biome::OldGrowth => 1.0,
+            Biome::Taiga => 0.8,
+            Biome::Deciduous => 0.72,
+            Biome::Woodland => 0.55,
+            Biome::Heath => 0.4,
+            Biome::Grassland | Biome::Tundra => 0.28,
+            Biome::Alpine | Biome::Ocean => 0.18,
+            Biome::Savanna => 0.08,
+            _ => 0.0,
+        },
     };
     if base == 0.0 {
         return 0.0;

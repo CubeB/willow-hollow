@@ -5,6 +5,7 @@
 //! (Braun & Willett 2013; Cordonnier et al. 2016), run coarse-to-fine so large-scale
 //! drainage is settled cheaply before fine detail is added.
 
+mod biomes;
 mod border;
 pub mod climate;
 pub mod flow;
@@ -258,7 +259,9 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
     for (li, &w) in sizes.iter().enumerate() {
         let level = Level::new(&shape, w);
         let n = w * w;
-        if li == 0 && level.ocean.iter().all(|&o| o) {
+        // Open sea needs no simulation, unless a range reaches this cell's border: its
+        // neighbour then holds land there, and so must this cell, however little.
+        if li == 0 && level.ocean.iter().all(|&o| o) && !border::touches(&shape, cfg.size) {
             return open_sea(desc, cfg.size, &shape);
         }
         if li == 0 {
@@ -300,6 +303,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         let cell_area = ((cfg.size / w) * (cfg.size / w)) as f32;
         let mut flow = Flow::new(w, desc.seed);
         for _ in 0..iterations[li] {
+            flow.outlets = border::outlets(&level, &pins, &height);
             flow.route(&height, &level.ocean, &rain, cell_area);
             erode(&level, &flow, cell_area, &mut height, &mut scratch);
             border::hold(&level, &pins, &mut height);
@@ -310,6 +314,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
             border::settle(&level, &pins, &mut height);
         }
         // Route once more so the stored drainage matches the final terrain exactly.
+        flow.outlets = border::outlets(&level, &pins, &height);
         flow.route(&height, &level.ocean, &rain, cell_area);
         if li == sizes.len() - 1 {
             dam_lakes(&level, &flow, &mut height, desc.seed);
@@ -317,6 +322,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         if li >= 1 || sizes.len() == 1 {
             // From here on the wet side of each range carries more water.
             rain = climate::rainfall(w, &height, &level.ocean, &desc);
+            flow.outlets = border::outlets(&level, &pins, &height);
             flow.route(&height, &level.ocean, &rain, cell_area);
         }
         rain_coarse = Some(rain.clone());
@@ -344,15 +350,12 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
     border::finish(&mut level, &mut flow, &mut height, &mut water_level, &mut lake, &rain, &pins);
     let mut temperature = climate::temperature(level.w, &height, &desc);
     border::blend_climate(&level, &pins, &shape, &height, &mut temperature, &mut rain);
-    let biome = (0..height.len())
-        .map(|i| {
-            if level.ocean[i] {
-                Biome::Ocean as u8
-            } else {
-                Biome::classify(temperature[i], rain[i]) as u8
-            }
-        })
-        .collect();
+    let biome = biomes::classify(&level, &shape, &flow, &height, &lake, &temperature, &rain);
+    let mut held = vec![false; height.len()];
+    for p in &pins {
+        held[p.i as usize] = true;
+    }
+    biomes::dunes(&level, &shape, &flow, &biome, &held, &lake, &mut height, &mut water_level);
     Continent {
         desc,
         size: cfg.size,
