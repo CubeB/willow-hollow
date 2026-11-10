@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Vec3};
 use voxel::Kind;
 use worldgen::{
-    Cascade,
+    Cascade, SpringMark,
     biome::Biome,
     noise,
     scale::{OLD_VOXEL as U, VOXELS_PER_METRE},
@@ -72,6 +72,10 @@ enum PKind {
     Droplet,
     Rain,
     Snow,
+    /// Rising from a spring's floor; it pops into a ripple at the surface.
+    Bubble,
+    /// A speck of a ring spreading out across a spring's surface.
+    Ripple,
 }
 
 /// What a falling leaf looks like, by the tree it came from.
@@ -131,6 +135,8 @@ pub struct Surroundings<'a> {
     /// Sun elevation (sine), negative at night.
     pub sun_elevation: f32,
     pub cascades: &'a [Cascade],
+    /// Spring pools near the player.
+    pub springs: &'a [SpringMark],
     /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
     pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
     /// Flower voxels near the player.
@@ -238,6 +244,29 @@ impl Particles {
                     size: Vec3::splat(self.range(0.5, 1.0)),
                     color: [0.9, 0.94, 1.0],
                     phase: 0.0,
+                    settled: false,
+                };
+                self.spawn(particle);
+            }
+        }
+
+        // Springs: now and then a bubble wells up from the floor of the pool.
+        for sp in s.springs {
+            let dist = (sp.pos.as_dvec3() - s.camera).length() as f32;
+            if dist > 40.0 * VOXELS_PER_METRE {
+                continue;
+            }
+            if self.unit() < dt * 1.5 {
+                let (a, r) = (self.range(0.0, std::f32::consts::TAU), sp.radius * 0.6 * self.unit().sqrt());
+                let particle = Particle {
+                    kind: PKind::Bubble,
+                    pos: sp.pos.as_dvec3() + DVec3::new((a.cos() * r) as f64, -1.0 - self.range(0.3, 1.2) as f64, (a.sin() * r) as f64),
+                    vel: Vec3::new(0.0, self.range(0.8, 1.2), 0.0),
+                    age: 0.0,
+                    life: 6.0,
+                    size: Vec3::splat(self.range(0.05, 0.1)),
+                    color: [0.85, 0.94, 1.0],
+                    phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                 };
                 self.spawn(particle);
@@ -405,6 +434,7 @@ impl Particles {
         let wind = self.wind.vector;
         let t = s.time as f32;
         let mut splashes: Vec<DVec3> = Vec::new();
+        let mut pops: Vec<DVec3> = Vec::new();
         for p in &mut self.particles {
             p.age += dt;
             match p.kind {
@@ -425,6 +455,20 @@ impl Particles {
                         }
                         _ => {}
                     }
+                }
+                PKind::Bubble => {
+                    // A wobbling rise; at the top of the water it pops.
+                    let wobble = (t * 9.0 + p.phase).sin() * 0.12;
+                    p.pos += (Vec3::new(wobble, p.vel.y, wobble * 0.7) * U * dt).as_dvec3();
+                    let at = p.pos.floor().as_ivec3();
+                    if voxels.kind(at.x, at.y, at.z) == Kind::Air {
+                        p.age = p.life;
+                        pops.push(DVec3::new(p.pos.x, p.pos.y.floor() + 0.02, p.pos.z));
+                    }
+                }
+                PKind::Ripple => {
+                    p.pos += (p.vel * U * dt).as_dvec3();
+                    p.vel *= (-1.5 * dt).exp();
                 }
                 PKind::Spray | PKind::Droplet => {
                     p.vel.y -= 9.0 * dt;
@@ -553,6 +597,24 @@ impl Particles {
                 self.spawn(particle);
             }
         }
+        // Each bubble that reaches the surface spreads a small ring.
+        for at in pops {
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                let particle = Particle {
+                    kind: PKind::Ripple,
+                    pos: at,
+                    vel: Vec3::new(a.cos(), 0.0, a.sin()) * 0.7,
+                    age: 0.0,
+                    life: 0.9,
+                    size: Vec3::new(0.08, 0.02, 0.08),
+                    color: [0.9, 0.96, 1.0],
+                    phase: a,
+                    settled: false,
+                };
+                self.spawn(particle);
+            }
+        }
         self.particles.retain(|p| p.age < p.life);
 
         // --- Instances --------------------------------------------------------------
@@ -566,6 +628,9 @@ impl Particles {
             match p.kind {
                 PKind::Mist => alpha *= 0.16,
                 PKind::Spray | PKind::Droplet => alpha *= 0.75,
+                PKind::Bubble => alpha *= 0.6,
+                // A ripple fades as it spreads.
+                PKind::Ripple => alpha = 0.5 * (1.0 - p.age / p.life),
                 PKind::Firefly => {
                     // Long dark gaps and short bright blinks.
                     let cycle = (t * 0.55 + p.phase).rem_euclid(3.2);

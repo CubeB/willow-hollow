@@ -33,11 +33,22 @@ pub struct Cascade {
     pub speed: f32,
 }
 
+/// Where a stream wells up out of the ground into a small pool. Bubbles come from here.
+#[derive(Clone, Copy, Debug)]
+pub struct SpringMark {
+    /// World position of the centre of the pool's water surface.
+    pub pos: Vec3,
+    /// Radius of the pool, in voxels.
+    pub radius: f32,
+}
+
 /// Everything generated for one chunk column.
 pub struct ColumnOutput {
     /// `(chunk y, voxels)`, lowest first with none skipped.
     pub chunks: Vec<(i32, PaddedChunk)>,
     pub cascades: Vec<Cascade>,
+    /// Springs whose pool centre is in this chunk column.
+    pub springs: Vec<SpringMark>,
     /// The current in each column, indexed `x * PAD + z` in padded coordinates like the
     /// chunks' voxels, or empty if no water here runs.
     pub currents: Vec<Current>,
