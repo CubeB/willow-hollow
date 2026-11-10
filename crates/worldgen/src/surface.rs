@@ -12,13 +12,14 @@ use glam::{Vec2, vec2};
 mod cliff;
 mod coast;
 mod current;
+pub mod overhang;
 mod ravine;
 mod sea_cliff;
 mod spring;
 
 pub use spring::Spring;
 
-pub use cliff::strata_tilt;
+pub use cliff::{strata_height, strata_tilt};
 
 use crate::{
     biome::Biome,
@@ -905,6 +906,7 @@ impl Fall {
             height: self.height,
             ledge: 0.0,
             split: 0.5,
+            lean: 0.0,
             salt: self.salt,
             seed: self.seed,
         };
@@ -1162,6 +1164,56 @@ mod tests {
         // Waterfalls and fault ravines cut through gentle ground, but only here and there.
         assert!(gentle.len() <= 15, "cliffs or scree on gentle ground: {gentle:?}");
     }
+
+    /// Prints the spread of inland cliff face heights, and places to look at faces
+    /// from: `cargo test --release -p worldgen inland_cliff_heights -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn inland_cliff_heights() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let natural = |x: i32, z: i32| {
+            let (fx, fz) = ((x as f32 + 0.5) / cs - 0.5, (z as f32 + 0.5) / cs - 0.5);
+            let (g, slope) = natural_ground(&c, 7, fx, fz, x as f64, z as f64);
+            (g, slope * OLD_VOXEL / cs)
+        };
+        let mut faces: Vec<(f32, i32, i32)> = Vec::new();
+        for z in (64..MACRO_SIZE - 64).step_by(12) {
+            for x in (64..MACRO_SIZE - 64).step_by(12) {
+                let i = (z / 64) as usize * c.size + (x / 64) as usize;
+                if c.ocean[i] || c.lake[i] != NO_LAKE {
+                    continue;
+                }
+                let (mut g, slope) = natural(x, z);
+                if let cliff::Part::Face(h) = cliff::apply(7, slope, x as f64, z as f64, &mut g, |_| 1.0) {
+                    faces.push((h, x, z));
+                }
+            }
+        }
+        faces.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let pct = |p: f32| faces[(faces.len() as f32 * p) as usize].0 / m(1.0);
+        eprintln!(
+            "{} face samples: max {:.1} m, p1 {:.1}, p10 {:.1}, median {:.1}, p90 {:.1}",
+            faces.len(),
+            pct(0.0),
+            pct(0.01),
+            pct(0.1),
+            pct(0.5),
+            pct(0.9)
+        );
+        // Places to stand and look at faces of several heights.
+        for q in [0.0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5] {
+            let (h, x, z) = faces[(faces.len() as f32 * q) as usize];
+            // Downhill, to stand below the face looking up at it.
+            let (dx, dz) = (natural(x + 8, z).0 - natural(x - 8, z).0, natural(x, z + 8).0 - natural(x, z - 8).0);
+            let len = dx.hypot(dz).max(1e-3);
+            let (ux, uz) = (-dx / len, -dz / len);
+            let (cx, cz) = (x + (ux * 110.0) as i32, z + (uz * 110.0) as i32);
+            let yaw = (-uz).atan2(-ux).to_degrees();
+            eprintln!("  {:.1} m face at {x},{z}: --over {cx},{cz},12 --look {yaw:.0},12", h / m(1.0));
+        }
+    }
+
 
     /// Prints how much of the land and of the steep land is cliff, and where the most
     /// cliff is: `cargo test --release -p worldgen cliff_survey -- --ignored --nocapture`.

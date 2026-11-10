@@ -210,3 +210,70 @@ fn chunk_columns_report_their_springs() {
         assert_eq!(mark.pos.y, sp.water as f32);
     }
 }
+
+#[test]
+fn overhangs_hang_from_faces_and_agree_across_chunks() {
+    use crate::surface::Cover;
+    let w = world();
+    let c = w.continent(0, 0);
+    // Chunk columns with cliff in them, from a coarse look over the continent.
+    let mut cliffs = Vec::new();
+    for tz in (0..MACRO_SIZE).step_by(2048) {
+        for tx in (0..MACRO_SIZE).step_by(2048) {
+            let s = Sampler::new(&c, w.seed(), tx, tz, 2048);
+            for z in (tz..tz + 2048).step_by(24) {
+                for x in (tx..tx + 2048).step_by(24) {
+                    if s.column(x, z).cover == Cover::Cliff {
+                        cliffs.push((x / CHUNK, z / CHUNK));
+                    }
+                }
+            }
+        }
+    }
+    assert!(!cliffs.is_empty(), "no cliffs on the test continent");
+    let (mut found, mut slabs) = (0, 0);
+    for &(cx, cz) in cliffs.iter().step_by((cliffs.len() / 400).max(1)) {
+        let (l0x, l0z) = (cx * CHUNK - 1, cz * CHUNK - 1);
+        let s = Sampler::new(&c, w.seed(), l0x - 8, l0z - 8, PAD as i32 + 16);
+        let columns: Vec<_> = (0..PAD as i32)
+            .flat_map(|px| (0..PAD as i32).map(move |pz| (px, pz)))
+            .map(|(px, pz)| s.column(l0x + px, l0z + pz))
+            .collect();
+        let hangs = crate::world::overhangs(w.seed(), &s, &columns, (l0x, l0z), (l0x, l0z));
+        if hangs.iter().all(Option::is_none) {
+            continue;
+        }
+        found += 1;
+        // Every slab is at least two voxels thick, clear of the ground under it, and
+        // held up by rock or another slab beside it.
+        for px in 1..PAD - 1 {
+            for pz in 1..PAD - 1 {
+                let Some((a, b)) = hangs[px * PAD + pz] else { continue };
+                slabs += 1;
+                assert!(b > a, "slab one voxel thick");
+                assert!(a > columns[px * PAD + pz].top() + 1, "slab resting on the ground");
+                let held = [(px + 1, pz), (px - 1, pz), (px, pz + 1), (px, pz - 1)].iter().any(|&(x, z)| {
+                    columns[x * PAD + z].top() >= b || hangs[x * PAD + z].is_some_and(|(c, d)| c <= b && d >= a)
+                });
+                assert!(held, "loose slab at {},{}", l0x + px as i32, l0z + pz as i32);
+            }
+        }
+        // The chunk columns either side agree on the voxels they share.
+        let (here, east) = (w.generate_column(cx, cz).chunks, w.generate_column(cx + 1, cz).chunks);
+        for (cy, a) in &here {
+            let Some((_, b)) = east.iter().find(|e| e.0 == *cy) else { continue };
+            for (ax, bx) in [(PAD - 2, 0), (PAD - 1, 1)] {
+                for y in 0..PAD {
+                    for z in 0..PAD {
+                        assert_eq!(a.get(ax, y, z), b.get(bx, y, z), "chunks {cx},{cz} and east differ");
+                    }
+                }
+            }
+        }
+        if found == 4 {
+            break;
+        }
+    }
+    eprintln!("{found} chunk columns with overhangs, {slabs} slab columns");
+    assert!(found > 0, "no overhangs near any cliff");
+}
