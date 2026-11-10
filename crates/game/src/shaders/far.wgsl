@@ -69,6 +69,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
         let body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
         color = mix(body, sky_color(reflect(view, up)), fresnel);
+        // Still water freezes over (rivers too: there is no flow to tell them apart).
+        let ice = ice_amount(in.rel.xz + G.cam_wrapped.xz);
+        color = mix(color, vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(up)), ice);
     } else {
         // Voxel terrain is all flat tops and vertical sides. From far away a slope
         // reads as a blend of the two, the sides counting for more the steeper it is.
@@ -77,7 +80,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let vis = sun_visibility(in.rel, up);
         let top = G.sun_color.rgb * max(G.sun_dir.y, 0.0) * vis + ambient(up);
         let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
-        color = in.color * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
+        // The season: a far forest turns and goes bare, grass dries, snow settles.
+        let world = in.rel.xz + G.cam_wrapped.xz;
+        var base = season_far_ground(in.color, in.kind > 0.002, world, G.season.x);
+        base = ground_weather(base, up, in.rel, 0.5, false, false);
+        color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.
         color *= 1.0 - clamp(steep * 0.9, 0.0, 0.35);
     }

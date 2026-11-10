@@ -674,7 +674,7 @@ impl Renderer {
             cache: None,
         });
 
-        let far_module = shader(device, "far", format!("{common}\n{}", include_str!("shaders/far.wgsl")));
+        let far_module = shader(device, "far", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/far.wgsl")));
         let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2];
         let far_instance_attrs = wgpu::vertex_attr_array![3 => Float32x3];
         let far = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -733,7 +733,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&scene_layout_bg), Some(&impostor_layout_bg)],
             immediate_size: 0,
         });
-        let impostor_module = shader(device, "impostor", format!("{common}\n{}", include_str!("shaders/impostor.wgsl")));
+        let impostor_module = shader(device, "impostor", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/impostor.wgsl")));
         let impostor_box_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
         let impostor_instance_attrs = wgpu::vertex_attr_array![2 => Sint32x3, 3 => Uint8x4, 4 => Unorm8x4];
         let impostor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

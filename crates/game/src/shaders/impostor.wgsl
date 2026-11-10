@@ -35,8 +35,12 @@ fn vs(in: VIn) -> VOut {
     out.rel = rel;
     out.color = srgb_to_linear(in.color.rgb);
     out.normal = in.normal;
+    // The season: leaves turn and fall (a whole box at once, so every corner agrees).
+    let leaf = season_far_leaf(out.color, vec2<f32>(in.lo.xz), G.season.x);
+    out.color = leaf.rgb;
+    let fallen = leaf.a < 0.5;
     // Nearer than this the real voxel trees are drawn instead.
-    if (length((low + size * 0.5).xz) < G.fog.y) {
+    if (fallen || length((low + size * 0.5).xz) < G.fog.y) {
         out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
     } else {
         out.clip = G.view_proj * vec4<f32>(rel, 1.0);
@@ -49,5 +53,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let n = in.normal;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
     let light = G.sun_color.rgb * ndl * 0.85 + ambient(n);
-    return vec4<f32>(apply_fog(in.color * light, in.rel), 1.0);
+    let base = ground_weather(in.color, n, in.rel, 0.5, true, false);
+    return vec4<f32>(apply_fog(base * light, in.rel), 1.0);
 }
