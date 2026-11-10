@@ -26,8 +26,11 @@ struct Globals {
     wind: vec4<f32>,
     // Nearest glowing fireflies: camera-relative xyz, glow strength in w (0 = unused).
     lights: array<vec4<f32>, 4>,
-    // x: date, 0..1 from the spring equinox (see season.wgsl).
+    // x: date, 0..1 from the spring equinox (see season.wgsl). y: snow cover at sea level.
+    // z: ice on still water.
     season: vec4<f32>,
+    // x: how wet the ground is (0..1).
+    weather: vec4<f32>,
 };
 
 struct Shadows {

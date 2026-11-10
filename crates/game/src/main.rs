@@ -356,6 +356,8 @@ struct Running {
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
+    /// How warm the biome underfoot is, eased as the player crosses into another.
+    warmth: f32,
     audio: Option<Audio>,
     /// The settings in force.
     settings: Settings,
@@ -491,6 +493,7 @@ impl Running {
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
+            warmth: season::warmth(worldgen::biome::Biome::Grassland),
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
             saved,
@@ -765,6 +768,7 @@ impl Running {
             self.env = Environment::at(self.env.time + days * 24.0, date);
         }
         self.save_timer -= dt;
+        self.warmth += (season::warmth(self.biome) - self.warmth) * (1.0 - (-0.4 * dt).exp());
 
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
@@ -821,6 +825,7 @@ impl Running {
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
+            ground: season::Ground::at(self.env.date, self.warmth, 0.0, 0.0),
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
         self.cpu.lap(4);
@@ -1150,6 +1155,7 @@ fn main() -> Result<()> {
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,
+            season::Ground::at(env.date, season::warmth(biome), 0.0, 0.0),
         )?;
         let s = streamer.stats;
         log::info!(

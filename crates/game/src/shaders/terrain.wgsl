@@ -97,6 +97,7 @@ fn shade(in: VOut) -> vec4<f32> {
         discard;
     }
     base = seasoned.rgb;
+    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -162,6 +163,13 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Sun glitter.
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
         color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face);
+        // In deep cold the surface is ice: pale, opaque and still.
+        let ice = ice_amount(world_xz);
+        if (ice > 0.0) {
+            let sheet = vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(n_face));
+            color = mix(color, sheet, ice);
+            alpha = mix(alpha, 1.0, ice);
+        }
     } else {
         // A vertical face of water is a fall or the step of a cascade: white and streaky,
         // the streaks running downward.
