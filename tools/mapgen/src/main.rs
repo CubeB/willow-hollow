@@ -238,7 +238,36 @@ fn render_relief(c: &Continent, view: View, px: u32, layer: Layer) -> RgbImage {
             }
         }
     }
+    draw_trails(c, view, scale, &mut img);
     img
+}
+
+/// Trails as thin dark lines, with a coloured dot per landmark.
+fn draw_trails(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
+    let cell = c.cell_size();
+    let px = img.width() as i32;
+    let to_px = |x: f32, z: f32| (((x / cell - view.x0) / scale) as i32, ((z / cell - view.z0) / scale) as i32);
+    let dot = |x: i32, z: i32, r: i32, color: [u8; 3], img: &mut RgbImage| {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let (qx, qz) = (x + dx, z + dz);
+                if qx >= 0 && qz >= 0 && qx < px && qz < px && dx * dx + dz * dz <= r * r {
+                    img.put_pixel(qx as u32, qz as u32, Rgb(color));
+                }
+            }
+        }
+    };
+    for line in &c.trails.lines {
+        for p in line {
+            let (x, z) = to_px(p.x, p.y);
+            dot(x, z, 0, [66, 44, 28], img);
+        }
+    }
+    for s in &c.trails.sites {
+        let (x, z) = to_px(s.x as f32, s.z as f32);
+        dot(x, z, 4, [20, 20, 20], img);
+        dot(x, z, 3, s.kind.map_color(), img);
+    }
 }
 
 /// Smallest discharge drawn as a stream.
@@ -302,6 +331,15 @@ fn print_poi(c: &Continent) {
         let z = c.desc.mz as f32 * MACRO_SIZE as f32 + ((i / c.size) as f32 + 0.5) * cell;
         format!("{x:.0},{z:.0}")
     };
+    let local = |x: i32, z: i32| (c.desc.mx * MACRO_SIZE + x, c.desc.mz * MACRO_SIZE + z);
+    for s in &c.trails.sites {
+        let (x, z) = local(s.x, s.z);
+        println!("  poi site       {x},{z}  {:?}, ground {}", s.kind, s.y);
+    }
+    for x in &c.trails.crossings {
+        let (wx, wz) = local(x.x, x.z);
+        println!("  poi crossing   {wx},{wz}  {:?}, span {}", x.kind, x.span);
+    }
     let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
     // Highest-scoring cells that are at least `spacing` cells apart.
     let top = |mut v: Vec<(f32, usize)>, count: usize, spacing: f32| -> Vec<(f32, usize)> {
@@ -426,8 +464,18 @@ fn main() -> Result<()> {
         o.seed, o.cell, desc.kind, desc.ruggedness, desc.temperature, desc.wetness
     );
     let t = Instant::now();
-    let c = continent::generate(desc, SimConfig { size: o.size });
+    let mut c = continent::generate(desc, SimConfig { size: o.size });
     println!("  simulated {0}x{0} in {1:.2} s", o.size, t.elapsed().as_secs_f32());
+    let t = Instant::now();
+    c.trails = worldgen::trails::build(&c, o.seed);
+    println!(
+        "  {} landmarks, {} trails, {} crossings, {} structures in {:.2} s",
+        c.trails.sites.len(),
+        c.trails.lines.len(),
+        c.trails.crossings.len(),
+        c.trails.stamp_count(),
+        t.elapsed().as_secs_f32()
+    );
     print_stats(&c);
     if o.poi {
         print_poi(&c);

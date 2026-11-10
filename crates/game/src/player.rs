@@ -28,12 +28,45 @@ const STEP: f64 = 1.0;
 const CLIMB_OUT: f64 = 2.0;
 const SKIN: f64 = 1e-4;
 
+/// Airspeed the glider settles at when flown level.
+const GLIDE_TRIM: f32 = 13.0;
+/// Sink rate at trim: with [`GLIDE_TRIM`] this is about 8 voxels forward per voxel down.
+const GLIDE_SINK: f32 = 1.6;
+/// How strongly diving gains speed and climbing loses it.
+const GLIDE_GRAVITY: f32 = 14.0;
+const GLIDE_DRAG: f32 = 0.55;
+const GLIDE_MIN_SPEED: f32 = 5.0;
+const GLIDE_MAX_SPEED: f32 = 34.0;
+/// Steepest the glider follows the view, down and up, in radians.
+const GLIDE_DIVE: f32 = 0.85;
+const GLIDE_CLIMB: f32 = 0.30;
+
+const BOAT_SPEED: f32 = 9.0;
+const BOAT_FAST: f32 = 22.0;
+/// From the middle of the hull to the bow, for running aground.
+const BOAT_REACH: f64 = 1.6;
+/// Sitting in a boat, the eye is this far above the water.
+const BOAT_EYE: f64 = 1.5;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Walk,
+    Glide,
+    Boat,
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct Controls {
     /// Desired horizontal direction in world space (y ignored), zero if standing still.
     pub wish: Vec3,
     pub jump: bool,
     pub sprint: bool,
+    /// Pressed this frame: open the glider if in the air, or fold it away.
+    pub deploy: bool,
+    /// Where the camera is looking; the glider follows it.
+    pub look: Vec3,
+    /// How fast the view is turning, radians per second.
+    pub turn: f32,
 }
 
 pub struct Player {
@@ -45,6 +78,14 @@ pub struct Player {
     /// How far the eye currently lags below its true height after stepping up, so
     /// steps read as a smooth rise rather than a jolt.
     step_lag: f32,
+    pub mode: Mode,
+    airspeed: f32,
+    /// How far the glider is leaning into a turn, radians.
+    pub bank: f32,
+    /// Direction a boat's bow points, radians.
+    pub heading: f32,
+    /// Advances while afloat, for the rocking of the boat.
+    swell: f32,
 }
 
 impl Player {
@@ -55,11 +96,127 @@ impl Player {
             on_ground: false,
             swimming: false,
             step_lag: 0.0,
+            mode: Mode::Walk,
+            airspeed: 0.0,
+            bank: 0.0,
+            heading: 0.0,
+            swell: 0.0,
         }
     }
 
     pub fn eye(&self) -> DVec3 {
+        if self.mode == Mode::Boat {
+            let rock = (self.swell * 1.1).sin() as f64 * 0.06;
+            return self.pos + DVec3::new(0.0, BOAT_EYE + rock, 0.0);
+        }
         self.pos + DVec3::new(0.0, EYE_HEIGHT - self.step_lag as f64, 0.0)
+    }
+
+    /// Steps aboard a boat floating at `pos`.
+    pub fn board(&mut self, pos: DVec3, heading: f32) {
+        self.mode = Mode::Boat;
+        self.pos = pos;
+        self.vel = Vec3::ZERO;
+        self.heading = heading;
+        self.on_ground = false;
+        self.swimming = false;
+    }
+
+    /// Steps out of the boat, onto dry land if any is within reach and otherwise into
+    /// the water. Returns where the boat was left, and its heading.
+    pub fn leave_boat(&mut self, v: &mut impl Voxels) -> (DVec3, f32) {
+        let boat = (self.pos, self.heading);
+        self.mode = Mode::Walk;
+        self.vel = Vec3::ZERO;
+        for radius in [1.5f64, 2.5, 3.5, 4.5] {
+            for k in 0..16 {
+                let a = k as f64 / 16.0 * std::f64::consts::TAU;
+                let spot = DVec3::new(self.pos.x + a.cos() * radius, 0.0, self.pos.z + a.sin() * radius);
+                let (x, z) = (spot.x.floor() as i32, spot.z.floor() as i32);
+                let base = self.pos.y.round() as i32;
+                for y in (base - 2..=base + 3).rev() {
+                    let clear = |dy: i32, v: &mut dyn FnMut(i32) -> Kind| v(dy) == Kind::Air;
+                    let mut kind = |dy: i32| v.kind(x, y + dy, z);
+                    if kind(-1) == Kind::Solid && clear(0, &mut kind) && clear(1, &mut kind) && clear(2, &mut kind) {
+                        self.pos = DVec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
+                        return boat;
+                    }
+                }
+            }
+        }
+        boat
+    }
+
+    /// Height of the water plane at a column, searching down from about `around`.
+    /// `None` if the first thing below is solid ground, or the water is out of reach.
+    fn water_plane(v: &mut impl Voxels, p: DVec3, around: f64) -> Option<f64> {
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let mut top = around.round() as i32;
+        // Starting inside a taller body of water, rise to its real surface first.
+        while v.kind(x, top, z) == Kind::Water && top < around.round() as i32 + 64 {
+            top += 1;
+        }
+        for y in (top - 30..=top).rev() {
+            match v.kind(x, y, z) {
+                Kind::Water => return Some(y as f64 + 1.0),
+                Kind::Solid => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn sail(&mut self, v: &mut impl Voxels, controls: Controls, dt: f32) {
+        self.swell += dt;
+        let wish = Vec3::new(controls.wish.x, 0.0, controls.wish.z).normalize_or_zero();
+        let speed = if controls.sprint { BOAT_FAST } else { BOAT_SPEED };
+        // A boat answers slowly and carries its way.
+        let blend = 1.0 - (-1.2 * dt).exp();
+        self.vel.x += (wish.x * speed - self.vel.x) * blend;
+        self.vel.z += (wish.z * speed - self.vel.z) * blend;
+        self.vel.y = 0.0;
+        if self.vel.length_squared() > 0.09 {
+            let want = self.vel.z.atan2(self.vel.x);
+            let turn = (want - self.heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            self.heading += turn * (1.0 - (-2.5 * dt).exp());
+        }
+        // One axis at a time, so a boat slides along a shore instead of stopping dead.
+        let plane = self.pos.y;
+        for axis in [0usize, 2] {
+            let delta = (self.vel[axis] * dt) as f64;
+            if delta == 0.0 {
+                continue;
+            }
+            let mut next = self.pos;
+            next[axis] += delta;
+            let mut bow = next;
+            bow[axis] += delta.signum() * BOAT_REACH;
+            // Water can be followed down any drop, but only up a low step.
+            if Self::water_plane(v, bow, plane).is_some_and(|w| w <= plane + 1.01) {
+                self.pos = next;
+            } else {
+                self.vel[axis] = 0.0;
+            }
+        }
+        if let Some(w) = Self::water_plane(v, self.pos, plane) {
+            self.pos.y += (w - self.pos.y) * (1.0 - ((-6.0 * dt) as f64).exp());
+        }
+    }
+
+    /// Glider flight: a calm exchange of height for speed. Looking down dives and gains
+    /// speed; looking up spends it. Lift only ever comes out of speed, so however it is
+    /// flown the glider comes down in the end.
+    fn glide(&mut self, controls: Controls, dt: f32) {
+        let look = controls.look.normalize_or_zero();
+        let pitch = look.y.asin().clamp(-GLIDE_DIVE, GLIDE_CLIMB);
+        let heading = Vec3::new(look.x, 0.0, look.z).normalize_or_zero();
+        let accel = -GLIDE_GRAVITY * pitch.sin() - (self.airspeed - GLIDE_TRIM) * GLIDE_DRAG;
+        self.airspeed = (self.airspeed + accel * dt).clamp(GLIDE_MIN_SPEED, GLIDE_MAX_SPEED);
+        // Below trim the wing starts to lose its grip and sink rate climbs quickly.
+        let slow = ((GLIDE_TRIM - self.airspeed) / 3.0).max(0.0);
+        let sink = GLIDE_SINK + slow * slow;
+        let target = (heading * pitch.cos() + Vec3::Y * pitch.sin()) * self.airspeed - Vec3::Y * sink;
+        self.vel += (target - self.vel) * (1.0 - (-3.0 * dt).exp());
     }
 
     fn blocked(pos: DVec3, v: &mut impl Voxels) -> bool {
@@ -137,11 +294,31 @@ impl Player {
     }
 
     pub fn update(&mut self, v: &mut impl Voxels, controls: Controls, dt: f32) {
+        if self.mode == Mode::Boat {
+            self.sail(v, controls, dt);
+            return;
+        }
         // Chest-deep in water means swimming.
         let chest = (self.pos + DVec3::new(0.0, 1.2, 0.0)).floor().as_ivec3();
         self.swimming = v.kind(chest.x, chest.y, chest.z) == Kind::Water;
         let head = (self.pos + DVec3::new(0.0, EYE_HEIGHT, 0.0)).floor().as_ivec3();
         let head_under = v.kind(head.x, head.y, head.z) == Kind::Water;
+
+        if controls.deploy {
+            if self.mode == Mode::Glide {
+                self.mode = Mode::Walk;
+            } else if !self.on_ground && !self.swimming {
+                self.mode = Mode::Glide;
+                self.airspeed = Vec3::new(self.vel.x, 0.0, self.vel.z).length().max(9.0);
+            }
+        }
+        if self.swimming {
+            self.mode = Mode::Walk;
+        }
+        let gliding = self.mode == Mode::Glide;
+        // Lean into turns; the camera rolls with it.
+        let lean = if gliding { (controls.turn * 0.35).clamp(-0.5, 0.5) } else { 0.0 };
+        self.bank += (lean - self.bank) * (1.0 - (-4.0 * dt).exp());
 
         let wish = Vec3::new(controls.wish.x, 0.0, controls.wish.z).normalize_or_zero();
         let speed = if self.swimming {
@@ -160,10 +337,14 @@ impl Player {
             3.0
         };
         let blend = 1.0 - (-response * dt).exp();
-        self.vel.x += (wish.x * speed - self.vel.x) * blend;
-        self.vel.z += (wish.z * speed - self.vel.z) * blend;
+        if !gliding {
+            self.vel.x += (wish.x * speed - self.vel.x) * blend;
+            self.vel.z += (wish.z * speed - self.vel.z) * blend;
+        }
 
-        if self.swimming {
+        if gliding {
+            self.glide(controls, dt);
+        } else if self.swimming {
             // Float with the head just clear of the surface; Space swims upward.
             let target = if controls.jump {
                 3.6
@@ -194,6 +375,9 @@ impl Player {
             } else if part.y != 0.0 {
                 self.on_ground = false;
             }
+        }
+        if self.on_ground && self.mode == Mode::Glide {
+            self.mode = Mode::Walk;
         }
         self.step_lag *= (-12.0 * dt).exp();
     }
@@ -381,12 +565,153 @@ mod tests {
             wish: Vec3::new(1.0, 0.0, 0.3),
             jump: true,
             sprint: true,
+            ..Default::default()
         };
         for _ in 0..(8.0 * 60.0) as u32 {
             p.update(&mut world, c, 1.0 / 60.0);
             assert!(!Player::blocked(p.pos, &mut world), "inside solid at {:?}", p.pos);
         }
         assert!(p.pos.x > 30.0 && p.pos.x < 40.0);
+    }
+
+    fn open_air(_: i32, _: i32, _: i32) -> Kind {
+        Kind::Air
+    }
+
+    fn gliding_at(look: Vec3, height: f64) -> (Player, Controls) {
+        let mut p = Player::new(DVec3::new(0.5, height, 0.5));
+        let mut world = Fake(open_air);
+        p.update(&mut world, Controls::default(), 1.0 / 120.0);
+        let open = Controls {
+            deploy: true,
+            look,
+            ..Default::default()
+        };
+        p.update(&mut world, open, 1.0 / 120.0);
+        assert_eq!(p.mode, Mode::Glide);
+        let flying = Controls { look, ..Default::default() };
+        (p, flying)
+    }
+
+    #[test]
+    fn the_glider_opens_only_in_the_air() {
+        let mut world = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Air });
+        let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut p, &mut world, Controls::default(), 0.5);
+        assert!(p.on_ground);
+        let open = Controls {
+            deploy: true,
+            look: Vec3::X,
+            ..Default::default()
+        };
+        p.update(&mut world, open, 1.0 / 120.0);
+        assert_eq!(p.mode, Mode::Walk, "opened standing on the ground");
+    }
+
+    #[test]
+    fn gliding_trades_height_for_distance() {
+        let mut world = Fake(open_air);
+        let (mut p, flying) = gliding_at(Vec3::X, 1000.0);
+        run(&mut p, &mut world, flying, 30.0);
+        let (run_x, drop) = (p.pos.x, 1000.0 - p.pos.y);
+        let ratio = run_x / drop;
+        println!("glide ratio {ratio:.1}, sink {:.2}", drop / 30.0);
+        assert!((6.0..12.0).contains(&ratio), "glide ratio {ratio}");
+    }
+
+    #[test]
+    fn no_way_of_flying_gains_height_for_long() {
+        let mut world = Fake(open_air);
+        for pitch in [-0.8f32, -0.3, 0.0, 0.1, 0.2, 0.3, 0.6, 1.2] {
+            let look = Vec3::new(pitch.cos(), pitch.sin(), 0.0);
+            let (mut p, flying) = gliding_at(look, 1000.0);
+            // Let the starting speed bleed off, then watch height.
+            run(&mut p, &mut world, flying, 20.0);
+            let before = p.pos.y;
+            run(&mut p, &mut world, flying, 20.0);
+            assert!(p.pos.y < before - 1.0, "pitch {pitch}: climbed from {before} to {}", p.pos.y);
+        }
+    }
+
+    #[test]
+    fn the_glider_lands_and_folds_away() {
+        let mut world = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Air });
+        let mut p = Player::new(DVec3::new(0.5, 40.0, 0.5));
+        p.update(&mut world, Controls::default(), 1.0 / 120.0);
+        let flying = Controls { look: Vec3::X, ..Default::default() };
+        p.update(&mut world, Controls { deploy: true, ..flying }, 1.0 / 120.0);
+        assert_eq!(p.mode, Mode::Glide);
+        run(&mut p, &mut world, flying, 60.0);
+        assert_eq!(p.mode, Mode::Walk);
+        assert!(p.on_ground);
+    }
+
+    /// Open water with a plane at y = 10, solid from x = 40 on, with a deck across it.
+    fn harbour(x: i32, y: i32, _z: i32) -> Kind {
+        if x >= 40 || y < 3 || ((20..=24).contains(&x) && y == 11) {
+            Kind::Solid
+        } else if y < 10 {
+            Kind::Water
+        } else {
+            Kind::Air
+        }
+    }
+
+    #[test]
+    fn a_boat_floats_sails_under_bridges_and_runs_aground() {
+        let mut world = Fake(harbour);
+        let mut p = Player::new(DVec3::ZERO);
+        p.board(DVec3::new(0.5, 10.0, 0.5), 0.0);
+        run(&mut p, &mut world, forward(), 20.0);
+        assert!((p.pos.y - 10.0).abs() < 0.2, "riding at {}", p.pos.y);
+        assert!(p.pos.x > 30.0, "only reached {}", p.pos.x);
+        assert!(p.pos.x < 40.0 - BOAT_REACH + 0.1, "sailed into the land at {}", p.pos.x);
+    }
+
+    #[test]
+    fn a_boat_follows_a_river_down_a_step_but_not_up_a_cliff() {
+        // Upper pool (plane 12) for x < 20, lower pool (plane 10) after, a wall at x = 40.
+        let world_fn = |x: i32, y: i32, _: i32| {
+            let plane = if x < 20 { 12 } else { 10 };
+            if x >= 40 || y < 3 {
+                Kind::Solid
+            } else if y < plane {
+                Kind::Water
+            } else {
+                Kind::Air
+            }
+        };
+        let mut world = Fake(world_fn);
+        let mut p = Player::new(DVec3::ZERO);
+        p.board(DVec3::new(0.5, 12.0, 0.5), 0.0);
+        run(&mut p, &mut world, forward(), 12.0);
+        assert!(p.pos.x > 22.0, "stuck above the step at {}", p.pos.x);
+        assert!((p.pos.y - 10.0).abs() < 0.3, "riding at {}", p.pos.y);
+        let back = Controls { wish: -Vec3::X, ..Default::default() };
+        run(&mut p, &mut world, back, 12.0);
+        assert!(p.pos.x > 18.0, "went up a two-voxel step to {}", p.pos.x);
+    }
+
+    #[test]
+    fn stepping_out_of_a_boat_finds_the_shore() {
+        let mut world = Fake(|x, y, _| {
+            if x >= 3 {
+                if y < 10 { Kind::Solid } else { Kind::Air }
+            } else if y < 3 {
+                Kind::Solid
+            } else if y < 10 {
+                Kind::Water
+            } else {
+                Kind::Air
+            }
+        });
+        let mut p = Player::new(DVec3::ZERO);
+        p.board(DVec3::new(0.5, 10.0, 0.5), 0.0);
+        let (left, _) = p.leave_boat(&mut world);
+        assert_eq!(p.mode, Mode::Walk);
+        assert!((left.x - 0.5).abs() < 1e-6);
+        assert!(p.pos.x >= 3.0, "not ashore: {:?}", p.pos);
+        assert!(!Player::blocked(p.pos, &mut world));
     }
 
     #[test]

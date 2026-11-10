@@ -7,6 +7,7 @@ mod particles;
 mod player;
 mod render;
 mod terrain;
+mod vehicles;
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 
@@ -27,9 +28,10 @@ use farview::FarView;
 use gfx::{Gpu, WindowSurface};
 use overlay::Overlay;
 use particles::{Particles, Surroundings};
-use player::{Controls, Player, WorldVoxels};
+use player::{Controls, Mode, Player, WorldVoxels};
 use render::Renderer;
 use terrain::Streamer;
+use vehicles::Fleet;
 
 struct Options {
     seed: u32,
@@ -168,6 +170,9 @@ fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
     Camera::new(pos, spawn.yaw, -4.0)
 }
 
+/// How close a boat must be to climb aboard.
+const BOARD_REACH: f64 = 6.0;
+
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
 
@@ -234,6 +239,12 @@ struct Running {
     biome: worldgen::biome::Biome,
     day_minutes: f32,
     was_swimming: bool,
+    fleet: Fleet,
+    /// Solid models to draw this frame.
+    props: Vec<particles::ParticleInstance>,
+    /// Glider key pressed since the last frame.
+    deploy: bool,
+    last_yaw: f32,
     world: Arc<GameWorld>,
     camera: Camera,
     /// On foot, or flying free of collision.
@@ -298,6 +309,10 @@ impl Running {
             biome: worldgen::biome::Biome::Grassland,
             day_minutes: opts.day_minutes,
             was_swimming: false,
+            fleet: Fleet::new(world.clone()),
+            props: Vec::new(),
+            deploy: false,
+            last_yaw: 0.0,
             world,
             fly: FlyController { speed: 20.0 },
             keys: HashSet::new(),
@@ -382,6 +397,21 @@ impl Running {
         }
     }
 
+    /// Boards the nearest boat, or goes ashore from the one being sailed.
+    fn interact(&mut self) {
+        if !self.walking {
+            return;
+        }
+        if self.player.mode == Mode::Boat {
+            let (pos, heading) = self.player.leave_boat(&mut self.voxels);
+            self.fleet.leave(pos, heading);
+            self.camera.pos = self.player.eye();
+        } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
+            let boat = self.fleet.take(i);
+            self.player.board(boat.pos, boat.heading);
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.surface.resize(&self.gpu, width, height);
         self.renderer.resize(&self.gpu, width, height);
@@ -404,18 +434,27 @@ impl Running {
             let axis = |pos: KeyCode, neg: KeyCode| {
                 self.keys.contains(&pos) as i32 as f32 - self.keys.contains(&neg) as i32 as f32
             };
+            let pi = std::f32::consts::PI;
+            let turned = (self.camera.yaw - self.last_yaw + pi).rem_euclid(pi * 2.0) - pi;
+            self.last_yaw = self.camera.yaw;
             let controls = Controls {
                 wish: fwd * axis(KeyCode::KeyW, KeyCode::KeyS)
                     + right * axis(KeyCode::KeyD, KeyCode::KeyA),
                 jump: self.keys.contains(&KeyCode::Space),
                 sprint: self.keys.contains(&KeyCode::ShiftLeft),
+                deploy: std::mem::take(&mut self.deploy),
+                look: self.camera.forward(),
+                turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
             self.player.update(&mut self.voxels, controls, dt);
             self.voxels.trim(self.player.pos);
             self.camera.pos = self.player.eye();
+            self.camera.roll = self.player.bank;
         } else {
+            self.camera.roll = 0.0;
             self.fly.update(&mut self.camera, &self.keys, dt);
         }
+        self.fleet.update(self.player.pos, dt);
         self.streamer.update(&self.gpu, self.camera.pos, 6);
         self.far.update(&self.gpu, self.camera.pos);
 
@@ -446,6 +485,19 @@ impl Running {
         };
         self.particles.update(dt, &surroundings, &mut self.voxels);
 
+        let clock = self.last_frame.duration_since(self.start).as_secs_f32();
+        self.props.clear();
+        for boat in self.fleet.boats() {
+            vehicles::draw_boat(boat.pos, boat.heading, clock, self.camera.pos, &mut self.props);
+        }
+        if self.walking {
+            match self.player.mode {
+                Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
+                Mode::Glide => vehicles::draw_glider(self.player.pos, self.camera.yaw, self.camera.pos, &mut self.props),
+                Mode::Walk => {}
+            }
+        }
+
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
@@ -457,6 +509,7 @@ impl Running {
             terrain: &self.streamer,
             far: &self.far,
             particles: self.particles.instances(),
+            props: &self.props,
             wind: self.particles.wind.lagged,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
@@ -467,11 +520,19 @@ impl Running {
         let gpu_name = &self.gpu.adapter_name;
         let (s, d) = (self.streamer.stats, self.renderer.stats);
         let (particle_count, biome) = (self.particles.len(), self.biome);
-        let mode = match (self.walking, self.player.swimming, self.player.on_ground) {
+        let mode = match (self.walking, self.player.mode, self.player.swimming, self.player.on_ground) {
             (false, ..) => "flying",
-            (true, true, _) => "swimming",
-            (true, false, true) => "walking",
-            (true, false, false) => "in the air",
+            (true, Mode::Boat, ..) => "sailing",
+            (true, Mode::Glide, ..) => "gliding",
+            (true, Mode::Walk, true, _) => "swimming",
+            (true, Mode::Walk, false, true) => "walking",
+            (true, Mode::Walk, false, false) => "in the air",
+        };
+        let prompt = match self.player.mode {
+            _ if !self.walking => None,
+            Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail"),
+            Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat"),
+            _ => None,
         };
         let mut time = self.env.time;
         let mut radius = self.streamer.radius();
@@ -483,6 +544,13 @@ impl Running {
                         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
                         .show(ctx, |ui| {
                             ui.label(egui::RichText::new("Click the view (or press Tab) to look around").size(18.0));
+                        });
+                }
+                if let Some(text) = prompt {
+                    egui::Area::new(egui::Id::unique("prompt"))
+                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -80.0])
+                        .show(ctx, |ui| {
+                            ui.label(egui::RichText::new(text).size(18.0).color(egui::Color32::from_gray(235)));
                         });
                 }
                 if !show_debug {
@@ -522,6 +590,7 @@ impl Running {
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Click or Tab to look, Esc to free the mouse. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel");
+                        ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
                     });
             });
         if time != self.env.time {
@@ -593,7 +662,13 @@ impl ApplicationHandler for App {
                             r.show_debug = !r.show_debug;
                         } else if code == KeyCode::KeyF && !event.repeat {
                             r.toggle_flying();
+                        } else if code == KeyCode::KeyE && !event.repeat {
+                            r.interact();
                         } else if r.grabbed {
+                            // A fresh press of Space in mid-air opens the glider.
+                            if !event.repeat && matches!(code, KeyCode::KeyG | KeyCode::Space) {
+                                r.deploy = true;
+                            }
                             r.keys.insert(code);
                         }
                     } else {
@@ -661,6 +736,12 @@ fn main() -> Result<()> {
         let mut voxels = WorldVoxels::new(world.clone());
         let (biome, leaves, flowers) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, 150.0).copied().collect();
+        let mut fleet = Fleet::new(world.clone());
+        fleet.refresh(camera.pos);
+        let mut props = Vec::new();
+        for boat in fleet.boats() {
+            vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
+        }
         let mut particles = Particles::new();
         for step in 0..480 {
             let surroundings = Surroundings {
@@ -684,6 +765,7 @@ fn main() -> Result<()> {
             &mut streamer,
             &mut far,
             particles.instances(),
+            &props,
             particles.wind.lagged,
         )?;
         let s = streamer.stats;

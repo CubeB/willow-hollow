@@ -7,6 +7,7 @@ pub mod macro_layout;
 pub mod materials;
 pub mod noise;
 pub mod surface;
+pub mod trails;
 pub mod world;
 
 use glam::Vec3;

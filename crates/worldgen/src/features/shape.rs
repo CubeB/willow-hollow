@@ -148,6 +148,13 @@ impl Shape {
         self.voxels.retain(|_, v| *v != voxel::AIR);
     }
 
+    /// Every voxel including air, sorted, for models that carve their own interiors.
+    pub fn into_voxels(self) -> Vec<(IVec3, Voxel)> {
+        let mut voxels: Vec<(IVec3, Voxel)> = self.voxels.into_iter().collect();
+        voxels.sort_unstable_by_key(|(p, _)| (p.y, p.x, p.z));
+        voxels
+    }
+
     /// Finishes the model: voxels sorted for deterministic stamping, with bounds.
     pub fn build(mut self) -> Template {
         self.drop_air();

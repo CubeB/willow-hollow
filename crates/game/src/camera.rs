@@ -11,6 +11,8 @@ pub struct Camera {
     pub yaw: f32,
     /// Radians, positive looks up.
     pub pitch: f32,
+    /// Radians, positive leans to the right. Only the glider uses it.
+    pub roll: f32,
     pub fov_y: f32,
     pub near: f32,
 }
@@ -21,6 +23,7 @@ impl Camera {
             pos,
             yaw: yaw_deg.to_radians(),
             pitch: pitch_deg.to_radians(),
+            roll: 0.0,
             fov_y: 70f32.to_radians(),
             near: 0.1,
         }
@@ -33,7 +36,13 @@ impl Camera {
     }
 
     pub fn right(&self) -> Vec3 {
-        self.forward().cross(Vec3::Y).normalize()
+        let f = self.forward();
+        let level = f.cross(Vec3::Y).normalize();
+        if self.roll == 0.0 {
+            return level;
+        }
+        let up = level.cross(f);
+        level * self.roll.cos() - up * self.roll.sin()
     }
 
     /// View-projection with the camera at the origin (rotation only), reverse-Z with an
@@ -41,7 +50,7 @@ impl Camera {
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         // Written out by hand: right-handed, view space looks down -Z, NDC depth in [0, 1].
         let f = self.forward();
-        let s = f.cross(Vec3::Y).normalize();
+        let s = self.right();
         let u = s.cross(f);
         let view = Mat4::from_cols(
             Vec4::new(s.x, u.x, -f.x, 0.0),

@@ -6,6 +6,7 @@
 //! work out which features overlap it by looking at the cells around it, so a tree
 //! spanning many chunks is stamped identically by each of them.
 
+pub mod landmarks;
 pub mod shape;
 pub mod trees;
 
@@ -255,6 +256,15 @@ pub fn place(
 
 /// Decides whether a feature grows at a column and which, or None.
 fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: i32, z: i32, seed: u32) -> Option<Species> {
+    // Trails and landmarks keep their surroundings clear; big trunks need more room.
+    let room = match layer.salt {
+        s if s == GIANTS.salt => 8.0,
+        s if s == TREES.salt => 3.5,
+        _ => 1.5,
+    };
+    if col.clear < room {
+        return None;
+    }
     let fl = flora(col.biome);
     // Forests thin out and open into clearings on a slow noise, so they are not
     // uniform carpets.

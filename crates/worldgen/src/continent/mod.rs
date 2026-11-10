@@ -57,6 +57,9 @@ pub struct Continent {
     pub temperature: Vec<f32>,
     /// [`Biome`] as u8.
     pub biome: Vec<u8>,
+    /// Trails and landmarks. Filled in after simulation, since building them needs the
+    /// finished voxel surface; empty for a continent fresh from [`generate`].
+    pub trails: crate::trails::Network,
 }
 
 impl Continent {
@@ -334,6 +337,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         rain,
         temperature,
         biome,
+        trails: Default::default(),
     }
 }
 
@@ -360,6 +364,7 @@ fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
         rain: vec![desc.wetness; n],
         temperature: vec![desc.temperature; n],
         biome: vec![Biome::Ocean as u8; n],
+        trails: Default::default(),
     }
 }
 

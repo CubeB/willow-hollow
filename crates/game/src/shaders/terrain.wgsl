@@ -30,6 +30,7 @@ fn face_normal(face: u32) -> vec3<f32> {
 
 const FLAG_WATER: u32 = 1u;
 const FLAG_FOLIAGE: u32 = 8u;
+const FLAG_EMISSIVE: u32 = 16u;
 const NEAR: f32 = 0.1;
 
 @vertex
@@ -81,7 +82,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
     let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(0.7, 1.0, in.ao);
-    let light = direct + ambient(n) * ao;
+    var light = direct + ambient(n) * ao;
+    if ((in.flags & FLAG_EMISSIVE) != 0u) {
+        // Lanterns and embers: faint by day, bright enough to bloom after dark.
+        light += vec3<f32>(mix(9.0, 1.2, G.sun_color.w));
+    }
     let color = apply_fog(base * light, in.rel);
     return vec4<f32>(color, 1.0);
 }

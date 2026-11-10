@@ -20,6 +20,10 @@ No textures. Form comes from the shapes of things, sunlight and shadow, mist and
 
 **Living detail.** Fourteen procedural tree species — oak, birch, maple, cherry, spruce, willow, acacia, baobab, palm, jungle trees, and towering redwood, kapok and elder-oak giants — placed by biome in groves and clearings, with willows along the banks and palms on warm beaches. Bushes, ferns, boulders, fallen logs, flower and heather drifts. A wandering wind that stirs the leaves and carries waterfall spray, falling leaves, pollen, butterflies, fireflies at dusk and the odd flock of birds.
 
+**Trails and landmarks.** Every landmass is walked by a network of paths joining shrines, lookout towers you can climb, camps, ruins, standing stones, cairns on the passes, stone arches, huts and boat landings. Sites are read off the land (lookouts on hills, shrines at springs and lake shores, cairns on saddles) and built from local materials, so a desert shrine is sandstone and a redwood-forest one is mossy rock and red timber. Paths cross brooks on stepping stones, streams on log and plank bridges, and rivers on arched stone bridges, with lanterns that come on at dusk.
+
+**Ways to travel.** Open a glider in mid-air and ride it down off a tower or a ridge. Each landing has a boat moored at it: sail the rivers, or set out across the strait for the next landmass.
+
 | | |
 |---|---|
 | ![Dawn mist in a valley](docs/images/dawn_mist.png) | ![Forest floor in dappled shade](docs/images/forest.png) |
@@ -48,6 +52,8 @@ cargo run --release -p game -- --help     # all options
 | W A S D | move |
 | Space | jump, swim up |
 | Shift | sprint |
+| G, or Space in mid-air | open or fold the glider; look down to dive, up to slow |
+| E | board a boat at a landing, or go ashore (W sails, Shift for full sail) |
 | F | toggle flying (Space / Ctrl up and down, wheel sets speed) |
 | F3 | hide the debug panel |
 
@@ -58,7 +64,8 @@ The first launch simulates the starting continent (about three seconds) before t
 ### Looking at the world without playing
 
 ```sh
-# Relief, biome and rainfall maps of a cell, plus coordinates of falls, lakes, confluences and biomes
+# Relief, biome and rainfall maps of a cell with its trails, plus coordinates of landmarks,
+# crossings, falls, lakes, confluences and biomes
 cargo run --release -p mapgen -- --seed 1 --poi
 
 # A still from any viewpoint, rendered headless
@@ -69,7 +76,8 @@ cargo run --release -p game -- --screenshot shot.png --over 22262,18550,14 --loo
 
 ```
 crates/worldgen   pure CPU: macro layout, continent simulation, climate, biomes,
-                  the voxel-resolution surface (rivers, lakes, materials), features
+                  the voxel-resolution surface (rivers, lakes, materials), features,
+                  trails and landmarks
 crates/voxel      chunk storage and the greedy mesher with baked ambient occlusion
 crates/game       wgpu renderer, chunk streaming, far view, player, particles
 tools/mapgen      renders a continent's simulation to PNG maps
@@ -86,11 +94,11 @@ Worldgen is deterministic from the seed and covered by tests: drainage reaches t
 
 ## Influences
 
-Cube World for the scale and feel; Veloren's erosion-based world generation; and a set of Minecraft mods whose methods shaped particular pieces — Geophilic and Blooming Biosphere (ground detail, flower drifts, biome palettes), Wilder Wild (wind, fallen trees), Particular and Subtle Effects (cascade spray, fireflies, falling leaves), RoadWeaver (the planned trail network).
+Cube World for the scale and feel; Veloren's erosion-based world generation; and a set of Minecraft mods whose methods shaped particular pieces — Geophilic and Blooming Biosphere (ground detail, flower drifts, biome palettes), Wilder Wild (wind, fallen trees), Particular and Subtle Effects (cascade spray, fireflies, falling leaves), RoadWeaver (the trail network).
 
 ## Roadmap
 
-Tracked as issues. In short: trails and landmarks with bridges and lanterns, a glider and a boat to reach the next continent, ambient sound, more biomes and continent archetypes, tree impostors in the far view, and a performance pass.
+Tracked as issues. In short: ambient sound, more biomes and continent archetypes, settings and saved state, tree impostors in the far view, and a performance pass.
 
 ## Logo
 

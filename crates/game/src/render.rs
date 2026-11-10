@@ -65,6 +65,9 @@ struct Instance {
     origin: [i32; 3],
 }
 
+/// Most cubes of solid moving models drawn in one frame.
+const PROP_CAPACITY: usize = 1024;
+
 /// Everything one frame draws.
 pub struct Scene<'a> {
     pub camera: &'a Camera,
@@ -72,6 +75,8 @@ pub struct Scene<'a> {
     pub terrain: &'a Streamer,
     pub far: &'a FarView,
     pub particles: &'a [ParticleInstance],
+    /// Solid moving models (boats, the glider), drawn with the opaque scene.
+    pub props: &'a [ParticleInstance],
     pub wind: Vec3,
 }
 
@@ -134,6 +139,8 @@ pub struct Renderer {
     blur_v: wgpu::RenderPipeline,
     tonemap: wgpu::RenderPipeline,
     particles: wgpu::RenderPipeline,
+    props: wgpu::RenderPipeline,
+    prop_instances: wgpu::Buffer,
     cube: wgpu::Buffer,
     particle_instances: wgpu::Buffer,
     particle_capacity: usize,
@@ -621,6 +628,47 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let props = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("props"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &particle_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &cube_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<ParticleInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &particle_attrs,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let prop_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("prop instances"),
+            size: (PROP_CAPACITY * size_of::<ParticleInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let particle_capacity = 8192;
         let particle_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particle instances"),
@@ -719,6 +767,8 @@ impl Renderer {
             blur_v,
             tonemap,
             particles,
+            props,
+            prop_instances,
             cube,
             particle_instances,
             particle_capacity,
@@ -1003,6 +1053,10 @@ impl Renderer {
         }
 
         // --- Opaque scene --------------------------------------------------------
+        let prop_count = scene.props.len().min(PROP_CAPACITY);
+        if prop_count > 0 {
+            gpu.queue.write_buffer(&self.prop_instances, 0, bytemuck::cast_slice(&scene.props[..prop_count]));
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -1057,6 +1111,13 @@ impl Renderer {
             for (mesh, index) in &opaque {
                 pass.set_vertex_buffer(0, mesh.buffer.slice(..));
                 pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
+            }
+
+            if prop_count > 0 {
+                pass.set_pipeline(&self.props);
+                pass.set_vertex_buffer(0, self.cube.slice(..));
+                pass.set_vertex_buffer(1, self.prop_instances.slice(..));
+                pass.draw(0..36, 0..prop_count as u32);
             }
         }
 
@@ -1174,6 +1235,7 @@ pub fn screenshot(
     streamer: &mut Streamer,
     far: &mut FarView,
     particles: &[ParticleInstance],
+    props: &[ParticleInstance],
     wind: Vec3,
 ) -> anyhow::Result<()> {
     let (width, height) = size;
@@ -1213,6 +1275,7 @@ pub fn screenshot(
         terrain: streamer,
         far,
         particles,
+        props,
         wind,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);

@@ -14,6 +14,7 @@ use crate::{
     continent::{Continent, NO_LAKE},
     macro_layout::MACRO_SIZE,
     noise::{fbm2, hash2, perlin2, unit},
+    trails::{Pad, TrailPoint},
 };
 
 /// Smallest discharge that forms a visible stream.
@@ -22,6 +23,8 @@ pub const MIN_RIVER_Q: f32 = 24.0;
 const SEGS: usize = 6;
 /// Narrowest channel half-width, so the thinnest brooks are still unbroken water.
 const MIN_HALF_WIDTH: f32 = 0.75;
+/// Taken from the distance to a trail's centreline to give the distance to its edge.
+const TRAIL_CLEARANCE: f32 = 1.5;
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -38,6 +41,8 @@ pub enum Cover {
     LakeBed,
     Beach,
     SeaFloor,
+    /// A trodden path.
+    Trail,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +59,9 @@ pub struct Column {
     /// Distance to the edge of the nearest river channel (negative inside it), or
     /// `f32::MAX` with no river nearby.
     pub river: f32,
+    /// Distance to the edge of the nearest trail or landmark, or `f32::MAX` with none
+    /// nearby. Nothing grows where this is small.
+    pub clear: f32,
 }
 
 impl Column {
@@ -182,6 +190,8 @@ pub struct Sampler<'a> {
     c: &'a Continent,
     world_seed: u32,
     pieces: Vec<Piece>,
+    trail_points: Vec<TrailPoint>,
+    pads: Vec<Pad>,
 }
 
 impl<'a> Sampler<'a> {
@@ -208,10 +218,13 @@ impl<'a> Sampler<'a> {
             vec2((lx0 + span) as f32, (lz0 + span) as f32),
         );
         pieces.retain(|p| p.lo.x <= hi.x && p.hi.x >= lo.x && p.lo.y <= hi.y && p.hi.y >= lo.y);
+        let (trail_points, pads) = c.trails.gather(lo, hi);
         Self {
             c,
             world_seed,
             pieces,
+            trail_points,
+            pads,
         }
     }
 
@@ -318,6 +331,8 @@ impl<'a> Sampler<'a> {
             cover = Cover::Beach;
         }
 
+        let clear = self.apply_trails(p, lx, lz, &mut ground, &mut cover, river, water, lake_level, near_sea);
+
         // Biome from the nearest cell, with the lookup position wobbled so borders
         // interlock and dither instead of following the grid.
         let wobble = |s: u32| {
@@ -333,7 +348,90 @@ impl<'a> Sampler<'a> {
             biome: Biome::from_u8(c.biome[bz * c.size + bx]),
             temperature: bilinear(&c.temperature),
             river,
+            clear,
         }
+    }
+
+    /// Levels the ground under landmarks and along trails. Returns the distance to the
+    /// nearest such thing.
+    ///
+    /// Water is never disturbed: only dry columns change, the ground right beside a
+    /// channel is left exactly as the river made it, and nothing can sink below a
+    /// neighbouring water surface. That keeps water contained by construction.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_trails(
+        &self,
+        p: Vec2,
+        lx: i32,
+        lz: i32,
+        ground: &mut f32,
+        cover: &mut Cover,
+        river: f32,
+        water: Option<i32>,
+        lake_level: Option<i32>,
+        near_sea: bool,
+    ) -> f32 {
+        if self.trail_points.is_empty() && self.pads.is_empty() {
+            return f32::MAX;
+        }
+        let top = ground.floor() as i32;
+        let dry = water.is_none_or(|k| top >= k - 1);
+        let guard = if river == f32::MAX { 1.0 } else { smoothstep(2.0, 6.0, river) };
+        let mut clear = f32::MAX;
+
+        // Trail points lie one voxel apart, so the nearest point is close enough to the
+        // nearest point on the curve.
+        let mut any = f32::MAX;
+        let mut paved: Option<(f32, &TrailPoint)> = None;
+        for t in &self.trail_points {
+            let d2 = (t.x - p.x).powi(2) + (t.z - p.y).powi(2);
+            any = any.min(d2);
+            if t.half_width > 0.0 && paved.is_none_or(|b| d2 < b.0) {
+                paved = Some((d2, t));
+            }
+        }
+        if any != f32::MAX {
+            clear = clear.min(any.sqrt() - TRAIL_CLEARANCE);
+        }
+
+        if let Some((d2, t)) = paved
+            && dry
+        {
+            let d = d2.sqrt();
+            let rise = (t.y - *ground).abs();
+            let shoulder = (rise * 1.3).clamp(2.0, 8.0);
+            if d < t.half_width + shoulder {
+                let w = (1.0 - smoothstep(t.half_width, t.half_width + shoulder, d)) * guard;
+                *ground += (t.y - *ground) * w;
+                let ragged = (unit(hash2(self.world_seed ^ 0x7a11, lx, lz)) - 0.5) * 0.9;
+                if d < t.half_width + ragged && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Beach | Cover::Bank) {
+                    *cover = Cover::Trail;
+                }
+            }
+        }
+
+        // Landmarks last, so a trail passing through one cannot tilt its level ground.
+        for pad in &self.pads {
+            let d = (p - vec2(pad.x, pad.z)).length() - pad.radius;
+            clear = clear.min(d);
+            if dry && d < 6.0 {
+                let w = (1.0 - smoothstep(0.0, 6.0, d)) * guard;
+                *ground += (pad.y - *ground) * w;
+            }
+        }
+
+        if dry {
+            // Whatever was done above, dry ground stays dry and keeps holding its water in.
+            if let Some(k) = lake_level
+                && top >= k - 1
+            {
+                *ground = ground.max(k as f32 - 0.5);
+            }
+            if near_sea && top >= 0 {
+                *ground = ground.max(0.5);
+            }
+        }
+        clear
     }
 }
 

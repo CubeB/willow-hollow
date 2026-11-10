@@ -5,7 +5,8 @@ use voxel::{Kind, Material, Materials, Voxel};
 use crate::biome::Biome;
 
 macro_rules! palette {
-    ($( $name:ident = ($r:expr, $g:expr, $b:expr), $kind:ident, $jitter:expr; )*) => {
+    (@glow) => { true };
+    ($( $name:ident = ($r:expr, $g:expr, $b:expr), $kind:ident, $jitter:expr $(, $glow:ident)?; )*) => {
         /// Voxel ids, in the order they are registered by [`build`].
         #[allow(non_camel_case_types, dead_code, clippy::upper_case_acronyms)]
         #[repr(u16)]
@@ -17,7 +18,7 @@ macro_rules! palette {
         pub fn build() -> Materials {
             let mut m = Materials::new();
             $(
-                let id = m.add(Material { color: [$r, $g, $b], kind: Kind::$kind, jitter: $jitter });
+                let id = m.add(Material { color: [$r, $g, $b], kind: Kind::$kind, jitter: $jitter, emissive: false $(|| palette!(@$glow))? });
                 debug_assert_eq!(id, $name);
             )*
             m
@@ -81,6 +82,28 @@ palette! {
     FLOWER_BLUE    = (104, 132, 214), Solid, 2;
     FLOWER_PINK    = (232, 158, 190), Solid, 2;
     HEATHER        = (164, 112, 160), Solid, 2;
+    // Trodden ground.
+    PATH_DIRT      = (142, 112,  78), Solid, 2;
+    PATH_GRAVEL    = (164, 154, 138), Solid, 2;
+    PATH_SAND      = (206, 178, 128), Solid, 1;
+    PATH_DARK      = (104,  86,  64), Solid, 2;
+    // Things people built.
+    SANDSTONE      = (204, 170, 122), Solid, 2;
+    SANDSTONE_DARK = (168, 132,  92), Solid, 2;
+    MOSSY_STONE    = (106, 128,  92), Solid, 2;
+    PLANK          = (160, 124,  82), Solid, 2;
+    PLANK_PALE     = (190, 160, 116), Solid, 2;
+    PLANK_DARK     = (102,  78,  58), Solid, 2;
+    PLANK_RED      = (146,  84,  60), Solid, 2;
+    THATCH         = (182, 156,  92), Solid, 3;
+    SLATE          = ( 84,  90, 104), Solid, 2;
+    ROOF_TILE      = (164,  84,  62), Solid, 2;
+    CLOTH_RED      = (178,  62,  58), Solid, 1;
+    CLOTH_BLUE     = ( 66,  98, 164), Solid, 1;
+    CLOTH_PALE     = (216, 204, 176), Solid, 1;
+    CHARCOAL       = ( 52,  48,  48), Solid, 1;
+    LANTERN        = (255, 198, 112), Solid, 0, glow;
+    EMBER          = (255, 122,  46), Solid, 1, glow;
 }
 
 /// The ground cover a biome grows.

@@ -142,6 +142,9 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         if m.kind == Kind::Foliage {
                             fl |= flags::FOLIAGE;
                         }
+                        if m.emissive {
+                            fl |= flags::EMISSIVE;
+                        }
                         let key = 1
                             | (uniform as u64) << 2
                             | color_bits(m.color) << 8
@@ -279,11 +282,13 @@ mod tests {
             color: [100, 100, 100],
             kind: Kind::Solid,
             jitter: 1,
+            emissive: false,
         });
         let water = m.add(Material {
             color: [40, 90, 200],
             kind: Kind::Water,
             jitter: 0,
+            emissive: false,
         });
         (m, stone, water)
     }

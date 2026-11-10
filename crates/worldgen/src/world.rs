@@ -17,6 +17,7 @@ use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
     surface::{Column, Cover, Sampler, node},
+    trails,
 };
 
 type Slot = Arc<OnceLock<Arc<Continent>>>;
@@ -65,7 +66,9 @@ impl GameWorld {
             .or_default()
             .clone();
         slot.get_or_init(|| {
-            Arc::new(continent::generate(cell_desc(self.seed, mx, mz), self.config))
+            let mut c = continent::generate(cell_desc(self.seed, mx, mz), self.config);
+            c.trails = trails::build(&c, self.seed);
+            Arc::new(c)
         })
         .clone()
     }
@@ -179,6 +182,7 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::RiverBed => (if patch < 0.62 { mat::GRAVEL } else { mat::SAND }, mat::GRAVEL),
         Cover::LakeBed => (if patch < 0.55 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
+        Cover::Trail => (trail_material(col, roll, patch), mat::DIRT),
         Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),
         Cover::Bank if roll < 0.42 => (mat::MUD, mat::DIRT),
         Cover::Bank | Cover::Land => {
@@ -197,6 +201,19 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
             }
         }
     }
+}
+
+/// What a trail is surfaced with: whatever feet would wear the local ground down to.
+fn trail_material(col: &Column, roll: f32, patch: f32) -> Voxel {
+    use crate::biome::Biome::*;
+    let (main, other, mix) = match col.biome {
+        Desert | Savanna => (mat::PATH_SAND, mat::PATH_DIRT, 0.25),
+        Alpine | Tundra | Ocean => (mat::PATH_GRAVEL, mat::STONE, 0.3),
+        OldGrowth | Rainforest => (mat::PATH_DARK, mat::MOSS, 0.15),
+        Taiga => (mat::PATH_DARK, mat::PATH_GRAVEL, 0.3),
+        Heath | Grassland | Deciduous | Woodland => (mat::PATH_DIRT, mat::PATH_GRAVEL, 0.3),
+    };
+    if roll * 0.6 + patch * 0.4 < mix { other } else { main }
 }
 
 impl World for GameWorld {
@@ -278,6 +295,13 @@ impl World for GameWorld {
             hi = hi.max(p.pos.y + t.top);
             lo = lo.min(p.pos.y - 4);
         }
+        // Landmarks, bridges and lanterns, whose voxels are continent-local.
+        let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));
+        let stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).collect();
+        for s in &stamps {
+            hi = hi.max(s.hi.y);
+            lo = lo.min(s.lo.y);
+        }
 
         // Only chunks that can hold a visible face: from just under the lowest ground
         // to the highest ground or water or tree top.
@@ -336,35 +360,43 @@ impl World for GameWorld {
             }
         }
 
-        let base_y = cy_min * CHUNK - 1;
-        for p in &placements {
-            features::stamp(lib, &self.materials, p, |q: IVec3, v, force| {
-                let (px, pz) = (q.x - wx0, q.z - wz0);
-                let py = q.y - base_y;
-                if px < 0 || pz < 0 || py < 0 || px >= PAD as i32 || pz >= PAD as i32 {
-                    return;
-                }
-                let (ci, ly) = ((py / CHUNK) as usize, py.rem_euclid(CHUNK) as usize);
-                // Chunk `ci` holds padded y 0..PAD; rows 0 and 33 are the borders
-                // of neighbouring chunks and are written there too.
-                let mut write = |chunk_index: usize, padded_y: usize| {
-                    if let Some((_, chunk)) = out.get_mut(chunk_index) {
-                        let (ux, uz) = (px as usize, pz as usize);
-                        if force || chunk.get(ux, padded_y, uz) == AIR {
-                            chunk.set(ux, padded_y, uz, v);
-                        }
+        let mut put = |q: IVec3, v: Voxel, force: bool| {
+            let (px, pz) = (q.x - wx0, q.z - wz0);
+            // Height above the bottom of the lowest chunk (not its padded border).
+            let py = q.y - cy_min * CHUNK;
+            if px < 0 || pz < 0 || py < 0 || px >= PAD as i32 || pz >= PAD as i32 {
+                return;
+            }
+            let (ci, ly) = ((py / CHUNK) as usize, py.rem_euclid(CHUNK) as usize);
+            // Chunk `ci` holds padded y 0..PAD; rows 0 and 33 are the borders
+            // of neighbouring chunks and are written there too.
+            let mut write = |chunk_index: usize, padded_y: usize| {
+                if let Some((_, chunk)) = out.get_mut(chunk_index) {
+                    let (ux, uz) = (px as usize, pz as usize);
+                    if force || chunk.get(ux, padded_y, uz) == AIR {
+                        chunk.set(ux, padded_y, uz, v);
                     }
-                };
-                // World y maps to padded y + 1 in its own chunk...
-                write(ci, ly + 1);
-                // ...and to the borders of the chunks below and above.
-                if ly == 0 && ci > 0 {
-                    write(ci - 1, PAD - 1);
                 }
-                if ly == CHUNK as usize - 1 {
-                    write(ci + 1, 0);
-                }
-            });
+            };
+            // World y maps to padded y + 1 in its own chunk...
+            write(ci, ly + 1);
+            // ...and to the borders of the chunks below and above.
+            if ly == 0 && ci > 0 {
+                write(ci - 1, PAD - 1);
+            }
+            if ly == CHUNK as usize - 1 {
+                write(ci + 1, 0);
+            }
+        };
+        for p in &placements {
+            features::stamp(lib, &self.materials, p, &mut put);
+        }
+        // Built things go last: they clear whatever grew or stood in their way.
+        let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
+        for s in &stamps {
+            for &(p, v) in &s.voxels {
+                put(p + origin, v, true);
+            }
         }
         ColumnOutput {
             chunks: out,

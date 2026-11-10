@@ -93,6 +93,8 @@ pub mod flags {
     pub const JITTER_MASK: u8 = 0b11 << JITTER_SHIFT;
     /// Leaves and vines: swayed by the wind in the vertex shader.
     pub const FOLIAGE: u8 = 1 << 3;
+    /// Lantern glass and embers: shines at night regardless of the light falling on it.
+    pub const EMISSIVE: u8 = 1 << 4;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -102,6 +104,8 @@ pub struct Material {
     pub kind: Kind,
     /// Per-voxel colour variation strength, 0..=3.
     pub jitter: u8,
+    /// Gives off its own light after dark.
+    pub emissive: bool,
 }
 
 /// Lookup from voxel id to material. Id 0 is always air.
@@ -122,6 +126,7 @@ impl Materials {
                 color: [0, 0, 0],
                 kind: Kind::Air,
                 jitter: 0,
+                emissive: false,
             }],
         }
     }
