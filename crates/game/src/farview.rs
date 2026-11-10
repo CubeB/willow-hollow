@@ -14,8 +14,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Vec3};
 use wgpu::util::DeviceExt;
 use worldgen::{
+    World,
     biome::Biome,
     continent::{Continent, NO_LAKE},
+    features::{self, trees},
     macro_layout::MACRO_SIZE,
     scale::OLD_VOXEL,
     materials as mat,
@@ -39,17 +41,35 @@ const LIFT_UNIT: f32 = 0.75;
 const MAX_LIFT_FLAGS: f32 = 100.0;
 
 /// Vertex of the far surface. `flags`: below 128 = land, in steps of how high its forest
-/// stands; 128 = standing water in the surface itself (lake, sea); 255 = river ribbon
+/// stands, lakes included (see `far`); 128 = the sea plane; 255 = river ribbon
 /// (drawn over the land it lies on).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct FarVertex {
     /// Position relative to the continent's origin corner.
     pub pos: [f32; 3],
+    /// Land: its ground, as seen while the tree models still stand on it.
     pub color: [u8; 3],
     pub flags: u8,
     /// Terrain gradient (rise per voxel along x and z), scaled by 1/4 into -1..1.
     pub grad: [i16; 2],
+    /// Land: rgb, how it looks out beyond the tree models, its forest seen as a canopy
+    /// over the ground; then how far standing water rises above the ground, 128 at the
+    /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
+    pub far: [u8; 4],
+}
+
+impl FarVertex {
+    /// A vertex of water: the sea plane, or a lake or river in the surface.
+    pub fn water(pos: [f32; 3], color: [u8; 3], flags: u8) -> Self {
+        Self {
+            pos,
+            color,
+            flags,
+            grad: [0, 0],
+            far: [color[0], color[1], color[2], 0],
+        }
+    }
 }
 
 pub const FLAG_WATER: u8 = 128;
@@ -117,9 +137,10 @@ impl FarView {
         std::thread::Builder::new()
             .name("far-view".into())
             .spawn(move || {
+                let canopies = canopies(&world);
                 while let Ok((cell, stride)) = request_rx.recv() {
                     let continent = world.continent(cell.0, cell.1);
-                    if result_tx.send(build_cell(&continent, cell, stride)).is_err() {
+                    if result_tx.send(build_cell(&continent, world.materials(), &canopies, cell, stride)).is_err() {
                         break;
                     }
                 }
@@ -250,61 +271,152 @@ fn grid_indices(n: usize) -> Vec<u16> {
     out
 }
 
-/// Colour and flags of the far surface at a cell.
-fn cell_color(c: &Continent, mats: &voxel::Materials, i: usize, slope: f32) -> ([u8; 3], u8) {
-    let color = |v: voxel::Voxel| mats.get(v).color;
-    if c.ocean[i] {
-        // Under the sea plane; only seen through gaps, so keep it sandy.
-        return (color(mat::SAND), 0);
-    }
-    if c.lake[i] != NO_LAKE {
-        return (color(mat::WATER), FLAG_WATER);
-    }
-    let biome = Biome::from_u8(c.biome[i]);
-    // Forest shows as its canopy colour from a distance.
-    if slope <= 1.6 && c.temperature[i] >= 0.13
-        && let Some((canopy, cover, _)) = worldgen::features::canopy(biome, mats)
-    {
-        let ground = color(mat::ground_cover(biome));
-        let t = cover * 0.85;
-        let mixed = [0, 1, 2].map(|k| (ground[k] as f32 * (1.0 - t) + canopy[k] as f32 * t) as u8);
-        return (mixed, 0);
-    }
-    let v = if slope > 1.6 {
-        mat::STONE
-    } else if c.temperature[i] < 0.10 {
-        mat::SNOW
-    } else if c.height[i] < 2.5 && near_ocean(c, i) {
-        mat::SAND
-    } else {
-        mat::ground_cover(biome)
-    };
-    (color(v), 0)
+/// How a biome's forest looks from beyond the tree models.
+#[derive(Clone, Copy)]
+struct Canopy {
+    /// What its trees' crowns show from above (sRGB).
+    color: [f32; 3],
+    /// How much of the ground they hide, 0..1.
+    cover: f32,
+    /// How tall they stand, in voxels.
+    height: f32,
 }
 
-/// Whether the far surface shows water at continent-local voxel `(lx, lz)`: a lake its
-/// coarse grid spreads over the shore, or land it lays below the sea. The true shore
-/// can lie well inside either, so things standing there are better left out.
+/// Each biome's forest, indexed by biome, or None where too few trees grow to tell.
+fn canopies(world: &GameWorld) -> Vec<Option<Canopy>> {
+    let (lib, mats) = (world.library(), world.materials());
+    Biome::ALL
+        .iter()
+        .map(|&biome| {
+            let (leaves, cover, height) = features::canopy(biome, mats)?;
+            // The crown the far tree models give the biome's commonest tree, so its
+            // forest keeps its colour where they hand over to the canopy: willow in a
+            // mangrove, palms on a volcano.
+            let crown = features::canopy_tree(biome)
+                .and_then(|species| trees::impostor(lib.get(species, 0), mats).into_iter().max_by_key(|b| b.hi.y))
+                .map_or(leaves, |b| mats.get(b.voxel).color);
+            Some(Canopy {
+                color: crown.map(f32::from),
+                cover,
+                height: height * OLD_VOXEL,
+            })
+        })
+        .collect()
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t)
+}
+
+/// What the far surface shows of the land at a cell.
+struct Look {
+    /// Its ground (sRGB).
+    ground: [f32; 3],
+    /// The ground under its forest's canopy, as seen from beyond the tree models.
+    far: [f32; 3],
+    /// How high that canopy stands above the ground, in voxels.
+    lift: f32,
+}
+
+/// The land at a cell as the far surface draws it. The ground is the one the voxel world
+/// gives it (see `world::surface_materials`), each biome with its own soil and rock, the
+/// voxel-to-voxel speckle and ragged edges between them averaged out as distance does.
+fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: usize, slope: f32) -> Look {
+    let color = |v: voxel::Voxel| mats.get(v).color.map(f32::from);
+    if c.ocean[i] {
+        // Under the sea plane; only seen through gaps, so keep it sandy.
+        let sand = color(mat::SAND);
+        return Look { ground: sand, far: sand, lift: 0.0 };
+    }
+    let biome = Biome::from_u8(c.biome[i]);
+    let beach = c.height[i] < 2.5 && near_ocean(c, i);
+    let mut ground = color(if beach { mat::SAND } else { mat::ground_cover(biome) });
+    // The voxel world's snow line wanders by 0.015 either way of 0.10.
+    let snow = if beach { 0.0 } else { ((0.115 - c.temperature[i]) / 0.03).clamp(0.0, 1.0) };
+    ground = mix(ground, color(mat::SNOW), snow);
+    // Ground too steep to hold soil is bare rock, a quarter of it the darker kind. The
+    // grid's slopes are gentler than the voxels', hence the steeper threshold.
+    let (light, dark) = mat::bedrock(biome);
+    let rocky = smoothstep(1.3, 1.9, slope);
+    ground = mix(ground, mix(color(light), color(dark), 0.25), rocky);
+
+    // Trees take no root on rock, on the beach, or where it is too cold.
+    let Some(canopy) = canopies[biome as usize].filter(|_| !beach) else {
+        return Look { ground, far: ground, lift: 0.0 };
+    };
+    let grows = (1.0 - rocky) * smoothstep(0.125, 0.14, c.temperature[i]);
+    Look {
+        ground,
+        far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),
+        lift: canopy.cover * canopy.height * 0.6 * grows,
+    }
+}
+
+/// Water depth, in voxels, at which the far surface's wetness saturates (see [`wetness`]).
+const WET_RANGE: f32 = 32.0;
+
+/// The standing water at the far-surface vertex on cell `(x, z)`, its neighbours
+/// `stride` cells away: the highest lake level among them, in voxels, as the voxel world
+/// floods a column to the highest lake at the corners of its grid square; and how far
+/// that level stands above the vertex's ground, or `-WET_RANGE` with no lake.
+///
+/// Both vary linearly across the surface's triangles, so where they meet, the shore,
+/// is a smooth line close to the voxel world's, not a cell of the grid.
+fn wetness(c: &Continent, x: usize, z: usize, stride: usize) -> (Option<f32>, f32) {
+    let (s, max) = (stride as isize, c.size as isize - 1);
+    let mut level: Option<f32> = None;
+    for dz in [-s, 0, s] {
+        for dx in [-s, 0, s] {
+            let (nx, nz) = ((x as isize + dx).clamp(0, max) as usize, (z as isize + dz).clamp(0, max) as usize);
+            let l = c.lake[nz * c.size + nx];
+            if l != NO_LAKE {
+                let k = surface::pool_level(c.desc.seed, l) as f32;
+                level = Some(level.map_or(k, |m| m.max(k)));
+            }
+        }
+    }
+    let ground = c.height[z * c.size + x] * OLD_VOXEL;
+    // Water fills the voxels above the ground up to one below the level.
+    let w = level.map_or(-WET_RANGE, |k| (k - 1.0 - ground).clamp(-WET_RANGE, WET_RANGE));
+    (level, w)
+}
+
+/// Whether the far surface shows water at continent-local voxel `(lx, lz)`: a lake, or
+/// land it lays below the sea. The true shore can lie a little inside either, so things
+/// standing there are better left out.
 pub fn shows_water(c: &Continent, lx: f32, lz: f32) -> bool {
     let cs = c.cell_size();
     let max = (c.size - 1) as f32;
     let (fx, fz) = ((lx / cs - 0.5).clamp(0.0, max), (lz / cs - 0.5).clamp(0.0, max));
     let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
     let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
-    let (mut lake, mut height, mut ocean) = (0.0, 0.0, false);
+    let (mut wet, mut height, mut ocean) = (0.0, 0.0, false);
     for (dx, dz, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
-        let i = (z0 + dz) * c.size + x0 + dx;
+        let (x, z) = (x0 + dx, z0 + dz);
+        let i = z * c.size + x;
         ocean |= c.ocean[i];
-        if c.lake[i] != NO_LAKE {
-            lake += w;
-            height += w * surface::pool_level(c.desc.seed, c.lake[i]) as f32;
-        } else {
-            height += w * land_y(c.height[i] * OLD_VOXEL);
-        }
+        let (level, depth) = wetness(c, x, z, 1);
+        wet += w * depth;
+        height += w * vertex_y(c.height[i] * OLD_VOXEL, level, depth);
     }
-    // The shader paints water only close to a lake's own vertices; half way is generous,
-    // allowing for the voxel shore not matching the grid.
-    lake > 0.5 || (ocean && height < SEA_LEVEL + 1.0)
+    // The shader's triangles and this square differ a little: half a voxel's grace.
+    wet > -0.5 || (ocean && height < SEA_LEVEL + 1.0)
+}
+
+/// The far surface's height at a vertex whose ground is at `h`, beside water at `level`
+/// standing `depth` above it: the water's surface where it is wet, else the land, which
+/// is never sunk from above the water to below it.
+fn vertex_y(h: f32, level: Option<f32>, depth: f32) -> f32 {
+    match level {
+        Some(k) if depth > 0.0 => k - 0.125,
+        Some(k) => land_y(h).max(h.min(k - 0.125)),
+        None => land_y(h),
+    }
 }
 
 /// Where the sea plane lies.
@@ -323,8 +435,7 @@ fn near_ocean(c: &Continent, i: usize) -> bool {
         .any(|&o| c.ocean[(i as isize + o).clamp(0, (c.size * c.size) as isize - 1) as usize])
 }
 
-fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
-    let mats = mat::build();
+fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize) -> CellMesh {
     let cs = c.cell_size();
     let size = c.size;
     let tiles_per_side = size / TILE;
@@ -353,37 +464,50 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                     let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
-                    let (mut color, mut flags) = cell_color(c, &mats, idx, gx.hypot(gz));
-                    if flags == 0 {
-                        // Slight variation from cell to cell, standing in for the
-                        // texture voxels have up close.
-                        let h = worldgen::noise::hash2(c.desc.seed ^ 0xfa2, x as i32, z as i32);
-                        let f = 0.93 + worldgen::noise::unit(h) * 0.12;
-                        color = color.map(|v| (v as f32 * f).min(255.0) as u8);
+                    let pos = |y: f32| Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
+                    let (level, depth) = wetness(c, x, z, stride);
+                    let mut land = look(c, mats, canopies, idx, gx.hypot(gz));
+                    if depth > 0.0 {
+                        // Nothing grows in the water.
+                        land.far = land.ground;
+                        land.lift = 0.0;
                     }
-                    let mut lift = 0.0;
-                    let y = if flags == FLAG_WATER {
-                        surface::pool_level(c.desc.seed, c.lake[idx]) as f32 - 0.125
-                    } else {
-                        // Forested land stands higher by about the height of its canopy.
-                        lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
-                            .filter(|_| c.temperature[idx] >= 0.13 && gx.hypot(gz) <= 1.6)
-                            .map_or(0.0, |(_, cover, height)| cover * height * 0.6 * OLD_VOXEL);
-                        land_y(h(x, z))
-                    };
-                    if flags == 0 {
-                        // Carried to the shader, which raises it only beyond the tree models.
-                        flags = (lift / LIFT_UNIT).round().min(MAX_LIFT_FLAGS) as u8;
+                    // The forest comes down to the ground beside water, so the water is
+                    // not tilted up to the canopy across the triangles of its shore.
+                    let s = stride as isize;
+                    let by_water = [(-s, -s), (0, -s), (s, -s), (-s, 0), (s, 0), (-s, s), (0, s), (s, s)].iter().any(|&(dx, dz)| {
+                            let max = size as isize - 1;
+                            let (nx, nz) = ((x as isize + dx).clamp(0, max) as usize, (z as isize + dz).clamp(0, max) as usize);
+                            wetness(c, nx, nz, stride).1 > 0.0
+                        });
+                    // Still a forest, for the seasons, though it no longer stands tall.
+                    let forest = land.lift > 0.0;
+                    if by_water {
+                        land.lift = 0.0;
                     }
-                    let pos = Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
-                    lo = lo.min(pos);
-                    hi = hi.max(pos + Vec3::Y * lift);
+                    // Slight variation from cell to cell, standing in for the texture
+                    // voxels have up close.
+                    let noise = worldgen::noise::hash2(c.desc.seed ^ 0xfa2, x as i32, z as i32);
+                    let f = 0.93 + worldgen::noise::unit(noise) * 0.12;
+                    let srgb = |rgb: [f32; 3]| rgb.map(|v| (v * f).round().clamp(0.0, 255.0) as u8);
+                    let far = srgb(land.far);
+                    // Forested land stands higher by about the height of its canopy. That
+                    // is carried to the shader, which raises it only beyond the tree models.
+                    let mut flags = (land.lift / LIFT_UNIT).round().min(MAX_LIFT_FLAGS) as u8;
+                    if forest {
+                        flags = flags.max(1);
+                    }
+                    let p = pos(vertex_y(h(x, z), level, depth));
+                    let wet = (128.0 + depth / WET_RANGE * 127.0).round().clamp(0.0, 255.0) as u8;
+                    lo = lo.min(p);
+                    hi = hi.max(p + Vec3::Y * land.lift);
                     let pack = |g: f32| ((g / 4.0).clamp(-1.0, 1.0) * 32767.0) as i16;
                     verts.push(FarVertex {
-                        pos: pos.to_array(),
-                        color,
+                        pos: p.to_array(),
+                        color: srgb(land.ground),
                         flags,
-                        grad: if flags == FLAG_WATER { [0, 0] } else { [pack(gx), pack(gz)] },
+                        grad: [pack(gx), pack(gz)],
+                        far: [far[0], far[1], far[2], wet],
                     });
                 }
             }
@@ -412,12 +536,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                 let corner = |p: glam::Vec2, t: f32, sign: f32| {
                     let q = p + side * (piece.half_width(t).max(worldgen::scale::m(1.0)) * sign);
                     let y = surface::pool_level(c.desc.seed, piece.level(t)) as f32 - 0.125;
-                    FarVertex {
-                        pos: [q.x, y, q.y],
-                        color: water,
-                        flags: FLAG_RIBBON,
-                        grad: [0, 0],
-                    }
+                    FarVertex::water([q.x, y, q.y], water, FLAG_RIBBON)
                 };
                 // Counter-clockwise seen from above.
                 rivers.extend_from_slice(&[

@@ -2,6 +2,8 @@
 // beyond the radius where voxels are loaded.
 
 const LIFT_UNIT: f32 = 0.75;
+// The colour of lakes in the surface: materials::WATER, sRGB.
+const LAKE_WATER: vec3<f32> = vec3<f32>(46.0, 112.0, 168.0) / 255.0;
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -12,6 +14,9 @@ struct VIn {
     @location(2) grad: vec2<f32>,
     // Per continent: its origin corner relative to the camera.
     @location(3) offset: vec3<f32>,
+    // Land: rgb, sRGB colour out beyond the tree models, the forest seen as a canopy.
+    // a: how far standing water rises above the ground, 128/255 at the shore.
+    @location(4) far: vec4<f32>,
 };
 
 struct VOut {
@@ -20,6 +25,9 @@ struct VOut {
     @location(1) color: vec3<f32>,
     @location(2) grad: vec2<f32>,
     @location(3) kind: f32,
+    @location(4) far: vec3<f32>,
+    // Above 0 under standing water; linear across a triangle, so 0 is the shore.
+    @location(5) wet: f32,
 };
 
 @vertex
@@ -50,28 +58,40 @@ fn vs(in: VIn) -> VOut {
     }
     out.clip = G.view_proj * vec4<f32>(depth_pos, 1.0);
     out.color = srgb_to_linear(in.color.rgb);
+    out.far = srgb_to_linear(in.far.rgb);
+    out.wet = in.far.a - 128.0 / 255.0;
     out.grad = in.grad * 4.0;
     out.kind = in.color.a;
     return out;
 }
 
+// Water, shaded as the voxel water is but opaque: nothing is drawn beneath.
+fn water_shade(c: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let view = normalize(rel);
+    let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
+    let body = c * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
+    let color = mix(body, sky_color(reflect(view, up)), fresnel);
+    // Still water freezes over (rivers too: there is no flow to tell them apart).
+    let ice = ice_amount(rel.xz + G.cam_wrapped.xz);
+    return mix(color, vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(up)), ice);
+}
+
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    // How much of this pixel a lake covers: its shore is a hard line, a pixel soft so
+    // that it does not crawl. Taken before anything that branches.
+    let lake = clamp(in.wet / max(fwidth(in.wet), 1e-6) + 0.5, 0.0, 1.0);
     // Nearer than this the voxel terrain is drawn instead.
     if (!beyond_voxels(in.rel)) {
         discard;
     }
     let up = vec3<f32>(0.0, 1.0, 0.0);
-    var color: vec3<f32>;
+    var color = vec3<f32>(0.0);
     if (in.kind > 0.42) {
-        // Water, shaded as the voxel water is but opaque: nothing is drawn beneath.
-        let view = normalize(in.rel);
-        let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
-        let body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
-        color = mix(body, sky_color(reflect(view, up)), fresnel);
-        // Still water freezes over (rivers too: there is no flow to tell them apart).
-        let ice = ice_amount(in.rel.xz + G.cam_wrapped.xz);
-        color = mix(color, vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(up)), ice);
+        color = water_shade(in.color, in.rel);
+    } else if (lake >= 1.0) {
+        color = water_shade(srgb_to_linear(LAKE_WATER), in.rel);
     } else {
         // Voxel terrain is all flat tops and vertical sides. From far away a slope
         // reads as a blend of the two, the sides counting for more the steeper it is.
@@ -82,11 +102,21 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
         // The season: a far forest turns and goes bare, grass dries, snow settles.
         let world = in.rel.xz + G.cam_wrapped.xz;
-        var base = season_far_ground(in.color, in.kind > 0.002, world, G.season.x);
+        // While the tree models stand on it, the ground is seen between them; out beyond,
+        // the forest they drew is seen as its canopy, over the same reach the surface
+        // rises to the canopy's height.
+        var base = season_far_ground(in.color, false, world, G.season.x);
+        let canopy = smoothstep(G.cam_wrapped.w * 0.85, G.cam_wrapped.w, length(in.rel.xz));
+        if (canopy > 0.0) {
+            base = mix(base, season_far_ground(in.far, in.kind > 0.002, world, G.season.x), canopy);
+        }
         base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0);
         color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.
         color *= 1.0 - clamp(steep * 0.9, 0.0, 0.35);
+        if (lake > 0.0) {
+            color = mix(color, water_shade(srgb_to_linear(LAKE_WATER), in.rel), lake);
+        }
     }
     return vec4<f32>(apply_fog(color, in.rel), 1.0);
 }
