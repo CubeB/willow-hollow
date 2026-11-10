@@ -57,6 +57,30 @@ fn busy_and_remote_trails_differ() {
 }
 
 #[test]
+fn trails_narrow_over_high_ground() {
+    let w = world();
+    let c = w.continent(0, 0);
+    let (mut high, mut low) = (Vec::new(), Vec::new());
+    for p in c.trails.points().filter(|p| p.half_width > 0.0) {
+        if p.y > crate::scale::m(210.0) {
+            high.push(p.half_width);
+        } else if p.y < crate::scale::m(60.0) {
+            low.push(p.half_width);
+        }
+    }
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+    println!("{} high points, mean half-width {:.2}; {} low, {:.2}", high.len(), mean(&high), low.len(), mean(&low));
+    assert!(high.len() > 100 && low.len() > 100, "{} high, {} low", high.len(), low.len());
+    assert!(high.iter().all(|&w| w <= crate::scale::m(0.31)), "a wide trail over high ground");
+    assert!(mean(&low) > mean(&high) * 1.5);
+    // And no sudden steps in width along a trail: no more than a few centimetres per
+    // metre walked (line points lie 16 voxels apart).
+    let jump = c.trails.line_widths.iter().flat_map(|l| l.windows(2)).map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
+    println!("largest change in half-width between line points: {jump:.2} voxels");
+    assert!(jump < crate::scale::m(0.25), "width jumps by {jump}");
+}
+
+#[test]
 fn bridges_are_rare() {
     let w = world();
     let c = w.continent(0, 0);

@@ -89,6 +89,42 @@ pub fn width_for(traffic: f32) -> f32 {
     m(metres)
 }
 
+/// Ground height over which trails narrow to a mountain path, in voxels.
+const HIGH: (f32, f32) = (m(100.0), m(200.0));
+/// Grade over which trails narrow, rising so much per step along.
+const STEEP: (f32, f32) = (0.2, 0.4);
+/// Half-width of a path over a peak or up a steep face: one voxel or two wide.
+const MOUNTAIN_PATH: f32 = m(0.3);
+
+fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
+    let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Over high ground and up steep slopes, however busy, a trail is a narrow worn line
+/// picking its way along, and it widens again gradually coming down. Narrow enough, it
+/// becomes a trace that comes and goes, so it vanishes over bare rock and picks up again.
+fn narrow_high(widths: &[f32], cols: &[Column]) -> Vec<f32> {
+    let n = cols.len();
+    let rough: Vec<f32> = (0..n)
+        .map(|i| {
+            let (a, b) = (i.saturating_sub(4), (i + 4).min(n - 1));
+            let grade = (cols[b].ground - cols[a].ground).abs() / ((b - a).max(1) as f32 * OLD_VOXEL);
+            smoothstep(HIGH.0, HIGH.1, cols[i].ground).max(smoothstep(STEEP.0, STEEP.1, grade) * 0.8)
+        })
+        .collect();
+    // Averaged along the way, so the width blends without visible steps.
+    const BLEND: usize = 20;
+    (0..n)
+        .map(|i| {
+            let (lo, hi) = (i.saturating_sub(BLEND), (i + BLEND + 1).min(n));
+            let t = rough[lo..hi].iter().sum::<f32>() / (hi - lo) as f32;
+            let w = widths[i];
+            w + (w.min(MOUNTAIN_PATH) - w) * t
+        })
+        .collect()
+}
+
 /// The narrowest a trail is worn.
 fn widths_min() -> f32 {
     m(WIDTHS[0].1)
@@ -746,6 +782,7 @@ impl Layer<'_> {
         // Straightening barely changes the number of points, so they map across in order.
         let widths: Vec<f32> = (0..pts.len()).map(|i| widths[i * widths.len() / pts.len()]).collect();
         let mut cols = sample(self.c, self.seed, &pts);
+        let widths = narrow_high(&widths, &cols);
         let runs = wet_runs(&cols);
 
         // Water too wide to bridge ends the trail on each side of it.
