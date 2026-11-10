@@ -5,6 +5,7 @@
 //! (Braun & Willett 2013; Cordonnier et al. 2016), run coarse-to-fine so large-scale
 //! drainage is settled cheaply before fine detail is added.
 
+mod border;
 pub mod climate;
 pub mod flow;
 pub mod shape;
@@ -13,6 +14,7 @@ use crate::{
     biome::Biome,
     macro_layout::{CellDesc, MACRO_SIZE, SIM_SPAN},
     noise::{hash2, unit},
+    structures::Field,
 };
 use flow::Flow;
 use shape::Shape;
@@ -136,9 +138,21 @@ impl Level {
 
     /// Cell centre in cell-normalised coordinates (-1..1).
     fn norm(&self, x: usize, z: usize) -> (f32, f32) {
-        let f = 2.0 / self.w as f32;
-        ((x as f32 + 0.5) * f - 1.0, (z as f32 + 0.5) * f - 1.0)
+        norm(self.w, x, z)
     }
+}
+
+/// Cell-normalised position (-1..1) of cell `(x, z)` on a `w`-wide grid. The outer ring
+/// is placed on the border itself, not the cell centre: that is what lets the cells
+/// either side of a border compute exactly the same values there.
+fn norm(w: usize, x: usize, z: usize) -> (f32, f32) {
+    let f = 2.0 / w as f32;
+    let snap = |i: usize| match i {
+        0 => -1.0,
+        i if i == w - 1 => 1.0,
+        i => (i as f32 + 0.5) * f - 1.0,
+    };
+    (snap(x), snap(z))
 }
 
 fn sea_floor(land: f32) -> f32 {
@@ -237,7 +251,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
 
     let mut height: Vec<f32> = Vec::new();
     let mut scratch = Scratch::default();
-    let mut last: Option<(Level, Flow, Vec<f32>)> = None;
+    let mut last: Option<(Level, Flow, Vec<f32>, Vec<border::Pin>)> = None;
     // Rainfall, computed once the coarse terrain has taken shape and refined with it.
     let mut rain_coarse: Option<Vec<f32>> = None;
 
@@ -276,6 +290,8 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
                 height[i].max(0.3)
             };
         }
+        let pins = border::pins(&level, &shape);
+        border::hold(&level, &pins, &mut height);
 
         let mut rain = match rain_coarse.take() {
             Some(coarse) => upsample(&coarse, w / 2),
@@ -286,6 +302,12 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         for _ in 0..iterations[li] {
             flow.route(&height, &level.ocean, &rain, cell_area);
             erode(&level, &flow, cell_area, &mut height, &mut scratch);
+            border::hold(&level, &pins, &mut height);
+        }
+        if li == sizes.len() - 1 {
+            // Fault steps and rift troughs go in last: erosion would wear them away.
+            displace(&level, &shape, &mut height);
+            border::settle(&level, &pins, &mut height);
         }
         // Route once more so the stored drainage matches the final terrain exactly.
         flow.route(&height, &level.ocean, &rain, cell_area);
@@ -298,11 +320,12 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
             flow.route(&height, &level.ocean, &rain, cell_area);
         }
         rain_coarse = Some(rain.clone());
-        last = Some((level, flow, rain));
+        last = Some((level, flow, rain, pins));
     }
 
-    let (level, flow, rain) = last.expect("at least one level");
-    let lake = find_lakes(&level, &flow, &mut height);
+    let (mut level, mut flow, mut rain, pins) = last.expect("at least one level");
+    border::dry(&level, &flow, &pins, &mut height);
+    let mut lake = find_lakes(&level, &flow, &mut height);
     // Flatten the water level across each lake, then make sure nothing downstream sits
     // above what feeds it (a lake's surface is its lowest point, so an outlet cell can
     // otherwise end up a hair higher than the lake).
@@ -318,7 +341,9 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
             water_level[r] = water_level[i as usize];
         }
     }
-    let temperature = climate::temperature(level.w, &height, &desc);
+    border::finish(&mut level, &mut flow, &mut height, &mut water_level, &mut lake, &rain, &pins);
+    let mut temperature = climate::temperature(level.w, &height, &desc);
+    border::blend_climate(&level, &pins, &shape, &height, &mut temperature, &mut rain);
     let biome = (0..height.len())
         .map(|i| {
             if level.ocean[i] {
@@ -348,14 +373,38 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
     }
 }
 
+/// Raises and lowers the finished land along faults and rifts, fading to nothing where
+/// the land meets a border band or the coast.
+fn displace(level: &Level, shape: &Shape, height: &mut [f32]) {
+    if shape.field.is_empty() {
+        return;
+    }
+    for z in 0..level.w {
+        for x in 0..level.w {
+            let i = z * level.w + x;
+            if level.ocean[i] {
+                continue;
+            }
+            let (px, pz) = level.norm(x, z);
+            let change = shape.field.offset(px, pz, level.land[i]);
+            if change != 0.0 {
+                let keep = 1.0 - Field::border_hold(px.abs().max(pz.abs()));
+                // A cut never takes the land below a share of its old height, so a rift
+                // floor near the coast keeps its relief instead of flattening at the sea.
+                let floor = height[i] * 0.3 + 0.3;
+                height[i] = (height[i] + change * keep).max(floor);
+            }
+        }
+    }
+}
+
 /// A cell with no land: just the sea floor.
 fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
     let n = size * size;
-    let f = 2.0 / size as f32;
     let height = (0..n)
         .map(|i| {
-            let (x, z) = ((i % size) as f32, (i / size) as f32);
-            sea_floor(shape.land((x + 0.5) * f - 1.0, (z + 0.5) * f - 1.0).min(0.0))
+            let (px, pz) = norm(size, i % size, i / size);
+            sea_floor(shape.land(px, pz).min(0.0))
         })
         .collect();
     Continent {

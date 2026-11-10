@@ -1,12 +1,15 @@
 //! The endless world at the largest scale: an infinite grid of macro-cells, each
 //! holding one independent landmass (or open sea).
 //!
-//! Land never touches a cell border, so every landmass is a bounded problem that can be
-//! simulated on its own, and cells can be generated lazily in any order.
+//! Ordinary land never touches a cell border, so every landmass is a bounded problem
+//! that can be simulated on its own, and cells can be generated lazily in any order.
+//! The rare exceptions, mountain ranges carried across a border by the structure field
+//! ([`crate::structures`]), keep their drainage bounded: the crossing is a divide.
 
 use crate::{
     noise::{hash2, unit},
     scale::OLD_VOXEL,
+    structures::in_vast_ocean,
 };
 
 /// Macro-cell edge length in simulation units (0.8 m each).
@@ -29,6 +32,8 @@ pub enum CellKind {
 pub struct CellDesc {
     pub mx: i32,
     pub mz: i32,
+    /// Seed of the world, for what is shared between cells (see [`crate::structures`]).
+    pub world_seed: u32,
     /// Seed for all of this cell's noise.
     pub seed: u32,
     pub kind: CellKind,
@@ -53,6 +58,7 @@ pub fn cell_desc(world_seed: u32, mx: i32, mz: i32) -> CellDesc {
     let origin = mx == 0 && mz == 0;
     let kind = match r(0) {
         _ if origin => CellKind::Continent,
+        _ if in_vast_ocean(world_seed, mx, mz) => CellKind::Ocean,
         k if k < 0.55 => CellKind::Continent,
         k if k < 0.80 => CellKind::Islands,
         _ => CellKind::Ocean,
@@ -60,6 +66,7 @@ pub fn cell_desc(world_seed: u32, mx: i32, mz: i32) -> CellDesc {
     CellDesc {
         mx,
         mz,
+        world_seed,
         seed,
         kind,
         center: ((r(1) - 0.5) * 0.24, (r(2) - 0.5) * 0.24),
