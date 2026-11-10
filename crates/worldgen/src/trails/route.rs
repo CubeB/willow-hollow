@@ -6,6 +6,7 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 use glam::{Vec2, vec2};
 
 use crate::{
+    biome::Biome,
     continent::{Continent, NO_LAKE},
     noise::perlin2,
     scale::OLD_VOXEL,
@@ -31,6 +32,51 @@ pub struct Router<'a> {
     current: u32,
     /// Trail occupying each cell (0 for none, otherwise id + 1).
     pub used: Vec<u32>,
+    /// How hard each cell's ground is to cross, as a multiple of easy open ground.
+    terrain: Vec<f32>,
+}
+
+/// How hard a cell's ground is to cross, as a multiple of open level ground. People
+/// keep to valley floors and gentle ground, and go around steep faces, exposed high
+/// ground and dense old forest. Direction of travel is handled separately, in the grade.
+pub fn terrain_factor(c: &Continent, i: usize) -> f32 {
+    let n = c.size as i32;
+    let cs = c.sim_cell_size();
+    let (x, z) = (i as i32 % n, i as i32 / n);
+    let h = |dx: i32, dz: i32| c.height[((z + dz).clamp(0, n - 1) * n + (x + dx).clamp(0, n - 1)) as usize];
+    let here = c.height[i];
+    // Steepness of the ground itself, whichever way it is crossed: a steep face is hard
+    // going even along the contour, and beyond a point it is a scramble.
+    let steep = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .map(|&(dx, dz)| (h(dx, dz) - here).abs())
+        .fold(0.0f32, f32::max)
+        / cs;
+    // Height above the ground around: positive on knolls and ridges, negative in valleys.
+    let r = 4;
+    let around = [(r, 0), (-r, 0), (0, r), (0, -r), (r, r), (r, -r), (-r, r), (-r, -r)]
+        .iter()
+        .map(|&(dx, dz)| h(dx, dz))
+        .sum::<f32>()
+        / 8.0;
+    let prominence = here - around;
+    let mut f = 1.0 + 1.5 * (steep - 0.4).max(0.0) + 4.0 * (steep - 0.8).max(0.0);
+    // Small hills are gone around rather than over.
+    f += (prominence * 0.02).clamp(0.0, 0.4);
+    // Beside a stream the ground is soft, and a trail kept there would wind across it
+    // again and again. Better a terrace a little above.
+    let q = |dx: i32, dz: i32| c.discharge[((z + dz).clamp(0, n - 1) * n + (x + dx).clamp(0, n - 1)) as usize];
+    if [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)].iter().any(|&(dx, dz)| q(dx, dz) >= MIN_RIVER_Q) {
+        f += 0.5;
+    }
+    // High ground is exposed and slow.
+    f += ((here - 260.0) / 250.0).clamp(0.0, 0.8);
+    f += match Biome::from_u8(c.biome[i]) {
+        Biome::OldGrowth | Biome::Rainforest => 0.3,
+        Biome::Alpine => 0.3,
+        _ => 0.0,
+    };
+    f.max(0.8)
 }
 
 impl<'a> Router<'a> {
@@ -43,6 +89,7 @@ impl<'a> Router<'a> {
             stamp: vec![0; n],
             current: 0,
             used: vec![0; n],
+            terrain: (0..n).map(|i| terrain_factor(c, i)).collect(),
         }
     }
 
@@ -51,14 +98,18 @@ impl<'a> Router<'a> {
         if c.ocean[b] || c.lake[b] != NO_LAKE {
             return None;
         }
-        let slope = (c.height[b] - c.height[a]).abs() / dist;
-        let mut cost = dist * (1.0 + 6.0 * slope + 60.0 * slope * slope);
+        // The grade along the way of travel: walking along a contour is cheap, straight
+        // up the fall line dear, so steep ground is climbed by traverses and zigzags.
+        let grade = (c.height[b] - c.height[a]).abs() / dist;
+        let terrain = (self.terrain[a] + self.terrain[b]) * 0.5;
+        let mut cost = dist * terrain * (1.0 + 6.0 * grade + 90.0 * grade * grade);
         let q = c.discharge[b];
         if q >= MIN_RIVER_Q {
-            // Crossing water costs more the wider it is: a brook is nothing, a great
-            // river is worth a long detour to find a good place to bridge.
+            // Water costs more the wider it is: a brook is little, while a river is
+            // worth a long detour to go around it or find a narrow place. Every cell
+            // with a stream counts, as a trail kept in one would cross it again and again.
             let width = Continent::river_width(q);
-            cost += 40.0 + width * width * 2.0 + if width > 10.0 { 300.0 + width * 25.0 } else { 0.0 };
+            cost += 150.0 + width * width * 6.0 + if width > 4.0 { 600.0 + width * 60.0 } else { 0.0 };
         }
         if self.used[b] != 0 {
             cost *= REUSE;

@@ -147,7 +147,8 @@ impl VertexArena {
     }
 
     fn grow(&mut self, gpu: &Gpu) -> bool {
-        let capacity = self.free.capacity.saturating_mul(2).min(self.max_units);
+        // By half again rather than double: the old and new buffers have to fit together.
+        let capacity = self.free.capacity.saturating_add(self.free.capacity / 2).min(self.max_units);
         if capacity == self.free.capacity {
             return false;
         }

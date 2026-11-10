@@ -26,6 +26,99 @@ fn the_network_is_repeatable() {
     for (p, q) in na.sites.iter().zip(&nb.sites) {
         assert_eq!((p.kind, p.x, p.y, p.z), (q.kind, q.x, q.y, q.z));
     }
+    // The trails themselves, point for point and width for width.
+    assert_eq!(na.lines.len(), nb.lines.len());
+    for (p, q) in na.lines.iter().zip(&nb.lines) {
+        assert_eq!(p, q);
+    }
+    assert_eq!(na.line_widths, nb.line_widths);
+    let sum = |n: &crate::trails::Network| n.points().map(|p| (p.x + p.y + p.z + p.half_width) as f64).sum::<f64>();
+    assert_eq!(sum(na), sum(nb));
+}
+
+#[test]
+fn busy_and_remote_trails_differ() {
+    use crate::trails::build::{TrailClass, class_of};
+    let w = world();
+    let c = w.continent(0, 0);
+    let mut seen = HashSet::new();
+    for widths in &c.trails.line_widths {
+        for &width in widths {
+            seen.insert(class_of(width));
+        }
+    }
+    println!("classes: {seen:?}");
+    assert!(seen.len() >= 2, "every trail is a {seen:?}");
+    // The widest and narrowest stretches really are worn differently on the ground.
+    let widths: Vec<f32> = c.trails.points().map(|p| p.half_width).filter(|&w| w > 0.0).collect();
+    let (lo, hi) = widths.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &w| (lo.min(w), hi.max(w)));
+    assert!(hi > lo * 1.8, "widths only run from {lo} to {hi}");
+    assert!(seen.contains(&TrailClass::Track) || seen.contains(&TrailClass::Footpath));
+}
+
+#[test]
+fn trails_narrow_over_high_ground() {
+    let w = world();
+    let c = w.continent(0, 0);
+    let (mut high, mut low) = (Vec::new(), Vec::new());
+    for p in c.trails.points().filter(|p| p.half_width > 0.0) {
+        if p.y > crate::scale::m(210.0) {
+            high.push(p.half_width);
+        } else if p.y < crate::scale::m(60.0) {
+            low.push(p.half_width);
+        }
+    }
+    let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len().max(1) as f32;
+    println!("{} high points, mean half-width {:.2}; {} low, {:.2}", high.len(), mean(&high), low.len(), mean(&low));
+    assert!(high.len() > 100 && low.len() > 100, "{} high, {} low", high.len(), low.len());
+    assert!(high.iter().all(|&w| w <= crate::scale::m(0.31)), "a wide trail over high ground");
+    assert!(mean(&low) > mean(&high) * 1.5);
+    // And no sudden steps in width along a trail: no more than a few centimetres per
+    // metre walked (line points lie 16 voxels apart).
+    let jump = c.trails.line_widths.iter().flat_map(|l| l.windows(2)).map(|p| (p[1] - p[0]).abs()).fold(0.0f32, f32::max);
+    println!("largest change in half-width between line points: {jump:.2} voxels");
+    assert!(jump < crate::scale::m(0.25), "width jumps by {jump}");
+}
+
+#[test]
+fn bridges_are_rare() {
+    let w = world();
+    let c = w.continent(0, 0);
+    let bridges = c.trails.crossings.iter().filter(|x| x.kind != CrossingKind::Stones).count();
+    let km: f32 = c
+        .trails
+        .lines
+        .iter()
+        .flat_map(|l| l.windows(2))
+        .map(|p| (p[1] - p[0]).length())
+        .sum::<f32>()
+        / crate::scale::m(1000.0);
+    println!("{bridges} bridges in {km:.1} km of trail");
+    assert!(km > 10.0);
+    assert!((bridges as f32) < km * 0.4,"{bridges} bridges in {km:.1} km");
+}
+
+#[test]
+fn trails_agree_across_chunk_borders() {
+    // A column near a trail reads the same whichever chunk's sampler it is taken from.
+    let w = world();
+    let c = w.continent(0, 0);
+    let mut checked = 0;
+    for line in c.trails.lines.iter().take(10) {
+        for p in line.iter().step_by(20) {
+            let (x, z) = (p.x as i32, p.y as i32);
+            let border = x.div_euclid(CHUNK) * CHUNK;
+            let a = Sampler::new(&c, w.seed(), border - CHUNK, z - 1, CHUNK + 2);
+            let b = Sampler::new(&c, w.seed(), border - 1, z - 1, CHUNK + 2);
+            for col_x in [border - 1, border] {
+                let (ca, cb) = (a.column(col_x, z), b.column(col_x, z));
+                assert_eq!(ca.ground, cb.ground, "ground differs at {col_x},{z}");
+                assert_eq!(ca.cover, cb.cover, "cover differs at {col_x},{z}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 50);
 }
 
 #[test]
