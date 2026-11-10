@@ -38,7 +38,7 @@ const OCEAN_ORIGIN_CLEAR: f64 = 4.0;
 /// Share of the cell's half-width inside which border land is held to its shared height.
 pub const BORDER_BAND: f32 = 0.10;
 /// How high a range's spine stands where it crosses a border, in simulation units.
-const BORDER_CREST: f32 = 680.0;
+const BORDER_CREST: f32 = 520.0;
 /// Sim units in one macro-cell.
 const CELL: f64 = SIM_SPAN as f64;
 
@@ -367,7 +367,7 @@ impl Field {
             // Ridged relief, in world coordinates like everything here, so the held band
             // reads as more of the same mountains rather than a smooth causeway.
             let relief = ridged2(s.seed ^ 13, wx * 24.0 + 0.37, wz * 24.0 + 0.71, 4, 2.07, 0.5);
-            let crest = BORDER_CREST * s.amplitude * s.massif(hit.along) * s.taper(hit.along) * ratio.powf(0.7) * (0.3 + 1.1 * relief);
+            let crest = s.taper(hit.along) * ratio.powf(0.7) * (0.3 + 1.1 * relief);
             best = Some((land, crest));
         }
         best
@@ -470,16 +470,22 @@ impl Field {
     /// Holding alone leaves a narrow crest, because erosion keeps cutting the held cells
     /// down and pulls the true profile in toward the border; the final blend, applied
     /// once the simulation is over, spreads the transition across the whole band.
-    pub fn border_pin(&self, px: f32, pz: f32, edge: f32) -> Option<(f32, f32, f32)> {
+    ///
+    /// `uplift` is the largest uplift rate of the cells meeting at this point, which
+    /// every one of them computes alike. Height under erosion grows with uplift, so it
+    /// sets how high the held land stands: as high as the higher side would be, so
+    /// neither side's own mountains face a hollow at the border.
+    pub fn border_pin(&self, px: f32, pz: f32, edge: f32, uplift: f32) -> Option<(f32, f32, f32)> {
         let b = 1.0 - edge;
         if b >= BORDER_BAND || self.items.is_empty() {
             return None;
         }
         let (wx, wz) = self.world(px, pz);
-        let (land, crest) = self.spine_at(wx, wz)?;
+        let (land, form) = self.spine_at(wx, wz)?;
         if land - self.basin_depth(wx, wz) * 4.0 <= 0.0 {
             return None;
         }
+        let crest = BORDER_CREST * uplift.max(0.0).powf(0.8) * form;
         // Rising to the border on both sides, so water runs away from it on each.
         let tilt = (1.0 - b / BORDER_BAND).powi(2) * (8.0 + crest * 0.05);
         let hard = BORDER_BAND * 0.05;

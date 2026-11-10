@@ -36,6 +36,9 @@ pub struct Flow {
     pub order: Vec<u32>,
     /// Water passing through each cell (its own rain plus everything upstream).
     pub discharge: Vec<f32>,
+    /// Extra land cells, with their heights, that the flood starts from as well as the
+    /// coast: where a range crosses the border, water may leave the cell there.
+    pub outlets: Vec<(u32, f32)>,
     closed: Vec<bool>,
     heap: BinaryHeap<Reverse<u64>>,
     seed: u32,
@@ -53,6 +56,7 @@ impl Flow {
             rcv_dist: vec![1.0; n],
             order: Vec::with_capacity(n),
             discharge: vec![0.0; n],
+            outlets: Vec::new(),
             closed: vec![false; n],
             heap: BinaryHeap::new(),
             seed,
@@ -87,6 +91,14 @@ impl Flow {
                 if ocean[i] && self.offsets.iter().any(|&o| !ocean[(i as isize + o) as usize]) {
                     self.heap.push(key(0.0, i));
                 }
+            }
+        }
+        for &(i, level) in &self.outlets {
+            let i = i as usize;
+            if !self.closed[i] {
+                self.closed[i] = true;
+                self.filled[i] = level.max(EPSILON);
+                self.heap.push(key(self.filled[i], i));
             }
         }
         while let Some(Reverse(k)) = self.heap.pop() {

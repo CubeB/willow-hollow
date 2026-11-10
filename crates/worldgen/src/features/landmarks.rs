@@ -97,7 +97,7 @@ impl Palette {
             moss,
             biome,
         };
-        match biome {
+        match biome.parent() {
             Desert | Savanna => Palette {
                 stone: mat::SANDSTONE,
                 stone_dark: mat::SANDSTONE_DARK,
@@ -114,6 +114,7 @@ impl Palette {
             Rainforest => stone(mat::BARK_JUNGLE, mat::PLANK_PALE, mat::THATCH, mat::CLOTH_RED, 0.55),
             Heath | Grassland => stone(mat::BARK_OAK, mat::PLANK, mat::THATCH, mat::CLOTH_BLUE, 0.14),
             Deciduous | Woodland => stone(mat::BARK_OAK, mat::PLANK, mat::ROOF_TILE, mat::CLOTH_RED, 0.3),
+            other => unreachable!("{other:?} is not an original biome"),
         }
     }
 
@@ -124,12 +125,13 @@ impl Palette {
         use Biome::*;
         let h = seed.wrapping_mul(0x9e37_79b1) ^ 0x5bd1_e995;
         let pick = |list: &[Voxel], k: u32| list[((h >> (k * 4)) as usize) % list.len()];
-        let (roofs, planks): (&[Voxel], &[Voxel]) = match self.biome {
+        let (roofs, planks): (&[Voxel], &[Voxel]) = match self.biome.parent() {
             Desert | Savanna => (&[mat::THATCH, mat::THATCH, mat::PLANK_PALE], &[mat::PLANK_PALE, mat::PLANK]),
             Alpine | Tundra | Ocean | Taiga => (&[mat::SLATE, mat::SLATE, mat::PLANK_DARK], &[mat::PLANK_DARK, mat::PLANK]),
             OldGrowth | Rainforest => (&[mat::THATCH, mat::THATCH, mat::PLANK_RED], &[mat::PLANK_RED, mat::PLANK_PALE]),
             Heath | Grassland => (&[mat::THATCH, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
-            Deciduous | Woodland => (&[mat::ROOF_TILE, mat::ROOF_TILE, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
+            // Deciduous and Woodland; every newer biome has one of the parents above.
+            _ => (&[mat::ROOF_TILE, mat::ROOF_TILE, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
         };
         self.roof = pick(roofs, 0);
         self.plank = pick(planks, 1);
@@ -176,99 +178,165 @@ fn cuboid(s: &mut Shape, lo: IVec3, hi: IVec3, mut f: impl FnMut(IVec3) -> Voxel
 
 /// A foundation running down into the ground, so nothing floats on uneven land.
 fn footing(s: &mut Shape, lo: (i32, i32), hi: (i32, i32), mut f: impl FnMut() -> Voxel) {
-    cuboid(s, v(lo.0, -4, lo.1), v(hi.0, -1, hi.1), |_| f());
+    cuboid(s, v(lo.0, -8, lo.1), v(hi.0, -1, hi.1), |_| f());
 }
 
-/// A lamp post at block (x, z), in a style that varies by landmark, built in 0.4 m voxels.
+/// A filled disc of radius `r` at height `y`.
+fn disc(s: &mut Shape, r: f32, y: i32, mut f: impl FnMut(IVec3) -> Voxel) {
+    let ri = r.ceil() as i32;
+    for z in -ri..=ri {
+        for x in -ri..=ri {
+            if ((x * x + z * z) as f32).sqrt() <= r {
+                let p = v(x, y, z);
+                s.set(p, f(p));
+            }
+        }
+    }
+}
+
+/// A lamp post at (x, z), in a style that varies by landmark, built in 0.4 m voxels.
 fn lamp_post(s: &mut Shape, rng: &mut Rng, p: &Palette, x: i32, z: i32, height: i32) {
     let style = parts::LampStyle::pick(rng.next_u32());
-    let b = crate::scale::BLOCK;
-    parts::paint_lantern(s, style, p, v(x * b, 0, z * b), height * b, rng.int(0, 3) as u32);
+    parts::paint_lantern(s, style, p, v(x, 0, z), height, rng.int(0, 3) as u32);
+}
+
+/// A loose stone or two lying about the site.
+fn scatter(s: &mut Shape, rng: &mut Rng, p: &Palette, count: i32, reach: i32) {
+    for _ in 0..count {
+        let (x, z) = (rng.int(-reach, reach), rng.int(-reach, reach));
+        let at = v(x, 0, z);
+        if s.get(at).is_none() {
+            let size = rng.int(1, 2);
+            cuboid(s, at, at + v(size - 1, rng.int(0, 1), size - 1), |_| p.block(rng));
+        }
+    }
 }
 
 fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    footing(s, (-2, -2), (2, 2), || p.stone_dark);
-    match rng.int(0, 2) {
-        // A stone niche: two posts carrying a slab, with a lamp on the altar between.
-        0 => {
-            let h = rng.int(3, 4);
-            cuboid(s, v(-2, 0, -2), v(2, 0, 2), |_| p.stone);
-            for x in [-2, 2] {
-                cuboid(s, v(x, 1, -1), v(x, h, 1), |_| p.stone_dark);
+    footing(s, (-7, -7), (7, 7), || p.stone_dark);
+    // A paved platform with a step up to the shrine itself.
+    cuboid(s, v(-7, 0, -7), v(7, 0, 7), |_| p.stone);
+    for x in -6..=6 {
+        for z in -6..=6 {
+            if (x + z) % 4 == 0 {
+                s.set(v(x, 0, z), p.stone_dark);
             }
-            cuboid(s, v(-3, h + 1, -2), v(3, h + 1, 2), |_| p.roof);
-            // The roof's upper layer sits inside its edge, leaving a one-voxel lip all round.
-            let bk = crate::scale::BLOCK;
-            let top = (h + 1) * bk + bk - 1;
-            for x in -3 * bk..=3 * bk + bk - 1 {
-                for z in -2 * bk..=2 * bk + bk - 1 {
-                    if x == -3 * bk || x == 3 * bk + bk - 1 || z == -2 * bk || z == 2 * bk + bk - 1 {
-                        s.paint(v(x, top, z), AIR);
-                    }
+        }
+    }
+    match rng.int(0, 2) {
+        // A stone niche: four pillars with capitals under a gabled roof, an altar between.
+        0 => {
+            cuboid(s, v(-5, 1, -5), v(5, 1, 5), |_| p.stone_dark);
+            let h = rng.int(8, 10);
+            for (cx, cz) in [(-5, -4), (4, -4), (-5, 3), (4, 3)] {
+                cuboid(s, v(cx - 1, 2, cz - 1), v(cx + 2, 2, cz + 2), |_| p.stone);
+                cuboid(s, v(cx, 3, cz), v(cx + 1, h, cz + 1), |_| p.stone_dark);
+                cuboid(s, v(cx - 1, h + 1, cz - 1), v(cx + 2, h + 1, cz + 2), |_| p.stone);
+            }
+            // The roof: a 45 degree pitch two voxels thick, with a ridge cap.
+            let eave = h + 2;
+            for z in -7i32..=7 {
+                let y = eave + (7 - z.abs()) / 1;
+                for x in -8..=8 {
+                    s.set(v(x, y, z), p.roof);
+                    s.set(v(x, y - 1, z), p.roof);
                 }
             }
-            cuboid(s, v(-1, 1, 0), v(1, 1, 0), |_| p.stone);
-            s.set(v(0, 2, 0), mat::LANTERN);
-        }
-        // A timber gate in the accent colour before a small altar.
-        1 => {
-            let h = rng.int(5, 7);
-            for x in [-3, 3] {
-                cuboid(s, v(x, -3, -2), v(x, h, -2), |_| p.accent);
+            for x in -8..=8 {
+                s.set(v(x, eave + 8, 0), p.wood);
             }
-            cuboid(s, v(-4, h + 1, -2), v(4, h + 1, -2), |_| p.wood);
-            cuboid(s, v(-3, h - 1, -2), v(3, h - 1, -2), |_| p.accent);
-            cuboid(s, v(-1, 0, 1), v(1, 1, 2), |_| p.stone);
-            s.set(v(0, 2, 2), mat::LANTERN);
-        }
-        // A tall stone lantern, tiered.
-        _ => {
-            cuboid(s, v(-1, 0, -1), v(1, 0, 1), |_| p.stone_dark);
-            cuboid(s, v(0, 1, 0), v(0, 3, 0), |_| p.stone);
-            cuboid(s, v(-1, 4, -1), v(1, 4, 1), |_| p.stone);
+            // The altar, with a lamp on it.
+            cuboid(s, v(-3, 2, -1), v(3, 3, 1), |_| p.stone);
+            cuboid(s, v(-1, 4, 0), v(1, 4, 0), |_| p.stone_dark);
             s.set(v(0, 5, 0), mat::LANTERN);
-            cuboid(s, v(-2, 6, -2), v(2, 6, 2), |_| p.roof);
-            cuboid(s, v(-1, 7, -1), v(1, 7, 1), |_| p.roof);
-            s.set(v(0, 8, 0), p.stone);
+        }
+        // A timber gate in the accent colour before a small altar: two tall pillars, a
+        // lower tie beam, and a top beam that curves up at its ends.
+        1 => {
+            let h = rng.int(13, 16);
+            for x in [-6, 5] {
+                cuboid(s, v(x - 1, 1, -2), v(x + 2, 1, 1), |_| p.stone_dark);
+                cuboid(s, v(x, 2, -1), v(x + 1, h, 0), |_| p.accent);
+            }
+            cuboid(s, v(-5, h - 3, -1), v(5, h - 3, 0), |_| p.accent);
+            for x in -9i32..=9 {
+                let up = (x.abs() >= 8) as i32 + (x.abs() >= 9) as i32;
+                cuboid(s, v(x, h + 1 + up, -1), v(x, h + 2 + up, 0), |_| p.wood);
+            }
+            cuboid(s, v(-7, h + 3, -1), v(7, h + 3, 0), |_| p.stone_dark);
+            // The altar beyond it.
+            cuboid(s, v(-4, 1, 3), v(4, 1, 6), |_| p.stone);
+            cuboid(s, v(-2, 2, 4), v(2, 3, 5), |_| p.stone_dark);
+            s.set(v(0, 4, 5), mat::LANTERN);
+        }
+        // A tall tiered stone lantern on a stepped base.
+        _ => {
+            cuboid(s, v(-4, 1, -4), v(4, 1, 4), |_| p.stone_dark);
+            cuboid(s, v(-2, 2, -2), v(2, 2, 2), |_| p.stone);
+            parts::paint_lantern(s, parts::LampStyle::Stone, p, v(0, 3, 0), 8, 0);
         }
     }
-    // Offerings at the foot.
-    for (x, z) in [(-3, 3), (3, 3), (-3, -3)] {
+    // Offerings at the foot, and stones round the edge.
+    for (x, z) in [(-6, 6), (6, 6), (-6, -6)] {
         if rng.unit() < 0.6 {
-            s.set(v(x, 0, z), p.block(rng));
+            s.set(v(x, 1, z), p.block(rng));
         }
     }
+    scatter(s, rng, p, 6, 9);
 }
 
-/// How high the treads of a spiral stair climb per step, and how many fill a turn.
-const STAIR_STEPS_PER_TURN: i32 = 16;
+/// How many treads make one turn of the stair, and the radii it is laid across.
+const STAIR_STEPS_PER_TURN: i32 = 28;
+const STAIR_RADII: [f32; 6] = [2.9, 3.7, 4.5, 5.3, 6.1, 6.9];
 
 fn stair_angle(step: i32) -> f32 {
     0.45 + step as f32 * TAU / STAIR_STEPS_PER_TURN as f32
 }
 
+/// The cells one tread covers.
+fn tread_cells(step: i32) -> Vec<(i32, i32)> {
+    let a = stair_angle(step);
+    let mut cells: Vec<(i32, i32)> = STAIR_RADII
+        .iter()
+        .flat_map(|&r| {
+            let (x, z) = (a.cos() * r, a.sin() * r);
+            [(x.round() as i32, z.round() as i32), ((x + a.sin() * 0.5).round() as i32, (z - a.cos() * 0.5).round() as i32)]
+        })
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
+}
+
 fn lookout(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    const R: f32 = 5.4;
-    let height = rng.int(14, 26);
+    const R: f32 = 10.8;
+    let height = rng.int(28, 50);
     let timber = rng.unit() < 0.35;
     let wall = |rng: &mut Rng| if timber { p.plank } else { p.block(rng) };
-    let (ri, r_out) = (R.ceil() as i32 + 1, R);
+    let ri = R.ceil() as i32 + 1;
+    let thick = 2.6;
 
-    footing(s, (-5, -5), (5, 5), || p.stone_dark);
-    for y in 0..=height + 3 {
+    footing(s, (-11, -11), (11, 11), || p.stone_dark);
+    // A stepped plinth the tower stands on.
+    disc(s, R + 1.8, 0, |_| p.stone_dark);
+    for y in 0..=height + 6 {
         for z in -ri..=ri {
             for x in -ri..=ri {
                 let d = ((x * x + z * z) as f32).sqrt();
-                if d > r_out {
+                if d > R {
                     continue;
                 }
                 let at = v(x, y, z);
-                let shell = d > r_out - 1.3;
+                let shell = d > R - thick;
                 if y <= height {
                     if shell {
-                        // Timber towers are open frames above the lower storey.
-                        let open = timber && y > 3 && (x + z).rem_euclid(3) != 0 && y % 4 != 0;
-                        s.set(at, if open { AIR } else { wall(rng) });
+                        // Timber towers are open frames above the lower storey; stone ones get
+                        // string courses and slit windows.
+                        let open = timber && y > 6 && (x + z).rem_euclid(5) != 0 && y % 7 != 0;
+                        let course = !timber && y % 9 == 8;
+                        let a = (z as f32).atan2(x as f32).rem_euclid(TAU);
+                        let slit = !timber && y % 9 >= 3 && y % 9 <= 5 && y > 8 && (a * 4.0 / TAU * 1.0).fract().abs() < 0.04 + 0.0;
+                        s.set(at, if open || slit { AIR } else if course { p.stone_dark } else { wall(rng) });
                     } else {
                         s.set(at, AIR);
                     }
@@ -276,61 +344,62 @@ fn lookout(s: &mut Shape, rng: &mut Rng, p: &Palette) {
             }
         }
     }
-    // Central newel the stair winds around.
-    cuboid(s, v(0, 0, 0), v(0, height, 0), |_| p.stone_dark);
-    // A door facing +X.
-    cuboid(s, v(4, 0, -1), v(6, 2, 1), |_| AIR);
-    // Treads, each one voxel above the last, two wide.
+    // The newel the stair winds around.
+    for y in 0..=height {
+        cuboid(s, v(-1, y, -1), v(1, y, 1), |_| p.stone_dark);
+    }
+    // A door facing +X with a frame, and a step up to it.
+    cuboid(s, v(7, 0, -2), v(12, 6, 2), |_| AIR);
+    cuboid(s, v(9, 7, -3), v(11, 7, 3), |_| p.wood);
+    for z in [-3, 3] {
+        cuboid(s, v(9, 0, z), v(11, 6, z), |_| p.wood);
+    }
+    cuboid(s, v(12, 0, -2), v(13, 0, 2), |_| p.stone);
+    // Treads, one voxel (0.4 m) above the last: climbable by walking.
     for step in 0..height {
-        let a = stair_angle(step);
-        for r in [1.8f32, 2.6, 3.4] {
-            let (x, z) = ((a.cos() * r).round() as i32, (a.sin() * r).round() as i32);
-            if (x, z) != (0, 0) {
+        for (x, z) in tread_cells(step) {
+            if x.abs() > 1 || z.abs() > 1 {
                 s.set(v(x, step, z), p.plank);
             }
         }
     }
-    // The top floor, open above the last few treads, with a parapet round it.
+    // The top floor, open above the last few treads, with a crenellated parapet.
     for z in -ri..=ri {
         for x in -ri..=ri {
             let d = ((x * x + z * z) as f32).sqrt();
-            if d > r_out {
+            if d > R + 1.0 {
                 continue;
             }
             let angle = (z as f32).atan2(x as f32).rem_euclid(TAU);
             let last = stair_angle(height - 1).rem_euclid(TAU);
             let behind = (last - angle).rem_euclid(TAU);
-            let stairwell = d < r_out - 1.3 && d > 1.0 && behind < TAU * 5.0 / STAIR_STEPS_PER_TURN as f32 + 0.3;
+            let stairwell = d < R - thick && d > 2.0 && behind < TAU * 6.0 / STAIR_STEPS_PER_TURN as f32 + 0.3;
             if !stairwell {
                 s.set(v(x, height, z), p.plank);
             }
-            if d > r_out - 1.3 {
+            if d > R - thick {
+                // The balcony lip juts out a little over the wall below.
                 s.set(v(x, height + 1, z), wall(rng));
-                if (x * 3 + z * 7).rem_euclid(4) < 2 {
-                    s.set(v(x, height + 2, z), wall(rng));
+                s.set(v(x, height + 2, z), wall(rng));
+                if (x * 3 + z * 5).rem_euclid(4) < 2 {
+                    s.set(v(x, height + 3, z), wall(rng));
                 }
             }
         }
     }
     s.set(v(0, height + 1, 0), mat::LANTERN);
-    s.set(v(0, height + 2, 0), p.accent);
-    // Clear the way up: at least three voxels of air over every tread.
+    cuboid(s, v(0, height + 2, 0), v(0, height + 5, 0), |_| p.wood);
+    s.set(v(0, height + 6, 0), p.accent);
+    // Clear the way up: six voxels of headroom over every tread.
+    let cells: Vec<Vec<(i32, i32)>> = (0..height).map(tread_cells).collect();
     for step in 0..height {
-        let a = stair_angle(step);
-        for r in [1.8f32, 2.6, 3.4] {
-            let (x, z) = ((a.cos() * r).round() as i32, (a.sin() * r).round() as i32);
-            for dy in 1..=3 {
-                if (x, z) != (0, 0) && step + dy <= height {
-                    let above = v(x, step + dy, z);
-                    let tread = (0..height).any(|t| {
-                        t == step + dy && [1.8f32, 2.6, 3.4].iter().any(|r| {
-                            let a = stair_angle(t);
-                            ((a.cos() * r).round() as i32, (a.sin() * r).round() as i32) == (x, z)
-                        })
-                    });
-                    if !tread {
-                        s.set(above, AIR);
-                    }
+        for &(x, z) in &cells[step as usize] {
+            if x.abs() <= 1 && z.abs() <= 1 {
+                continue;
+            }
+            for dy in 1..=6 {
+                if step + dy <= height && !(step + dy < height && cells[(step + dy) as usize].contains(&(x, z))) {
+                    s.set(v(x, step + dy, z), AIR);
                 }
             }
         }
@@ -338,82 +407,120 @@ fn lookout(s: &mut Shape, rng: &mut Rng, p: &Palette) {
 }
 
 fn camp(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    // Fire ring around a bed of embers.
-    for (x, z) in [(-2, -1), (-2, 0), (-2, 1), (2, -1), (2, 0), (2, 1), (-1, -2), (0, -2), (1, -2), (-1, 2), (0, 2), (1, 2)] {
-        s.set(v(x, 0, z), p.block(rng));
+    // A ring of fire stones around a bed of embers.
+    for k in 0..14 {
+        let a = k as f32 / 14.0 * TAU;
+        let (x, z) = ((a.cos() * 3.4).round() as i32, (a.sin() * 3.4).round() as i32);
+        cuboid(s, v(x, 0, z), v(x, rng.int(0, 1), z), |_| p.block(rng));
     }
-    cuboid(s, v(-1, -1, -1), v(1, -1, 1), |_| mat::CHARCOAL);
+    disc(s, 2.5, -1, |_| mat::CHARCOAL);
+    disc(s, 1.6, 0, |_| mat::CHARCOAL);
     s.set(v(0, 0, 0), mat::EMBER);
+    s.set(v(1, 0, 0), mat::EMBER);
+    s.set(v(0, 0, 1), mat::EMBER);
     if rng.unit() < 0.6 {
-        s.set(v(1, 0, 0), mat::EMBER);
-        s.set(v(0, 0, -1), mat::CHARCOAL);
+        s.set(v(-1, 0, 0), mat::EMBER);
     }
-    // Log benches.
-    for (x0, z0, along_x) in [(-3, 4, true), (5, -2, false)] {
-        for k in 0..rng.int(3, 5) {
-            s.set(if along_x { v(x0 + k, 0, z0) } else { v(x0, 0, z0 + k) }, p.wood);
+    // A tripod over it, and a pot.
+    for (x, z) in [(-2, -1), (2, -1), (0, 2)] {
+        for y in 1..=5 {
+            let t = y as f32 / 6.0;
+            s.set(v((x as f32 * (1.0 - t)).round() as i32, y, (z as f32 * (1.0 - t)).round() as i32), p.wood);
         }
     }
-    // A tent: an A-frame of cloth, open at the ends.
+    cuboid(s, v(0, 4, 0), v(0, 4, 0), |_| p.stone_dark);
+    // Log benches: round-ish logs two voxels thick.
+    for (x0, z0, along_x) in [(-7, 6, true), (9, -4, false)] {
+        for k in 0..rng.int(7, 10) {
+            let q = if along_x { v(x0 + k, 0, z0) } else { v(x0, 0, z0 + k) };
+            cuboid(s, q, q + v(0, 1, 0), |_| p.wood);
+            let off = if along_x { v(0, 0, 1) } else { v(1, 0, 0) };
+            s.set(q + off, p.wood);
+            if rng.unit() < 0.2 {
+                s.set(q + v(0, 2, 0), p.wood);
+            }
+        }
+    }
+    // A tent: an A-frame of cloth on a ridge pole, closed at the back, open at the front.
     let cloth = if rng.unit() < 0.5 { p.accent } else { mat::CLOTH_PALE };
-    let (tx, tz, len) = (-6, -5, rng.int(4, 6));
+    let (tx, tz, len) = (-12, -10, rng.int(10, 13));
     for k in 0..len {
         let z = tz + k;
-        for y in 0..=2 {
-            let w = 2 - y;
+        for y in 0..=5 {
+            let w = 5 - y;
             s.set(v(tx - w, y, z), cloth);
             s.set(v(tx + w, y, z), cloth);
+            if w == 0 {
+                s.set(v(tx, y, z), cloth);
+            }
         }
     }
-    let lamp_height = rng.int(2, 3);
-    lamp_post(s, rng, p, 5, 5, lamp_height);
-    if rng.unit() < 0.5 {
-        cuboid(s, v(4, 0, 2), v(4, 1, 3), |_| p.plank);
+    cuboid(s, v(tx - 5, 0, tz + len - 1), v(tx + 5, 0, tz + len - 1), |_| cloth);
+    // The ridge pole sticks out at both ends, with a guy stake at each corner.
+    cuboid(s, v(tx, 6, tz - 1), v(tx, 6, tz + len), |_| p.wood);
+    for (x, z) in [(tx - 7, tz), (tx + 7, tz), (tx - 7, tz + len - 1), (tx + 7, tz + len - 1)] {
+        cuboid(s, v(x, 0, z), v(x, 1, z), |_| p.wood);
+    }
+    // A bedroll inside.
+    cuboid(s, v(tx - 1, 0, tz + 3), v(tx + 1, 0, tz + 6), |_| mat::CLOTH_BLUE);
+    lamp_post(s, rng, p, 10, 10, 9);
+    if rng.unit() < 0.6 {
+        // A stack of firewood.
+        cuboid(s, v(7, 0, 5), v(10, 2, 6), |_| p.wood);
     }
 }
 
 fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     let broken = |rng: &mut Rng, h: i32| ((h as f32) * rng.range(0.25, 1.1)).round() as i32;
     match rng.int(0, 2) {
-        // The shell of a keep with one fallen side.
+        // The shell of a keep with one fallen side, windows still in its walls.
         0 => {
-            let (w, d, h) = (rng.int(6, 9), rng.int(5, 8), rng.int(5, 8));
-            footing(s, (-w, -d), (w, d), || p.stone_dark);
-            let wall = |s: &mut Shape, rng: &mut Rng, x: i32, z: i32| {
+            let (w, d, h) = (rng.int(12, 18), rng.int(10, 16), rng.int(10, 16));
+            footing(s, (-w - 1, -d - 1), (w + 1, d + 1), || p.stone_dark);
+            let wall = |s: &mut Shape, rng: &mut Rng, x: i32, z: i32, dx: i32, dz: i32| {
                 let top = broken(rng, h);
-                cuboid(s, v(x, 0, z), v(x, top, z), |_| p.stone);
-                for y in 0..=top {
-                    s.set(v(x, y, z), p.block(rng));
+                for k in 0..2 {
+                    for y in 0..=top {
+                        // Windows, three voxels wide, every eighth column above the base.
+                        let window = (x + z).rem_euclid(8) < 2 && (6..=9).contains(&y);
+                        let at = v(x + dx * k, y, z + dz * k);
+                        s.set(at, if window { AIR } else { p.block(rng) });
+                    }
                 }
             };
             for x in -w..=w {
-                wall(s, rng, x, -d);
+                wall(s, rng, x, -d, 0, 1);
                 if rng.unit() < 0.45 {
-                    wall(s, rng, x, d);
+                    wall(s, rng, x, d - 1, 0, 1);
                 }
             }
             for z in -d..=d {
-                wall(s, rng, -w, z);
-                wall(s, rng, w, z);
+                wall(s, rng, -w, z, 1, 0);
+                wall(s, rng, w - 1, z, 1, 0);
             }
-            cuboid(s, v(-1, 0, -d), v(1, 3, -d), |_| AIR);
+            cuboid(s, v(-2, 0, -d), v(2, 6, -d + 1), |_| AIR);
+            cuboid(s, v(-3, 7, -d), v(3, 7, -d + 1), |_| p.stone_dark);
+            // Fallen stones inside and out.
+            scatter(s, rng, p, 24, w);
         }
         // A colonnade with some columns down.
         1 => {
             let n = rng.int(3, 5);
-            for row in [-4, 4] {
+            for row in [-8, 8] {
                 for k in -n..=n {
-                    let x = k * 3;
-                    let top = broken(rng, 8);
-                    cuboid(s, v(x, -3, row), v(x, top, row), |_| p.stone);
-                    for y in 0..=top {
-                        s.set(v(x, y, row), p.block(rng));
+                    let x = k * 6;
+                    let top = broken(rng, 16);
+                    cuboid(s, v(x - 1, -8, row - 1), v(x + 2, 0, row + 2), |_| p.stone_dark);
+                    for y in 1..=top.max(1) {
+                        cuboid(s, v(x, y, row), v(x + 1, y, row + 1), |_| p.block(rng));
                     }
-                    if top >= 8 && k < n {
-                        cuboid(s, v(x, 9, row), v(x + 3, 9, row), |_| p.stone_dark);
-                    } else if top < 3 {
-                        for j in 1..=4 {
-                            s.set(v(x, 0, row + j * row.signum()), p.block(rng));
+                    if top >= 15 && k < n {
+                        cuboid(s, v(x - 1, 17, row - 1), v(x + 7, 18, row + 2), |_| p.stone_dark);
+                    } else if top < 6 {
+                        for j in 1..=6 {
+                            if rng.unit() < 0.7 {
+                                s.set(v(x, 0, row + j * row.signum()), p.block(rng));
+                            }
                         }
                     }
                 }
@@ -421,36 +528,40 @@ fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
         }
         // A ring of walling around a sunken floor.
         _ => {
-            let r = rng.range(7.0, 10.0);
-            let ri = r.ceil() as i32 + 1;
+            let r = rng.range(14.0, 20.0);
+            let ri = r.ceil() as i32 + 2;
             for z in -ri..=ri {
                 for x in -ri..=ri {
                     let d = ((x * x + z * z) as f32).sqrt();
-                    if (d - r).abs() < 0.8 {
-                        let top = broken(rng, 5);
-                        for y in -2..=top {
+                    if (d - r).abs() < 1.2 {
+                        let top = broken(rng, 10);
+                        for y in -4..=top {
                             s.set(v(x, y, z), p.block(rng));
                         }
-                    } else if d < r - 0.8 {
-                        s.set(v(x, -1, z), if rng.unit() < 0.5 { p.stone_dark } else { p.stone });
+                    } else if d < r - 1.2 {
+                        s.set(v(x, -2, z), if rng.unit() < 0.5 { p.stone_dark } else { p.stone });
                     }
                 }
             }
         }
     }
-    // Scattered blocks.
-    for _ in 0..rng.int(5, 12) {
-        s.fill(v(rng.int(-11, 11), 0, rng.int(-11, 11)), p.block(rng));
-    }
+    // Scattered rubble.
+    let rubble = rng.int(14, 26);
+    scatter(s, rng, p, rubble, 20);
 }
 
 fn standing_stone(s: &mut Shape, rng: &mut Rng, p: &Palette, x: i32, z: i32, height: i32) {
-    let (w, d) = (rng.int(0, 1), rng.int(0, 1));
-    for y in -3..=height {
-        let taper = (y > height * 2 / 3) as i32;
+    let (w, d) = (rng.int(1, 3), rng.int(1, 2));
+    for y in -6..=height {
+        let taper = (y > height * 2 / 3) as i32 + (y > height - 2) as i32;
+        // Each layer is a little ragged, so the stone is not a clean prism.
+        let lean = if y > height / 2 { rng.int(0, 1) } else { 0 };
         for dz in 0..=(d - taper).max(0) {
             for dx in 0..=(w - taper).max(0) {
-                s.set(v(x + dx, y, z + dz), p.block(rng));
+                if y > 0 && (dx, dz) != (0, 0) && rng.unit() < 0.1 {
+                    continue;
+                }
+                s.set(v(x + dx + lean, y, z + dz), p.block(rng));
             }
         }
     }
@@ -460,41 +571,46 @@ fn stones(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     match rng.int(0, 2) {
         // A ring.
         0 => {
-            let (n, r) = (rng.int(7, 12), rng.range(7.5, 11.0));
+            let (n, r) = (rng.int(8, 12), rng.range(14.0, 21.0));
             for k in 0..n {
                 let a = k as f32 / n as f32 * TAU + rng.range(-0.08, 0.08);
-                let h = rng.int(3, 7);
+                let h = rng.int(6, 13);
                 standing_stone(s, rng, p, (a.cos() * r) as i32, (a.sin() * r) as i32, h);
             }
-            s.set(v(0, 0, 0), p.stone_dark);
+            cuboid(s, v(-1, 0, -1), v(1, 0, 1), |_| p.stone_dark);
         }
         // An alignment dwindling away.
         1 => {
             let n = rng.int(5, 8);
             for k in 0..n {
-                let z = rng.int(-1, 1);
-                standing_stone(s, rng, p, -10 + k * 3, z, 8 - k);
+                let z = rng.int(-2, 2);
+                standing_stone(s, rng, p, -20 + k * 6, z, 16 - 2 * k);
             }
         }
         // A dolmen: uprights under a capstone.
         _ => {
-            let h = rng.int(3, 5);
-            for (x, z) in [(-3, -2), (3, -2), (-3, 2), (3, 2)] {
+            let h = rng.int(7, 10);
+            for (x, z) in [(-6, -4), (6, -4), (-6, 4), (6, 4)] {
                 standing_stone(s, rng, p, x, z, h);
             }
-            cuboid(s, v(-4, h + 1, -3), v(4, h + 2, 3), |_| p.stone_dark);
+            for y in 0..3 {
+                cuboid(s, v(-8 + y, h + 1 + y, -6 + y), v(9 - y, h + 1 + y, 7 - y), |_| p.stone_dark);
+            }
         }
     }
+    scatter(s, rng, p, 10, 14);
 }
 
 fn cairn(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    let h = rng.int(4, 8);
-    footing(s, (-2, -2), (2, 2), || p.stone_dark);
+    let h = rng.int(8, 16);
+    footing(s, (-4, -4), (4, 4), || p.stone_dark);
     for y in 0..h {
-        let r = (2.8 * (1.0 - y as f32 / h as f32)).ceil() as i32;
-        for z in -r..=r {
-            for x in -r..=r {
-                if x * x + z * z <= r * r + 1 && rng.unit() < 0.9 {
+        let r = 5.6 * (1.0 - y as f32 / h as f32) + 0.8;
+        let ri = r.ceil() as i32;
+        for z in -ri..=ri {
+            for x in -ri..=ri {
+                let wobble = rng.range(-0.5, 0.5);
+                if ((x * x + z * z) as f32).sqrt() <= r + wobble && rng.unit() < 0.9 {
                     s.set(v(x, y, z), p.block(rng));
                 }
             }
@@ -502,112 +618,151 @@ fn cairn(s: &mut Shape, rng: &mut Rng, p: &Palette) {
         s.set(v(0, y, 0), p.block(rng));
     }
     if rng.unit() < 0.6 {
-        // A prayer flag on a pole.
-        cuboid(s, v(0, h, 0), v(0, h + 4, 0), |_| p.wood);
-        for x in 1..=3 {
-            s.set(v(x, h + 4, 0), p.accent);
-            s.set(v(x, h + 3, 0), if x == 3 { AIR } else { p.accent });
+        // A prayer flag on a pole, flying in strips.
+        cuboid(s, v(0, h, 0), v(0, h + 9, 0), |_| p.wood);
+        for x in 1..=6 {
+            s.set(v(x, h + 9, 0), p.accent);
+            s.set(v(x, h + 8, 0), if x % 2 == 0 { mat::CLOTH_PALE } else { p.accent });
+            s.set(v(x, h + 7, 0), if x >= 5 { AIR } else { p.accent });
         }
     }
+    scatter(s, rng, p, 8, 8);
 }
 
 fn arch(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    let (r, thick) = (rng.range(4.5, 7.0), rng.int(1, 2));
-    let ri = r.ceil() as i32 + 3;
-    let leg = rng.int(1, 3);
+    let (r, thick) = (rng.range(9.0, 14.0), rng.int(3, 5));
+    let ri = r.ceil() as i32 + 5;
+    let leg = rng.int(2, 6);
+    let band = rng.range(3.0, 4.5);
     for z in 0..thick {
         for x in -ri..=ri {
-            for y in -3..=ri + leg {
+            for y in -6..=ri + leg + 2 {
                 let lift = (y - leg).max(0) as f32;
                 let d = ((x * x) as f32 + lift * lift).sqrt();
-                if d >= r && d <= r + 2.0 {
+                // The underside is a little ragged where the rock has weathered.
+                if d >= r && d <= r + band && !(y > leg && rng.unit() < 0.05) {
                     s.set(v(x, y, z), p.block(rng));
                 }
             }
         }
     }
+    // A keystone at the crown, a shade darker.
+    let top = leg + (r + band).floor() as i32 - 1;
+    cuboid(s, v(-1, top - 3, 0), v(1, top, thick - 1), |_| p.stone_dark);
     if rng.unit() < 0.5 {
-        // A lamp hung at the crown.
-        let top = leg + r.floor() as i32 - 1;
-        s.set(v(0, top, 0), p.wood);
-        s.set(v(0, top - 1, 0), mat::LANTERN);
+        // A lamp hung on a short chain from the crown.
+        let under = leg + r.floor() as i32;
+        cuboid(s, v(0, under - 2, 0), v(0, under - 1, 0), |_| p.wood);
+        s.set(v(0, under - 3, 0), mat::LANTERN);
     }
 }
 
 fn hut(s: &mut Shape, rng: &mut Rng, p: &Palette) {
-    let (w, d) = (rng.int(3, 4), rng.int(4, 5));
-    let (h, stone_walls) = (rng.int(3, 4), rng.unit() < 0.4);
-    footing(s, (-w, -d), (w, d), || p.stone_dark);
+    let (w, d) = (rng.int(6, 8), rng.int(8, 10));
+    let (h, stone_walls) = (rng.int(7, 9), rng.unit() < 0.4);
+    footing(s, (-w - 1, -d - 1), (w + 1, d + 1), || p.stone_dark);
     let wall = |rng: &mut Rng| if stone_walls { p.block(rng) } else { p.plank };
-    cuboid(s, v(-w, -1, -d), v(w, -1, d), |_| p.plank);
-    for y in 0..h {
+    // A stone sill, a plank floor, and walls one voxel thick with corner posts.
+    for z in -d..=d {
+        for x in -w..=w {
+            let edge = x.abs() == w || z.abs() == d;
+            s.set(v(x, -1, z), p.plank);
+            if edge {
+                s.set(v(x, 0, z), p.stone_dark);
+            }
+        }
+    }
+    for y in 1..h {
         for z in -d..=d {
             for x in -w..=w {
                 let edge = x.abs() == w || z.abs() == d;
-                let corner = x.abs() == w && z.abs() == d;
-                let at = v(x, y, z);
+                let corner = x.abs() >= w - 1 && z.abs() >= d - 1 && edge;
                 if corner {
-                    s.set(at, p.wood);
+                    s.set(v(x, y, z), p.wood);
                 } else if edge {
-                    s.set(at, wall(rng));
+                    // Timber walls get a horizontal band every few boards.
+                    let band = !stone_walls && (y == 4 || y == h - 1);
+                    s.set(v(x, y, z), if band { p.wood } else { wall(rng) });
                 } else {
-                    s.set(at, AIR);
+                    s.set(v(x, y, z), AIR);
                 }
             }
         }
     }
-    // Door on the +Z end, and a lit window each side.
-    cuboid(s, v(0, 0, d), v(0, 2, d), |_| AIR);
+    // A door on the +Z end with a frame and a step, and a lit window each side.
+    cuboid(s, v(-1, 1, d), v(1, 5, d), |_| AIR);
+    cuboid(s, v(-2, 1, d), v(-2, 6, d), |_| p.wood);
+    cuboid(s, v(2, 1, d), v(2, 6, d), |_| p.wood);
+    cuboid(s, v(-2, 6, d), v(2, 6, d), |_| p.wood);
+    cuboid(s, v(-2, 0, d + 1), v(2, 0, d + 2), |_| p.stone);
     for x in [-w, w] {
-        s.set(v(x, 1, 0), mat::LANTERN);
+        cuboid(s, v(x, 3, -1), v(x, 5, 1), |_| p.wood);
+        s.set(v(x, 4, 0), mat::LANTERN);
     }
-    // A gabled roof built in voxels, not blocks: a 45 degree pitch, two voxels thick, with
-    // an overhang at the eaves and a timber ridge cap. The walls are blocks 2 voxels wide
-    // and centred on x = 0.5, so the roof is symmetric about that line.
-    let b = crate::scale::BLOCK;
-    let eave = h * b;
-    let half = w * b + 1 + 2;
-    let height_at = |x: i32| eave + half - ((x as f32 - 0.5).abs().ceil() as i32 - 0).max(0) - 1;
-    for x in -half..=half + 1 {
+    // A gabled roof in voxels: a 45 degree pitch two voxels thick, with an overhang at the
+    // eaves and a timber ridge cap.
+    let eave = h;
+    let half = w + 2;
+    let height_at = |x: i32| eave + half - x.abs();
+    for x in -half..=half {
         let top = height_at(x);
-        for z in -(d + 1) * b..=(d + 1) * b + b - 1 {
-            s.paint(v(x, top, z), p.roof);
-            s.paint(v(x, top - 1, z), p.roof);
+        for z in -d - 2..=d + 2 {
+            s.set(v(x, top, z), p.roof);
+            s.set(v(x, top - 1, z), p.roof);
         }
     }
-    for z in -(d + 1) * b..=(d + 1) * b + b - 1 {
-        for x in [0, 1] {
-            s.paint(v(x, height_at(x) + 1, z), p.wood);
-        }
+    for z in -d - 2..=d + 2 {
+        s.set(v(0, height_at(0) + 1, z), p.wood);
     }
     // Gable ends: the wall carried up under the roof.
-    for x in -(w * b)..=w * b + 1 {
+    for x in -w..=w {
         for y in eave..height_at(x) - 1 {
-            for z in [-d * b, -d * b + 1, d * b, d * b + 1] {
-                s.paint(v(x, y, z), if stone_walls { p.stone } else { p.plank });
+            for z in [-d, d] {
+                s.set(v(x, y, z), if stone_walls { p.stone } else { p.plank });
             }
         }
     }
     // Chimney.
-    let (cx, cz) = (w - 1, -d + 1);
-    cuboid(s, v(cx, 0, cz), v(cx, h + w + 2, cz), |_| p.stone_dark);
-    lamp_post(s, rng, p, 2, d + 3, 2);
+    let (cx, cz) = (w - 3, -d + 2);
+    cuboid(s, v(cx, 1, cz), v(cx + 1, h + w + 4, cz + 1), |_| p.stone_dark);
+    cuboid(s, v(cx - 1, h + w + 5, cz - 1), v(cx + 2, h + w + 5, cz + 2), |_| p.stone);
+    lamp_post(s, rng, p, 4, d + 6, 9);
+    scatter(s, rng, p, 6, d + 6);
 }
 
-/// A pier running out along +X from the shore at the origin, `length` long.
+/// A pier running out along +X from the shore at the origin, `length` voxels long.
 fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
     for x in 0..length {
-        cuboid(s, v(x, 0, -1), v(x, 0, 1), |_| if x % 5 == 4 { p.wood } else { p.plank });
-        if x % 4 == 1 {
-            for z in [-2, 2] {
-                cuboid(s, v(x, -9, z), v(x, 1, z), |_| p.wood);
+        // Boards across the pier, alternating in tone, with a gap now and then.
+        let board = if x % 4 < 3 { if (x / 4) % 2 == 0 { p.plank } else { mat::PLANK_DARK } } else { AIR };
+        for z in -3i32..=3 {
+            if board != AIR || z.abs() == 3 {
+                s.set(v(x, 0, z), if board != AIR { board } else { p.wood });
             }
         }
     }
-    cuboid(s, v(-1, -3, -1), v(-1, -1, 1), |_| p.stone_dark);
-    lamp_post(s, rng, p, length - 1, 2, 3);
+    // Posts down to the bed with caps, and rails between them.
+    for x in (0..length).step_by(8) {
+        for z in [-4, 4] {
+            cuboid(s, v(x, -18, z), v(x + 1, 4, z + 1), |_| p.wood);
+            cuboid(s, v(x, 5, z), v(x + 1, 5, z + 1), |_| p.stone_dark);
+        }
+    }
+    for x in 0..length {
+        for z in [-4, 4] {
+            s.set(v(x, 3, z), p.wood);
+        }
+    }
+    // Rails open at the middle of the pier's end, where boats tie up.
+    cuboid(s, v(length - 1, 1, -3), v(length, 3, 3), |_| p.wood);
+    // Stone steps up from the shore.
+    cuboid(s, v(-3, -3, -3), v(-1, -1, 3), |_| p.stone_dark);
+    cuboid(s, v(-2, 0, -3), v(-1, 0, 3), |_| p.stone);
+    lamp_post(s, rng, p, length - 3, 2, 8);
     if rng.unit() < 0.6 {
-        cuboid(s, v(length - 3, 1, -1), v(length - 2, 1, -1), |_| p.plank);
+        // A crate and a coil of rope on the boards.
+        cuboid(s, v(length - 8, 1, -2), v(length - 6, 2, -1), |_| p.plank);
+        cuboid(s, v(length - 8, 1, 1), v(length - 7, 1, 2), |_| mat::THATCH);
     }
 }
 
@@ -615,7 +770,7 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
 pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(IVec3, Voxel)> {
     let palette = &palette.varied(seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
-    let mut s = Shape::new();
+    let mut s = Shape::raw();
     match kind {
         Landmark::Shrine => shrine(&mut s, &mut rng, palette),
         Landmark::Lookout => lookout(&mut s, &mut rng, palette),
@@ -625,7 +780,7 @@ pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(
         Landmark::Cairn => cairn(&mut s, &mut rng, palette),
         Landmark::Arch => arch(&mut s, &mut rng, palette),
         Landmark::Hut => hut(&mut s, &mut rng, palette),
-        Landmark::Landing => landing(&mut s, &mut rng, palette, length),
+        Landmark::Landing => landing(&mut s, &mut rng, palette, length * crate::scale::BLOCK),
     }
     // Break up the hard block outline of the stonework.
     let chip = match kind {
@@ -647,16 +802,30 @@ pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, V
     parts::lantern(parts::LampStyle::pick(hash >> 3), &palette, height * crate::scale::BLOCK, hash >> 7 & 3)
 }
 
-/// A signpost: one arm per direction, each direction in radians.
+/// A signpost: a post with a cap, and one board per direction pointing along it, each
+/// board a voxel thick with a pointed end and a bracket under it. Each direction is in radians.
 pub fn signpost(palette: &Palette, directions: &[f32]) -> Vec<(IVec3, Voxel)> {
-    let mut s = Shape::new();
-    cuboid(&mut s, v(0, -3, 0), v(0, 3, 0), |_| palette.wood);
+    let mut s = Shape::raw();
+    for y in -6..=9 {
+        s.set(v(0, y, 0), palette.wood);
+    }
+    for (x, z) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+        s.set(v(x, -1, z), palette.stone_dark);
+    }
+    s.set(v(0, 10, 0), palette.roof);
     for (k, &a) in directions.iter().enumerate().take(3) {
-        let y = 3 - k as i32;
-        for r in 1..=2 {
+        let y = 8 - k as i32 * 2;
+        for r in 1..=6 {
             let (x, z) = (a.cos() * r as f32, a.sin() * r as f32);
-            s.set(v(x.round() as i32, y, z.round() as i32), palette.plank);
+            let at = v(x.round() as i32, y, z.round() as i32);
+            s.set(at, palette.plank);
+            if r <= 5 {
+                s.set(at + v(0, 1, 0), palette.plank);
+            }
         }
+        // A bracket under the board.
+        let (bx, bz) = ((a.cos() * 1.0).round() as i32, (a.sin() * 1.0).round() as i32);
+        s.set(v(bx, y - 1, bz), palette.wood);
     }
     s.into_voxels()
 }
@@ -735,35 +904,30 @@ mod tests {
     fn lookout_stairs_can_be_climbed() {
         let palette = Palette::of(Biome::Grassland);
         for seed in 0..12 {
-            // Blocks, addressed by one corner voxel each.
-            let unit = IVec3::splat(crate::scale::BLOCK);
-            let model: HashMap<IVec3, Voxel> = build(Landmark::Lookout, &palette, seed, 0)
-                .into_iter()
-                .filter(|(p, _)| p.rem_euclid(unit) == IVec3::ZERO)
-                .map(|(p, v)| (p.div_euclid(unit), v))
-                .collect();
+            let model: HashMap<IVec3, Voxel> = build(Landmark::Lookout, &palette, seed, 0).into_iter().collect();
             let solid = |p: IVec3| model.get(&p).is_some_and(|&v| v != AIR);
-            let height = (0..40).rev().find(|&y| model.get(&v(0, y, 0)) == Some(&mat::LANTERN)).unwrap() - 1;
-            let tread = |step: i32| {
-                let a = stair_angle(step);
-                v((a.cos() * 2.6).round() as i32, step, (a.sin() * 2.6).round() as i32)
-            };
+            let height = (0..80).rev().find(|&y| model.get(&v(0, y, 0)) == Some(&mat::LANTERN)).unwrap() - 1;
+            let outer = |step: i32| tread_cells(step).into_iter().filter(|c| c.0.abs() > 1 || c.1.abs() > 1).collect::<Vec<_>>();
             for step in 0..height {
-                let t = tread(step);
-                assert!(solid(t), "seed {seed}: tread {step} missing at {t:?}");
-                for dy in 1..=3 {
-                    if step + dy < height {
-                        let above = t + IVec3::Y * dy;
-                        let is_next_tread = (step + 1..height).any(|s| tread(s) == above);
-                        assert!(is_next_tread || !solid(above), "seed {seed}: no headroom above tread {step} at {above:?}");
+                let cells = outer(step);
+                assert!(cells.len() >= 5, "seed {seed}: tread {step} is too narrow: {cells:?}");
+                for &(x, z) in &cells {
+                    assert!(solid(v(x, step, z)), "seed {seed}: tread {step} missing at {x},{z}");
+                    for dy in 1..=5 {
+                        if step + dy < height {
+                            let next_tread = outer(step + dy).contains(&(x, z));
+                            assert!(next_tread || !solid(v(x, step + dy, z)), "seed {seed}: no headroom above tread {step} at {x},{z}");
+                        }
                     }
                 }
                 if step > 0 {
-                    let (a, b) = (tread(step - 1), t);
-                    let gap = (a.x - b.x).abs().max((a.z - b.z).abs());
-                    assert!(gap <= 2, "seed {seed}: treads {} and {step} too far apart", step - 1);
+                    let prev = outer(step - 1);
+                    let reaches = cells.iter().any(|a| prev.iter().any(|b| (a.0 - b.0).abs() <= 1 && (a.1 - b.1).abs() <= 1));
+                    assert!(reaches, "seed {seed}: treads {} and {step} are not adjacent", step - 1);
                 }
             }
+            // The door is open at ground level.
+            assert!(!solid(v(9, 1, 0)) && !solid(v(10, 3, 0)));
         }
     }
 }

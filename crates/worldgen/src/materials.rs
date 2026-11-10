@@ -158,6 +158,19 @@ palette! {
     VINE_LEAF         = ( 72, 128,  58), Foliage, 3;
     VINE_FLOWER       = (232, 142, 170), Foliage, 2;
     LIANA_STEM        = (116, 100,  66), Foliage, 2;
+    // Ground of the rarer biomes.
+    GRASS_MARSH    = ( 84, 126,  92), Solid, 2;
+    GRASS_BIRCH    = (128, 166,  82), Solid, 2;
+    GRASS_ALPINE   = (104, 156, 104), Solid, 2;
+    BOG_MOSS       = (138, 100,  78), Solid, 2;
+    GRASS_STEPPE   = (168, 166, 100), Solid, 2;
+    DUNE_SAND      = (232, 180, 116), Solid, 1;
+    RED_SAND       = (196, 118,  76), Solid, 2;
+    RED_ROCK       = (172,  86,  58), Solid, 2;
+    RED_ROCK_DARK  = (136,  66,  50), Solid, 2;
+    MANGROVE_MUD   = ( 88,  80,  60), Solid, 1;
+    ASH            = ( 74,  70,  70), Solid, 2;
+    BASALT         = ( 52,  50,  56), Solid, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -206,6 +219,37 @@ pub fn ground_cover(biome: Biome) -> Voxel {
         Biome::Savanna => GRASS_SAVANNA,
         Biome::Woodland => GRASS_WOODLAND,
         Biome::Rainforest => GRASS_JUNGLE,
+        Biome::Marsh => GRASS_MARSH,
+        Biome::BirchGrove => GRASS_BIRCH,
+        Biome::AlpineMeadow => GRASS_ALPINE,
+        Biome::SnowyPine => SNOW,
+        Biome::Bog => BOG_MOSS,
+        Biome::Steppe => GRASS_STEPPE,
+        Biome::DuneSea => DUNE_SAND,
+        Biome::RedRock => RED_SAND,
+        Biome::Mangrove => MANGROVE_MUD,
+        Biome::Volcanic => ASH,
+    }
+}
+
+/// Bare rock where the ground is too steep for soil: the usual rock and a darker one.
+pub fn bedrock(biome: Biome) -> (Voxel, Voxel) {
+    match biome {
+        Biome::RedRock => (RED_ROCK, RED_ROCK_DARK),
+        Biome::DuneSea | Biome::Desert => (SANDSTONE, SANDSTONE_DARK),
+        Biome::Volcanic => (BASALT, ROCK_DARK),
+        _ => (STONE, ROCK_DARK),
+    }
+}
+
+/// What lies a little beneath a biome's ground cover.
+pub fn subsoil(cover: Voxel) -> Voxel {
+    match cover {
+        DESERT_SAND | DUNE_SAND => cover,
+        RED_SAND => RED_ROCK,
+        ASH => BASALT,
+        MANGROVE_MUD | BOG_MOSS => MUD,
+        _ => DIRT,
     }
 }
 

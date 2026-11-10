@@ -59,11 +59,14 @@ pub fn snow_cover(date: f32) -> f32 {
 /// above 1 where it never does.
 pub fn warmth(biome: Biome) -> f32 {
     match biome {
+        // Snowy pine is snow-covered by definition; the other newer biomes follow their parent.
+        Biome::SnowyPine => -0.3,
         Biome::Alpine => -0.5,
         Biome::Tundra => -0.35,
         Biome::Taiga => -0.2,
         Biome::Heath | Biome::Grassland | Biome::Deciduous | Biome::Woodland | Biome::OldGrowth | Biome::Ocean => 0.25,
         Biome::Savanna | Biome::Desert | Biome::Rainforest => 1.5,
+        b => warmth(b.parent()),
     }
 }
 
