@@ -62,6 +62,42 @@ enum PKind {
     Droplet,
 }
 
+/// What a falling leaf looks like, by the tree it came from.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LeafShape {
+    /// Needle flecks under spruce and pine.
+    Needle,
+    /// Long slips under willow, acacia and palm.
+    Slip,
+    /// Broad leaves: oak, birch, jungle, baobab.
+    Broad,
+    /// Big autumn leaves; these fall in heavier numbers.
+    Autumn,
+    /// Cherry blossom petals.
+    Petal,
+}
+
+impl LeafShape {
+    /// Size (width, thickness, length) in old voxels, and how many extra falls it brings.
+    fn size(self) -> Vec3 {
+        match self {
+            LeafShape::Needle => Vec3::new(0.04, 0.03, 0.14),
+            LeafShape::Slip => Vec3::new(0.07, 0.04, 0.36),
+            LeafShape::Broad => Vec3::new(0.2, 0.06, 0.24),
+            LeafShape::Autumn => Vec3::new(0.26, 0.06, 0.28),
+            LeafShape::Petal => Vec3::new(0.1, 0.03, 0.1),
+        }
+    }
+    fn weight(self) -> f32 {
+        match self {
+            LeafShape::Needle => 0.5,
+            LeafShape::Slip => 0.8,
+            LeafShape::Broad | LeafShape::Petal => 1.0,
+            LeafShape::Autumn => 3.5,
+        }
+    }
+}
+
 struct Particle {
     kind: PKind,
     pos: DVec3,
@@ -84,7 +120,7 @@ pub struct Surroundings<'a> {
     pub sun_elevation: f32,
     pub cascades: &'a [Cascade],
     /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
-    pub leaves: &'a [(DVec3, [f32; 3])],
+    pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
     /// Flower voxels near the player.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
@@ -187,18 +223,22 @@ impl Particles {
 
         // Leaves let go in the wind.
         if !s.leaves.is_empty() {
-            let windiness = 0.3 + self.wind.vector.length() * 0.4;
-            let rate = 2.5 * windiness * (s.leaves.len() as f32 / 400.0).min(1.5);
+            let gust = self.wind.vector.length();
+            // Gusts shake leaves loose far faster than a steady breeze does.
+            let windiness = 0.3 + gust * 0.4 + (gust - 1.8).max(0.0) * 2.0;
+            // Autumn groves (maple and the like) shed much more.
+            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32;
+            let rate = 2.5 * windiness * weight * (s.leaves.len() as f32 / 400.0).min(1.5);
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
-                let (pos, color) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
+                let (pos, color, shape) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
                 let particle = Particle {
                     kind: PKind::Leaf,
                     pos: pos + DVec3::new(self.range(0.1, 0.9) as f64, -0.1, self.range(0.1, 0.9) as f64),
                     vel: Vec3::ZERO,
                     age: 0.0,
                     life: self.range(9.0, 14.0),
-                    size: Vec3::new(0.22, 0.08, 0.22),
+                    size: shape.size() * self.range(0.8, 1.2),
                     color,
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
@@ -345,12 +385,17 @@ impl Particles {
                         Kind::Solid => {
                             p.settled = true;
                             p.pos.y = below.y as f64 + 1.02;
-                            p.life = p.age + 6.0;
+                            // Leaves gather where they land and lie a good while.
+                            p.life = p.age + 30.0;
                         }
                         Kind::Water => {
+                            // Only still water holds a leaf: it floats on the top voxel.
                             p.settled = true;
                             p.pos = next;
-                            p.life = p.age + 5.0;
+                            if voxels.kind(below.x, below.y + 1, below.z) != Kind::Water {
+                                p.pos.y = below.y as f64 + 0.9;
+                            }
+                            p.life = p.age + 20.0;
                         }
                         _ => p.pos = next,
                     }
@@ -453,4 +498,15 @@ fn ground_below(voxels: &mut impl Voxels, from: DVec3, depth: i32) -> Option<DVe
         prev = k;
     }
     None
+}
+
+#[cfg(test)]
+mod leaf_tests {
+    use super::LeafShape::*;
+
+    #[test]
+    fn shapes_differ_and_autumn_falls_heavier() {
+        assert!(Needle.size().z < Broad.size().z && Slip.size().z > Broad.size().z);
+        assert!(Autumn.weight() > Broad.weight());
+    }
 }

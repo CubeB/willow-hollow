@@ -218,6 +218,21 @@ const BOARD_REACH: f64 = m64(4.8);
 
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
+type Leaves = Vec<(DVec3, [f32; 3], particles::LeafShape)>;
+
+/// Which shape of leaf a tree's foliage sheds; plants and vines shed none.
+fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
+    use particles::LeafShape::*;
+    use worldgen::materials as mat;
+    Some(match v {
+        mat::NEEDLES | mat::NEEDLES_REDWOOD => Needle,
+        mat::LEAVES_WILLOW | mat::LEAVES_ACACIA | mat::LEAVES_PALM => Slip,
+        mat::LEAVES_MAPLE | mat::LEAVES_MAPLE_RED => Autumn,
+        mat::LEAVES_CHERRY => Petal,
+        mat::LEAVES_OAK | mat::LEAVES_BIRCH | mat::LEAVES_JUNGLE | mat::LEAVES_BAOBAB => Broad,
+        _ => return None,
+    })
+}
 
 /// Samples voxels around the camera for leaves (to shed) and flowers (for butterflies),
 /// and reads the biome. Cheap enough to do every couple of seconds.
@@ -226,7 +241,7 @@ fn scan_surroundings(
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
-) -> (worldgen::biome::Biome, Spots, Spots) {
+) -> (worldgen::biome::Biome, Leaves, Spots) {
     use worldgen::materials as mat;
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;
@@ -249,7 +264,9 @@ fn scan_surroundings(
             let v = voxels.voxel(x, y, z);
             let kind = mats.get(v).kind;
             if kind == voxel::Kind::Foliage && mats.get(below).kind == voxel::Kind::Air {
-                leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color)));
+                if let Some(shape) = leaf_shape(v) {
+                    leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color), shape));
+                }
                 break;
             }
             if kind == voxel::Kind::Solid {
@@ -268,7 +285,7 @@ fn scan_surroundings(
     (biome, leaves, flowers)
 }
 
-type Scan = (worldgen::biome::Biome, Spots, Spots);
+type Scan = (worldgen::biome::Biome, Leaves, Spots);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -323,7 +340,7 @@ struct Running {
     env: Environment,
     particles: Particles,
     /// Leaf and flower voxels near the player, refreshed now and then.
-    leaves: Vec<(DVec3, [f32; 3])>,
+    leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
     scan_timer: f32,
     scanner: Scanner,
