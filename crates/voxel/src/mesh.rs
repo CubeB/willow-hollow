@@ -2,13 +2,15 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags};
+use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 
 /// One quad corner, packed into 8 bytes.
 ///
 /// `a`: x (6 bits) | y (6) << 6 | z (6) << 12 | face (3) << 18 | ao (2) << 21
 ///      | quarter-voxel fractions of x, y, z (2 bits each) << 23, 25, 27
-/// `b`: r | g << 8 | b << 16 | flags << 24
+///      | which side of its voxel the corner is on, per axis, << 29, 30, 31 (set for
+///        single leaf voxels and plant boxes, so the voxel is `floor(position) - bits`)
+/// `b`: r | g << 8 | b << 16 | flags << 24 (flags include a 3-bit plant kind << 29)
 ///
 /// Positions are chunk-local, 0..=32. Face index: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
 #[repr(C)]
@@ -176,8 +178,12 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         if m.emissive {
                             fl |= flags::EMISSIVE;
                         }
+                        fl |= m.plant << flags::PLANT_SHIFT;
+                        // Leaves that fall one by one stay one voxel each, so the shader can tell
+                        // which voxel every corner of a face belongs to.
+                        let single = m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN;
                         let key = 1
-                            | (uniform as u64) << 2
+                            | (uniform && !single) as u64 * 4
                             | color_bits(m.color) << 8
                             | (fl as u64) << 32
                             | ao_bits << 40;
@@ -289,9 +295,17 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                 // Darker where a rooted stem meets the ground.
                 let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
                 let sways = if at_top { b.sway_hi } else { b.sway_lo };
-                let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK) | if sways { flags::FOLIAGE } else { 0 };
+                let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
+                    | if sways { flags::FOLIAGE } else { 0 }
+                    | m.plant << flags::PLANT_SHIFT;
+                // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
+                // voxel before it.
+                let mut corner = 0u32;
+                for axis in 0..3 {
+                    corner |= ((frac[axis] == 0 && cell[axis] == b.hi[axis]) as u32) << axis;
+                }
                 Vertex {
-                    a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27,
+                    a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27 | corner << 29,
                     b: color_bits(m.color) as u32 | (fl as u32) << 24,
                 }
             };
@@ -333,8 +347,17 @@ fn emit_quad(
         p[n_axis] = n as u32;
         p[u_axis] = corners[i].0 as u32;
         p[v_axis] = corners[i].1 as u32;
+        // A single leaf voxel says which side of it each corner is on, so the shader can
+        // name the voxel from any corner.
+        let kind = ((key >> 32) as u8 & flags::PLANT_MASK) >> flags::PLANT_SHIFT;
+        let mut corner = 0u32;
+        if kind == plant::DECIDUOUS || kind == plant::AUTUMN {
+            corner |= ((p[n_axis] as usize > s) as u32) << n_axis;
+            corner |= ((corners[i].0 > u) as u32) << u_axis;
+            corner |= ((corners[i].1 > v) as u32) << v_axis;
+        }
         Vertex {
-            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao(i) << 21,
+            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao(i) << 21 | corner << 29,
             b,
         }
     };
@@ -365,12 +388,14 @@ mod tests {
             kind: Kind::Solid,
             jitter: 1,
             emissive: false,
+            plant: 0,
         });
         let water = m.add(Material {
             color: [40, 90, 200],
             kind: Kind::Water,
             jitter: 0,
             emissive: false,
+            plant: 0,
         });
         (m, stone, water)
     }
@@ -445,6 +470,7 @@ mod tests {
             kind: Kind::Foliage,
             jitter: 0,
             emissive: false,
+            plant: 0,
         });
         let mut c = PaddedChunk::new();
         c.set(5, 6, 7, stone);
@@ -583,5 +609,39 @@ mod tests {
         // The lake bed under water is still drawn (it is visible through the water).
         assert_eq!(mesh.opaque.len(), 4);
         assert_eq!((mesh.water[0].b >> 24) as u8 & flags::WATER, flags::WATER);
+    }
+
+    #[test]
+    fn single_leaf_voxels_name_their_voxel_from_every_corner() {
+        let (mut m, _, _) = mats();
+        let leaf = m.add(Material {
+            color: [60, 130, 50],
+            kind: Kind::Foliage,
+            jitter: 0,
+            emissive: false,
+            plant: plant::DECIDUOUS,
+        });
+        let mut c = PaddedChunk::new();
+        // A row of identical leaves, which would merge into one long quad if they could.
+        for x in 4..9 {
+            c.set(x, 7, 7, leaf);
+        }
+        let mesh = mesh_chunk(&c, &m);
+        assert_eq!(mesh.opaque.len() / 4, 5 * 4 + 2, "every face of every leaf stays its own quad");
+        for quad in mesh.opaque.chunks(4) {
+            let voxels: Vec<_> = quad
+                .iter()
+                .map(|v| {
+                    let bits = [(v.a >> 29) & 1, (v.a >> 30) & 1, (v.a >> 31) & 1];
+                    let p = pos(v);
+                    [p[0] - bits[0], p[1] - bits[1], p[2] - bits[2]]
+                })
+                .collect();
+            assert!(voxels.iter().all(|v| *v == voxels[0]), "corners disagree: {voxels:?}");
+            assert_eq!(voxels[0][1], 6);
+            assert_eq!(voxels[0][2], 6);
+            assert!((3..8).contains(&voxels[0][0]));
+            assert_eq!((quad[0].b >> 24) as u8 >> flags::PLANT_SHIFT, plant::DECIDUOUS);
+        }
     }
 }

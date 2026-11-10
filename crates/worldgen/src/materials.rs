@@ -18,9 +18,10 @@ macro_rules! palette {
         pub fn build() -> Materials {
             let mut m = Materials::new();
             $(
-                let id = m.add(Material { color: [$r, $g, $b], kind: Kind::$kind, jitter: $jitter, emissive: false $(|| palette!(@$glow))? });
+                let id = m.add(Material { color: [$r, $g, $b], kind: Kind::$kind, jitter: $jitter, emissive: false $(|| palette!(@$glow))?, plant: voxel::plant::NONE });
                 debug_assert_eq!(id, $name);
             )*
+            classify(&mut m);
             m
         }
     };
@@ -142,5 +143,36 @@ pub fn ground_cover(biome: Biome) -> Voxel {
         Biome::Savanna => GRASS_SAVANNA,
         Biome::Woodland => GRASS_WOODLAND,
         Biome::Rainforest => GRASS_JUNGLE,
+    }
+}
+
+/// Tells the seasons what each plant material is (see `voxel::plant`). A new plant
+/// material belongs in one of these lists, or the seasons will leave it alone.
+fn classify(m: &mut Materials) {
+    use voxel::plant as pk;
+    let kinds: [(&[Voxel], u8); 7] = [
+        (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
+        (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB], pk::EVERGREEN),
+        (&[LEAVES_MAPLE, LEAVES_MAPLE_RED], pk::AUTUMN),
+        (
+            &[
+                TUFT, TUFT_MEADOW, TUFT_LUSH, TUFT_DRY, TUFT_STRAW, TUFT_ALPINE, TUFT_SEDGE, SEED_HEAD, REED, REED_HEAD,
+            ],
+            pk::GRASS,
+        ),
+        (
+            &[GRASS, GRASS_LUSH, GRASS_MEADOW, GRASS_DRY, GRASS_SAVANNA, GRASS_WOODLAND, GRASS_JUNGLE, GRASS_TAIGA, GRASS_TUNDRA],
+            pk::GROUND,
+        ),
+        (
+            &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN],
+            pk::FLOWER,
+        ),
+        (&[VINE], pk::VINE),
+    ];
+    for (voxels, kind) in kinds {
+        for &v in voxels {
+            m.set_plant(v, kind);
+        }
     }
 }

@@ -72,6 +72,23 @@ fn vs(in: VIn) -> VOut {
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
+    // Plants that are gone this season (fallen leaves, dead flowers, tufts under snow) are
+    // dropped here: every corner of the face names the same voxel, so the whole face goes.
+    let kind = (in.b >> 29u) & 7u;
+    if (kind != 0u && kind != PLANT_EVERGREEN && kind < 6u) {
+        let corner = vec3<i32>(i32((in.a >> 29u) & 1u), i32((in.a >> 30u) & 1u), i32((in.a >> 31u) & 1u));
+        var vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - corner;
+        if (kind >= PLANT_GRASS) {
+            vox.y = 0;
+        }
+        var gone = season_gone(G.season.x, kind, vox);
+        if (kind == PLANT_GRASS && !gone) {
+            gone = plant_buried(rel, season_hash(vox + vec3<i32>(5, 0, 9)));
+        }
+        if (gone) {
+            out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        }
+    }
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
     // Hashed per cell, so a coarse chunk counts its cells from its own corner.
@@ -105,11 +122,7 @@ fn shade(in: VOut) -> vec4<f32> {
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
-    let seasoned = season_apply(base, voxel, h, (in.flags & FLAG_FOLIAGE) != 0u, G.season.x);
-    if (seasoned.a < 0.5) {
-        discard;
-    }
-    base = seasoned.rgb;
+    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x);
     base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;

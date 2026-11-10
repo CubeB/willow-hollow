@@ -95,6 +95,32 @@ pub mod flags {
     pub const FOLIAGE: u8 = 1 << 3;
     /// Lantern glass and embers: shines at night regardless of the light falling on it.
     pub const EMISSIVE: u8 = 1 << 4;
+    /// Three bits saying what kind of plant this is (see [`plant`](super::plant)), so the
+    /// seasons can treat a maple, a tuft of grass and a pine each their own way.
+    pub const PLANT_SHIFT: u8 = 5;
+    pub const PLANT_MASK: u8 = 0b111 << PLANT_SHIFT;
+}
+
+/// What a plant material is, for the seasons. Each material carries one (default `NONE`),
+/// and it travels to the shader in the vertex flags.
+pub mod plant {
+    /// Not a plant, or one the seasons leave alone (lily pads, flowering ground).
+    pub const NONE: u8 = 0;
+    /// Broadleaf trees: bud in spring, turn in autumn, fall in winter.
+    pub const DECIDUOUS: u8 = 1;
+    /// Needles, jungle, palm: green all year, and carry snow.
+    pub const EVERGREEN: u8 = 2;
+    /// Maples: modelled in autumn colours, green until their autumn.
+    pub const AUTUMN: u8 = 3;
+    /// Tufts, sedge and reeds: dry out, yellow, and are buried in snow.
+    pub const GRASS: u8 = 4;
+    /// Blooms and mushrooms: gone in winter.
+    pub const FLOWER: u8 = 5;
+    /// Ivy and vines: stay.
+    pub const VINE: u8 = 6;
+    /// Ground cover coloured like grass: it dries and yellows with the grass, but is
+    /// solid ground, so it is never buried or dropped.
+    pub const GROUND: u8 = 7;
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,6 +132,8 @@ pub struct Material {
     pub jitter: u8,
     /// Gives off its own light after dark.
     pub emissive: bool,
+    /// What kind of plant it is, one of the [`plant`] constants.
+    pub plant: u8,
 }
 
 /// Lookup from voxel id to material. Id 0 is always air.
@@ -127,8 +155,14 @@ impl Materials {
                 kind: Kind::Air,
                 jitter: 0,
                 emissive: false,
+                plant: plant::NONE,
             }],
         }
+    }
+
+    /// Marks a material as a kind of plant, one of the [`plant`] constants.
+    pub fn set_plant(&mut self, v: Voxel, plant: u8) {
+        self.list[v as usize].plant = plant;
     }
 
     pub fn add(&mut self, m: Material) -> Voxel {

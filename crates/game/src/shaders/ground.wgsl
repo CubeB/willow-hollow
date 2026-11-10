@@ -34,6 +34,13 @@ fn ground_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, h: f32, foliage: b
     return mix(o, SNOW_COLOUR * (0.9 + 0.1 * h), cover);
 }
 
+// Small plants lost in deep snow: most tufts are buried, the rest are capped by the snow
+// colour on their tops.
+fn plant_buried(rel: vec3<f32>, h: f32) -> bool {
+    let alt_m = (G.cam_wrapped.y + rel.y) / VOXELS_PER_METRE;
+    return h < smoothstep(0.25, 0.9, snow_depth(alt_m)) * 0.85;
+}
+
 // Ice on still water: whole sheets in deep cold, broken at the edges before that.
 fn ice_amount(world_xz: vec2<f32>) -> f32 {
     let frozen = G.season.z;
