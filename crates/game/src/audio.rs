@@ -105,9 +105,9 @@ where
 /// What a footstep on this voxel sounds like.
 pub fn ground_of(v: Voxel) -> Ground {
     match v {
-        mat::STONE | mat::ROCK_DARK | mat::SANDSTONE | mat::SANDSTONE_DARK | mat::MOSSY_STONE | mat::SLATE | mat::ROOF_TILE => Ground::Stone,
+        mat::STONE | mat::ROCK_DARK | mat::ROCK_PALE | mat::ROCK_BROWN | mat::SANDSTONE_RED | mat::SANDSTONE | mat::SANDSTONE_DARK | mat::MOSSY_STONE | mat::SLATE | mat::ROOF_TILE => Ground::Stone,
         mat::SAND | mat::DESERT_SAND | mat::PATH_SAND => Ground::Sand,
-        mat::GRAVEL | mat::PATH_GRAVEL => Ground::Gravel,
+        mat::GRAVEL | mat::SCREE | mat::PATH_GRAVEL => Ground::Gravel,
         mat::DIRT | mat::MUD | mat::PATH_DIRT | mat::PATH_DARK => Ground::Earth,
         mat::SNOW => Ground::Snow,
         mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED | mat::WOOD_DEAD

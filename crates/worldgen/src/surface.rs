@@ -9,6 +9,8 @@
 
 use glam::{Vec2, vec2};
 
+mod cliff;
+
 use crate::{
     biome::Biome,
     continent::{Continent, NO_LAKE},
@@ -24,6 +26,8 @@ pub const MIN_RIVER_Q: f32 = 24.0;
 const SEGS: usize = 6;
 /// Narrowest channel half-width, so the thinnest brooks are still unbroken water.
 const MIN_HALF_WIDTH: f32 = m(0.6);
+/// How far, in cells of the 1024 grid, the largest rivers swing sideways to meander.
+const SINUOSITY_CELLS: f32 = 4.0;
 /// Taken from the distance to a trail's centreline to give the distance to its edge.
 const TRAIL_CLEARANCE: f32 = m(1.2);
 
@@ -44,6 +48,10 @@ pub enum Cover {
     SeaFloor,
     /// A trodden path.
     Trail,
+    /// Sheer rock face or ledge.
+    Cliff,
+    /// Loose stone at the foot of a cliff.
+    Scree,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +97,9 @@ pub struct Piece {
     l0: f32,
     l1: f32,
     l2: f32,
+    /// Water level just upstream of the start: higher than `l0` where the piece starts
+    /// at the foot of a waterfall.
+    lip: f32,
     /// Length of the curve in voxels.
     length: f32,
     /// Bounding box grown by the farthest the piece can influence terrain.
@@ -97,7 +108,7 @@ pub struct Piece {
 }
 
 impl Piece {
-    fn new(p0: Vec2, p1: Vec2, p2: Vec2, widths: (f32, f32), levels: (f32, f32, f32)) -> Self {
+    fn new(p0: Vec2, p1: Vec2, p2: Vec2, widths: (f32, f32), levels: (f32, f32, f32), lip: f32) -> Self {
         let mut pts = [Vec2::ZERO; SEGS + 1];
         let (mut lo, mut hi) = (Vec2::MAX, Vec2::MIN);
         for (k, pt) in pts.iter_mut().enumerate() {
@@ -116,6 +127,7 @@ impl Piece {
             l0: levels.0,
             l1: levels.1,
             l2: levels.2,
+            lip: lip.max(levels.0),
             lo: lo - reach,
             hi: hi + reach,
         }
@@ -148,6 +160,18 @@ impl Piece {
         } else {
             self.l1 + (self.l2 - self.l1) * (t * 2.0 - 1.0)
         }
+    }
+
+    /// Simulated water level a distance `back` (voxels) upstream of curve parameter `t`.
+    /// Above the start of the piece that is the level at the top of any waterfall there.
+    fn level_above(&self, t: f32, back: f32) -> f32 {
+        let u = t - back / self.length;
+        if u < 0.0 { self.lip } else { self.level(u) }
+    }
+
+    /// Height of the waterfall at the start of the piece, in simulation units.
+    fn plunge(&self) -> f32 {
+        self.lip - self.l0
     }
 }
 
@@ -192,6 +216,8 @@ pub struct Sampler<'a> {
     c: &'a Continent,
     world_seed: u32,
     pieces: Vec<Piece>,
+    /// Waterfalls whose cliff can reach the area.
+    falls: Vec<Fall>,
     trail_points: Vec<TrailPoint>,
     pads: Vec<Pad>,
 }
@@ -204,15 +230,19 @@ impl<'a> Sampler<'a> {
         let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q)) * OLD_VOXEL;
         // A piece lies within a cell of its node, so gather nodes that close plus the
         // farthest a river can reach.
-        let margin = reach(widest * 0.5) + cs * 1.5;
+        let margin = reach(widest * 0.5) + cs * (3.0 + SINUOSITY_CELLS * 1.5);
         let cell = |v: f32| ((v / cs).floor() as i32).clamp(1, c.size as i32 - 2) as usize;
         let (x0, x1) = (cell(lx0 as f32 - margin), cell((lx0 + span) as f32 + margin));
         let (z0, z1) = (cell(lz0 as f32 - margin), cell((lz0 + span) as f32 + margin));
 
+        let mut falls = Vec::new();
         let mut pieces = Vec::new();
         for z in z0..=z1 {
             for x in x0..=x1 {
                 add_pieces(c, z * c.size + x, &mut pieces);
+                if let Some(f) = Fall::at(c, world_seed, z * c.size + x) {
+                    falls.push(f);
+                }
             }
         }
         let (lo, hi) = (
@@ -220,11 +250,17 @@ impl<'a> Sampler<'a> {
             vec2((lx0 + span) as f32, (lz0 + span) as f32),
         );
         pieces.retain(|p| p.lo.x <= hi.x && p.hi.x >= lo.x && p.lo.y <= hi.y && p.hi.y >= lo.y);
+        falls.retain(|f| {
+            let r = Vec2::splat(f.radius);
+            let (a, b) = (f.pos - r, f.pos + r);
+            a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y
+        });
         let (trail_points, pads) = c.trails.gather(lo, hi);
         Self {
             c,
             world_seed,
             pieces,
+            falls,
             trail_points,
             pads,
         }
@@ -259,7 +295,8 @@ impl<'a> Sampler<'a> {
         let wz = (c.desc.mz as i64 * MACRO_SIZE as i64 + lz as i64) as f64;
         let seed = self.world_seed;
 
-        let base = bicubic(c, fx, fz) * OLD_VOXEL;
+        let (base, slope) = bicubic_slope(c, fx, fz);
+        let base = base * OLD_VOXEL;
         // Fine relief the simulation grid cannot hold. Faded out at the waterline so
         // shores stay clean.
         let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08)
@@ -268,6 +305,24 @@ impl<'a> Sampler<'a> {
         let mut ground = base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0);
         let mut water: Option<i32> = None;
         let mut cover = Cover::Land;
+        if lake == NO_LAKE && !near_sea {
+            let slope = slope * OLD_VOXEL / cs;
+            let mut part = cliff::apply(seed, slope, wx, wz, &mut ground);
+            for f in &self.falls {
+                let d = (p - f.pos).length();
+                if d < f.radius {
+                    let fall = f.cut(d, slope, wx, wz, &mut ground);
+                    if part == cliff::Part::None {
+                        part = fall;
+                    }
+                }
+            }
+            match part {
+                cliff::Part::Face(_) => cover = Cover::Cliff,
+                cliff::Part::Foot(p) if unit(hash2(seed ^ 0x5c4e, lx >> 1, lz >> 1)) < p => cover = Cover::Scree,
+                _ => {}
+            }
+        }
         let mut river = f32::MAX;
 
         // Standing water this column could be under: it must not be given river banks.
@@ -277,8 +332,8 @@ impl<'a> Sampler<'a> {
 
         // The river whose channel edge is nearest.
         // (signed distance to the channel edge, half-width, water level there, water
-        // level a couple of voxels upstream)
-        let mut nearest: Option<(f32, f32, f32, f32)> = None;
+        // level a couple of voxels upstream, extra depth of a plunge pool)
+        let mut nearest: Option<(f32, f32, f32, f32, f32)> = None;
         for piece in &self.pieces {
             if p.x < piece.lo.x || p.x > piece.hi.x || p.y < piece.lo.y || p.y > piece.hi.y {
                 continue;
@@ -287,16 +342,22 @@ impl<'a> Sampler<'a> {
             let hw = piece.half_width(t);
             let sd = dist - hw;
             if nearest.is_none_or(|n| sd < n.0) {
-                let upstream = (t - m(1.6) / piece.length).max(0.0);
-                nearest = Some((sd, hw, piece.level(t), piece.level(upstream)));
+                // Under a waterfall the bed is scoured into a pool.
+                let plunge = piece.plunge() * OLD_VOXEL;
+                let pool = if plunge > 0.0 {
+                    (plunge * 0.3).min(m(3.0)) * (1.0 - smoothstep(0.0, m(3.0) + hw * 2.0, t * piece.length))
+                } else {
+                    0.0
+                };
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool));
             }
         }
-        if let Some((sd, hw, level, upstream_level)) = nearest {
+        if let Some((sd, hw, level, upstream_level, pool)) = nearest {
             river = sd;
             let k = pool_level(c.desc.seed, level);
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
-                let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6));
+                let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6)) + pool;
                 let across = 1.0 + sd / hw; // 0 at the centre, 1 at the edge
                 let bed = k as f32 - 1.01 - depth * (1.0 - across * across);
                 ground = if submerged { ground.min(bed) } else { bed };
@@ -406,7 +467,7 @@ impl<'a> Sampler<'a> {
                 let w = (1.0 - smoothstep(t.half_width, t.half_width + shoulder, d)) * guard;
                 *ground += (t.y - *ground) * w;
                 let ragged = (unit(hash2(self.world_seed ^ 0x7a11, lx, lz)) - 0.5) * m(0.72);
-                if d < t.half_width + ragged && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Beach | Cover::Bank) {
+                if d < t.half_width + ragged && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Beach | Cover::Bank | Cover::Scree | Cover::Cliff) {
                     *cover = Cover::Trail;
                 }
             }
@@ -450,7 +511,8 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     let (wi, li) = (width(i), c.water_level[i]);
     // Sea level is 0; the last piece of a river runs down to it.
     let lr = if c.ocean[r] { 0.0 } else { c.water_level[r] };
-    let exit_level = (li + lr) * 0.5;
+    // Above a waterfall the pool holds its level right to the lip.
+    let exit_level = if fall_drop(c, i) > 0.0 { li } else { (li + lr) * 0.5 };
 
     let size = c.size as isize;
     let mut fed = false;
@@ -460,13 +522,10 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             if d != i && c.rcv[d] as usize == i && is_river(d) {
                 fed = true;
                 let pd = node(c, d);
-                out.push(Piece::new(
-                    (pd + pi) * 0.5,
-                    pi,
-                    exit,
-                    (width(d), wi),
-                    ((c.water_level[d] + li) * 0.5, li, exit_level),
-                ));
+                // Below a waterfall the pool starts at the foot of the fall.
+                let ld = c.water_level[d];
+                let (start, lip) = if fall_drop(c, d) > 0.0 { (li, ld) } else { ((ld + li) * 0.5, (ld + li) * 0.5) };
+                out.push(Piece::new((pd + pi) * 0.5, pi, exit, (width(d), wi), (start, li, exit_level), lip));
             }
         }
     }
@@ -478,6 +537,7 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             exit,
             (0.0, wi),
             (li, (li + exit_level) * 0.5, exit_level),
+            li,
         ));
     }
     if c.ocean[r] {
@@ -488,7 +548,93 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             pr,
             (wi, wi * 1.25),
             (exit_level, exit_level * 0.5, 0.0),
+            exit_level,
         ));
+    }
+}
+
+/// Smallest drop, in simulation units, that a river can make as one waterfall.
+const FALL_MIN: f32 = 7.0;
+/// Chance that a drop that large is a waterfall rather than a run of cascades.
+const FALL_CHANCE: f32 = 0.4;
+
+/// How far the water drops, in simulation units, if the river leaving node `i` goes
+/// over a waterfall on its way to the next node, or 0.
+///
+/// Where the simulated river falls steeply between two nodes it normally runs down a
+/// series of pools. Some of those reaches instead hold the upper pool's level to the
+/// midpoint between the nodes and drop the whole height there at once.
+pub(crate) fn fall_drop(c: &Continent, i: usize) -> f32 {
+    let candidate = |i: usize| {
+        let r = c.rcv[i] as usize;
+        if r == i || c.ocean[i] || c.ocean[r] || c.lake[i] != NO_LAKE || c.lake[r] != NO_LAKE || c.discharge[i] < MIN_RIVER_Q {
+            return 0.0;
+        }
+        let drop = c.water_level[i] - c.water_level[r];
+        let (x, z) = ((i % c.size) as i32, (i / c.size) as i32);
+        if drop < FALL_MIN || unit(hash2(c.desc.seed ^ 0xfa11, x, z)) > FALL_CHANCE {
+            return 0.0;
+        }
+        drop
+    };
+    // Never two in a row: the river needs a pool between them.
+    if candidate(c.rcv[i] as usize) > 0.0 {
+        return 0.0;
+    }
+    candidate(i)
+}
+
+/// The cliff a waterfall pours over: a face across the valley at the lip, which
+/// follows the valley sides downstream as a short gorge and fades out within `radius`.
+struct Fall {
+    pos: Vec2,
+    radius: f32,
+    /// Natural ground height at the lip, in voxels.
+    level: f32,
+    /// Height of the drop, in voxels.
+    height: f32,
+    salt: u32,
+}
+
+impl Fall {
+    fn at(c: &Continent, world_seed: u32, i: usize) -> Option<Fall> {
+        if fall_drop(c, i) <= 0.0 {
+            return None;
+        }
+        let r = c.rcv[i] as usize;
+        let top = pool_level(c.desc.seed, c.water_level[i]);
+        let bottom = pool_level(c.desc.seed, c.water_level[r]);
+        let height = (top - bottom) as f32;
+        if height < m(3.0) {
+            return None;
+        }
+        let pos = (node(c, i) + node(c, r)) * 0.5;
+        let cs = c.cell_size();
+        let (level, _) = bicubic_slope(c, pos.x / cs - 0.5, pos.y / cs - 0.5);
+        Some(Fall {
+            pos,
+            radius: m(24.0) + height * 1.5,
+            level: level * OLD_VOXEL,
+            height,
+            salt: hash2(world_seed ^ 0xfa12, i as i32, 3),
+        })
+    }
+
+    /// Cuts the face into a column `dist` voxels from the lip.
+    fn cut(&self, dist: f32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> cliff::Part {
+        // Only on sloping ground: on the flat the lift would raise a round plateau.
+        let strength = (1.0 - smoothstep(self.radius * 0.5, self.radius, dist)) * smoothstep(0.2, 0.45, slope);
+        let half = self.height * 0.5;
+        let face = cliff::Face {
+            x: *ground - self.level,
+            lo: -half * 1.5,
+            hi: half * 1.6,
+            height: self.height,
+            ledge: 0.0,
+            split: 0.5,
+            salt: self.salt,
+        };
+        face.cut(strength, slope.max(0.35), wx, wz, ground)
     }
 }
 
@@ -510,12 +656,47 @@ pub(crate) fn node(c: &Continent, i: usize) -> Vec2 {
         let drift = 0.35 + 1.25 * size;
         let (nx, nz) = (x as f64 / 4.5, z as f64 / 4.5);
         p += vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift;
+        p += sinuosity(c, i, size);
     }
     p * c.cell_size()
 }
 
-/// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid.
-fn bicubic(c: &Continent, fx: f32, fz: f32) -> f32 {
+/// A sideways swing, in cells, that turns the long straight runs the router leaves on
+/// big rivers into meanders.
+///
+/// Routing on a grid follows one slope direction for as long as a valley does, so a
+/// large river can run dead straight for hundreds of metres. This pushes each node
+/// across the local direction of flow by low-frequency noise sampled at its position.
+/// Nodes along one reach sample neighbouring points, so the swing is smooth along the
+/// river, and a node's position stays a function of its own cell alone, so tributaries
+/// and the river they join still meet. Water levels belong to the nodes and are
+/// untouched, which keeps every river flowing downhill. `size` is 0 for brooks and 1
+/// for the largest rivers.
+fn sinuosity(c: &Continent, i: usize, size: f32) -> Vec2 {
+    if size <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let (x, z) = (i % c.size, i / c.size);
+    let cell = |j: usize| vec2((j % c.size) as f32, (j / c.size) as f32);
+    // Direction of flow over the next couple of cells, so it turns gently.
+    let r = c.rcv[i] as usize;
+    let r2 = c.rcv[r] as usize;
+    let ahead = cell(r2) - cell(i);
+    let Some(dir) = ahead.try_normalize() else { return Vec2::ZERO };
+    let side = vec2(-dir.y, dir.x);
+    // Wavelength about 7 cells at the 1024 grid, scaled so it is the same distance
+    // on the ground at any grid size.
+    let k = 1024.0 / c.size as f64 / 7.0;
+    let wave = perlin2(c.desc.seed ^ 0x3ea3, x as f64 * k, z as f64 * k)
+        + 0.5 * perlin2(c.desc.seed ^ 0x3ea4, x as f64 * k * 2.3, z as f64 * k * 2.3);
+    side * wave * SINUOSITY_CELLS * size * (c.size as f32 / 1024.0)
+}
+
+
+/// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid,
+/// with the steepness of that smooth surface (height units per cell). The slope comes
+/// from the same 16 samples, so it costs almost nothing extra.
+fn bicubic_slope(c: &Continent, fx: f32, fz: f32) -> (f32, f32) {
     let (x1, z1) = (fx.floor() as isize, fz.floor() as isize);
     let (tx, tz) = (fx - x1 as f32, fz - z1 as f32);
     let weights = |t: f32| {
@@ -527,17 +708,278 @@ fn bicubic(c: &Continent, fx: f32, fz: f32) -> f32 {
             0.5 * t3 - 0.5 * t2,
         ]
     };
+    let derivatives = |t: f32| {
+        let t2 = t * t;
+        [
+            -1.5 * t2 + 2.0 * t - 0.5,
+            4.5 * t2 - 5.0 * t,
+            -4.5 * t2 + 4.0 * t + 0.5,
+            1.5 * t2 - t,
+        ]
+    };
     let (wx, wz) = (weights(tx), weights(tz));
+    let dx = derivatives(tx);
+    let dz = derivatives(tz);
     let max = c.size as isize - 1;
-    let mut sum = 0.0;
-    for (j, wzj) in wz.iter().enumerate() {
+    let (mut sum, mut gx, mut gz) = (0.0, 0.0, 0.0);
+    for j in 0..4 {
         let z = (z1 - 1 + j as isize).clamp(0, max) as usize;
-        let mut row = 0.0;
-        for (i, wxi) in wx.iter().enumerate() {
+        let (mut row, mut row_dx) = (0.0, 0.0);
+        for i in 0..4 {
             let x = (x1 - 1 + i as isize).clamp(0, max) as usize;
-            row += c.height[z * c.size + x] * wxi;
+            let h = c.height[z * c.size + x];
+            row += h * wx[i];
+            row_dx += h * dx[i];
         }
-        sum += row * wzj;
+        sum += row * wz[j];
+        gx += row_dx * wz[j];
+        gz += row * dz[j];
     }
-    sum
+    (sum, gx.hypot(gz))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{continent::{SimConfig, generate}, macro_layout::cell_desc};
+
+    /// Longest dead-straight stretch (in voxels) of any large river: how far the node
+    /// chain runs while staying within `tol` voxels of one straight line.
+    fn longest_straight(c: &Continent, min_q: f32, tol: f32) -> f32 {
+        let mut best = 0.0f32;
+        for i in 0..c.size * c.size {
+            if c.ocean[i] || c.lake[i] != NO_LAKE || c.discharge[i] < min_q {
+                continue;
+            }
+            // Only start where no larger river feeds in from upstream along the chain.
+            let mut chain = vec![node(c, i)];
+            let mut j = i;
+            for _ in 0..400 {
+                let r = c.rcv[j] as usize;
+                if r == j || c.ocean[r] || c.lake[r] != NO_LAKE {
+                    break;
+                }
+                chain.push(node(c, r));
+                j = r;
+            }
+            let mut a = 0;
+            for b in 2..chain.len() {
+                // Shrink from the start until every point is within tol of chord a..b.
+                loop {
+                    let (pa, pb) = (chain[a], chain[b]);
+                    let d = (pb - pa).normalize_or_zero();
+                    let ok = chain[a..=b].iter().all(|q| {
+                        let v = *q - pa;
+                        (v.x * d.y - v.y * d.x).abs() <= tol
+                    });
+                    if ok || a + 2 > b {
+                        break;
+                    }
+                    a += 1;
+                }
+                best = best.max((chain[b] - chain[a]).length());
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn rivers_do_not_run_straight_for_long() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let straight = longest_straight(&c, 4000.0, m(5.0));
+        eprintln!("longest straight reach: {straight} voxels = {} m", straight / m(1.0));
+        assert!(straight < m(190.0), "straight reach {straight}");
+    }
+
+    #[test]
+    fn cliffs_stand_on_some_steep_ground_with_scree_and_never_on_gentle_ground() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let slope = |i: usize| {
+            let gx = (c.height[i + 1] - c.height[i - 1]) * OLD_VOXEL / (2.0 * cs);
+            let gz = (c.height[i + c.size] - c.height[i - c.size]) * OLD_VOXEL / (2.0 * cs);
+            gx.hypot(gz)
+        };
+        let mut sites: Vec<(f32, usize)> = Vec::new();
+        for z in (8..c.size - 8).step_by(6) {
+            for x in (8..c.size - 8).step_by(6) {
+                let i = z * c.size + x;
+                if !c.ocean[i] && c.height[i] * OLD_VOXEL > m(10.0) {
+                    sites.push((slope(i), i));
+                }
+            }
+        }
+        sites.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let count = |i: usize| {
+            let (lx, lz) = ((i % c.size) as f32 * cs, (i / c.size) as f32 * cs);
+            let (lx, lz) = (lx as i32, lz as i32);
+            let s = Sampler::new(&c, 7, lx - 32, lz - 32, 64);
+            let (mut cliff, mut scree) = (0, 0);
+            for dz in -32..32 {
+                for dx in -32..32 {
+                    let col = s.column(lx + dx, lz + dz);
+                    match col.cover {
+                        Cover::Cliff => {
+                            assert!(col.ground > m(5.0), "cliff down at the shore");
+                            cliff += 1;
+                        }
+                        Cover::Scree => scree += 1,
+                        _ => {}
+                    }
+                }
+            }
+            (cliff, scree)
+        };
+        let steep: Vec<(i32, i32)> = sites.iter().take(300).map(|s| count(s.1)).collect();
+        let cliffed = steep.iter().filter(|s| s.0 > 0).count();
+        let scree: i32 = steep.iter().map(|s| s.1).sum();
+        eprintln!("{cliffed} of {} steep sites have a cliff; {scree} scree columns", steep.len());
+        // Cliffs are features: some of the steepest ground has them, most does not.
+        assert!(cliffed >= 15, "too few cliffs: {cliffed}");
+        assert!(cliffed * 2 < steep.len(), "cliffs cover most steep ground: {cliffed}");
+        assert!(scree > 100, "no scree at the foot of cliffs: {scree}");
+        let gentle: Vec<(f32, (i32, i32))> = sites.iter().rev().take(300).map(|s| (s.0, count(s.1))).filter(|g| g.1 != (0, 0)).collect();
+        // A waterfall can cut its own lip through gentle ground, but nothing else does.
+        assert!(gentle.len() <= 3, "cliffs or scree on gentle ground: {gentle:?}");
+    }
+
+    /// Prints how much of the land and of the steep land is cliff, and where the most
+    /// cliff is: `cargo test --release -p worldgen cliff_survey -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn cliff_survey() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        const STRIDE: i32 = 16;
+        const TILE: i32 = 1024;
+        let (mut land, mut steep, mut cliff, mut steep_cliff, mut scree) = (0, 0, 0, 0, 0);
+        let mut tiles: Vec<(i32, i32, i32)> = Vec::new();
+        let mut faces: Vec<(f32, i32, i32, i32, i32)> = Vec::new();
+        let span = MACRO_SIZE;
+        for tz in (0..span).step_by(TILE as usize) {
+            for tx in (0..span).step_by(TILE as usize) {
+                let s = Sampler::new(&c, 7, tx, tz, TILE);
+                let mut here = 0;
+                for z in (tz..tz + TILE).step_by(STRIDE as usize) {
+                    for x in (tx..tx + TILE).step_by(STRIDE as usize) {
+                        let i = (z / 64) as usize * c.size + (x / 64) as usize;
+                        if c.ocean[i] {
+                            continue;
+                        }
+                        let col = s.column(x, z);
+                        let (_, sl) = bicubic_slope(&c, x as f32 / 64.0 - 0.5, z as f32 / 64.0 - 0.5);
+                        let is_steep = sl * OLD_VOXEL / 64.0 > 0.55 && col.ground > m(8.0);
+                        land += 1;
+                        steep += is_steep as i32;
+                        match col.cover {
+                            Cover::Cliff => {
+                                cliff += 1;
+                                steep_cliff += is_steep as i32;
+                                here += 1;
+                                // The drop in front of this face, and which way it looks.
+                                let mut best = (0.0f32, 0, 0);
+                                for (dx, dz) in [(8, 0), (-8, 0), (0, 8), (0, -8), (6, 6), (-6, 6), (6, -6), (-6, -6)] {
+                                    let d = col.ground - s.column(x + dx, z + dz).ground;
+                                    if d > best.0 {
+                                        best = (d, dx, dz);
+                                    }
+                                }
+                                faces.push((best.0, x, z, best.1, best.2));
+                            }
+                            Cover::Scree => scree += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                if here > 0 {
+                    tiles.push((here, tx + TILE / 2, tz + TILE / 2));
+                }
+            }
+        }
+        eprintln!(
+            "land {land}, steep {steep} ({:.1}%), cliff {cliff} ({:.2}% of land, {:.1}% of steep), scree {scree}",
+            steep as f32 / land as f32 * 100.0,
+            cliff as f32 / land as f32 * 100.0,
+            steep_cliff as f32 / steep.max(1) as f32 * 100.0
+        );
+        tiles.sort_by_key(|t| -t.0);
+        for t in tiles.iter().take(8) {
+            eprintln!("  tile {},{}: {}", t.1, t.2, t.0);
+        }
+        // Trails that run into a cliff (the trail is levelled through it).
+        let mut c = c;
+        c.trails = crate::trails::build(&c, 7);
+        let (mut on_trail, mut trail_cliff) = (0, Vec::new());
+        for line in &c.trails.lines {
+            for p in line.iter().step_by(4) {
+                let (x, z) = (p.x as i32, p.y as i32);
+                let s = Sampler::new(&c, 7, x - 6, z - 6, 13);
+                on_trail += 1;
+                let near = (-6..=6).step_by(3).any(|dz| (-6..=6).step_by(3).any(|dx| s.column(x + dx, z + dz).cover == Cover::Cliff));
+                if near {
+                    trail_cliff.push((x, z));
+                }
+            }
+        }
+        eprintln!("trail points {on_trail}, near a cliff {}: {:?}", trail_cliff.len(), &trail_cliff[..trail_cliff.len().min(6)]);
+        // Waterfalls over a lip: how many, how tall, and the biggest few.
+        let mut falls: Vec<(f32, usize)> = (0..c.size * c.size)
+            .filter_map(|i| Fall::at(&c, 7, i).map(|f| (f.height, i)))
+            .collect();
+        falls.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let fp = |p: f32| falls.get((falls.len() as f32 * p) as usize).map_or(0.0, |f| f.0 / m(1.0));
+        eprintln!("{} waterfalls: p10 {:.1} m, median {:.1} m, p90 {:.1} m", falls.len(), fp(0.1), fp(0.5), fp(0.9));
+        for &(h, i) in falls.iter().step_by((falls.len() / 8).max(1)).take(8) {
+            let r = c.rcv[i] as usize;
+            let (a, b) = (node(&c, i), node(&c, r));
+            let p = (a + b) * 0.5;
+            let d = (b - a).normalize();
+            eprintln!(
+                "  fall {:.0} m at {:.0},{:.0}  downstream {:.2},{:.2}  q {:.0}",
+                h / m(1.0),
+                p.x,
+                p.y,
+                d.x,
+                d.y,
+                c.discharge[i]
+            );
+        }
+        // Face heights, and the tallest faces at least 300 m apart.
+        faces.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let pct = |p: f32| faces.get((faces.len() as f32 * p) as usize).map_or(0.0, |f| f.0 / m(1.0));
+        eprintln!("face drop over 3.2 m: p10 {:.1} m, median {:.1} m, p90 {:.1} m", pct(0.1), pct(0.5), pct(0.9));
+        let mut picked: Vec<(f32, i32, i32, i32, i32)> = Vec::new();
+        for f in &faces {
+            if picked.iter().all(|p| ((p.1 - f.1) as f32).hypot((p.2 - f.2) as f32) > m(300.0)) {
+                picked.push(*f);
+                // Yaw of the direction from the drop back to the face: where to look from.
+                let yaw = (-(f.4 as f32)).atan2(-(f.3 as f32)).to_degrees();
+                eprintln!("  face {:.0} m at {},{}  drop toward {},{}  look yaw {yaw:.0}", f.0 / m(1.0), f.1, f.2, f.3, f.4);
+                if picked.len() == 12 {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Prints column cost on steep, flat and gorge ground:
+    /// `cargo test --release -p worldgen column_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn column_cost() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        for (name, (cx, cz)) in [("mountain", (22016, 40064)), ("lowland", (30000, 15000)), ("coast gorge", (26240, 45824))] {
+            let (mut best, mut sum) = (f64::MAX, 0.0);
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                let s = Sampler::new(&c, 7, cx - 256, cz - 256, 512);
+                for dz in 0..512 {
+                    for dx in 0..512 {
+                        sum += s.column(cx - 256 + dx, cz - 256 + dz).ground;
+                    }
+                }
+                best = best.min(t0.elapsed().as_nanos() as f64 / 262144.0);
+            }
+            eprintln!("{name}: {best:.0} ns/column ({sum})");
+        }
+    }
 }
