@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
 };
 
-use glam::{IVec3, Vec2, Vec3, vec2};
+use glam::{IVec2, IVec3, Vec2, Vec3, vec2};
 use voxel::Voxel;
 
 use super::{
@@ -59,6 +59,28 @@ const AT_JUNCTION: f32 = m(12.0);
 /// No lantern this close to one on another trail, nor at a junction this close to any.
 pub(crate) const LANTERN_CLEAR: f32 = m(9.0);
 pub(crate) const JUNCTION_CLEAR: f32 = m(16.0);
+
+/// Quarter turns that best point a model's +X along `d`.
+fn turns_toward(d: Vec2) -> u32 {
+    // rotate() takes +X to (0,1), (-1,0) and (0,-1) for one, two and three turns.
+    let axes = [vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(0.0, -1.0)];
+    (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
+}
+
+/// Whether a gate turned `turns` at trail point `i` has its posts off the way, either
+/// side of it.
+fn gate_fits(pts: &[Vec2], widths: &[f32], i: usize, turns: u32) -> bool {
+    let r = rotate(IVec3::new(2, 0, 0), turns);
+    let axis = vec2(r.x as f32, r.z as f32);
+    let (x, z) = (pts[i].x.floor(), pts[i].y.floor());
+    let lo = i.saturating_sub(40);
+    let hi = (i + 40).min(pts.len());
+    [axis, -axis].iter().all(|&a| {
+        let post = vec2(x, z) + a + 0.5;
+        // Each post's footprint is one column, a voxel across.
+        pts[lo..hi].iter().zip(&widths[lo..hi]).all(|(p, &w)| p.distance(post) >= w + 0.5)
+    })
+}
 
 /// Steps to the next lantern along a plain stretch, after one placed at step `i`.
 fn plain_gap(salt: u32, i: usize) -> usize {
@@ -1151,11 +1173,24 @@ impl Layer<'_> {
             };
             let tangent = (pts[i + 4] - pts[i - 4]).normalize_or_zero();
             let normal = vec2(-tangent.y, tangent.x);
-            let q = pts[i] + normal * side * (widths[i] + m(1.2));
             let col = cols[i];
             if is_wet(&col) || col.river < m(2.4) {
                 continue;
             }
+            // Each style faces the trail: a crook's lamp hangs out over its edge, a pair
+            // runs along it, and a gate spans it where it is narrow enough to pass through.
+            let pick = hash2(salt ^ 0x5e1f, i as i32, 3);
+            let mut style = parts::LampStyle::pick_trail(pick >> 3);
+            let gate_turns = turns_toward(normal);
+            if style == parts::LampStyle::Gate && !gate_fits(pts, widths, i, gate_turns) {
+                style = if pick & 1 == 0 { parts::LampStyle::Post } else { parts::LampStyle::Stone };
+            }
+            let (q, turns) = match style {
+                parts::LampStyle::Gate => (pts[i], gate_turns),
+                parts::LampStyle::Crook => (pts[i] + normal * side * (widths[i] + m(0.8)), turns_toward(-normal * side)),
+                parts::LampStyle::Pair => (pts[i] + normal * side * (widths[i] + m(1.2)), turns_toward(tangent)),
+                _ => (pts[i] + normal * side * (widths[i] + m(1.2)), pick >> 7 & 3),
+            };
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
             let crowded = net.lanterns.iter().any(|l| {
                 (l.trail != salt || cause == LanternCause::Junction) && l.at.distance_squared(q) < clear * clear
@@ -1167,9 +1202,25 @@ impl Layer<'_> {
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
             let at = IVec3::new(x, y, z);
-            let (voxels, fine) = landmarks::trail_lantern_parts(&self.palette_at(&col), height, hash2(salt, x, z));
-            net.add_stamp_with(absolute(voxels, at, 0), parts::place_fine(&fine, at, 0));
-            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause });
+            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col), height, hash2(salt, x, z), style, turns);
+            let footprint: Vec<IVec2> = voxels
+                .iter()
+                .filter(|(p, _)| (0..=2).contains(&p.y))
+                .map(|(p, _)| IVec2::new(x + p.x, z + p.z))
+                .collect();
+            // Nothing stands on the walkable way, of this trail or any laid before it.
+            let on_way = footprint.iter().any(|c| {
+                let c = c.as_vec2() + 0.5;
+                pts[i.saturating_sub(40)..(i + 40).min(pts.len())]
+                    .iter()
+                    .zip(&widths[i.saturating_sub(40)..(i + 40).min(pts.len())])
+                    .any(|(p, &w)| p.distance_squared(c) < (w + 0.5).powi(2))
+            });
+            if on_way {
+                continue;
+            }
+            net.held_lanterns.push((net.lanterns.len(), absolute(voxels, at, 0), parts::place_fine(&fine, at, 0)));
+            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause, style, footprint });
             since = 0;
             gap = plain_gap(salt, i);
             side = -side;
@@ -1304,6 +1355,28 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             .collect();
         layer.lay(pts, &widths, start_y, end_y, id, &mut net);
     }
+
+    // Lanterns, now every trail is down, except any a later trail runs over.
+    let walked: Vec<Vec2> = net.points().filter(|p| p.half_width > 0.0).map(|p| vec2(p.x, p.z)).collect();
+    let widths: Vec<f32> = net.points().filter(|p| p.half_width > 0.0).map(|p| p.half_width).collect();
+    let mut keep = vec![false; net.lanterns.len()];
+    for (k, voxels, fine) in std::mem::take(&mut net.held_lanterns) {
+        let l = &net.lanterns[k];
+        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(l.at) < m(12.0).powi(2)).collect();
+        let on_way = l.footprint.iter().any(|c| {
+            let c = c.as_vec2() + 0.5;
+            near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
+        });
+        if !on_way {
+            keep[k] = true;
+            net.add_stamp_with(voxels, fine);
+        }
+    }
+    let mut k = 0;
+    net.lanterns.retain(|_| {
+        k += 1;
+        keep[k - 1]
+    });
 
     // Signposts where trails meet.
     let mut junction_cells = std::collections::HashSet::new();

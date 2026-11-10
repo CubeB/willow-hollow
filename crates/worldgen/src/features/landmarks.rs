@@ -809,8 +809,19 @@ pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, V
 
 /// [`trail_lantern`], with its fine parts in model cells.
 pub fn trail_lantern_parts(palette: &Palette, height: i32, hash: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
+    trail_lantern_styled(palette, height, hash, parts::LampStyle::pick_trail(hash >> 3), hash >> 7 & 3)
+}
+
+/// [`trail_lantern_parts`] in a given style and turned a given number of quarter turns.
+pub fn trail_lantern_styled(
+    palette: &Palette,
+    height: i32,
+    hash: u32,
+    style: parts::LampStyle,
+    turns: u32,
+) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = palette.varied(hash);
-    parts::lantern_parts(parts::LampStyle::pick_trail(hash >> 3), &palette, height * crate::scale::BLOCK, hash >> 7 & 3)
+    parts::lantern_parts(style, &palette, height * crate::scale::BLOCK, turns)
 }
 
 /// A signpost: a post with a cap, and one board per direction pointing along it, each
@@ -869,7 +880,7 @@ mod tests {
                     let lights = a.iter().filter(|&&(_, v)| v == mat::LANTERN).count();
                     assert!(lights == 1 || (style == parts::LampStyle::Pair && lights == 2), "{style:?}: {lights} lights");
                     // Rooted below the ground, and in one piece: every voxel touches another.
-                    assert!(a.iter().any(|&(q, _)| q == v(0, -3, 0)));
+                    assert!(a.iter().any(|&(q, _)| q.y == -3));
                     let set: std::collections::HashSet<_> = a.iter().map(|&(q, _)| q).collect();
                     for &(q, _) in &a {
                         let touches = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z]

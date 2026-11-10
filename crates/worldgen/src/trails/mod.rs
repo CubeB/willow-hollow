@@ -108,7 +108,7 @@ pub enum LanternCause {
 }
 
 /// A lantern beside a trail.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct TrailLantern {
     pub at: Vec2,
     /// The trail it lights, by the salt it was laid with.
@@ -116,6 +116,9 @@ pub struct TrailLantern {
     /// Its step along that trail.
     pub step: usize,
     pub cause: LanternCause,
+    pub style: crate::features::parts::LampStyle,
+    /// The columns where it stands on the ground: its footprint in its lowest layers.
+    pub footprint: Vec<glam::IVec2>,
 }
 
 /// Everything people have added to one continent.
@@ -137,6 +140,9 @@ pub struct Network {
     tiles: HashMap<(i32, i32), Vec<TrailPoint>>,
     pads: Vec<Pad>,
     stamps: Vec<Stamp>,
+    /// Lanterns chosen but not yet built, waiting until every trail is down so none
+    /// is built on a trail laid after it: (its index in `lanterns`, voxels, fine parts).
+    held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
 }
