@@ -101,6 +101,9 @@ fn blur_land(src: &[f32], dst: &mut [f32], ocean: &[bool], w: usize, radius: i32
     }
 }
 
+/// Fall in temperature per simulation unit of altitude.
+pub const LAPSE: f32 = 0.00115;
+
 /// Temperature, 0 = polar to 1 = tropical: the cell's base climate, a north-south
 /// gradient across it, and cooling with altitude.
 pub fn temperature(w: usize, height: &[f32], desc: &CellDesc) -> Vec<f32> {
@@ -109,7 +112,7 @@ pub fn temperature(w: usize, height: &[f32], desc: &CellDesc) -> Vec<f32> {
         let south = (z as f32 + 0.5) / w as f32 - 0.5; // -0.5 north edge .. 0.5 south edge
         for x in 0..w {
             let i = z * w + x;
-            t[i] = desc.temperature + south * 0.34 - height[i].max(0.0) * 0.00115;
+            t[i] = desc.temperature + south * 0.34 - height[i].max(0.0) * LAPSE;
         }
     }
     t

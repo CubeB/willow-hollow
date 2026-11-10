@@ -9,14 +9,16 @@ mod biomes;
 mod border;
 pub mod climate;
 pub mod flow;
+pub mod scarp;
 pub mod shape;
 
 use crate::{
     biome::Biome,
     macro_layout::{CellDesc, MACRO_SIZE, SIM_SPAN},
     noise::{hash2, unit},
-    structures::Field,
+    structures::{self, Field},
 };
+pub use scarp::Scarp;
 use flow::Flow;
 use shape::Shape;
 
@@ -65,6 +67,8 @@ pub struct Continent {
     /// Trails and landmarks. Filled in after simulation, since building them needs the
     /// finished voxel surface; empty for a continent fresh from [`generate`].
     pub trails: crate::trails::Network,
+    /// Fault scarps, for drawing each step as a sharp face (see [`Continent::scarp`]).
+    pub scarps: scarp::Scarps,
 }
 
 impl Continent {
@@ -181,6 +185,37 @@ fn upsample(src: &[f32], w: usize) -> Vec<f32> {
     out
 }
 
+/// Mean of `src` over the square of radius `r` cells around each cell of a `w`-wide
+/// grid, clipped at the grid's edges. Two running-sum passes, so any radius costs the
+/// same.
+fn box_mean(src: &[f32], w: usize, r: usize) -> Vec<f32> {
+    let mut tmp = vec![0.0f32; w * w];
+    let mut out = vec![0.0f32; w * w];
+    // One pass along x (rows) or z (columns) from `from` into `to`.
+    let pass = |from: &[f32], to: &mut [f32], along_x: bool| {
+        let idx = |line: usize, k: usize| if along_x { line * w + k } else { k * w + line };
+        for line in 0..w {
+            let mut sum = 0.0f64;
+            for k in 0..=r.min(w - 1) {
+                sum += from[idx(line, k)] as f64;
+            }
+            for k in 0..w {
+                let (lo, hi) = (k.saturating_sub(r), (k + r).min(w - 1));
+                to[idx(line, k)] = (sum / (hi - lo + 1) as f64) as f32;
+                if k + r + 1 < w {
+                    sum += from[idx(line, k + r + 1)] as f64;
+                }
+                if k >= r {
+                    sum -= from[idx(line, k - r)] as f64;
+                }
+            }
+        }
+    };
+    pass(src, &mut tmp, true);
+    pass(&tmp, &mut out, false);
+    out
+}
+
 /// Working buffers for [`erode`], reused across iterations.
 #[derive(Default)]
 struct Scratch {
@@ -255,6 +290,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
     let mut last: Option<(Level, Flow, Vec<f32>, Vec<border::Pin>)> = None;
     // Rainfall, computed once the coarse terrain has taken shape and refined with it.
     let mut rain_coarse: Option<Vec<f32>> = None;
+    let mut scarps = scarp::Scarps::default();
 
     for (li, &w) in sizes.iter().enumerate() {
         let level = Level::new(&shape, w);
@@ -310,8 +346,8 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         }
         if li == sizes.len() - 1 {
             // Fault steps and rift troughs go in last: erosion would wear them away.
-            displace(&level, &shape, &mut height);
-            border::settle(&level, &pins, &mut height);
+            scarps = displace(&level, &shape, &mut height);
+            border::settle(&level, &shape, &pins, &mut height);
         }
         // Route once more so the stored drainage matches the final terrain exactly.
         flow.outlets = border::outlets(&level, &pins, &height);
@@ -373,15 +409,23 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         temperature,
         biome,
         trails: Default::default(),
+        scarps,
     }
 }
 
 /// Raises and lowers the finished land along faults and rifts, fading to nothing where
-/// the land meets a border band or the coast.
-fn displace(level: &Level, shape: &Shape, height: &mut [f32]) {
+/// the land meets a border band or the coast. Returns what the surface needs to draw
+/// each fault's step as a face, which the grid is too coarse to hold.
+fn displace(level: &Level, shape: &Shape, height: &mut [f32]) -> scarp::Scarps {
+    let mut scarps = scarp::Scarps::default();
     if shape.field.is_empty() {
-        return;
+        return scarps;
     }
+    // Steps narrower than this the grid would draw as a lone notch, not a slope.
+    let soft = structures::FAULT_SCARP.max(level.dx * 1.5);
+    // Grid cells whose fault offset the surface reads back, either side of the line.
+    // Beyond the reach of the surface's 4x4 interpolation from any column it changes.
+    let near = soft + level.dx * 4.0;
     for z in 0..level.w {
         for x in 0..level.w {
             let i = z * level.w + x;
@@ -389,16 +433,29 @@ fn displace(level: &Level, shape: &Shape, height: &mut [f32]) {
                 continue;
             }
             let (px, pz) = level.norm(x, z);
-            let change = shape.field.offset(px, pz, level.land[i]);
-            if change != 0.0 {
-                let keep = 1.0 - Field::border_hold(px.abs().max(pz.abs()));
-                // A cut never takes the land below a share of its old height, so a rift
-                // floor near the coast keeps its relief instead of flattening at the sea.
+            let o = shape.field.offset(px, pz, level.land[i], soft);
+            if o.total == 0.0 && o.nearest >= near {
+                continue;
+            }
+            let keep = 1.0 - Field::border_hold(px.abs().max(pz.abs()));
+            // A cut never takes the land below a share of its old height, so a rift
+            // floor near the coast keeps its relief instead of flattening at the sea.
+            if o.total != 0.0 {
                 let floor = height[i] * 0.3 + 0.3;
-                height[i] = (height[i] + change * keep).max(floor);
+                height[i] = (height[i] + o.total * keep).max(floor);
+            }
+            if o.nearest < near && o.step * keep > 0.0 {
+                // The floor only ever holds back a rift's deep cut, so the fault's share
+                // is as computed.
+                scarps.note(i as u32, o.fault * keep, o.step * keep);
             }
         }
     }
+    if !scarps.is_empty() {
+        let d = shape.desc();
+        scarps.finish(&shape.field, d.mx, d.mz, level.w, soft);
+    }
+    scarps
 }
 
 /// A cell with no land: just the sea floor.
@@ -424,6 +481,7 @@ fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
         temperature: vec![desc.temperature; n],
         biome: vec![Biome::Ocean as u8; n],
         trails: Default::default(),
+        scarps: Default::default(),
     }
 }
 

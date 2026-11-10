@@ -9,7 +9,12 @@
 //! water has to leave across the border, so the band has outlets there (see [`outlets`]).
 
 use super::{Level, NO_LAKE, flow::Flow, shape::Shape};
-use crate::structures::{BORDER_BAND, Field};
+use crate::structures::{BORDER_BAND, BORDER_EASE, Field, border_fine};
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// A grid cell in the band, held toward `target` by `weight` (1 at the border).
 pub(super) struct Pin {
@@ -27,7 +32,8 @@ pub(super) fn pins(level: &Level, shape: &Shape) -> Vec<Pin> {
         return out;
     }
     let w = level.w;
-    let band = ((w as f32 * BORDER_BAND * 0.5).ceil() as usize + 1).min(w / 2);
+    let band = strip(w, BORDER_BAND);
+    let fine = border_fine(w);
     for z in 0..w {
         for x in 0..w {
             // Cheap test first: most of the grid is nowhere near a border.
@@ -36,12 +42,12 @@ pub(super) fn pins(level: &Level, shape: &Shape) -> Vec<Pin> {
             }
             let (px, pz) = level.norm(x, z);
             let edge = px.abs().max(pz.abs());
-            if shape.field.border_pin(px, pz, edge, 1.0).is_none() {
+            if !shape.field.on_crossing(px, pz, edge, BORDER_BAND) {
                 continue;
             }
             // Shared with the neighbours on the border itself, so the held height is too.
             let u = shape.uplift(px, pz, shape.land(px, pz));
-            if let Some((target, weight, blend)) = shape.field.border_pin(px, pz, edge, u) {
+            if let Some((target, weight, blend)) = shape.field.border_pin(px, pz, edge, u, fine) {
                 out.push(Pin { i: (z * w + x) as u32, weight, blend, target });
             }
         }
@@ -93,7 +99,7 @@ pub(super) fn touches(shape: &Shape, w: usize) -> bool {
     (0..w).any(|k| {
         [(k, 0), (k, w - 1), (0, k), (w - 1, k)].into_iter().any(|(x, z)| {
             let (px, pz) = super::norm(w, x, z);
-            shape.field.border_pin(px, pz, 1.0, 1.0).is_some()
+            shape.field.on_crossing(px, pz, 1.0, BORDER_BAND)
         })
     })
 }
@@ -108,25 +114,84 @@ pub(super) fn hold(level: &Level, pins: &[Pin], height: &mut [f32]) {
     }
 }
 
-/// Once erosion is over, eases the land across the whole band toward the held profile,
-/// so the crossing is a broad massif rather than a narrow crest along the border.
-pub(super) fn settle(level: &Level, pins: &[Pin], height: &mut [f32]) {
+/// Grid cells from a border within which a share `reach` of the half-width lies.
+fn strip(w: usize, reach: f32) -> usize {
+    ((w as f32 * reach * 0.5).ceil() as usize + 1).min(w / 2)
+}
+
+/// Once erosion is over, brings the land near a crossing onto the shared profile
+/// without leaving a seam.
+///
+/// The simulated land is split into its broad shape (a local mean) and its eroded
+/// relief (what is left). The broad shape eases toward the shared profile over
+/// [`BORDER_EASE`], which is wide enough that a difference of hundreds of units
+/// between two cells' mountains becomes a gentle tilt rather than a step. The eroded
+/// relief is kept, handing over across the band to the profile's own relief, which
+/// both cells share; the sum is rescaled so the land is no smoother halfway. The held
+/// cells at the border itself take the shared height exactly.
+pub(super) fn settle(level: &Level, shape: &Shape, pins: &[Pin], height: &mut [f32]) {
+    if pins.is_empty() {
+        return;
+    }
+    let w = level.w;
+    let mean = local_mean(height, w, (w / 64).max(2));
+    let mut held = vec![0.0f32; w * w];
+    for p in pins {
+        held[p.i as usize] = p.weight;
+    }
+    let reach = strip(w, BORDER_EASE);
+    let fine = border_fine(w);
+    for z in 0..w {
+        for x in 0..w {
+            if x >= reach && z >= reach && x < w - reach && z < w - reach {
+                continue;
+            }
+            let i = z * w + x;
+            if level.ocean[i] {
+                continue;
+            }
+            let (px, pz) = level.norm(x, z);
+            let edge = px.abs().max(pz.abs());
+            if !shape.field.on_crossing(px, pz, edge, BORDER_EASE) {
+                continue;
+            }
+            let Some(p) = shape.field.border_profile(px, pz, edge, level.uplift[i], fine) else { continue };
+            let b = 1.0 - edge;
+            // Fades out where the range spine meets the sea, so the change ends softly
+            // along the range's flanks too. Held cells converge whatever the spine does.
+            let fade = smoothstep(0.0, 0.06, p.land);
+            let broad = ((1.0 - smoothstep(0.0, BORDER_EASE, b)) * fade).max(held[i]);
+            let shared = ((1.0 - smoothstep(0.0, BORDER_BAND, b)) * fade).max(held[i]);
+            let own = height[i] - mean[i];
+            let relief = (own * (1.0 - shared) + p.detail * shared)
+                / ((1.0 - shared).powi(2) + shared * shared).sqrt();
+            let base = mean[i] + (p.height - mean[i]) * broad;
+            height[i] = (base + relief).max(0.3);
+        }
+    }
     for p in pins {
         let i = p.i as usize;
-        if !level.ocean[i] {
-            let w = p.blend.max(p.weight);
-            height[i] = (height[i] + (p.target - height[i]) * w).max(0.3);
+        if !level.ocean[i] && p.weight >= 1.0 {
+            height[i] = p.target;
         }
     }
 }
 
-/// Keeps standing water out of the band: a lake there could stand against open air in
-/// the neighbouring cell. Raising each band cell to its spill level leaves nothing to
-/// fill, and with outlets beside the ring the spill level is never far above it.
+/// Mean height over a square of radius `r` cells around each cell, with sea counted as
+/// sea level so a coast does not drag the mean of the land beside it down.
+fn local_mean(height: &[f32], w: usize, r: usize) -> Vec<f32> {
+    let land: Vec<f32> = height.iter().map(|h| h.max(0.0)).collect();
+    super::box_mean(&land, w, r)
+}
+
+/// Keeps standing water away from the border: a lake there could stand against open
+/// air in the neighbouring cell. Raising the cells near the border to their spill level
+/// leaves nothing to fill, and with outlets beside the ring the spill level is never
+/// far above it. Only the inner part of the band, since filled hollows are flat.
 pub(super) fn dry(level: &Level, flow: &Flow, pins: &[Pin], height: &mut [f32]) {
     for p in pins {
         let i = p.i as usize;
-        if !level.ocean[i] && p.blend > 0.02 {
+        if !level.ocean[i] && p.weight > 0.2 {
             height[i] = height[i].max(flow.filled[i]);
         }
     }
@@ -279,7 +344,7 @@ pub(super) fn blend_climate(
             let t = (b / REACH).clamp(0.0, 1.0);
             let hold = (1.0 - t * t * (3.0 - 2.0 * t)).max(held[i]).max(Field::border_hold(1.0 - b));
             let (sea_temp, wet) = shared(px, pz);
-            temperature[i] += (sea_temp - height[i].max(0.0) * 0.00115 - temperature[i]) * hold;
+            temperature[i] += (sea_temp - height[i].max(0.0) * super::climate::LAPSE - temperature[i]) * hold;
             rain[i] += (wet - rain[i]) * hold;
         }
     }
