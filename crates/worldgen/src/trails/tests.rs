@@ -380,3 +380,25 @@ fn lanterns_gather_at_places_and_thin_out_between() {
     assert!(near_site > 0, "no lantern near any landmark");
     assert!(near_site * 4 >= lanterns.len(), "only {near_site} of {} lanterns near landmarks", lanterns.len());
 }
+
+#[test]
+fn nothing_stands_on_the_walkable_trail() {
+    let w = world();
+    let c = w.continent(0, 0);
+    let net = &c.trails;
+    let mut styles = std::collections::HashMap::new();
+    for l in &net.lanterns {
+        *styles.entry(l.style).or_insert(0) += 1;
+    }
+    println!("lantern styles: {styles:?}");
+    let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
+    for l in &net.lanterns {
+        assert!(!l.footprint.is_empty());
+        for col in &l.footprint {
+            let at = col.as_vec2() + 0.5;
+            if let Some(p) = points.iter().find(|p| glam::vec2(p.x, p.z).distance(at) < p.half_width + 0.5) {
+                panic!("{:?} lantern stands at {col:?} on a trail {} wide", l.style, p.half_width);
+            }
+        }
+    }
+}

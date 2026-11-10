@@ -212,13 +212,16 @@ pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, he
     let mut put = |x: i32, y: i32, z: i32, v: Voxel| voxels.push((IVec3::new(x, y, z), v));
     let v = IVec3::new;
     let iron = mat::CHARCOAL;
-    // A footing running down into the ground, so nothing floats on uneven land.
-    for y in -3..0 {
-        put(0, y, 0, p.stone_dark);
-    }
-    // Every style stands on a plus-shaped stone base.
-    for (x, z) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
-        put(x, 0, z, p.stone_dark);
+    // A footing running down into the ground, so nothing floats on uneven land, and a
+    // plus-shaped stone base on it; but a gate stands on its two posts' own footings,
+    // leaving the way between them clear.
+    if style != LampStyle::Gate {
+        for y in -3..0 {
+            put(0, y, 0, p.stone_dark);
+        }
+        for (x, z) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            put(x, 0, z, p.stone_dark);
+        }
     }
     // The voxels first, turned as they go in; the fine parts after, in their own pass.
     match style {
