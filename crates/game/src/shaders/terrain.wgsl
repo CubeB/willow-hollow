@@ -4,6 +4,9 @@ struct VIn {
     // Per chunk: position of the chunk origin relative to the camera, and in world voxels.
     @location(2) offset: vec3<f32>,
     @location(3) origin: vec3<i32>,
+    // Per chunk: voxels per cell of its mesh, and the distances between which it is shown.
+    @location(4) scale: f32,
+    @location(5) band: vec2<f32>,
 };
 
 struct VOut {
@@ -15,7 +18,15 @@ struct VOut {
     @location(4) @interpolate(flat) face: u32,
     @location(5) @interpolate(flat) origin: vec3<i32>,
     @location(6) @interpolate(flat) flags: u32,
+    @location(7) @interpolate(flat) band: vec2<f32>,
 };
+
+// True if this ring of terrain has given way to another at this distance. Each pixel is
+// drawn by exactly one ring.
+fn outside_band(rel: vec3<f32>, band: vec2<f32>) -> bool {
+    let d = length(rel.xz);
+    return d < band.x || d >= band.y;
+}
 
 fn face_normal(face: u32) -> vec3<f32> {
     switch face {
@@ -42,7 +53,8 @@ fn vs(in: VIn) -> VOut {
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
     out.flags = in.b >> 24u;
     out.local = local;
-    var rel = local + in.offset;
+    out.band = in.band;
+    var rel = local * in.scale + in.offset;
     if ((out.flags & FLAG_WATER) != 0u && out.face == 2u) {
         // Water surfaces sit a little below the top of their voxel.
         rel.y -= 0.125;
@@ -50,7 +62,7 @@ fn vs(in: VIn) -> VOut {
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
         // Leaves stir in the wind. The offset is a smooth function of world position,
         // so neighbouring leaf voxels move together and no gaps open between them.
-        let world = (vec3<f32>(in.origin) + local) / VOXELS_PER_METRE;
+        let world = (vec3<f32>(in.origin) + local * in.scale) / VOXELS_PER_METRE;
         let t = G.sun_dir.w;
         let wave = sin(world.x * 0.4375 + world.z * 0.3375 + world.y * 0.25 + t * 1.7)
             + 0.5 * sin(world.x * 1.125 - world.z * 0.75 + t * 2.9);
@@ -62,19 +74,20 @@ fn vs(in: VIn) -> VOut {
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
-    out.origin = in.origin;
+    // Hashed per cell, so a coarse chunk counts its cells from its own corner.
+    out.origin = in.origin / i32(in.scale);
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    if (beyond_voxels(in.rel)) {
+    if (outside_band(in.rel, in.band)) {
         discard;
     }
     return shade(in);
 }
 
-// For chunks wholly inside the voxel radius. Without a discard the GPU can settle depth
+// For chunks wholly inside their ring. Without a discard the GPU can settle depth
 // before running the shader, so hidden surfaces cost nothing.
 @fragment
 fn fs_inside(in: VOut) -> @location(0) vec4<f32> {
@@ -125,7 +138,7 @@ fn ripple_normal(world_xz: vec2<f32>, t: f32) -> vec3<f32> {
 
 @fragment
 fn fs_water(in: VOut) -> @location(0) vec4<f32> {
-    if (beyond_voxels(in.rel)) {
+    if (outside_band(in.rel, in.band)) {
         discard;
     }
     let n_face = face_normal(in.face);
@@ -143,7 +156,10 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
     var color: vec3<f32>;
     var alpha: f32;
     if (in.face == 2u) {
-        let n = ripple_normal(world_xz, t);
+        // Ripples are far finer than a pixel out in the coarser rings, and would only
+        // sparkle there.
+        let calm = smoothstep(80.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
+        let n = normalize(mix(ripple_normal(world_xz, t), vec3<f32>(0.0, 1.0, 0.0), calm));
         let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
         let reflected = sky_color(reflect(view, n));
         // Clear and bright-bedded in the shallows, deep blue-green further out.
@@ -155,7 +171,15 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         alpha = mix(1.0 - exp(-thickness / VOXELS_PER_METRE * 0.5625), 1.0, fresnel);
         // Sun glitter.
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
-        color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face);
+        color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face) * (1.0 - calm);
+        // Further out, water looks the way the far view paints it: opaque, with no bed
+        // showing through to mark the rings.
+        let far = smoothstep(150.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
+        let up = vec3<f32>(0.0, 1.0, 0.0);
+        let far_fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
+        let far_body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
+        color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
+        alpha = mix(alpha, 1.0, far);
     } else {
         // A vertical face of water is a fall or the step of a cascade: white and streaky,
         // the streaks running downward.

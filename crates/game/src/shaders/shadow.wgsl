@@ -11,11 +11,13 @@ struct VIn {
     @location(1) b: u32,
     @location(2) offset: vec3<f32>,
     @location(3) origin: vec3<i32>,
+    // Per chunk: voxels per cell of its mesh.
+    @location(4) scale: f32,
 };
 
 @vertex
 fn vs(in: VIn) -> @builtin(position) vec4<f32> {
     let local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u))
         + vec3<f32>(f32((in.a >> 23u) & 3u), f32((in.a >> 25u) & 3u), f32((in.a >> 27u) & 3u)) * 0.25;
-    return C.light_vp * vec4<f32>(local + in.offset, 1.0);
+    return C.light_vp * vec4<f32>(local * in.scale + in.offset, 1.0);
 }

@@ -4,6 +4,8 @@ mod camera;
 mod env;
 mod farview;
 mod gfx;
+mod impostors;
+mod lod;
 mod overlay;
 mod particles;
 mod player;
@@ -43,6 +45,7 @@ use camera::{Camera, FlyController};
 use env::Environment;
 use farview::FarView;
 use gfx::{Gpu, WindowSurface};
+use impostors::Impostors;
 use overlay::Overlay;
 use particles::{Particles, Surroundings};
 use player::{Controls, Mode, Player, WorldVoxels};
@@ -320,6 +323,7 @@ struct Running {
     renderer: Renderer,
     streamer: Streamer,
     far: FarView,
+    impostors: Impostors,
     env: Environment,
     particles: Particles,
     /// Leaf and flower voxels near the player, refreshed now and then.
@@ -454,6 +458,7 @@ impl Running {
             player,
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
+            impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
             env: Environment::at_time(time),
             particles: Particles::new(),
@@ -726,6 +731,7 @@ impl Running {
         self.cpu.lap(0);
         self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
         self.far.update(&self.gpu, self.camera.pos);
+        self.impostors.update(&self.gpu, self.camera.pos);
         self.cpu.lap(1);
 
         // The day turns.
@@ -785,6 +791,7 @@ impl Running {
             env: &self.env,
             terrain: &self.streamer,
             far: &self.far,
+            impostors: &self.impostors,
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
@@ -1020,13 +1027,15 @@ impl ApplicationHandler for App {
                         log::info!("{}", timer.summary());
                     }
                     log::info!(
-                        "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles",
+                        "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles, {} far tree boxes, arena {} MiB",
                         r.frame,
                         r.frame_ms,
                         1000.0 / r.frame_ms,
                         s.chunks,
                         d.quads_drawn as f64 / 1e6,
-                        d.far_tiles
+                        d.far_tiles,
+                        d.impostor_boxes,
+                        s.arena_bytes >> 20
                     );
                     el.exit();
                 }
@@ -1076,6 +1085,7 @@ fn main() -> Result<()> {
         let camera = make_camera(&opts, &world, None);
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
+        let mut impostors = Impostors::new(&gpu, world.clone());
         let t = Instant::now();
         let env = Environment::at_time(opts.time.unwrap_or(10.0));
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
@@ -1111,6 +1121,7 @@ fn main() -> Result<()> {
             &env,
             &mut streamer,
             &mut far,
+            &mut impostors,
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,

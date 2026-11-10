@@ -16,15 +16,18 @@ use voxel::{
     CHUNK,
     mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk},
 };
-use worldgen::{Cascade, World, scale::m};
+use worldgen::{Cascade, World, scale::m, world::GameWorld};
 
 use crate::{
     arena::{MeshSpan, VertexArena},
     gfx::Gpu,
+    lod,
 };
 
 pub struct GpuChunk {
-    /// Chunk coordinates (world voxel position / 32).
+    /// Level of detail: this chunk's voxels are `2^level` times the size of real ones.
+    pub level: u8,
+    /// Chunk coordinates at this level (world voxel position / (32 * 2^level)).
     pub pos: IVec3,
     pub opaque: Option<MeshSpan>,
     pub water: Option<MeshSpan>,
@@ -32,7 +35,28 @@ pub struct GpuChunk {
     pub faces: [u32; 13],
 }
 
-type Col = (i32, i32);
+/// Levels of detail, the first being full-size voxels.
+pub const LEVELS: usize = 3;
+
+/// A column at some level of detail: (level, x, z), in columns of that level.
+type Col = (u8, i32, i32);
+
+/// Where each level is loaded, as (inner, outer) in full-size columns from the camera.
+/// Each ring is twice as far out as the one inside it, and reaches four of its own
+/// columns in under it. The finer ring is only ever complete to a little short of its
+/// edge, so the coarser one must be there underneath to take over.
+fn ring(level: u8, radius: i32) -> (f32, f32) {
+    let outer = |level: u8| radius as f32 * step(level);
+    match level {
+        0 => (0.0, outer(0)),
+        _ => ((outer(level - 1) - 4.0 * step(level)).max(0.0), outer(level)),
+    }
+}
+
+/// How many full-size columns one column of a level spans.
+fn step(level: u8) -> f32 {
+    (1 << level) as f32
+}
 
 struct ColumnResult {
     col: Col,
@@ -67,16 +91,25 @@ struct Focus {
 }
 
 impl Focus {
+    /// Distance from the camera's column to the middle of `col`, in full-size columns.
+    fn distance(&self, col: Col) -> f32 {
+        let s = step(col.0);
+        let dx = (col.1 as f32 + 0.5) * s - (self.cx.load(Ordering::Relaxed) as f32 + 0.5);
+        let dz = (col.2 as f32 + 0.5) * s - (self.cz.load(Ordering::Relaxed) as f32 + 0.5);
+        dx.hypot(dz)
+    }
+
     fn in_range(&self, col: Col, slack: i32) -> bool {
-        let dx = (col.0 - self.cx.load(Ordering::Relaxed)) as i64;
-        let dz = (col.1 - self.cz.load(Ordering::Relaxed)) as i64;
-        let r = (self.radius.load(Ordering::Relaxed) + slack) as i64;
-        dx * dx + dz * dz <= r * r
+        let (inner, outer) = ring(col.0, self.radius.load(Ordering::Relaxed));
+        let (d, slack) = (self.distance(col), slack as f32 * step(col.0));
+        d <= outer + slack && (col.0 == 0 || d >= inner - slack)
     }
 }
 
 pub struct Streamer {
-    world: Arc<dyn World>,
+    world: Arc<GameWorld>,
+    /// Trees rebuilt for the coarser levels.
+    models: Arc<lod::Models>,
     pool: rayon::ThreadPool,
     tx: Sender<ColumnResult>,
     rx: Receiver<ColumnResult>,
@@ -90,7 +123,7 @@ pub struct Streamer {
     pending: HashSet<Col>,
     /// Columns still to request, farthest first (so the nearest is popped first).
     wanted: Vec<Col>,
-    center: Option<Col>,
+    center: Option<(i32, i32)>,
     focus: Arc<Focus>,
     max_in_flight: usize,
     /// The largest load radius the GPU has shown it can hold.
@@ -109,9 +142,11 @@ pub const PLANT_REACH: f32 = m(100.0);
 const PLANT_COLUMNS: i32 = (PLANT_REACH / CHUNK as f32) as i32 + 3;
 /// Roughly what one column takes on the GPU, for sizing the mesh buffer up front.
 const COLUMN_BYTES: u64 = 130 << 10;
+/// Roughly how much of that the coarse rings add, as a share of the full-size columns.
+const RINGS_SHARE: f64 = 1.2;
 
 impl Streamer {
-    pub fn new(gpu: &Gpu, world: Arc<dyn World>, radius: i32) -> Self {
+    pub fn new(gpu: &Gpu, world: Arc<GameWorld>, radius: i32) -> Self {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -123,14 +158,16 @@ impl Streamer {
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();
+        let expected = (std::f64::consts::PI * (radius * radius) as f64 * (1.0 + RINGS_SHARE)) as u64 * COLUMN_BYTES;
         Self {
             world,
+            models: Arc::default(),
             pool,
             tx,
             rx,
             columns: HashMap::new(),
             bare: HashSet::new(),
-            arena: VertexArena::new(gpu, (std::f64::consts::PI * (radius * radius) as f64) as u64 * COLUMN_BYTES),
+            arena: VertexArena::new(gpu, "chunk arena", expected, 4 * size_of::<Vertex>() as u64),
             cascades: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
@@ -158,26 +195,38 @@ impl Streamer {
         }
     }
 
-    /// Horizontal distance from the camera within which every column is loaded, in
-    /// voxels. Outside it the far view must cover for terrain still being generated.
-    pub fn complete_radius(&self) -> f32 {
-        let Some(center) = self.center else { return 0.0 };
-        let dist = |c: &Col| {
-            let (dx, dz) = ((c.0 - center.0) as f32, (c.1 - center.1) as f32);
-            dx.hypot(dz)
-        };
-        // A column being rebuilt with its plants is still there, so it is no gap. And
-        // starting from the edge of the ring that walking uncovers keeps the boundary
-        // still as the camera crosses columns, rather than pulsing in and out.
-        let nearest_missing = self
-            .pending
-            .iter()
-            .chain(&self.wanted)
-            .filter(|c| !self.columns.contains_key(*c))
-            .map(dist)
-            .fold(self.radius() as f32 - std::f32::consts::SQRT_2, f32::min);
-        // The camera can be anywhere in its column, and columns are square.
-        ((nearest_missing - 1.5) * CHUNK as f32).max(0.0)
+    /// For each level, the horizontal distance from the camera out to which it, and
+    /// every finer level, is fully loaded, in voxels. A level is drawn from the previous
+    /// level's distance to its own. Beyond the last, the far view covers for terrain not
+    /// loaded yet.
+    pub fn bands(&self) -> [f32; LEVELS] {
+        let mut reached = [0.0; LEVELS];
+        if self.center.is_none() {
+            return reached;
+        }
+        let radius = self.radius();
+        let mut inside = 0.0f32;
+        for level in 0..LEVELS as u8 {
+            let (inner, outer) = ring(level, radius);
+            let s = step(level);
+            // A column being rebuilt with its plants is still there, so it is no gap. And
+            // starting from the edge of the ring that walking uncovers keeps the boundary
+            // still as the camera crosses columns, rather than pulsing in and out.
+            let nearest_missing = self
+                .pending
+                .iter()
+                .chain(&self.wanted)
+                .filter(|c| c.0 == level && !self.columns.contains_key(*c))
+                .map(|c| self.focus.distance(*c))
+                .filter(|d| (*d + s) * CHUNK as f32 >= inside)
+                .fold(outer - s * std::f32::consts::SQRT_2, f32::min);
+            // The camera can be anywhere in its column, and columns are square.
+            let edge = ((nearest_missing - 1.5 * s) * CHUNK as f32).max(0.0);
+            // A level that doesn't reach in as far as the one before it ends can't take over.
+            inside = if inside < inner * CHUNK as f32 { inside } else { edge.max(inside) };
+            reached[level as usize] = inside;
+        }
+        reached
     }
 
     pub fn is_idle(&self) -> bool {
@@ -199,7 +248,7 @@ impl Streamer {
         let (cx, cz) = ((pos.x / CHUNK as f64).floor() as i32, (pos.z / CHUNK as f64).floor() as i32);
         let p = pos.as_vec3();
         (-r..=r)
-            .flat_map(move |dz| (-r..=r).map(move |dx| (cx + dx, cz + dz)))
+            .flat_map(move |dz| (-r..=r).map(move |dx| (0, cx + dx, cz + dz)))
             .filter_map(move |col| self.cascades.get(&col))
             .flatten()
             .filter(move |c| (c.pos.x - p.x).hypot(c.pos.z - p.z) <= radius)
@@ -221,10 +270,10 @@ impl Streamer {
         while self.pending.len() < self.max_in_flight {
             let Some(col) = self.wanted.pop() else { break };
             self.pending.insert(col);
-            let plants = in_plant_range(col, center, PLANT_COLUMNS + 1);
-            let (world, tx, focus) = (self.world.clone(), self.tx.clone(), self.focus.clone());
+            let plants = col.0 == 0 && in_plant_range(col, center, PLANT_COLUMNS + 1);
+            let (world, models, tx, focus) = (self.world.clone(), self.models.clone(), self.tx.clone(), self.focus.clone());
             self.pool.spawn(move || {
-                let result = build_column(&*world, &focus, col, plants);
+                let result = build_column(&world, &models, &focus, col, plants);
                 let _ = tx.send(result);
             });
         }
@@ -279,47 +328,52 @@ impl Streamer {
         }
     }
 
-    fn rebuild_wanted(&mut self, center: Col) {
+    fn rebuild_wanted(&mut self, center: (i32, i32)) {
         let r = self.radius();
-        let unload = (r + UNLOAD_SLACK) as i64;
-        let dist2 = |c: &Col| {
-            let (dx, dz) = ((c.0 - center.0) as i64, (c.1 - center.1) as i64);
-            dx * dx + dz * dz
-        };
+        let focus = self.focus.clone();
         let before = self.columns.len();
         let arena = &mut self.arena;
         self.columns.retain(|c, chunks| {
-            let keep = dist2(c) <= unload * unload;
+            let keep = focus.in_range(*c, UNLOAD_SLACK);
             if !keep {
                 release(arena, chunks);
             }
             keep
         });
-        self.cascades.retain(|c, _| dist2(c) <= unload * unload);
-        self.bare.retain(|c| dist2(c) <= unload * unload);
+        self.cascades.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
+        self.bare.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
         if self.columns.len() != before {
             self.recount();
         }
 
         self.wanted.clear();
-        for dx in -r..=r {
-            for dz in -r..=r {
-                let col = (center.0 + dx, center.1 + dz);
-                // A column that has come within reach of its plants is built again with them.
-                let incomplete = !self.columns.contains_key(&col) || (self.bare.contains(&col) && in_plant_range(col, center, PLANT_COLUMNS));
-                if dx * dx + dz * dz <= r * r && incomplete && !self.pending.contains(&col) {
-                    self.wanted.push(col);
+        for level in 0..LEVELS as u8 {
+            let s = step(level) as i32;
+            let (cx, cz) = (center.0.div_euclid(s), center.1.div_euclid(s));
+            // A column of this level counts by its middle, so reach one further each way.
+            let reach = (ring(level, r).1 / step(level)).ceil() as i32 + 1;
+            for dx in -reach..=reach {
+                for dz in -reach..=reach {
+                    let col = (level, cx + dx, cz + dz);
+                    if !focus.in_range(col, 0) || self.pending.contains(&col) {
+                        continue;
+                    }
+                    // A column that has come within reach of its plants is built again with them.
+                    let incomplete = !self.columns.contains_key(&col) || (self.bare.contains(&col) && in_plant_range(col, center, PLANT_COLUMNS));
+                    if incomplete {
+                        self.wanted.push(col);
+                    }
                 }
             }
         }
-        self.wanted.sort_unstable_by_key(|c| std::cmp::Reverse(dist2(c)));
+        self.wanted.sort_unstable_by_key(|c| std::cmp::Reverse((focus.distance(*c) * 16.0) as i64));
     }
 
     /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
     fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>) -> Option<Vec<GpuChunk>> {
         let mut chunks = Vec::with_capacity(meshes.len());
         for (cy, mesh) in meshes {
-            let Some(chunk) = self.upload(gpu, IVec3::new(col.0, cy, col.1), mesh) else {
+            let Some(chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
                 release(&mut self.arena, &chunks);
                 self.recount();
                 return None;
@@ -330,7 +384,7 @@ impl Streamer {
     }
 
     /// Stores one chunk's meshes, or None if the GPU has no room for them.
-    fn upload(&mut self, gpu: &Gpu, pos: IVec3, mesh: ChunkMesh) -> Option<GpuChunk> {
+    fn upload(&mut self, gpu: &Gpu, level: u8, pos: IVec3, mesh: ChunkMesh) -> Option<GpuChunk> {
         let opaque = self.store(gpu, &mesh.opaque)?;
         let Some(water) = self.store(gpu, &mesh.water) else {
             if let Some(span) = opaque {
@@ -340,6 +394,7 @@ impl Streamer {
         };
         self.stats.chunks += 1;
         Some(GpuChunk {
+            level,
             pos,
             opaque,
             water,
@@ -395,8 +450,8 @@ impl Streamer {
     }
 }
 
-fn in_plant_range(col: Col, center: Col, columns: i32) -> bool {
-    let (dx, dz) = (col.0 - center.0, col.1 - center.1);
+fn in_plant_range(col: Col, center: (i32, i32), columns: i32) -> bool {
+    let (dx, dz) = (col.1 - center.0, col.2 - center.1);
     dx * dx + dz * dz <= columns * columns
 }
 
@@ -406,7 +461,7 @@ fn release(arena: &mut VertexArena, chunks: &[GpuChunk]) {
     }
 }
 
-fn build_column(world: &dyn World, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
+fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
     if !focus.in_range(col, UNLOAD_SLACK) {
         return ColumnResult {
             col,
@@ -417,15 +472,18 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col, plants: bool) -> Col
             mesh_ms: 0.0,
         };
     }
+    if col.0 > 0 {
+        return build_coarse_column(world, models, col);
+    }
     let t0 = Instant::now();
-    let output = world.generate_column(col.0, col.1);
+    let output = world.generate_column(col.1, col.2);
     let t1 = Instant::now();
     let chunks = output
         .chunks
         .iter()
         .map(|(cy, chunk)| {
             let mut mesh = mesh_chunk(chunk, world.materials());
-            let origin = [col.0 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.1 * CHUNK * CELLS];
+            let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
             add_plants(&mut mesh, inside, origin, world.materials());
@@ -439,6 +497,28 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col, plants: bool) -> Col
         chunks: Some(chunks),
         planted: plants,
         cascades: output.cascades,
+        gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
+        mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+    }
+}
+
+/// A column of one of the coarse rings: no plants, cascades or spray this far out.
+fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> ColumnResult {
+    let t0 = Instant::now();
+    let chunks = lod::generate(world, models, col.0, col.1, col.2);
+    let t1 = Instant::now();
+    let meshes = chunks
+        .iter()
+        .map(|(cy, chunk)| (*cy, mesh_chunk(chunk, world.materials())))
+        .filter(|(_, mesh)| !mesh.is_empty())
+        .collect();
+    let t2 = Instant::now();
+    ColumnResult {
+        col,
+        chunks: Some(meshes),
+        // Coarse columns never need building again with plants.
+        planted: true,
+        cascades: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
     }
