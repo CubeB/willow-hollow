@@ -52,6 +52,13 @@ fn spread(w: usize, v: &mut [f32], fall: f32) {
 /// How far, in metres of world, waterlogging and the coast reach inland.
 const WET_REACH: f32 = 700.0;
 const COAST_REACH: f32 = 420.0;
+/// Half-width, in metres, of the country weighed to judge how sheltered a coast is.
+const SHELTER_REACH: f32 = 2400.0;
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 
 /// Per-cell biome.
 pub(super) fn classify(
@@ -80,7 +87,11 @@ pub(super) fn classify(
         })
         .collect();
     spread(w, &mut wet, metres / WET_REACH);
-    let mut coast: Vec<f32> = level.ocean.iter().map(|&o| if o { 1.0 } else { 0.0 }).collect();
+    let sea: Vec<f32> = level.ocean.iter().map(|&o| if o { 1.0 } else { 0.0 }).collect();
+    // Share of the country around that is open sea: about half on a straight coast,
+    // much more on a headland or a small island, much less at the head of a bay.
+    let open = super::box_mean(&sea, w, (SHELTER_REACH / metres).round().max(2.0) as usize);
+    let mut coast = sea;
     spread(w, &mut coast, metres / COAST_REACH);
 
     let mut out = vec![Biome::Ocean as u8; n];
@@ -101,6 +112,7 @@ pub(super) fn classify(
                 slope: if ring { 0.1 } else { slope(level, height, x, z) },
                 wet: if ring { 0.0 } else { wet[i] },
                 coast: if ring { 0.0 } else { coast[i] },
+                shelter: if ring { 0.0 } else { 1.0 - smoothstep(0.36, 0.56, open[i]) },
                 variety: variety(shape, px, pz),
                 volcanic: shape.volcanic(px, pz),
             };
