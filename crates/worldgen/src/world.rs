@@ -37,6 +37,8 @@ pub struct GameWorld {
     continents: Mutex<HashMap<(i32, i32), Slot>>,
     /// Climbing plants grown lately, shared by the chunk columns they span.
     climbers: features::climber::PlantCache,
+    /// Caves laid out lately, by world cell.
+    caves: features::cave::Cache,
 }
 
 impl GameWorld {
@@ -52,6 +54,7 @@ impl GameWorld {
             library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
             climbers: Default::default(),
+            caves: Default::default(),
         }
     }
 
@@ -416,7 +419,7 @@ impl GameWorld {
             (mx * MACRO_SIZE, mz * MACRO_SIZE),
         );
         // Only the features whose model can touch this column.
-        let placements: Vec<_> = placements
+        let mut placements: Vec<_> = placements
             .into_iter()
             .filter(|p| {
                 let t = lib.get(p.species, p.variant);
@@ -438,6 +441,8 @@ impl GameWorld {
             lo = lo.min(s.lo.y);
         }
         hi = plants.iter().fold(hi, |top, p| top.max((p.lo[1]).div_euclid(CELLS)));
+        let caves = features::cave::Carve::new(&self.caves, self.seed, &continent, wx0, wz0);
+        lo = lo.min(caves.lowest().unwrap_or(lo));
 
         // Only chunks that can hold a visible face: from just under the lowest ground
         // to the highest ground or water or tree top.
@@ -503,6 +508,7 @@ impl GameWorld {
             }
             out.push((cy, chunk));
         }
+        caves.apply(self.seed, &sampler, &mut out, cy_min, &columns, (wx0, wz0), (lx0, lz0), &mut plants, &mut placements);
 
         // Which way the water runs in each column, for its surface and what floats on it.
         let mut currents = Vec::new();
