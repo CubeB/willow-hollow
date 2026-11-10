@@ -170,3 +170,18 @@ fn spawn_is_on_dry_land_beside_a_river() {
     });
     assert!(found, "no water ahead of the spawn point");
 }
+
+#[test]
+fn chunk_columns_report_their_springs() {
+    let w = world();
+    let c = w.continent(0, 0);
+    let springs: Vec<_> = (0..c.size * c.size).filter_map(|i| crate::surface::Spring::at(&c, 3, i)).take(6).collect();
+    assert!(!springs.is_empty(), "no springs on the test continent");
+    for sp in &springs {
+        let (cx, cz) = (sp.pos.x.floor() as i32 / CHUNK, sp.pos.y.floor() as i32 / CHUNK);
+        let out = w.generate_column(cx, cz);
+        let mark = out.springs.iter().find(|m| (m.pos.x - sp.pos.x).abs() < 0.01 && (m.pos.z - sp.pos.y).abs() < 0.01);
+        let mark = mark.unwrap_or_else(|| panic!("spring at {:?} missing from column {cx},{cz}", sp.pos));
+        assert_eq!(mark.pos.y, sp.water as f32);
+    }
+}

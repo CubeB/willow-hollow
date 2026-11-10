@@ -801,11 +801,13 @@ impl Running {
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
         let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, m(120.0)).copied().collect();
+        let springs: Vec<_> = self.streamer.springs_near(self.camera.pos, m(40.0)).copied().collect();
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
             sun_elevation: self.env.sun_elevation,
             cascades: &cascades,
+            springs: &springs,
             leaves: &self.leaves,
             flowers: &self.flowers,
             player_entered_water: entered_water,
@@ -1158,6 +1160,7 @@ fn main() -> Result<()> {
         let warmth = season::warmth(biome);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
+        let springs: Vec<_> = streamer.springs_near(camera.pos, m(40.0)).copied().collect();
         let mut fleet = Fleet::new(world.clone());
         fleet.refresh(camera.pos);
         let mut props = Vec::new();
@@ -1171,6 +1174,7 @@ fn main() -> Result<()> {
                 biome,
                 sun_elevation: env.sun_elevation,
                 cascades: &cascades,
+                springs: &springs,
                 leaves: &leaves,
                 flowers: &flowers,
                 player_entered_water: None,

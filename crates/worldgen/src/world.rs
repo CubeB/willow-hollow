@@ -13,7 +13,7 @@ use voxel::{
 };
 
 use crate::{
-    Cascade, ColumnOutput, World,
+    Cascade, ColumnOutput, SpringMark, World,
     continent::{self, Continent, NO_LAKE, SimConfig},
     features::{self, Library},
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
@@ -552,6 +552,20 @@ impl GameWorld {
             }
         }
 
+        // Springs whose pool centre lies inside this column (not its padded border).
+        let springs = sampler
+            .springs()
+            .iter()
+            .filter(|s| {
+                let (x, z) = (s.pos.x.floor() as i32 - lx0, s.pos.y.floor() as i32 - lz0);
+                (1..=CHUNK).contains(&x) && (1..=CHUNK).contains(&z)
+            })
+            .map(|s| SpringMark {
+                pos: Vec3::new(s.pos.x + (wx0 - lx0) as f32, s.water as f32, s.pos.y + (wz0 - lz0) as f32),
+                radius: s.radius,
+            })
+            .collect();
+
         let mut put = |q: IVec3, v: Voxel, force: bool| {
             let (px, pz) = (q.x - wx0, q.z - wz0);
             // Height above the bottom of the lowest chunk (not its padded border).
@@ -644,6 +658,7 @@ impl GameWorld {
         ColumnOutput {
             chunks: out,
             cascades,
+            springs,
             currents,
             plants,
         }
