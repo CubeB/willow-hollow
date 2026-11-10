@@ -335,3 +335,48 @@ fn trees_keep_off_the_trails() {
     }
     assert!(checked > 0);
 }
+
+#[test]
+fn lanterns_gather_at_places_and_thin_out_between() {
+    use crate::trails::{LanternCause, build::{JUNCTION_CLEAR, LANTERN_CLEAR, LANTERN_FAR}};
+    let w = world();
+    let c = w.continent(0, 0);
+    let net = &c.trails;
+    let lanterns = &net.lanterns;
+    let count = |cause| lanterns.iter().filter(|l| l.cause == cause).count();
+    println!(
+        "{} lanterns: {} bridge, {} junction, {} approach, {} plain",
+        lanterns.len(),
+        count(LanternCause::Bridge),
+        count(LanternCause::Junction),
+        count(LanternCause::Approach),
+        count(LanternCause::Plain)
+    );
+    assert!(!lanterns.is_empty(), "no lanterns at all");
+    // Plain stretches are lit only now and then.
+    let min_gap = (LANTERN_FAR as f32 * 0.7) as usize;
+    for (k, l) in lanterns.iter().enumerate() {
+        if l.cause != LanternCause::Plain {
+            continue;
+        }
+        if let Some(prev) = lanterns[..k].iter().rev().find(|p| p.trail == l.trail) {
+            assert!(l.step - prev.step >= min_gap, "plain lanterns {} steps apart", l.step - prev.step);
+        }
+    }
+    // None crowds one on another trail.
+    for (k, l) in lanterns.iter().enumerate() {
+        let clear = if l.cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
+        for p in &lanterns[..k] {
+            if p.trail != l.trail || l.cause == LanternCause::Junction {
+                assert!(p.at.distance(l.at) >= clear, "lanterns {} apart", p.at.distance(l.at));
+            }
+        }
+    }
+    // Landmarks are still approached by lantern light.
+    let near_site = lanterns
+        .iter()
+        .filter(|l| net.sites.iter().any(|s| l.at.distance(glam::vec2(s.x as f32, s.z as f32)) < crate::scale::m(240.0)))
+        .count();
+    assert!(near_site > 0, "no lantern near any landmark");
+    assert!(near_site * 4 >= lanterns.len(), "only {near_site} of {} lanterns near landmarks", lanterns.len());
+}
