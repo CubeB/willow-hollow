@@ -209,6 +209,13 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Cliff if steepness < 0.9 && roll < 0.55 => (cover, mat::STONE),
         Cover::Cliff => (mat::STONE, mat::STONE),
         Cover::Scree => (if roll < 0.8 { mat::SCREE } else { mat::GRAVEL }, mat::SCREE),
+        // Coasts: shingle with a little sand between the stones, boulders, the dark wet
+        // rock of a wave-cut shelf, and dune sand.
+        Cover::Shingle => (if roll < 0.72 { mat::GRAVEL } else if roll < 0.9 { mat::SCREE } else { mat::SAND }, mat::GRAVEL),
+        Cover::Boulders => (if roll < 0.5 { mat::STONE } else if roll < 0.8 { mat::ROCK_DARK } else { mat::GRAVEL }, mat::STONE),
+        Cover::Shelf => (if patch < 0.5 || roll < 0.2 { mat::ROCK_DARK } else { mat::STONE }, mat::STONE),
+        Cover::Dune if matches!(col.biome, crate::biome::Biome::Desert | crate::biome::Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
+        Cover::Dune => (mat::SAND, mat::SAND),
         // Banks and flats at sea level are tidal mud, with a little sand.
         Cover::Bank if col.ground < m(1.0) => (if roll < 0.8 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),

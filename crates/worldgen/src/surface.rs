@@ -13,6 +13,7 @@ mod cliff;
 mod coast;
 mod current;
 mod ravine;
+mod sea_cliff;
 
 pub use cliff::strata_tilt;
 
@@ -63,6 +64,15 @@ pub enum Cover {
     Cliff,
     /// Loose stone at the foot of a cliff.
     Scree,
+    // Coasts (see `coast`), added after the others so existing variants keep their order.
+    /// A pebble and cobble beach on an exposed coast.
+    Shingle,
+    /// Big rounded stones on the most exposed shores and under sea cliffs.
+    Boulders,
+    /// The wave-cut rock platform at the foot of a sea cliff, partly awash.
+    Shelf,
+    /// Wind-blown sand heaped up behind a wide beach.
+    Dune,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -251,6 +261,9 @@ pub struct Sampler<'a> {
     falls: Vec<Fall>,
     /// River deltas that can reach the area.
     deltas: Vec<coast::Delta>,
+    /// River mouths whose estuaries can reach the area, and the shores of its grid cells.
+    mouths: Vec<coast::Mouth>,
+    shores: coast::Shores,
     trail_points: Vec<TrailPoint>,
     pads: Vec<Pad>,
 }
@@ -316,6 +329,8 @@ impl<'a> Sampler<'a> {
             pieces,
             falls,
             deltas,
+            mouths: coast::mouths(c, lo, hi),
+            shores: coast::Shores::new(c, lo, hi),
             trail_points,
             pads,
         }
@@ -396,6 +411,13 @@ impl<'a> Sampler<'a> {
                 cliff::Part::Foot(p) if unit(hash2(seed ^ 0x5c4e, lx >> 1, lz >> 1)) < p => cover = Cover::Scree,
                 _ => {}
             }
+        }
+        // Coasts: sea cliffs, shingle, boulders, dunes and estuary flats.
+        let mut shore = (near_sea && lake == NO_LAKE).then(|| self.shores.at(c, &corners, tx, tz, p, &self.mouths));
+        if let Some(s) = &mut shore
+            && let Some(rock) = s.shape(seed, slope * OLD_VOXEL / cs, wx, wz, &mut ground)
+        {
+            cover = rock;
         }
         let mut river = f32::MAX;
 
@@ -527,8 +549,12 @@ impl<'a> Sampler<'a> {
             if cover == Cover::Land {
                 cover = Cover::SeaFloor;
             }
-        } else if near_sea && ground < m(2.4) && cover == Cover::Land {
-            cover = Cover::Beach;
+        } else if near_sea && cover == Cover::Land {
+            match &shore {
+                Some(s) => cover = s.cover(ground).unwrap_or(cover),
+                None if ground < m(2.4) => cover = Cover::Beach,
+                None => {}
+            }
         }
 
         let clear = self.apply_trails(p, lx, lz, &mut ground, &mut cover, river, water, lake_level, near_sea);
