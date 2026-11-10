@@ -99,6 +99,19 @@ impl Toward {
     pub fn is_side(self) -> bool {
         !matches!(self, Toward::Below | Toward::Above)
     }
+
+    /// The mesh face index (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) of a growth's outer side,
+    /// the one facing away from its host.
+    pub fn outer_face(self) -> u8 {
+        match self {
+            Toward::Below => 2,
+            Toward::Above => 3,
+            Toward::PosX => 1,
+            Toward::NegX => 0,
+            Toward::PosZ => 5,
+            Toward::NegZ => 4,
+        }
+    }
 }
 
 /// One generated chunk column plus its one-voxel border, in world coordinates.
@@ -263,26 +276,59 @@ impl FacePlot<'_> {
         for d in d0.max(0)..d1.min(CELLS) {
             for v in v0.max(0)..v1.min(CELLS) {
                 for u in u0.max(0)..u1.min(CELLS) {
-                    let c = match self.toward {
-                        Toward::Below => [u, d, v],
-                        Toward::Above => [u, CELLS - 1 - d, v],
-                        Toward::PosX => [CELLS - 1 - d, v, u],
-                        Toward::NegX => [d, v, u],
-                        Toward::PosZ => [u, v, CELLS - 1 - d],
-                        Toward::NegZ => [u, v, d],
-                    };
-                    self.raster.set(self.origin + IVec3::from_array(c), voxel);
+                    self.raster.put(self.cell(u, v, d), voxel, 0);
                 }
             }
         }
     }
+
+    /// Fills the cells `u0..u1`, `v0..v1` against the face with a skin half a cell thick
+    /// (0.05 m), leaving any already taken: moss lying flat, not standing up.
+    pub fn skin(&mut self, u0: i32, u1: i32, v0: i32, v1: i32, voxel: Voxel) {
+        let skin = 1 + self.toward.outer_face();
+        for v in v0.max(0)..v1.min(CELLS) {
+            for u in u0.max(0)..u1.min(CELLS) {
+                self.raster.put(self.cell(u, v, 0), voxel, skin);
+            }
+        }
+    }
+
+    /// The world cell at face coordinates `u`, `v`, `d`.
+    fn cell(&self, u: i32, v: i32, d: i32) -> IVec3 {
+        let c = match self.toward {
+            Toward::Below => [u, d, v],
+            Toward::Above => [u, CELLS - 1 - d, v],
+            Toward::PosX => [CELLS - 1 - d, v, u],
+            Toward::NegX => [d, v, u],
+            Toward::PosZ => [u, v, CELLS - 1 - d],
+            Toward::NegZ => [u, v, d],
+        };
+        self.origin + IVec3::from_array(c)
+    }
 }
 
+const GRID_CELLS: usize = (CELLS * CELLS * CELLS) as usize;
+
 /// Cells of a voxel, each holding the plant material there, or air.
-type Grid = [Voxel; (CELLS * CELLS * CELLS) as usize];
+#[derive(Clone, Copy)]
+struct Grid {
+    voxels: [Voxel; GRID_CELLS],
+    /// Per cell, 0 for a whole cell, or 1 + the face index of a skin's outer side, which
+    /// is drawn half a cell in (see [`PlantBox::thin`]).
+    skins: [u8; GRID_CELLS],
+}
+
+impl Grid {
+    const EMPTY: Grid = Grid { voxels: [AIR; GRID_CELLS], skins: [0; GRID_CELLS] };
+}
 
 fn grid_index(p: IVec3) -> usize {
     (p.x + p.z * CELLS + p.y * CELLS * CELLS) as usize
+}
+
+fn grid_local(i: usize) -> IVec3 {
+    let i = i as i32;
+    IVec3::new(i % CELLS, i / (CELLS * CELLS), (i / CELLS) % CELLS)
 }
 
 /// A set of plant cells in world cell coordinates, turned into merged boxes at the end.
@@ -305,12 +351,17 @@ impl Raster {
     /// Claims a cell for `voxel`, unless it already holds something. Returns whether it
     /// was free.
     pub fn set(&mut self, cell: IVec3, voxel: Voxel) -> bool {
+        self.put(cell, voxel, 0)
+    }
+
+    /// [`set`](Self::set), for a whole cell (`skin` 0) or a skin (see [`Grid::skins`]).
+    fn put(&mut self, cell: IVec3, voxel: Voxel, skin: u8) -> bool {
         let at = cell.div_euclid(IVec3::splat(CELLS));
-        let local = cell - at * CELLS;
-        let grid = self.grids.entry(at).or_insert([AIR; (CELLS * CELLS * CELLS) as usize]);
-        let slot = &mut grid[grid_index(local)];
-        if *slot == AIR {
-            *slot = voxel;
+        let i = grid_index(cell - at * CELLS);
+        let grid = self.grids.entry(at).or_insert(Grid::EMPTY);
+        if grid.voxels[i] == AIR {
+            grid.voxels[i] = voxel;
+            grid.skins[i] = skin;
             true
         } else {
             false
@@ -320,17 +371,16 @@ impl Raster {
     /// Whether a cell holds a plant.
     pub fn taken(&self, cell: IVec3) -> bool {
         let at = cell.div_euclid(IVec3::splat(CELLS));
-        self.grids.get(&at).is_some_and(|g| g[grid_index(cell - at * CELLS)] != AIR)
+        self.grids.get(&at).is_some_and(|g| g.voxels[grid_index(cell - at * CELLS)] != AIR)
     }
 
     /// Every plant cell and what it holds, in a fixed order.
     pub fn cells(&self) -> Vec<(IVec3, Voxel)> {
         let mut out = Vec::new();
         for (&at, grid) in &self.grids {
-            for (i, &v) in grid.iter().enumerate() {
+            for (i, &v) in grid.voxels.iter().enumerate() {
                 if v != AIR {
-                    let i = i as i32;
-                    out.push((at * CELLS + IVec3::new(i % CELLS, i / (CELLS * CELLS), (i / CELLS) % CELLS), v));
+                    out.push((at * CELLS + grid_local(i), v));
                 }
             }
         }
@@ -367,12 +417,10 @@ impl Raster {
         let mut keys: Vec<IVec3> = other.grids.keys().copied().collect();
         keys.sort_unstable_by_key(|p| (p.y, p.x, p.z));
         for at in keys {
-            let incoming = other.grids[&at];
-            for (i, &v) in incoming.iter().enumerate() {
+            let incoming = &other.grids[&at];
+            for (i, &v) in incoming.voxels.iter().enumerate() {
                 if v != AIR {
-                    let i = i as i32;
-                    let local = IVec3::new(i % CELLS, i / (CELLS * CELLS), (i / CELLS) % CELLS);
-                    self.set(at * CELLS + local, v);
+                    self.put(at * CELLS + grid_local(i), v, incoming.skins[i]);
                 }
             }
         }
@@ -394,12 +442,16 @@ impl Raster {
             for y in 0..CELLS {
                 for z in 0..CELLS {
                     for x in 0..CELLS {
-                        let voxel = grid[grid_index(IVec3::new(x, y, z))];
+                        let first = grid_index(IVec3::new(x, y, z));
+                        let (voxel, skin) = (grid.voxels[first], grid.skins[first]);
                         if voxel == AIR {
                             continue;
                         }
                         let (mut w, mut d, mut h) = (1, 1, 1);
-                        let same = |g: &Grid, p: IVec3| g[grid_index(p)] == voxel;
+                        let same = |g: &Grid, p: IVec3| {
+                            let i = grid_index(p);
+                            g.voxels[i] == voxel && g.skins[i] == skin
+                        };
                         while x + w < CELLS && same(&grid, IVec3::new(x + w, y, z)) {
                             w += 1;
                         }
@@ -424,14 +476,15 @@ impl Raster {
                         for iy in y..y + h {
                             for iz in z..z + d {
                                 for ix in x..x + w {
-                                    grid[grid_index(IVec3::new(ix, iy, iz))] = AIR;
+                                    grid.voxels[grid_index(IVec3::new(ix, iy, iz))] = AIR;
                                 }
                             }
                         }
                         let lo = at * CELLS + IVec3::new(x, y, z);
                         let hi = lo + IVec3::new(w, h, d);
                         let (sway_lo, sway_hi) = sway(voxel);
-                        boxes.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel, sway_lo, sway_hi });
+                        let thin = if skin == 0 { 0 } else { 1 << (skin - 1) };
+                        boxes.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel, sway_lo, sway_hi, thin });
                     }
                 }
             }
@@ -447,7 +500,7 @@ pub fn merge_boxes(boxes: &mut Vec<PlantBox>) {
     let chunk_of = |c: i32| c.div_euclid(CHUNK * CELLS);
     for axis in [0, 2, 1] {
         let (a1, a2) = ((axis + 1) % 3, (axis + 2) % 3);
-        boxes.sort_unstable_by_key(|b| (b.lo[a1], b.lo[a2], b.hi[a1], b.hi[a2], b.voxel, b.sway_lo, b.sway_hi, b.lo[axis]));
+        boxes.sort_unstable_by_key(|b| (b.lo[a1], b.lo[a2], b.hi[a1], b.hi[a2], b.voxel, b.sway_lo, b.sway_hi, b.thin, b.lo[axis]));
         let mut merged: Vec<PlantBox> = Vec::with_capacity(boxes.len());
         for &b in boxes.iter() {
             if let Some(last) = merged.last_mut()
@@ -458,6 +511,7 @@ pub fn merge_boxes(boxes: &mut Vec<PlantBox>) {
                 && last.voxel == b.voxel
                 && last.sway_lo == b.sway_lo
                 && last.sway_hi == b.sway_hi
+                && last.thin == b.thin
                 && last.hi[axis] == b.lo[axis]
                 && chunk_of(last.lo[axis]) == chunk_of(b.hi[axis] - 1)
             {
@@ -573,6 +627,37 @@ mod tests {
                     assert_eq!(b.lo[axis], cell, "{toward:?}: flush against the host");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn skins_lie_flush_on_every_face_and_are_marked_thin_on_the_outside() {
+        let air = IVec3::new(2, 3, 4);
+        for toward in Toward::ALL {
+            let site = Site { air, toward, host: 1, canopy: 0 };
+            let mut raster = Raster::new();
+            let mut plot = site.plot(&mut raster);
+            plot.skin(0, 4, 0, 4, 7);
+            // A whole cell over part of it, written first, keeps its place and stays whole.
+            let mut raster2 = Raster::new();
+            let mut plot2 = site.plot(&mut raster2);
+            plot2.fill(1, 2, 1, 2, 0, 1, 7);
+            plot2.skin(0, 4, 0, 4, 7);
+            let mut boxes = Vec::new();
+            raster.finish(&mut boxes, |_| (false, false));
+            assert_eq!(boxes.len(), 1, "{toward:?}: {boxes:?}");
+            let b = boxes[0];
+            assert_eq!(b.thin, 1 << toward.outer_face(), "{toward:?}");
+            let normal = (0..3).find(|&i| toward.step()[i] != 0).unwrap();
+            assert_eq!(b.hi[normal] - b.lo[normal], 1, "{toward:?}: one cell, drawn as half");
+            // The pulled-in side is the one away from the host.
+            let outer = toward.outer_face() as usize;
+            assert_eq!(outer / 2, normal);
+            assert_eq!(outer % 2 == 0, toward.step()[normal] < 0, "{toward:?}");
+            let mut mixed = Vec::new();
+            raster2.finish(&mut mixed, |_| (false, false));
+            assert_eq!(mixed.iter().filter(|b| b.thin == 0).count(), 1, "{toward:?}: {mixed:?}");
+            assert_eq!(mixed.iter().map(|b| (0..3).map(|i| b.hi[i] - b.lo[i]).product::<i32>()).sum::<i32>(), 16);
         }
     }
 

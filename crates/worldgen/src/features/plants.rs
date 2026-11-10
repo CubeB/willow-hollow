@@ -142,6 +142,7 @@ impl Plot<'_> {
             voxel,
             sway_lo: sway.0,
             sway_hi: sway.1,
+            thin: 0,
         });
     }
 
