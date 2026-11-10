@@ -78,8 +78,9 @@ pub fn gorge_wall(seed: u32, wx: f64, wz: f64, sd: f32, hw: f32, bank: f32, leve
 }
 
 /// Cuts any dry fault ravine into a column whose ground is `ground`, scaled by `fade`
-/// (0 to 1, used to keep ravines away from rivers).
-pub fn dry(seed: u32, wx: f64, wz: f64, fade: f32, ground: &mut f32) -> Part {
+/// (0 to 1, used to keep ravines away from rivers). `fade` is only called on the few
+/// columns near a fault line, since finding the nearest river is not cheap.
+pub fn dry(seed: u32, wx: f64, wz: f64, fade: impl FnOnce() -> f32, ground: &mut f32) -> Part {
     const LINE: f64 = m64(700.0);
     // Faults run along the zero lines of one broad noise field.
     let n = perlin2(seed ^ 0xfa17, wx / LINE, wz / LINE);
@@ -87,7 +88,11 @@ pub fn dry(seed: u32, wx: f64, wz: f64, fade: f32, ground: &mut f32) -> Part {
         return Part::None;
     }
     // Only some stretches of each line open up.
-    let open = smoothstep(0.32, 0.45, perlin2(seed ^ 0xfa18, wx / m64(400.0), wz / m64(400.0))) * fade;
+    let open = smoothstep(0.32, 0.45, perlin2(seed ^ 0xfa18, wx / m64(400.0), wz / m64(400.0)));
+    if open <= 0.0 {
+        return Part::None;
+    }
+    let open = open * fade();
     if open <= 0.0 {
         return Part::None;
     }

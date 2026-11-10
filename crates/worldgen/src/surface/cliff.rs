@@ -79,7 +79,13 @@ fn band(seed: u32, n: i32, wx: f64, wz: f64) -> Band {
 
 /// Applies any cliff to a column whose natural ground is `ground` (voxels) and whose
 /// simulated slope is `slope` (voxels per voxel), changing `ground` in place.
-pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part {
+///
+/// `guard` is given the natural height of the bottom of the band the face gathers
+/// its drop from, and returns how strongly (0 to 1) a face may stand there. It keeps
+/// faces off valley floors: below a face the ground is lowered as far as that height,
+/// which beside a river would dig the valley out below the water. It is only called
+/// for the few columns a face could touch.
+pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32, guard: impl FnOnce(f32) -> f32) -> Part {
     // Gentle and low ground is the overwhelming majority: skip it first.
     if slope < STEEP || *ground < m(8.0) {
         return Part::None;
@@ -106,6 +112,10 @@ pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part 
     // Keep the foot of a face clear of the shore.
     let base = *ground - x + lo;
     let strength = strength.min(smoothstep(m(4.0), m(10.0), base));
+    if strength <= 0.0 {
+        return Part::None;
+    }
+    let strength = strength.min(guard(base));
     if strength <= 0.0 {
         return Part::None;
     }
