@@ -843,6 +843,7 @@ impl Running {
         let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
+        let ground = self.weather.places(self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         let scene = render::Scene {
             camera: &self.camera,
             env: &lit,
@@ -852,7 +853,7 @@ impl Running {
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
-            ground: self.weather.ground(self.env.date, self.warmth),
+            ground,
             lamps: &lamps,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
@@ -1200,7 +1201,7 @@ fn main() -> Result<()> {
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,
-            weather.ground(env.date, warmth),
+            weather.places(env.date, settings.year_days, warmth, settings.seed),
             &lamps,
         )?;
         let s = streamer.stats;

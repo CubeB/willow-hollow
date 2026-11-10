@@ -7,6 +7,8 @@ struct VIn {
     // Per chunk: voxels per cell of its mesh, and the distances between which it is shown.
     @location(4) scale: f32,
     @location(5) band: vec2<f32>,
+    // Per chunk: the biomes at its corners, for the snow (see corner_snow in ground.wgsl).
+    @location(6) biomes: u32,
 };
 
 struct VOut {
@@ -22,6 +24,8 @@ struct VOut {
     // Water only: the current, metres per second along x and z, and how much of a river
     // (rather than a lake or the sea) the water is, 0..1. Zero for everything else.
     @location(8) current: vec3<f32>,
+    // The ground here: its row of G.snow, blended between the chunk's corners.
+    @location(9) snow: vec4<f32>,
 };
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
@@ -76,6 +80,7 @@ fn vs(in: VIn) -> VOut {
     out.flags = in.b >> 24u;
     out.local = local;
     out.band = in.band;
+    out.snow = corner_snow(in.biomes, local.xz / 32.0);
     var rel = local * in.scale + in.offset;
     if ((out.flags & FLAG_WATER) != 0u && out.face == 2u) {
         // Water surfaces sit a little below the top of their voxel.
@@ -104,7 +109,7 @@ fn vs(in: VIn) -> VOut {
         }
         var gone = season_gone(G.season.x, kind, vox);
         if (kind == PLANT_GRASS && !gone) {
-            gone = plant_buried(rel, season_hash(vox + vec3<i32>(5, 0, 9)));
+            gone = plant_buried(rel, season_hash(vox + vec3<i32>(5, 0, 9)), out.snow);
         }
         if (gone) {
             out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
@@ -144,7 +149,7 @@ fn shade(in: VOut) -> vec4<f32> {
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
     base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x);
-    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, fract(in.local.y));
+    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, fract(in.local.y), in.snow);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -188,6 +193,7 @@ fn vs_water(in: VIn) -> VOut {
     out.flags = in.b >> 24u;
     out.local = local;
     out.band = in.band;
+    out.snow = corner_snow(in.biomes, local.xz / 32.0);
     out.current = water_current(in.a);
     var rel = local * in.scale + in.offset;
     if (out.face == 2u) {
@@ -334,11 +340,11 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
         alpha = mix(alpha, 1.0, far);
         // In deep cold the surface is ice: pale, opaque and still.
-        var ice = ice_amount(world_xz);
+        var ice = ice_amount(world_xz, in.snow.y);
         // Running water freezes later than still water, and less: ice creeps out from
         // the slow water by the banks, and the fast middle of a river stays open.
         let swift = length(flow) / MAX_CURRENT;
-        ice *= mix(1.0, smoothstep(0.55 + 0.35 * swift, 1.0, G.season.z) * (1.0 - 0.6 * swift), in.current.z);
+        ice *= mix(1.0, smoothstep(0.55 + 0.35 * swift, 1.0, in.snow.y) * (1.0 - 0.6 * swift), in.current.z);
         if (ice > 0.0) {
             let sheet = vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(n_face));
             color = mix(color, sheet, ice);

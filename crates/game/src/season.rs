@@ -118,6 +118,16 @@ impl Ground {
     }
 }
 
+/// The ground everywhere in view: what it carries where the camera is, and in each biome,
+/// so that a far cold range is white while the desert in front of it is bare. The sea, and
+/// ground whose biome is not known yet, take the camera's.
+#[derive(Clone, Copy, Debug)]
+pub struct Places {
+    pub here: Ground,
+    /// Indexed by biome (`Biome as usize`).
+    pub biomes: [Ground; Biome::ALL.len()],
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,6 +33,9 @@ pub struct GpuChunk {
     pub water: Option<MeshSpan>,
     /// Where each face direction starts within `opaque`, in quads.
     pub faces: [u32; 13],
+    /// The biomes (as u8) at the column's four corners, low x low z first, then high x,
+    /// high z, both high, for the snow lying there (see `season::Places`).
+    pub biomes: u32,
 }
 
 /// Levels of detail, the first being full-size voxels.
@@ -417,12 +420,20 @@ impl Streamer {
     /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
     fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>) -> Option<Vec<GpuChunk>> {
         let mut chunks = Vec::with_capacity(meshes.len());
+        // The corners in world voxels, which neighbouring columns share.
+        let size = CHUNK << col.0;
+        let (x, z) = (col.1 * size, col.2 * size);
+        let biomes = [(0, 0), (size, 0), (0, size), (size, size)]
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (k, &(dx, dz))| acc | (crate::farview::biome_at(&self.world, x + dx, z + dz) as u32) << (8 * k));
         for (cy, mesh) in meshes {
-            let Some(chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
+            let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
                 release(&mut self.arena, &chunks);
                 self.recount();
                 return None;
             };
+            chunk.biomes = biomes;
             chunks.push(chunk);
         }
         Some(chunks)
@@ -444,6 +455,7 @@ impl Streamer {
             opaque,
             water,
             faces: mesh.faces,
+            biomes: 0,
         })
     }
 
