@@ -59,6 +59,10 @@ pub fn settings_menu(ctx: &egui::Context, s: &mut Settings, held: Option<i32>, w
                 });
                 ui.end_row();
 
+                ui.label("Length of a year");
+                ui.add(egui::Slider::new(&mut s.year_days, settings::YEAR_DAYS).fixed_decimals(0).suffix(" days"));
+                ui.end_row();
+
                 ui.label("Window size");
                 ui.add_enabled_ui(!s.fullscreen, |ui| {
                     let mut pick = window;

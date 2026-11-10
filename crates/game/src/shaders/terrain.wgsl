@@ -91,6 +91,12 @@ fn shade(in: VOut) -> vec4<f32> {
     // Each cube gets its own slight brightness and warmth so merged faces still read as cubes.
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
+    // The season: leaf colour and fall, dry or wintry grass.
+    let seasoned = season_apply(base, voxel, h, (in.flags & FLAG_FOLIAGE) != 0u, G.season.x);
+    if (seasoned.a < 0.5) {
+        discard;
+    }
+    base = seasoned.rgb;
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);

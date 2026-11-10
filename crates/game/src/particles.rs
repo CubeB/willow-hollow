@@ -124,6 +124,8 @@ pub struct Surroundings<'a> {
     /// Flower voxels near the player.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
+    /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
+    pub leaf_fall: f32,
     pub time: f64,
 }
 
@@ -227,7 +229,9 @@ impl Particles {
             // Gusts shake leaves loose far faster than a steady breeze does.
             let windiness = 0.3 + gust * 0.4 + (gust - 1.8).max(0.0) * 2.0;
             // Autumn groves (maple and the like) shed much more.
-            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32;
+            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32
+                // Leaves hold on through summer, let go in autumn, and few are left by winter.
+                * (0.2 + 2.4 * s.leaf_fall);
             let rate = 2.5 * windiness * weight * (s.leaves.len() as f32 / 400.0).min(1.5);
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {

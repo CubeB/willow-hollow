@@ -18,6 +18,8 @@ pub struct Environment {
     pub clouds: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
+    /// Time of year, 0 to 1 from the spring equinox.
+    pub date: f32,
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -26,11 +28,14 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 }
 
 impl Environment {
-    pub fn at_time(hours: f32) -> Self {
+    /// The environment at an hour of the day and a time of year (0..1).
+    pub fn at(hours: f32, date: f32) -> Self {
         let time = hours.rem_euclid(24.0);
+        // The sun stands higher and rides the sky longer in summer, lower and shorter in winter.
+        let decl = crate::season::declination(date);
         // Sun rises at 6, peaks at 12, sets at 18, on a tilted arc.
         let angle = (time - 6.0) / 12.0 * std::f32::consts::PI;
-        let sun = Vec3::new(angle.cos() * 0.85, angle.sin(), 0.42).normalize();
+        let sun = Vec3::new(angle.cos() * 0.85, angle.sin() + 0.3 * decl, 0.42 - 0.25 * decl).normalize();
         let elev = sun.y;
 
         let day = smoothstep(-0.02, 0.35, elev);
@@ -75,6 +80,7 @@ impl Environment {
             mist,
             clouds: 0.45,
             sun_elevation: elev,
+            date,
         }
     }
 }

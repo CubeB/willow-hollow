@@ -9,6 +9,7 @@ mod particles;
 mod player;
 mod profile;
 mod render;
+mod season;
 mod settings;
 mod terrain;
 mod vehicles;
@@ -64,6 +65,8 @@ struct Options {
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
+    /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
+    date: Option<f32>,
     /// Start from the spawn point, ignoring any saved position.
     fresh: bool,
     /// Render one frame to this PNG without opening a window, then exit.
@@ -85,6 +88,7 @@ impl Default for Options {
             fly: false,
             look: (35.0, -18.0),
             time: None,
+            date: None,
             fresh: false,
             screenshot: None,
             audio: true,
@@ -105,6 +109,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --fly                 start in free-fly mode (F toggles in game)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
+  --season S            spring, summer, autumn or winter
+  --date F              time of year, 0-1 from the spring equinox
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
@@ -153,6 +159,11 @@ fn parse_args() -> Result<Options> {
                 o.look = (v[0], v[1]);
             }
             "--time" => o.time = Some(value()?.parse()?),
+            "--date" => o.date = Some(value()?.parse::<f32>()?.rem_euclid(1.0)),
+            "--season" => {
+                let name = value()?;
+                o.date = Some(season::named(&name).ok_or_else(|| anyhow::anyhow!("unknown season {name}"))?);
+            }
             "--radius" => o.overrides.radius = Some(value()?.parse::<i32>()?.clamp(1, 64)),
             "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
@@ -461,6 +472,7 @@ impl Running {
         }
         let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
         let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
+        let date = opts.date.or(progress.map(|p| p.date)).unwrap_or(season::DEFAULT_DATE);
         Ok(Self {
             window,
             overlay,
@@ -472,7 +484,7 @@ impl Running {
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
-            env: Environment::at_time(time),
+            env: Environment::at(time, date),
             particles: Particles::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
@@ -582,6 +594,7 @@ impl Running {
             yaw: self.camera.yaw,
             pitch: self.camera.pitch,
             time: self.env.time,
+            date: self.env.date,
             travel: match (flying, self.player.mode) {
                 (true, _) => Travel::Flying,
                 (false, Mode::Boat) => Travel::Sailing,
@@ -747,7 +760,9 @@ impl Running {
 
         // The day turns.
         if self.settings.day_minutes > 0.0 {
-            self.env = Environment::at_time(self.env.time + dt * 24.0 / (self.settings.day_minutes * 60.0));
+            let days = dt / (self.settings.day_minutes * 60.0);
+            let date = season::advance(self.env.date, days, self.settings.year_days);
+            self.env = Environment::at(self.env.time + days * 24.0, date);
         }
         self.save_timer -= dt;
 
@@ -772,6 +787,7 @@ impl Running {
             leaves: &self.leaves,
             flowers: &self.flowers,
             player_entered_water: entered_water,
+            leaf_fall: season::leaf_fall(self.env.date),
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
         };
         self.particles.update(dt, &surroundings, &mut self.voxels);
@@ -831,6 +847,7 @@ impl Running {
             _ => None,
         };
         let mut time = self.env.time;
+        let mut date = self.env.date;
         let mut settings = self.settings;
         let mut choice = overlay::MenuChoice::default();
         let held = Some(self.streamer.radius()).filter(|r| *r < settings.radius);
@@ -890,14 +907,15 @@ impl Running {
                         }
                         ui.label(&cpu_line);
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
+                        ui.add(egui::Slider::new(&mut date, 0.0..=1.0).text("time of year"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
                     });
             });
-        if time != self.env.time {
-            self.env = Environment::at_time(time);
+        if time != self.env.time || date != self.env.date {
+            self.env = Environment::at(time, date);
         }
         if choice.resume {
             self.set_menu(false);
@@ -1094,7 +1112,7 @@ fn main() -> Result<()> {
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let t = Instant::now();
-        let env = Environment::at_time(opts.time.unwrap_or(10.0));
+        let env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
@@ -1116,6 +1134,7 @@ fn main() -> Result<()> {
                 leaves: &leaves,
                 flowers: &flowers,
                 player_entered_water: None,
+                leaf_fall: season::leaf_fall(env.date),
                 time: step as f64 / 60.0,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
