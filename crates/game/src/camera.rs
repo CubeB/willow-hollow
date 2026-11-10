@@ -15,6 +15,8 @@ pub struct Camera {
     pub roll: f32,
     pub fov_y: f32,
     pub near: f32,
+    /// Multiplies the mouse look speed.
+    pub sensitivity: f32,
 }
 
 impl Camera {
@@ -26,6 +28,7 @@ impl Camera {
             roll: 0.0,
             fov_y: 70f32.to_radians(),
             near: worldgen::scale::m(0.08),
+            sensitivity: 1.0,
         }
     }
 
@@ -70,8 +73,9 @@ impl Camera {
 
     pub fn add_look(&mut self, dx: f32, dy: f32) {
         const SENS: f32 = 0.0022;
-        self.yaw = (self.yaw + dx * SENS).rem_euclid(std::f32::consts::TAU);
-        self.pitch = (self.pitch - dy * SENS).clamp(-1.55, 1.55);
+        let turn = SENS * self.sensitivity;
+        self.yaw = (self.yaw + dx * turn).rem_euclid(std::f32::consts::TAU);
+        self.pitch = (self.pitch - dy * turn).clamp(-1.55, 1.55);
     }
 }
 

@@ -109,6 +109,10 @@ palette! {
     TUFT_MEADOW    = (146, 184,  84), Foliage, 3;
     TUFT_LUSH      = ( 60, 142,  62), Foliage, 3;
     TUFT_DRY       = (172, 160,  98), Foliage, 3;
+    TUFT_STRAW     = (200, 184, 118), Foliage, 3;
+    TUFT_ALPINE    = (132, 150,  98), Foliage, 3;
+    TUFT_SEDGE     = (112, 158, 102), Foliage, 3;
+    SEED_HEAD      = (210, 194, 136), Foliage, 2;
     BLOOM_RED      = (222,  70,  64), Foliage, 2;
     BLOOM_YELLOW   = (244, 214,  80), Foliage, 2;
     BLOOM_WHITE    = (244, 244, 234), Foliage, 1;

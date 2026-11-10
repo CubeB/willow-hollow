@@ -80,17 +80,26 @@ impl Gpu {
         if let Some(f) = caps.formats.iter().copied().find(|f| !f.is_srgb()) {
             config.format = f;
         }
-        config.present_mode = if vsync {
-            wgpu::PresentMode::AutoVsync
-        } else {
-            wgpu::PresentMode::AutoNoVsync
-        };
+        config.present_mode = present_mode(vsync);
         surface.configure(&gpu.device, &config);
         Ok((gpu, WindowSurface { surface, config }))
     }
 }
 
+fn present_mode(vsync: bool) -> wgpu::PresentMode {
+    if vsync {
+        wgpu::PresentMode::AutoVsync
+    } else {
+        wgpu::PresentMode::AutoNoVsync
+    }
+}
+
 impl WindowSurface {
+    pub fn set_vsync(&mut self, gpu: &Gpu, vsync: bool) {
+        self.config.present_mode = present_mode(vsync);
+        self.surface.configure(&gpu.device, &self.config);
+    }
+
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;

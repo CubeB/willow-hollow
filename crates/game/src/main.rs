@@ -8,6 +8,7 @@ mod overlay;
 mod particles;
 mod player;
 mod render;
+mod settings;
 mod terrain;
 mod vehicles;
 
@@ -37,11 +38,13 @@ use overlay::Overlay;
 use particles::{Particles, Surroundings};
 use player::{Controls, Mode, Player, WorldVoxels};
 use render::Renderer;
+use settings::{Overrides, Progress, Settings, Store, Travel};
 use terrain::Streamer;
 use vehicles::Fleet;
 
 struct Options {
-    seed: u32,
+    /// Choices that take precedence over the saved settings, for this run.
+    overrides: Overrides,
     /// Camera start: world position, then yaw and pitch in degrees.
     pos: DVec3,
     /// If set, start at this (x, z) and this far above the ground or water there.
@@ -49,54 +52,51 @@ struct Options {
     /// Start flying instead of on foot. Implied by --pos and --over.
     fly: bool,
     look: (f32, f32),
-    /// Time of day in hours.
-    time: f32,
-    /// Chunk load radius.
-    radius: i32,
+    /// Time of day in hours, if not the one left off at.
+    time: Option<f32>,
+    /// Start from the spawn point, ignoring any saved position.
+    fresh: bool,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     audio: bool,
     size: (u32, u32),
-    /// Real minutes per in-game day; 0 freezes the time of day.
-    day_minutes: f32,
     /// Exit after this many frames (smoke tests).
     frames: Option<u64>,
-    no_vsync: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
-            seed: 1,
+            overrides: Overrides::default(),
             pos: DVec3::new(0.0, 90.0, 0.0),
             over: None,
             fly: false,
             look: (35.0, -18.0),
-            time: 10.0,
-            radius: (m(307.2) / voxel::CHUNK as f32).round() as i32,
+            time: None,
+            fresh: false,
             screenshot: None,
             audio: true,
             size: (1280, 720),
-            day_minutes: 40.0,
             frames: None,
-            no_vsync: false,
         }
     }
 }
 
 const USAGE: &str = "\
 usage: game [options]
-  --seed N              world seed (default 1)
+Options hold for one run. Settings and your place in each world are saved between runs.
+  --seed N              world seed (default: the last one played)
+  --fresh               start from the spawn point instead of where you left off
   --pos X,Y,Z           camera start position in voxels
   --over X,Z,H          start H voxels above the ground (or water) at X,Z
   --fly                 start in free-fly mode (F toggles in game)
   --look YAW,PITCH      camera direction in degrees
-  --time H              time of day, 0-24 (default 10)
-  --radius N            chunk load radius (default: about 300 m)
+  --time H              time of day, 0-24
+  --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --size WxH            screenshot size (default 1280x720)
-  --day-minutes M       real minutes per day, 0 to freeze time (default 40)
+  --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames
   --no-vsync            uncapped frame rate";
 
@@ -118,34 +118,37 @@ fn parse_args() -> Result<Options> {
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
-            "--seed" => o.seed = value()?.parse()?,
+            "--seed" => o.overrides.seed = Some(value()?.parse()?),
+            "--fresh" => o.fresh = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
                 o.over = None;
                 o.fly = true;
+                o.overrides.placed = true;
             }
             "--fly" => o.fly = true,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
                 o.fly = true;
+                o.overrides.placed = true;
             }
             "--look" => {
                 let v = list::<f32>(&value()?, ',', 2)?;
                 o.look = (v[0], v[1]);
             }
-            "--time" => o.time = value()?.parse()?,
-            "--radius" => o.radius = value()?.parse::<i32>()?.clamp(1, 64),
+            "--time" => o.time = Some(value()?.parse()?),
+            "--radius" => o.overrides.radius = Some(value()?.parse::<i32>()?.clamp(1, 64)),
             "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
             "--size" => {
                 let v = list::<u32>(&value()?, 'x', 2)?;
                 o.size = (v[0].max(1), v[1].max(1));
             }
-            "--day-minutes" => o.day_minutes = value()?.parse()?,
+            "--day-minutes" => o.overrides.day_minutes = Some(value()?.parse()?),
             "--frames" => o.frames = Some(value()?.parse()?),
-            "--no-vsync" => o.no_vsync = true,
+            "--no-vsync" => o.overrides.vsync = Some(false),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -156,18 +159,28 @@ fn parse_args() -> Result<Options> {
     Ok(o)
 }
 
-fn make_world(opts: &Options) -> Arc<GameWorld> {
-    Arc::new(GameWorld::new(opts.seed))
-}
-
 /// Height of the walkable or swimmable surface at a column.
 fn surface_height(world: &GameWorld, x: i32, z: i32) -> f64 {
     let col = world.column(x, z);
     col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1) as f64
 }
 
-/// The starting view: an explicit position if one was given, else the spawn point.
-fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
+/// The starting view: an explicit position if one was given, else where the player
+/// left off, else the spawn point.
+fn make_camera(opts: &Options, world: &GameWorld, saved: Option<&Progress>) -> Camera {
+    if let Some(p) = saved {
+        let mut pos = p.pos;
+        if p.travel != Travel::Flying {
+            if p.travel == Travel::Walking {
+                // In case the terrain here has changed since the save was made.
+                pos.y = pos.y.max(surface_height(world, pos.x.floor() as i32, pos.z.floor() as i32));
+            }
+            pos.y += player::EYE_HEIGHT;
+        }
+        let mut camera = Camera::new(pos, 0.0, 0.0);
+        (camera.yaw, camera.pitch) = (p.yaw, p.pitch);
+        return camera;
+    }
     if let Some((x, z, h)) = opts.over {
         let pos = DVec3::new(x as f64 + 0.5, surface_height(world, x, z) + h, z as f64 + 0.5);
         return Camera::new(pos, opts.look.0, opts.look.1);
@@ -179,6 +192,10 @@ fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
     let feet = surface_height(world, spawn.x, spawn.z);
     let pos = DVec3::new(spawn.x as f64 + 0.5, feet + player::EYE_HEIGHT, spawn.z as f64 + 0.5);
     Camera::new(pos, spawn.yaw, -4.0)
+}
+
+fn fullscreen(on: bool) -> Option<winit::window::Fullscreen> {
+    on.then_some(winit::window::Fullscreen::Borderless(None))
 }
 
 /// How close a boat must be to climb aboard.
@@ -252,12 +269,19 @@ struct Running {
     scan_timer: f32,
     biome: worldgen::biome::Biome,
     audio: Option<Audio>,
-    volume: f32,
+    /// The settings in force.
+    settings: Settings,
+    /// The settings as they stand on disk.
+    saved: Settings,
+    /// Where to save, if anywhere: smoke tests leave no trace.
+    store: Option<Store>,
+    save_timer: f32,
+    show_settings: bool,
+    quit: bool,
     /// Distance walked since the last footstep.
     stride: f32,
     last_fall_speed: f32,
     was_grounded: bool,
-    day_minutes: f32,
     was_swimming: bool,
     fleet: Fleet,
     /// Solid models to draw this frame.
@@ -282,7 +306,6 @@ struct Running {
     /// (with the cursor re-centred each frame) drive the look instead.
     raw_motion_seen: bool,
     last_cursor: Option<(f64, f64)>,
-    show_debug: bool,
     last_frame: Instant,
     start: Instant,
     frame: u64,
@@ -291,7 +314,8 @@ struct Running {
 
 /// Distance between footsteps.
 const STRIDE: f32 = m(1.7);
-const START_VOLUME: f32 = 0.75;
+/// Seconds between saves, so a crash loses little.
+const AUTOSAVE: f32 = 30.0;
 
 struct App {
     opts: Options,
@@ -300,11 +324,21 @@ struct App {
 
 impl Running {
     fn new(el: &ActiveEventLoop, opts: &Options) -> Result<Self> {
-        let attrs = Window::default_attributes()
-            .with_title("Willow Hollow")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        let store = if opts.frames.is_some() { None } else { Store::find() };
+        let saved = store.as_ref().map_or_else(Settings::default, Store::settings);
+        let settings = opts.overrides.applied_to(saved);
+        let progress = store
+            .as_ref()
+            .filter(|_| opts.overrides.keeps_position() && !opts.fresh)
+            .and_then(|s| s.progress(settings.seed));
+
+        let attrs = Window::default_attributes().with_title("Willow Hollow").with_fullscreen(fullscreen(settings.fullscreen));
+        let attrs = match settings.window {
+            Some((w, h)) => attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h)),
+            None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1280, 720)),
+        };
         let window = Arc::new(el.create_window(attrs)?);
-        let (gpu, surface) = Gpu::for_window(window.clone(), !opts.no_vsync)?;
+        let (gpu, surface) = Gpu::for_window(window.clone(), settings.vsync)?;
         let overlay = Overlay::new(&window, &gpu, surface.config.format);
         let renderer = Renderer::new(
             &gpu,
@@ -312,36 +346,48 @@ impl Running {
             surface.config.width,
             surface.config.height,
         );
-        let world = make_world(opts);
-        let camera = make_camera(opts, &world);
+        let world = Arc::new(GameWorld::new(settings.seed));
+        let mut camera = make_camera(opts, &world, progress.as_ref());
+        camera.fov_y = settings.fov.to_radians();
+        camera.sensitivity = settings.sensitivity;
         let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+        let mut player = Player::new(feet);
+        if let Some(p) = progress.filter(|p| p.travel == Travel::Sailing) {
+            player.board(p.pos, p.heading);
+        }
+        let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
+        let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
         Ok(Self {
             window,
             overlay,
             renderer,
+            last_yaw: camera.yaw,
             camera,
-            walking: !opts.fly,
-            player: Player::new(feet),
+            walking: !flying,
+            player,
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
-            streamer: Streamer::new(&gpu, world.clone(), opts.radius),
-            env: Environment::at_time(opts.time),
+            streamer: Streamer::new(&gpu, world.clone(), settings.radius),
+            env: Environment::at_time(time),
             particles: Particles::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
             scan_timer: 0.0,
             biome: worldgen::biome::Biome::Grassland,
-            audio: if opts.audio { Audio::start(START_VOLUME) } else { None },
-            volume: START_VOLUME,
+            audio: if opts.audio { Audio::start(settings.volume) } else { None },
+            settings,
+            saved,
+            store,
+            save_timer: AUTOSAVE,
+            show_settings: false,
+            quit: false,
             stride: 0.0,
             last_fall_speed: 0.0,
             was_grounded: false,
-            day_minutes: opts.day_minutes,
             was_swimming: false,
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
             deploy: false,
-            last_yaw: 0.0,
             world,
             fly: FlyController { speed: m(16.0) },
             keys: HashSet::new(),
@@ -349,7 +395,6 @@ impl Running {
             want_grab: true,
             raw_motion_seen: false,
             last_cursor: None,
-            show_debug: true,
             last_frame: Instant::now(),
             start: Instant::now(),
             frame: 0,
@@ -382,6 +427,70 @@ impl Running {
         }
         self.window.set_cursor_visible(!grab);
         self.grabbed = grab;
+    }
+
+    /// Opens or closes the settings menu, which needs the mouse.
+    fn set_menu(&mut self, open: bool) {
+        self.show_settings = open;
+        self.want_grab = !open;
+        self.set_grab(!open);
+        if !open {
+            self.save_timer = 0.0;
+        }
+    }
+
+    /// Puts into effect whatever changed in the settings since `was`.
+    fn apply_settings(&mut self, was: Settings) {
+        let now = self.settings;
+        if now.radius != was.radius {
+            self.streamer.set_radius(now.radius);
+        }
+        self.camera.fov_y = now.fov.to_radians();
+        self.camera.sensitivity = now.sensitivity;
+        if now.volume != was.volume
+            && let Some(audio) = &self.audio
+        {
+            audio.set_volume(now.volume);
+        }
+        if now.vsync != was.vsync {
+            self.surface.set_vsync(&self.gpu, now.vsync);
+        }
+        if now.fullscreen != was.fullscreen {
+            self.window.set_fullscreen(fullscreen(now.fullscreen));
+        }
+        if now.window != was.window
+            && let Some((w, h)) = now.window
+        {
+            let _ = self.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        }
+    }
+
+    fn progress(&self) -> Progress {
+        let flying = !self.walking;
+        Progress {
+            pos: if flying { self.camera.pos } else { self.player.pos },
+            yaw: self.camera.yaw,
+            pitch: self.camera.pitch,
+            time: self.env.time,
+            travel: match (flying, self.player.mode) {
+                (true, _) => Travel::Flying,
+                (false, Mode::Boat) => Travel::Sailing,
+                (false, _) => Travel::Walking,
+            },
+            heading: self.player.heading,
+        }
+    }
+
+    /// Writes the settings, if changed, and where the player is.
+    fn persist(&mut self, overrides: &Overrides) {
+        let Some(store) = &self.store else { return };
+        let keep = overrides.worth_keeping(self.settings, self.saved);
+        if keep != self.saved && store.write_settings(keep) {
+            self.saved = keep;
+        }
+        if overrides.keeps_position() {
+            store.write_progress(self.settings.seed, self.progress());
+        }
     }
 
     fn centre_cursor(&mut self) {
@@ -511,9 +620,10 @@ impl Running {
         self.far.update(&self.gpu, self.camera.pos);
 
         // The day turns.
-        if self.day_minutes > 0.0 {
-            self.env = Environment::at_time(self.env.time + dt * 24.0 / (self.day_minutes * 60.0));
+        if self.settings.day_minutes > 0.0 {
+            self.env = Environment::at_time(self.env.time + dt * 24.0 / (self.settings.day_minutes * 60.0));
         }
+        self.save_timer -= dt;
 
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
@@ -588,12 +698,15 @@ impl Running {
             _ => None,
         };
         let mut time = self.env.time;
-        let mut radius = self.streamer.radius();
-        let mut volume = self.volume;
-        let (show_debug, grabbed) = (self.show_debug, self.grabbed);
+        let mut settings = self.settings;
+        let mut choice = overlay::MenuChoice::default();
+        let held = Some(self.streamer.radius()).filter(|r| *r < settings.radius);
+        let (show_debug, show_menu, grabbed) = (settings.show_debug, self.show_settings, self.grabbed);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
-                if !grabbed {
+                if show_menu {
+                    choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
+                } else if !grabbed {
                     egui::Area::new(egui::Id::unique("hint"))
                         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
                         .show(ctx, |ui| {
@@ -640,24 +753,21 @@ impl Running {
                             s.gen_ms, s.mesh_ms, s.queued, s.in_flight
                         ));
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
-                        ui.add(egui::Slider::new(&mut radius, 2..=(32.0 * OLD_VOXEL) as i32).text("load radius"));
-                        ui.add(egui::Slider::new(&mut volume, 0.0..=1.0).text("volume"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
-                        ui.label("Click or Tab to look, Esc to free the mouse. WASD, Space = jump/swim up, Shift = sprint");
-                        ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel");
+                        ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
+                        ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
                     });
             });
         if time != self.env.time {
             self.env = Environment::at_time(time);
         }
-        self.streamer.set_radius(radius);
-        if volume != self.volume {
-            self.volume = volume;
-            if let Some(audio) = &self.audio {
-                audio.set_volume(volume);
-            }
+        let was = std::mem::replace(&mut self.settings, settings);
+        self.apply_settings(was);
+        if choice.resume {
+            self.set_menu(false);
         }
+        self.quit |= choice.quit;
 
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
@@ -682,12 +792,27 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(r) = self.run.as_mut() else { return };
+        // Esc always reaches the game, even while a slider has the keyboard.
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event
+            && key.state == ElementState::Pressed
+            && !key.repeat
+            && key.physical_key == PhysicalKey::Code(KeyCode::Escape)
+        {
+            r.set_menu(!r.show_settings);
+            return;
+        }
         if !r.grabbed && r.overlay.on_event(&r.window, &event) {
             return;
         }
         match event {
             WindowEvent::CloseRequested => el.exit(),
-            WindowEvent::Resized(s) => r.resize(s.width, s.height),
+            WindowEvent::Resized(s) => {
+                r.resize(s.width, s.height);
+                // Remember only a size the player would want the window to come back at.
+                if s.width > 0 && s.height > 0 && r.window.fullscreen().is_none() && !r.window.is_maximized() {
+                    r.settings.window = Some((s.width, s.height));
+                }
+            }
             WindowEvent::Focused(false) => r.set_grab(false),
             WindowEvent::Focused(true) => {
                 if r.want_grab {
@@ -699,7 +824,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !r.grabbed => {
+            } if !r.grabbed && !r.show_settings => {
                 r.want_grab = true;
                 r.set_grab(true);
             }
@@ -713,14 +838,16 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if event.state == ElementState::Pressed {
-                        if code == KeyCode::Escape {
-                            r.want_grab = false;
-                            r.set_grab(false);
+                        if code == KeyCode::F3 && !event.repeat {
+                            r.settings.show_debug = !r.settings.show_debug;
+                        } else if code == KeyCode::F11 && !event.repeat {
+                            r.settings.fullscreen = !r.settings.fullscreen;
+                            r.window.set_fullscreen(fullscreen(r.settings.fullscreen));
+                        } else if r.show_settings {
+                            // The rest of the keyboard is for playing.
                         } else if code == KeyCode::Tab && !event.repeat {
                             r.want_grab = !r.grabbed;
                             r.set_grab(r.want_grab);
-                        } else if code == KeyCode::F3 && !event.repeat {
-                            r.show_debug = !r.show_debug;
                         } else if code == KeyCode::KeyF && !event.repeat {
                             r.toggle_flying();
                         } else if code == KeyCode::KeyE && !event.repeat {
@@ -739,6 +866,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 r.redraw();
+                if r.quit {
+                    el.exit();
+                }
+                if r.save_timer <= 0.0 {
+                    r.save_timer = AUTOSAVE;
+                    r.persist(&self.opts.overrides);
+                }
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
                     let (s, d) = (r.streamer.stats, r.renderer.stats);
                     log::info!(
@@ -767,6 +901,12 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn exiting(&mut self, _el: &ActiveEventLoop) {
+        if let Some(r) = self.run.as_mut() {
+            r.persist(&self.opts.overrides);
+        }
+    }
+
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
         if let Some(r) = &self.run {
             r.window.request_redraw();
@@ -785,13 +925,15 @@ fn main() -> Result<()> {
     let opts = parse_args()?;
 
     if let Some(path) = &opts.screenshot {
+        // Screenshots neither read nor write anything saved, so they are repeatable.
+        let settings = opts.overrides.applied_to(Settings::default());
         let gpu = Gpu::headless()?;
-        let world = make_world(&opts);
-        let camera = make_camera(&opts, &world);
+        let world = Arc::new(GameWorld::new(settings.seed));
+        let camera = make_camera(&opts, &world, None);
         let mut far = FarView::new(&gpu, world.clone());
-        let mut streamer = Streamer::new(&gpu, world.clone(), opts.radius);
+        let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let t = Instant::now();
-        let env = Environment::at_time(opts.time);
+        let env = Environment::at_time(opts.time.unwrap_or(10.0));
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
