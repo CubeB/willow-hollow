@@ -10,7 +10,7 @@ use glam::{IVec3, Vec2, Vec3, vec2};
 use voxel::Voxel;
 
 use super::{
-    Crossing, CrossingKind, Mooring, Network, Pad, Site, TrailPoint,
+    Crossing, CrossingKind, LanternCause, Mooring, Network, Pad, Site, TrailLantern, TrailPoint,
     route::{self, Router},
     sites,
 };
@@ -50,9 +50,20 @@ const MAX_SLOPE: f32 = 0.45;
 const MAX_SPAN: usize = 90;
 /// Longest link in the site graph.
 const MAX_LINK: f32 = m(4800.0);
-/// Trail steps between lanterns near landmarks, and much further apart elsewhere.
-const LANTERN_NEAR: usize = 64;
-const LANTERN_FAR: usize = 170;
+/// Trail steps between lanterns near landmarks, and much further apart elsewhere (the
+/// latter jittered by 0.7 to 1.3 times).
+const LANTERN_NEAR: usize = 150;
+pub(crate) const LANTERN_FAR: usize = 400;
+/// How close to a junction a lantern marks it.
+const AT_JUNCTION: f32 = m(12.0);
+/// No lantern this close to one on another trail, nor at a junction this close to any.
+pub(crate) const LANTERN_CLEAR: f32 = m(9.0);
+pub(crate) const JUNCTION_CLEAR: f32 = m(16.0);
+
+/// Steps to the next lantern along a plain stretch, after one placed at step `i`.
+fn plain_gap(salt: u32, i: usize) -> usize {
+    (LANTERN_FAR as f32 * (0.7 + 0.6 * unit(hash2(salt ^ 0x1a77, i as i32, 17)))) as usize
+}
 /// How far from a landmark counts as near it.
 const NEAR_SITE: f32 = m(240.0);
 
@@ -1102,8 +1113,9 @@ impl Layer<'_> {
         if !end && along < 0.15 + 0.35 * faint { 0.0 } else { w }
     }
 
-    /// Lanterns along the way, closer together near landmarks and at bridge heads, and
-    /// only on trails worn enough for anyone to light.
+    /// Lanterns along the way: at bridge heads, where trails meet and on the approach to
+    /// landmarks, and only now and then along plain stretches; never crowding one on
+    /// another trail, and only on trails worn enough for anyone to light.
     #[allow(clippy::too_many_arguments)]
     fn furnish(
         &self,
@@ -1116,20 +1128,39 @@ impl Layer<'_> {
         net: &mut Network,
     ) {
         let mut since = 30usize;
+        let mut gap = plain_gap(salt, 0) / 2;
         let mut side = if salt & 1 == 0 { 1.0 } else { -1.0 };
         for i in 8..pts.len().saturating_sub(8) {
             since += 1;
-            let near_site = self.site_points.iter().any(|s| s.distance_squared(pts[i]) < NEAR_SITE * NEAR_SITE);
-            let at_bridge = carried.iter().any(|&(a, b)| i + 3 == a || i == b + 3);
-            let due = since >= if near_site { LANTERN_NEAR } else { LANTERN_FAR };
-            if !(at_bridge || due) || widths[i] < LIT || carried.iter().any(|&(a, b)| (a..=b).contains(&i)) {
+            if widths[i] < LIT || carried.iter().any(|&(a, b)| (a..=b).contains(&i)) {
                 continue;
             }
+            let near_site = self.site_points.iter().any(|s| s.distance_squared(pts[i]) < NEAR_SITE * NEAR_SITE);
+            let at_bridge = carried.iter().any(|&(a, b)| i + 3 == a || i == b + 3);
+            let at_junction = since >= 12 && net.junctions.iter().any(|j| j.distance_squared(pts[i]) < AT_JUNCTION * AT_JUNCTION);
+            let cause = if at_bridge {
+                LanternCause::Bridge
+            } else if at_junction {
+                LanternCause::Junction
+            } else if near_site && since >= LANTERN_NEAR {
+                LanternCause::Approach
+            } else if since >= gap {
+                LanternCause::Plain
+            } else {
+                continue;
+            };
             let tangent = (pts[i + 4] - pts[i - 4]).normalize_or_zero();
             let normal = vec2(-tangent.y, tangent.x);
             let q = pts[i] + normal * side * (widths[i] + m(1.2));
             let col = cols[i];
             if is_wet(&col) || col.river < m(2.4) {
+                continue;
+            }
+            let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
+            let crowded = net.lanterns.iter().any(|l| {
+                (l.trail != salt || cause == LanternCause::Junction) && l.at.distance_squared(q) < clear * clear
+            });
+            if crowded {
                 continue;
             }
             let (x, z) = (q.x.floor() as i32, q.y.floor() as i32);
@@ -1138,7 +1169,9 @@ impl Layer<'_> {
             let at = IVec3::new(x, y, z);
             let (voxels, fine) = landmarks::trail_lantern_parts(&self.palette_at(&col), height, hash2(salt, x, z));
             net.add_stamp_with(absolute(voxels, at, 0), parts::place_fine(&fine, at, 0));
+            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause });
             since = 0;
+            gap = plain_gap(salt, i);
             side = -side;
         }
     }

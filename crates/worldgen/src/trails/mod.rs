@@ -94,6 +94,30 @@ pub struct Crossing {
     pub span: i32,
 }
 
+/// Why a lantern stands where it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanternCause {
+    /// At the head of a bridge.
+    Bridge,
+    /// Where trails meet.
+    Junction,
+    /// On the approach to a landmark.
+    Approach,
+    /// Somewhere along an otherwise plain stretch.
+    Plain,
+}
+
+/// A lantern beside a trail.
+#[derive(Clone, Copy, Debug)]
+pub struct TrailLantern {
+    pub at: Vec2,
+    /// The trail it lights, by the salt it was laid with.
+    pub trail: u32,
+    /// Its step along that trail.
+    pub step: usize,
+    pub cause: LanternCause,
+}
+
 /// Everything people have added to one continent.
 #[derive(Default)]
 pub struct Network {
@@ -105,6 +129,8 @@ pub struct Network {
     pub lines: Vec<Vec<Vec2>>,
     /// The half-width its traffic gives each trail at each point of `lines`.
     pub line_widths: Vec<Vec<f32>>,
+    /// Every lantern set beside a trail, in the order they were placed.
+    pub lanterns: Vec<TrailLantern>,
     /// The name of every place on the continent, landmarks and natural features alike.
     /// Filled in once the network itself is built (see [`crate::names::survey`]).
     pub names: crate::names::Gazetteer,
