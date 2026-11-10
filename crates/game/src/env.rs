@@ -73,7 +73,7 @@ impl Environment {
         Self {
             time,
             sun_dir,
-            sun_color: sun_color * exposure,
+            sun_color: sun_color * exposure * (1.0 + 0.25 * (-decl).max(0.0)),
             sky_zenith: zenith * exposure,
             sky_horizon: horizon * exposure,
             fog_density: 0.0001625 / VOXELS_PER_METRE,
