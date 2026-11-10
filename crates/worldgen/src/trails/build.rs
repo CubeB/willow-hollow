@@ -69,8 +69,8 @@ fn turns_toward(d: Vec2) -> u32 {
 
 /// Whether a gate turned `turns` at trail point `i` has its posts off the way, either
 /// side of it.
-fn gate_fits(pts: &[Vec2], widths: &[f32], i: usize, turns: u32) -> bool {
-    let r = rotate(IVec3::new(2, 0, 0), turns);
+fn gate_fits(pts: &[Vec2], widths: &[f32], i: usize, turns: u32, half: i32) -> bool {
+    let r = rotate(IVec3::new(half, 0, 0), turns);
     let axis = vec2(r.x as f32, r.z as f32);
     let (x, z) = (pts[i].x.floor(), pts[i].y.floor());
     let lo = i.saturating_sub(40);
@@ -1180,9 +1180,18 @@ impl Layer<'_> {
             // Each style faces the trail: a crook's lamp hangs out over its edge, a pair
             // runs along it, and a gate spans it where it is narrow enough to pass through.
             let pick = hash2(salt ^ 0x5e1f, i as i32, 3);
+            // Gates mark arrivals, at landmarks and where trails meet, their posts
+            // either side of the trail.
             let mut style = parts::LampStyle::pick_trail(pick >> 3);
+            let arrival = matches!(cause, LanternCause::Approach | LanternCause::Junction);
+            if arrival && pick % 6 == 0 {
+                style = parts::LampStyle::Gate;
+            }
             let gate_turns = turns_toward(normal);
-            if style == parts::LampStyle::Gate && !gate_fits(pts, widths, i, gate_turns) {
+            let gate_half = (widths[i] + 1.0).ceil() as i32;
+            if style == parts::LampStyle::Gate
+                && !(arrival && gate_half <= parts::GATE_HALF_MAX && gate_fits(pts, widths, i, gate_turns, gate_half))
+            {
                 style = if pick & 1 == 0 { parts::LampStyle::Post } else { parts::LampStyle::Stone };
             }
             let (q, turns) = match style {
@@ -1202,7 +1211,7 @@ impl Layer<'_> {
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
             let at = IVec3::new(x, y, z);
-            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col), height, hash2(salt, x, z), style, turns);
+            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col), height, hash2(salt, x, z), style, turns, gate_half);
             let footprint: Vec<IVec2> = voxels
                 .iter()
                 .filter(|(p, _)| (0..=2).contains(&p.y))
