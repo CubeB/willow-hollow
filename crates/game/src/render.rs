@@ -57,6 +57,10 @@ struct Globals {
     wind: [f32; 4],
     /// Nearest glowing particles (fireflies): camera-relative xyz, glow in w.
     lights: [[f32; 4]; 4],
+    /// x: the date, 0..1 from the spring equinox. y: snow cover. z: ice on water.
+    season: [f32; 4],
+    /// x: how wet the ground is.
+    weather: [f32; 4],
 }
 
 #[repr(C)]
@@ -70,6 +74,7 @@ struct Shadows {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CascadeUniform {
     light_vp: [[f32; 4]; 4],
+    season: [f32; 4],
 }
 
 /// What one cascade's shadow map was last drawn from.
@@ -141,6 +146,8 @@ pub struct Scene<'a> {
     /// Solid moving models (boats, the glider), drawn with the opaque scene.
     pub props: &'a [ParticleInstance],
     pub wind: Vec3,
+    /// Snow, ice and wetness on the ground.
+    pub ground: crate::season::Ground,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -550,7 +557,7 @@ impl Renderer {
             cache: None,
         });
 
-        let terrain_module = shader(device, "terrain", format!("{common}\n{}", include_str!("shaders/terrain.wgsl")));
+        let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
         let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2];
         let terrain_buffers = [
@@ -635,7 +642,7 @@ impl Renderer {
             cache: None,
         });
 
-        let shadow_module = shader(device, "shadow", include_str!("shaders/shadow.wgsl").to_string());
+        let shadow_module = shader(device, "shadow", format!("{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/shadow.wgsl")));
         let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow"),
             layout: Some(&shadow_layout),
@@ -1167,7 +1174,7 @@ impl Renderer {
                 gpu.queue.write_buffer(
                     &self.cascade_binds[i].0,
                     0,
-                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d() }),
+                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d(), season: [env.date, 0.0, 0.0, 0.0] }),
                 );
             }
             // A map drawn earlier is still right: it is fixed in the world, so only the
@@ -1202,6 +1209,8 @@ impl Renderer {
             ],
             wind: v4(scene.wind, 0.0),
             lights: nearest_glows(scene.particles),
+            season: [env.date, scene.ground.snow, scene.ground.frozen, 0.0],
+            weather: [scene.ground.wet, 0.0, 0.0, 0.0],
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1663,6 +1672,7 @@ pub fn screenshot(
     particles: &[ParticleInstance],
     props: &[ParticleInstance],
     wind: Vec3,
+    ground: crate::season::Ground,
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -1705,6 +1715,7 @@ pub fn screenshot(
         particles,
         props,
         wind,
+        ground,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(

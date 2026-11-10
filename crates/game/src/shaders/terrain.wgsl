@@ -104,6 +104,13 @@ fn shade(in: VOut) -> vec4<f32> {
     // Each cube gets its own slight brightness and warmth so merged faces still read as cubes.
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
+    // The season: leaf colour and fall, dry or wintry grass.
+    let seasoned = season_apply(base, voxel, h, (in.flags & FLAG_FOLIAGE) != 0u, G.season.x);
+    if (seasoned.a < 0.5) {
+        discard;
+    }
+    base = seasoned.rgb;
+    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -180,6 +187,13 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         let far_body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
         alpha = mix(alpha, 1.0, far);
+        // In deep cold the surface is ice: pale, opaque and still.
+        let ice = ice_amount(world_xz);
+        if (ice > 0.0) {
+            let sheet = vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(n_face));
+            color = mix(color, sheet, ice);
+            alpha = mix(alpha, 1.0, ice);
+        }
     } else {
         // A vertical face of water is a fall or the step of a cascade: white and streaky,
         // the streaks running downward.
