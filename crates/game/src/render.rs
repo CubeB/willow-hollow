@@ -59,9 +59,10 @@ struct Globals {
     lights: [[f32; 4]; 4],
     /// The nearest lanterns: camera-relative xyz, 1 in w (0 = unused).
     lamps: [[f32; 4]; 4],
-    /// x: the date, 0..1 from the spring equinox. y: snow cover. z: ice on water.
+    /// x: the date, 0..1 from the spring equinox. y: snow cover. z: ice on water. w: the
+    /// summit snowline, metres.
     season: [f32; 4],
-    /// x: how wet the ground is.
+    /// x: how wet the ground is. y: how much more snow the hills hold this winter.
     weather: [f32; 4],
 }
 
@@ -1229,8 +1230,8 @@ impl Renderer {
             wind: v4(scene.wind, 0.0),
             lights: nearest_glows(scene.particles),
             lamps: nearest_lamps(scene.lamps, camera.pos),
-            season: [env.date, scene.ground.snow, scene.ground.frozen, 0.0],
-            weather: [scene.ground.wet, 0.0, 0.0, 0.0],
+            season: [env.date, scene.ground.snow, scene.ground.frozen, scene.ground.snowline],
+            weather: [scene.ground.wet, scene.ground.highland, 0.0, 0.0],
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

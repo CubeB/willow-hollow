@@ -35,8 +35,10 @@ fn vs(in: VIn) -> VOut {
     out.rel = rel;
     out.color = srgb_to_linear(in.color.rgb);
     out.normal = in.normal;
-    // The season: leaves turn and fall (a whole box at once, so every corner agrees).
-    let leaf = season_far_leaf(out.color, vec2<f32>(in.lo.xz), G.season.x);
+    // The season: leaves turn and fall with the near tree's (a whole box at once, so every
+    // corner agrees). The box's plant kind rides in the colour's alpha.
+    let kind = u32(round(in.color.a * 255.0));
+    let leaf = season_box_leaf(out.color, in.lo, kind, G.season.x);
     out.color = leaf.rgb;
     let fallen = leaf.a < 0.5;
     // Nearer than this the real voxel trees are drawn instead.

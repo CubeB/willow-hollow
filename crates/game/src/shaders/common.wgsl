@@ -29,9 +29,9 @@ struct Globals {
     // The nearest lanterns: camera-relative xyz, w 1 where there is one.
     lamps: array<vec4<f32>, 4>,
     // x: date, 0..1 from the spring equinox (see season.wgsl). y: snow cover at sea level.
-    // z: ice on still water.
+    // z: ice on still water. w: the summit snowline, metres (see ground.wgsl).
     season: vec4<f32>,
-    // x: how wet the ground is (0..1).
+    // x: how wet the ground is (0..1). y: how much more snow the hills hold this winter.
     weather: vec4<f32>,
 };
 

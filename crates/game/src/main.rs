@@ -850,7 +850,7 @@ impl Running {
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
-            ground: season::Ground::at(self.env.date, self.warmth, self.weather.snowpack, self.weather.wet),
+            ground: self.weather.ground(self.env.date, self.warmth),
             lamps: &lamps,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
@@ -1148,12 +1148,15 @@ fn main() -> Result<()> {
         let t = Instant::now();
         let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
         // Screenshots are clear unless a weather is asked for.
-        let weather = weather::Weather::new(opts.weather);
+        let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
         let (biome, leaves, flowers) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
+        // The snow and ice the season has left lying here, as the game would have them.
+        let warmth = season::warmth(biome);
+        weather.settle(env.date, settings.year_days, warmth, settings.seed);
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
         let mut fleet = Fleet::new(world.clone());
         fleet.refresh(camera.pos);
@@ -1179,7 +1182,7 @@ fn main() -> Result<()> {
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
-        log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet));
+        log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, weather.ground(env.date, warmth));
         let lamps: Vec<DVec3> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         render::screenshot(
             &gpu,
@@ -1193,7 +1196,7 @@ fn main() -> Result<()> {
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,
-            season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet),
+            weather.ground(env.date, warmth),
             &lamps,
         )?;
         let s = streamer.stats;
