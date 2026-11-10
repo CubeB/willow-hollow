@@ -274,6 +274,9 @@ impl World for GameWorld {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     if plants.len() == grown {
+                        features::aquatic::grow(col, wx as i32, wz as i32, self.seed, &mut plants);
+                    }
+                    if plants.len() == grown {
                         features::pebbles::scatter(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     }
                 }
