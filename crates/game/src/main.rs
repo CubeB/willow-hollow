@@ -6,6 +6,7 @@ mod farview;
 mod gfx;
 mod impostors;
 mod lod;
+mod minimap;
 mod overlay;
 mod particles;
 mod player;
@@ -77,6 +78,8 @@ struct Options {
     fresh: bool,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
+    /// Write the map of the continent around the start to this PNG, then exit.
+    map: Option<PathBuf>,
     audio: bool,
     size: (u32, u32),
     /// Exit after this many frames (smoke tests).
@@ -98,6 +101,7 @@ impl Default for Options {
             weather: None,
             fresh: false,
             screenshot: None,
+            map: None,
             audio: true,
             size: (1280, 720),
             frames: None,
@@ -122,6 +126,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
+  --map FILE            write a map of the continent around the start to a PNG, then exit
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went
@@ -179,6 +184,7 @@ fn parse_args() -> Result<Options> {
             "--radius" => o.overrides.radius = Some(value()?.parse::<i32>()?.clamp(1, 64)),
             "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
+            "--map" => o.map = Some(value()?.into()),
             "--size" => {
                 let v = list::<u32>(&value()?, 'x', 2)?;
                 o.size = (v[0].max(1), v[1].max(1));
@@ -1137,6 +1143,15 @@ fn main() -> Result<()> {
         .filter_module("naga", log::LevelFilter::Warn)
         .init();
     let opts = parse_args()?;
+
+    if let Some(path) = &opts.map {
+        let settings = opts.overrides.applied_to(Settings::default());
+        let world = GameWorld::new(settings.seed);
+        let camera = make_camera(&opts, &world, None);
+        minimap::build(&world, camera.pos).save(path)?;
+        log::info!("map {}", path.display());
+        return Ok(());
+    }
 
     if let Some(path) = &opts.screenshot {
         // Screenshots neither read nor write anything saved, so they are repeatable.

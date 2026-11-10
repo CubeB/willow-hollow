@@ -428,6 +428,32 @@ fn land_y(h: f32) -> f32 {
     (h - SINK).max(h.min(SEA_LEVEL + 0.2))
 }
 
+/// Each grid cell of `c` as a map shows it, sRGB: the far view's land seen from above
+/// (forests as their canopy), lakes, the sea and the rivers it draws as ribbons.
+pub fn map_colors(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
+    let canopies = canopies(world);
+    let mats = world.materials();
+    let size = c.size;
+    let cs = c.cell_size();
+    let water = mats.get(mat::WATER).color.map(f32::from);
+    let sea = [32.0, 78.0, 128.0];
+    (0..size * size)
+        .map(|i| {
+            let (x, z) = (i % size, i / size);
+            if c.ocean[i] {
+                return sea;
+            }
+            if ribbon_at(c, i) || wetness(c, x, z, 1).1 > 0.0 {
+                return water;
+            }
+            let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
+            let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
+            let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
+            look(c, mats, &canopies, i, gx.hypot(gz)).far
+        })
+        .collect()
+}
+
 /// Whether grid cell `i` carries a river drawn as a ribbon.
 fn ribbon_at(c: &Continent, i: usize) -> bool {
     !c.ocean[i] && Continent::river_width(c.discharge[i]) * OLD_VOXEL >= MIN_RIBBON_WIDTH
