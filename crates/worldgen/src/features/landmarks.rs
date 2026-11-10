@@ -766,6 +766,101 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
     }
 }
 
+/// How long a site has stood and how well it is looked after, both 0 to 1.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct History {
+    pub age: f32,
+    pub care: f32,
+}
+
+impl History {
+    /// Taken from the kind of site and its seed: ruins and standing stones are old and
+    /// forgotten, camps new and kept, the rest somewhere between.
+    pub fn of(kind: Landmark, seed: u32) -> Self {
+        let mut rng = Rng::new(seed ^ 0x4157_0e1d ^ (kind as u32).wrapping_mul(0x85eb_ca6b));
+        let ((a0, a1), (c0, c1)) = match kind {
+            Landmark::Ruins => ((0.8, 1.0), (0.0, 0.15)),
+            Landmark::Stones => ((0.9, 1.0), (0.0, 0.1)),
+            Landmark::Cairn | Landmark::Arch => ((0.5, 0.9), (0.1, 0.5)),
+            Landmark::Camp => ((0.0, 0.15), (0.8, 1.0)),
+            _ => ((0.2, 0.7), (0.4, 0.95)),
+        };
+        History { age: rng.range(a0, a1), care: rng.range(c0, c1) }
+    }
+
+    /// How far the site has gone to ruin.
+    pub fn neglect(self) -> f32 {
+        self.age * (1.0 - self.care)
+    }
+}
+
+/// Ages a built site by its history: rotten wood, lamps gone out, and on neglected sites
+/// erosion from the top down. Only voxels with nothing above them fall, roofs before
+/// wood before stone and corners last, worse in some sections of the site than others,
+/// and what falls lands on the pad beside it as rubble. Lookouts are left whole, so
+/// their stair and lamp stay as built; nothing here makes a material the site lacked,
+/// so desert sites stay sandstone.
+fn decay(s: &mut Shape, kind: Landmark, p: &Palette, seed: u32, h: History) {
+    if kind == Landmark::Lookout {
+        return;
+    }
+    let neglect = h.neglect();
+    let mut rng = Rng::new(seed ^ 0xdeca_7001);
+    // Rot and dead lamps.
+    for q in s.snapshot() {
+        let Some(v) = s.get(q) else { continue };
+        let swap = match v {
+            _ if v == p.wood && rng.unit() < neglect * 0.6 => mat::WOOD_DEAD,
+            _ if v == p.plank && rng.unit() < neglect * 0.6 => mat::PLANK_DARK,
+            mat::LANTERN | mat::EMBER if h.care < 0.3 => mat::CHARCOAL,
+            _ => continue,
+        };
+        s.paint(q, swap);
+    }
+    if neglect < 0.25 {
+        return;
+    }
+    let roof = [p.roof, mat::THATCH];
+    let wood = [p.wood, p.plank, mat::WOOD_DEAD, mat::PLANK_DARK];
+    let solid = |s: &Shape, q: IVec3| s.get(q).is_some_and(|v| v != AIR);
+    let section = |q: IVec3| 0.3 + 1.2 * crate::noise::unit(crate::noise::hash3(seed ^ 0x5ec7, q.x.div_euclid(4), 0, q.z.div_euclid(4)));
+    let rounds = (neglect * 6.0).ceil() as i32;
+    for _ in 0..rounds {
+        let mut fall = Vec::new();
+        for q in s.snapshot() {
+            if q.y < 1 || !solid(s, q) || solid(s, q + IVec3::Y) {
+                continue;
+            }
+            let v = s.get(q).unwrap();
+            let class = if roof.contains(&v) {
+                1.0
+            } else if wood.contains(&v) {
+                0.6
+            } else if v == mat::LANTERN || v == mat::CHARCOAL {
+                0.0
+            } else {
+                0.3
+            };
+            // A corner is open on both an x side and a z side; it holds out longest.
+            let open = |d: IVec3| !solid(s, q + d);
+            let corner = (open(IVec3::X) || open(IVec3::NEG_X)) && (open(IVec3::Z) || open(IVec3::NEG_Z));
+            let chance = neglect * 0.35 * class * section(q) * if corner { 0.25 } else { 1.0 };
+            if rng.unit() < chance {
+                fall.push((q, v));
+            }
+        }
+        for (q, piece) in fall {
+            s.paint(q, AIR);
+            if rng.unit() < 0.5 {
+                let at = v(q.x + rng.int(-1, 1), 0, q.z + rng.int(-1, 1));
+                if !solid(s, at) {
+                    s.paint(at, piece);
+                }
+            }
+        }
+    }
+}
+
 /// Builds a landmark. `length` only matters for landings: the length of the pier.
 pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(IVec3, Voxel)> {
     build_parts(kind, palette, seed, length).0
@@ -798,6 +893,7 @@ pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) ->
     if chip > 0.0 {
         parts::weather_stone(&mut s, &mut rng, palette, chip);
     }
+    decay(&mut s, kind, palette, seed, History::of(kind, seed));
     let fine = s.take_fine();
     (s.into_voxels(), fine)
 }
@@ -908,6 +1004,33 @@ mod tests {
         assert!(uses(Biome::Desert, mat::SANDSTONE));
         assert!(!uses(Biome::Desert, mat::STONE));
         assert!(uses(Biome::OldGrowth, mat::MOSSY_STONE));
+    }
+
+    #[test]
+    fn old_ruins_crumble_and_kept_camps_do_not() {
+        let palette = Palette::of(Biome::Deciduous);
+        let count = |kind, seed, decayed: bool| {
+            let palette = &palette.varied(seed);
+            let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
+            let mut s = Shape::raw();
+            match kind {
+                Landmark::Ruins => ruins(&mut s, &mut rng, palette),
+                _ => camp(&mut s, &mut rng, palette),
+            }
+            if decayed {
+                decay(&mut s, kind, palette, seed, History::of(kind, seed));
+            }
+            s.into_voxels().iter().filter(|&&(q, v)| v != AIR && q.y >= 1).count()
+        };
+        for seed in 0..12 {
+            let h = History::of(Landmark::Ruins, seed);
+            assert!(h.neglect() > 0.6, "{h:?}");
+            assert!(count(Landmark::Ruins, seed, true) < count(Landmark::Ruins, seed, false), "seed {seed}: ruins kept everything");
+            assert!(History::of(Landmark::Camp, seed).neglect() < 0.05);
+            assert_eq!(count(Landmark::Camp, seed, true), count(Landmark::Camp, seed, false), "seed {seed}: a kept camp decayed");
+            // A kept camp's fire still burns.
+            assert!(build(Landmark::Camp, &palette, seed, 0).iter().any(|&(_, v)| v == mat::EMBER));
+        }
     }
 
     /// Follows the stair from the door to the top floor, as a player would.
