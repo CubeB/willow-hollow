@@ -37,6 +37,28 @@ const MAX_OCEAN_RADIUS: f64 = 15.0;
 const OCEAN_ORIGIN_CLEAR: f64 = 4.0;
 /// Share of the cell's half-width inside which border land is held to its shared height.
 pub const BORDER_BAND: f32 = 0.10;
+/// Share of the cell's half-width over which the broad height of a crossing eases
+/// toward the shared profile. Much wider than the band: two cells' mountains can stand
+/// hundreds of units apart, and closing that over the band alone leaves a step along
+/// the border.
+pub const BORDER_EASE: f32 = 0.30;
+
+/// The shared height profile of a range crossing (see [`Field::border_profile`]).
+#[derive(Clone, Copy, Debug)]
+pub struct BorderProfile {
+    /// Broad height in simulation units.
+    pub height: f32,
+    /// Fine relief on top of it, about zero on average.
+    pub detail: f32,
+    /// Landness of the range spine there; small at the spine's shores.
+    pub land: f32,
+}
+
+/// Frequency per macro-cell of a crossing's finest shared relief on a `w`-wide grid:
+/// a few hundred metres, but never finer than eight grid cells, so the grid holds it.
+pub fn border_fine(w: usize) -> f64 {
+    (w as f64 / 8.0).min(90.0)
+}
 /// How high a range's spine stands where it crosses a border, in simulation units.
 const BORDER_CREST: f32 = 520.0;
 /// Sim units in one macro-cell.
@@ -134,6 +156,24 @@ impl Structure {
         let sign = (h.side >= 0.0) == (self.amplitude > 0.0);
         let d = if sign { h.dist } else { -h.dist };
         (d + fbm2(self.seed ^ 5, wx * 70.0 + 0.13, wz * 70.0 + 0.61, 3, 2.07, 0.5) as f64 * 0.0012) as f32
+    }
+
+    /// Height of a fault's step at the line, simulation units, before it fades out
+    /// at the coast and the cell border.
+    fn fault_step(&self, along: f64) -> f32 {
+        let wander = 0.75 + 0.3 * perlin2(self.seed ^ 11, along * 0.5, 0.5);
+        self.amplitude.abs() * wander * self.taper(along)
+    }
+
+    /// For a fault: signed distance in macro-cells from its line at world position
+    /// `(wx, wz)` (in macro-cells), positive on the raised side. `None` for other
+    /// structures, or out of the fault's reach.
+    pub fn fault_dist(&self, wx: f64, wz: f64) -> Option<f32> {
+        if self.kind != Kind::Fault {
+            return None;
+        }
+        let hit = self.hit(wx, wz)?;
+        Some(self.fault_side(wx, wz, &hit))
     }
 }
 
@@ -426,10 +466,12 @@ impl Field {
 
     /// Change in ground height at a land position, in simulation units, once the land
     /// has been simulated: the fault steps and rift troughs that erosion must not soften.
-    /// `land` is the landness there, so both fade out toward the sea.
-    pub fn offset(&self, px: f32, pz: f32, land: f32) -> f32 {
+    /// `land` is the landness there, so both fade out toward the sea. `soft` is the
+    /// half-width of a fault's step in simulation units: the grid can draw no sharper.
+    pub fn offset(&self, px: f32, pz: f32, land: f32, soft: f32) -> Offset {
+        let mut out = Offset { total: 0.0, fault: 0.0, step: 0.0, nearest: f32::MAX };
         if self.items.is_empty() {
-            return 0.0;
+            return out;
         }
         let (wx, wz) = self.world(px, pz);
         let coast = smoothstep(0.015, 0.08, land);
@@ -440,12 +482,14 @@ impl Field {
                 Kind::Range => {}
                 Kind::Fault => {
                     let up = s.fault_side(wx, wz, &hit);
-                    // Sim units half-width of the scarp, as a share of a macro-cell.
-                    let w = (FAULT_SCARP / CELL) as f32;
-                    let step = smoothstep(-w, w, up);
-                    let block = (1.0 - (up.max(0.0) / FAULT_FALLOFF).min(1.0)).powi(2);
-                    let along = 0.75 + 0.3 * perlin2(s.seed ^ 11, hit.along * 0.5, 0.5);
-                    total += s.amplitude.abs() * step * block * along * s.taper(hit.along);
+                    // Half-width of the scarp, as a share of a macro-cell.
+                    let w = (soft as f64 / CELL) as f32;
+                    let step = s.fault_step(hit.along);
+                    let lift = step * smoothstep(-w, w, up) * fault_block(up);
+                    total += lift;
+                    out.fault += lift * coast;
+                    out.step = out.step.max(step * coast);
+                    out.nearest = out.nearest.min(up.abs() * CELL as f32);
                 }
                 Kind::Rift => {
                     let hw = s.half_width as f32;
@@ -460,7 +504,50 @@ impl Field {
                 }
             }
         }
-        total * coast
+        out.total = total * coast;
+        out
+    }
+
+    /// True if a range's dry spine covers a position within `reach` (a share of the
+    /// cell's half-width) of the border: a cheap test before [`Field::border_profile`].
+    pub fn on_crossing(&self, px: f32, pz: f32, edge: f32, reach: f32) -> bool {
+        if 1.0 - edge >= reach || self.items.is_empty() {
+            return false;
+        }
+        let (wx, wz) = self.world(px, pz);
+        self.spine_at(wx, wz).is_some_and(|(land, _)| land - self.basin_depth(wx, wz) * 4.0 > 0.0)
+    }
+
+    /// The height profile a crossing is eased toward, at a position within
+    /// [`BORDER_EASE`] of the border on a range spine; `None` elsewhere. `edge` is the
+    /// max-norm distance from the cell centre, and `uplift` the shared uplift rate there
+    /// (see [`Field::border_pin`]). `fine` is the frequency, per macro-cell, of the
+    /// profile's finest relief: cells either side of a border must pass the same value.
+    pub fn border_profile(&self, px: f32, pz: f32, edge: f32, uplift: f32, fine: f64) -> Option<BorderProfile> {
+        let b = 1.0 - edge;
+        if b >= BORDER_EASE || self.items.is_empty() {
+            return None;
+        }
+        let (wx, wz) = self.world(px, pz);
+        let (land, form) = self.spine_at(wx, wz)?;
+        let land = land - self.basin_depth(wx, wz) * 4.0;
+        if land <= 0.0 {
+            return None;
+        }
+        let crest = BORDER_CREST * uplift.max(0.0).powf(0.8) * form;
+        // A gentle rise to the border on both sides, so water mostly runs away from it.
+        // It flattens out on the border itself: a rise that met there at an angle would
+        // stand as a straight crease along the border.
+        let t = (b / BORDER_BAND).min(1.0);
+        let tilt = (1.0 - t * t).powi(2) * (8.0 + crest * 0.05);
+        // Spurs and gullies, so the land where the two cells meet is as rough as the
+        // eroded land either side rather than a smooth causeway. World coordinates, so
+        // the same on both sides; lightly warped so it has no grain.
+        let warp = |s: u32| perlin2(self.world_seed ^ s, wx * fine * 0.3 + 0.17, wz * fine * 0.3 + 0.59) as f64 * 0.6;
+        let (ux, uz) = (wx * fine + warp(0x5ea1), wz * fine + warp(0x5ea2));
+        let ridges = ridged2(self.world_seed ^ 0x5ea3, ux + 0.19, uz + 0.83, 3, 2.1, 0.5);
+        let detail = (ridges - 0.5) * (6.0 + crest * 0.16);
+        Some(BorderProfile { height: (crest + tilt).max(0.5), detail, land })
     }
 
     /// How land is held near a border: `(target height, weight while simulating, weight
@@ -475,23 +562,16 @@ impl Field {
     /// every one of them computes alike. Height under erosion grows with uplift, so it
     /// sets how high the held land stands: as high as the higher side would be, so
     /// neither side's own mountains face a hollow at the border.
-    pub fn border_pin(&self, px: f32, pz: f32, edge: f32, uplift: f32) -> Option<(f32, f32, f32)> {
+    pub fn border_pin(&self, px: f32, pz: f32, edge: f32, uplift: f32, fine: f64) -> Option<(f32, f32, f32)> {
         let b = 1.0 - edge;
-        if b >= BORDER_BAND || self.items.is_empty() {
+        if b >= BORDER_BAND {
             return None;
         }
-        let (wx, wz) = self.world(px, pz);
-        let (land, form) = self.spine_at(wx, wz)?;
-        if land - self.basin_depth(wx, wz) * 4.0 <= 0.0 {
-            return None;
-        }
-        let crest = BORDER_CREST * uplift.max(0.0).powf(0.8) * form;
-        // Rising to the border on both sides, so water runs away from it on each.
-        let tilt = (1.0 - b / BORDER_BAND).powi(2) * (8.0 + crest * 0.05);
+        let p = self.border_profile(px, pz, edge, uplift, fine)?;
         let hard = BORDER_BAND * 0.05;
         let weight = if b < hard { 1.0 } else { (1.0 - (b - hard) / (BORDER_BAND - hard)).powf(2.5) };
         let blend = 1.0 - smoothstep(0.0, BORDER_BAND, b);
-        Some(((crest + tilt).max(0.5), weight, blend))
+        Some(((p.height + p.detail).max(0.5), weight, blend))
     }
 
     /// How strongly a position is held to the border profile (0 inland, 1 at a border),
@@ -501,8 +581,30 @@ impl Field {
     }
 }
 
-/// Sim units over which a fault's step happens, either side of the line.
-const FAULT_SCARP: f64 = 40.0;
+/// Sim units over which a fault's step happens on the simulation grid, either side of
+/// the line, at the least. The surface draws the step itself as a face (see
+/// `continent::scarp`).
+pub const FAULT_SCARP: f32 = 40.0;
+
+/// What faults and rifts do to the ground at one spot (see [`Field::offset`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Offset {
+    /// Change in ground height, simulation units.
+    pub total: f32,
+    /// The part of `total` that faults contribute.
+    pub fault: f32,
+    /// Full height of the largest fault step here, as it would stand at the line.
+    pub step: f32,
+    /// Distance from the nearest fault line, simulation units; `f32::MAX` if none.
+    pub nearest: f32,
+}
+
+/// Share of a fault's step that the raised block keeps at `up` macro-cells from the
+/// line (negative on the low side, where there is no block): the block tilts back down
+/// to the surrounding land away from the fault.
+pub fn fault_block(up: f32) -> f32 {
+    (1.0 - (up.max(0.0) / FAULT_FALLOFF).min(1.0)).powi(2)
+}
 
 /// Every structure touching a cell, with a short description, for tools.
 pub fn describe(world_seed: u32, mx: i32, mz: i32) -> Vec<String> {

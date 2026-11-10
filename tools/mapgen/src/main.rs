@@ -184,11 +184,14 @@ fn render_relief(c: &Continent, view: View, px: u32, layer: Layer) -> RgbImage {
                 WATER
             } else {
                 // Light from the north-west, as on a printed relief map.
-                let d = 1.0;
-                let gx = (sample(c, &c.height, x + d, z) - sample(c, &c.height, x - d, z))
-                    / (2.0 * d * cell);
-                let gz = (sample(c, &c.height, x, z + d) - sample(c, &c.height, x, z - d))
-                    / (2.0 * d * cell);
+                // Differences over a cell either way, one-sided at the grid's edge: a
+                // centred difference there would read the clamped edge as flat and
+                // draw a line along every border a range crosses.
+                let (lo, hi) = (0.5, c.size as f32 - 0.5);
+                let (x0, x1) = ((x - 1.0).max(lo), (x + 1.0).min(hi));
+                let (z0, z1) = ((z - 1.0).max(lo), (z + 1.0).min(hi));
+                let gx = (sample(c, &c.height, x1, z) - sample(c, &c.height, x0, z)) / ((x1 - x0).max(0.5) * cell);
+                let gz = (sample(c, &c.height, x, z1) - sample(c, &c.height, x, z0)) / ((z1 - z0).max(0.5) * cell);
                 let n = {
                     let (nx, ny, nz) = (-gx * 2.5, 1.0, -gz * 2.5);
                     let len = (nx * nx + ny * ny + nz * nz).sqrt();

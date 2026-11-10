@@ -1,5 +1,7 @@
 //! Biome classification from climate.
 
+use crate::continent::climate::LAPSE;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(u8)]
 pub enum Biome {
@@ -59,6 +61,9 @@ pub struct Site {
     pub wet: f32,
     /// 1 at the coast, falling to 0 a little way inland.
     pub coast: f32,
+    /// 0..1, how sheltered the nearby water is: 1 in bays, estuaries and lagoons,
+    /// 0 on open coasts and small islands facing the open sea.
+    pub shelter: f32,
     /// Slow noise, -1..1, that hands stretches of country to one sub-biome or another.
     pub variety: f32,
     /// 0..1, how much the spot belongs to a volcano.
@@ -125,7 +130,7 @@ impl Biome {
     /// Picks the biome for a spot: the climate decides the broad type, and the ground
     /// and a slow noise then choose among the kinds of country that climate allows.
     pub fn select(site: &Site) -> Biome {
-        let Site { temperature: t, rain: r, height: h, slope, wet, coast, variety: v, volcanic } = *site;
+        let Site { temperature: t, rain: r, height: h, slope, wet, coast, shelter, variety: v, volcanic } = *site;
         let base = Self::classify(t, r);
         if base == Biome::Alpine {
             return base;
@@ -133,20 +138,39 @@ impl Biome {
         if volcanic > 0.5 {
             return Biome::Volcanic;
         }
-        let flat = slope < 0.045;
+        // How waterlogged the ground is: wet ground near big water that is also flat
+        // enough to hold it, more so under heavy rain.
+        let sodden = wet * (1.0 - slope / 0.08).clamp(0.0, 1.0) * (0.75 + 0.25 * r.min(2.0));
+        // Some stretches of country are given over to wetland more than others.
+        let wetland = 0.22 - 0.06 * v;
+        // The tree line wanders a little from place to place.
+        let treeline = 0.19 + 0.02 * v;
+        // Cold because it is high, not because it is far north: only there is there a
+        // tree line with meadow above it rather than tundra all the way down.
+        let alpine = h > 100.0 && t + h * LAPSE > treeline + 0.06;
         match base {
-            // Warm, wet, low coasts and the mouths of rivers.
+            // Warm, wet, low ground at sheltered coasts (bays, lagoons, estuaries) and
+            // the mouths of big rivers; open coasts facing the sea stay beach and forest.
             Biome::Woodland | Biome::Rainforest | Biome::Savanna
-                if t > 0.62 && r > 0.7 && h < 7.0 && slope < 0.04 && (coast > 0.3 || wet > 0.6) =>
+                if t > 0.62
+                    && r > 0.8
+                    && h < 6.0
+                    && slope < 0.03
+                    && coast > 0.12
+                    && ((coast > 0.3 && shelter > 0.5) || wet > 0.7) =>
             {
                 Biome::Mangrove
             }
             // Flowering grass from the tree line up to the snow.
-            _ if t < 0.155 && h > 100.0 && r > 0.45 && slope < 0.5 => Biome::AlpineMeadow,
-            Biome::Tundra | Biome::Taiga if flat && (wet > 0.3 || (r > 1.3 && slope < 0.02)) && t > 0.14 => Biome::Bog,
+            _ if alpine && t < treeline && r > 0.4 && slope < 0.8 => Biome::AlpineMeadow,
+            Biome::Tundra | Biome::Taiga
+                if t > 0.13 && (sodden > wetland * 0.9 || (r > 1.3 && slope < 0.015)) =>
+            {
+                Biome::Bog
+            }
             Biome::Taiga if r > 1.05 && v > 0.05 => Biome::SnowyPine,
             Biome::Grassland | Biome::Deciduous | Biome::OldGrowth | Biome::Heath | Biome::Woodland
-                if flat && wet > 0.4 && h < 120.0 =>
+                if sodden > wetland && h < 150.0 =>
             {
                 Biome::Marsh
             }
@@ -211,7 +235,7 @@ mod tests {
     use super::*;
 
     fn site(temperature: f32, rain: f32, height: f32, slope: f32) -> Site {
-        Site { temperature, rain, height, slope, wet: 0.0, coast: 0.0, variety: 0.0, volcanic: 0.0 }
+        Site { temperature, rain, height, slope, wet: 0.0, coast: 0.0, shelter: 0.0, variety: 0.0, volcanic: 0.0 }
     }
 
     #[test]
@@ -225,12 +249,18 @@ mod tests {
             (Site { variety: -0.5, ..site(0.50, 0.3, 40.0, 0.05) }, Biome::Steppe),
             (Site { variety: 0.5, ..site(0.80, 0.1, 30.0, 0.02) }, Biome::DuneSea),
             (Site { variety: -0.5, ..site(0.80, 0.2, 150.0, 0.2) }, Biome::RedRock),
-            (Site { coast: 1.0, ..site(0.80, 1.6, 2.0, 0.01) }, Biome::Mangrove),
+            (Site { coast: 1.0, shelter: 1.0, ..site(0.80, 1.6, 2.0, 0.01) }, Biome::Mangrove),
+            (Site { coast: 0.5, wet: 0.9, ..site(0.80, 1.6, 2.0, 0.01) }, Biome::Mangrove),
             (Site { volcanic: 1.0, ..site(0.60, 1.0, 100.0, 0.2) }, Biome::Volcanic),
         ];
         for (s, want) in cases {
             assert_eq!(Biome::select(&s), want, "{s:?}");
         }
+        // An open coast facing the sea, or a floodplain far inland, is no mangrove.
+        assert_ne!(Biome::select(&Site { coast: 1.0, ..site(0.80, 1.6, 2.0, 0.01) }), Biome::Mangrove);
+        assert_ne!(Biome::select(&Site { wet: 0.9, ..site(0.80, 1.6, 2.0, 0.01) }), Biome::Mangrove);
+        // Cold uplands in the far north are tundra or taiga, not meadow under a tree line.
+        assert_ne!(Biome::select(&site(0.11, 0.9, 105.0, 0.2)), Biome::AlpineMeadow);
         // Climate alone still decides ordinary country.
         assert_eq!(Biome::select(&site(0.45, 1.0, 50.0, 0.1)), Biome::Deciduous);
         assert_eq!(Biome::select(&site(0.05, 1.0, 900.0, 0.3)), Biome::Alpine);
