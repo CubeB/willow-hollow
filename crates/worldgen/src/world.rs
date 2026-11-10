@@ -13,7 +13,7 @@ use voxel::{
 };
 
 use crate::{
-    Cascade, ColumnOutput, SpringMark, World,
+    Cascade, ColumnOutput, SpringMark, Surf, World,
     continent::{self, Continent, NO_LAKE, SimConfig},
     features::{self, Library},
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
@@ -554,6 +554,37 @@ impl GameWorld {
             }
         }
 
+        // Surf: sea water beside rock that stands out of it, thinned to a few per column.
+        const MAX_SURF: usize = 8;
+        let mut surf = Vec::new();
+        'surf: for px in (1..PAD - 1).step_by(3) {
+            for pz in (1..PAD - 1).step_by(3) {
+                if columns[px * PAD + pz].water_surface() != Some(0) {
+                    continue;
+                }
+                let mut dir = Vec3::ZERO;
+                for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1), (2, 0), (-2, 0), (0, 2), (0, -2)] {
+                    let (x, z) = (px as i32 + dx, pz as i32 + dz);
+                    if x < 0 || z < 0 || x >= PAD as i32 || z >= PAD as i32 {
+                        continue;
+                    }
+                    let n = &columns[x as usize * PAD + z as usize];
+                    if matches!(n.cover, Cover::Shelf | Cover::Boulders | Cover::Cliff) && n.water_surface().is_none() {
+                        dir += Vec3::new(dx as f32, 0.0, dz as f32);
+                    }
+                }
+                if dir != Vec3::ZERO {
+                    surf.push(Surf {
+                        pos: Vec3::new((wx0 + px as i32) as f32 + 0.5, 0.0, (wz0 + pz as i32) as f32 + 0.5),
+                        dir: dir.normalize(),
+                    });
+                    if surf.len() >= MAX_SURF {
+                        break 'surf;
+                    }
+                }
+            }
+        }
+
         // Springs whose pool centre lies inside this column (not its padded border).
         let springs = sampler
             .springs()
@@ -661,6 +692,7 @@ impl GameWorld {
             chunks: out,
             cascades,
             springs,
+            surf,
             currents,
             plants,
         }

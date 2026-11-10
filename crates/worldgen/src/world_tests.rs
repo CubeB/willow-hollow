@@ -172,6 +172,31 @@ fn spawn_is_on_dry_land_beside_a_river() {
 }
 
 #[test]
+fn rocky_shores_have_surf() {
+    let w = world();
+    let c = w.continent(0, 0);
+    // Coastal cells: sea with land beside it.
+    let coast: Vec<usize> = (c.size + 1..c.size * (c.size - 1) - 1)
+        .filter(|&i| c.ocean[i] && !c.ocean[i + 1])
+        .collect();
+    assert!(!coast.is_empty());
+    let cs = c.cell_size();
+    let (mut found, mut checked) = (0, 0);
+    for &i in coast.iter().step_by((coast.len() / 150).max(1)) {
+        let p = ((i % c.size) as f32 + 1.0) * cs;
+        let (cx, cz) = (p as i32 / CHUNK, ((i / c.size) as f32 + 0.5) as i32 * cs as i32 / CHUNK);
+        let out = w.generate_column(cx, cz);
+        checked += 1;
+        assert!(out.surf.len() <= 8);
+        if !out.surf.is_empty() {
+            found += 1;
+        }
+    }
+    eprintln!("surf in {found} of {checked} coastal chunk columns");
+    assert!(found > 0, "no surf on any of {checked} coastal chunk columns");
+}
+
+#[test]
 fn chunk_columns_report_their_springs() {
     let w = world();
     let c = w.continent(0, 0);

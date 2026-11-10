@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Vec3};
 use voxel::Kind;
 use worldgen::{
-    Cascade, SpringMark,
+    Cascade, SpringMark, Surf,
     biome::Biome,
     noise,
     scale::{OLD_VOXEL as U, VOXELS_PER_METRE},
@@ -137,6 +137,8 @@ pub struct Surroundings<'a> {
     pub cascades: &'a [Cascade],
     /// Spring pools near the player.
     pub springs: &'a [SpringMark],
+    /// Where the sea breaks on rock near the player.
+    pub surf: &'a [Surf],
     /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
     pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
     /// Flower voxels near the player.
@@ -243,6 +245,33 @@ impl Particles {
                     life: self.range(2.0, 3.5),
                     size: Vec3::splat(self.range(0.5, 1.0)),
                     color: [0.9, 0.94, 1.0],
+                    phase: 0.0,
+                    settled: false,
+                };
+                self.spawn(particle);
+            }
+        }
+
+        // Surf: now and then a wave breaks on the rocks and throws up a burst of spray,
+        // more often and higher in wind and storm.
+        let rough = 1.0 + self.wind.vector.length() * 0.3 + s.storm * 2.5;
+        for sf in s.surf {
+            let dist = (sf.pos.as_dvec3() - s.camera).length() as f32;
+            if dist > 60.0 * VOXELS_PER_METRE || self.unit() >= dt * 0.12 * rough {
+                continue;
+            }
+            let n = (6.0 + 6.0 * rough.min(3.0)) as u32;
+            for _ in 0..n {
+                let up = self.range(1.5, 3.0) * rough.sqrt();
+                let side = Vec3::new(-sf.dir.z, 0.0, sf.dir.x) * self.range(-1.2, 1.2) * U;
+                let particle = Particle {
+                    kind: PKind::Spray,
+                    pos: sf.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.2, 0.0),
+                    vel: sf.dir * self.range(0.2, 1.2) + Vec3::Y * up + Vec3::new(self.range(-0.5, 0.5), 0.0, self.range(-0.5, 0.5)),
+                    age: 0.0,
+                    life: self.range(0.6, 1.2),
+                    size: Vec3::splat(self.range(0.1, 0.24)),
+                    color: [0.92, 0.95, 0.98],
                     phase: 0.0,
                     settled: false,
                 };
