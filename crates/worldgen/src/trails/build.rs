@@ -3,7 +3,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap},
+    collections::{BTreeMap, BinaryHeap, HashMap},
 };
 
 use glam::{IVec3, Vec2, Vec3, vec2};
@@ -20,6 +20,7 @@ use crate::{
         landmarks::{self, Landmark, Palette},
         shape::{Rng, Shape, rotate},
     },
+    materials as mat,
     noise::{hash2, perlin2, unit},
     scale::{BLOCK, OLD_VOXEL, m},
     surface::{Column, Cover, Sampler},
@@ -379,6 +380,222 @@ fn stepping_stones(pal: &Palette, rng: &mut Rng, pts: &[Vec2], cols: &[Column], 
     s.into_voxels()
 }
 
+/// Where one column of a bridge lies: `t` voxels along from where the water begins, `u`
+/// voxels across from the centreline, the deck height `y` over it, and the trail sample
+/// `i` it belongs to.
+#[derive(Clone, Copy)]
+struct Under {
+    t: f32,
+    u: f32,
+    y: i32,
+    i: usize,
+}
+
+/// One arch of a stone bridge: from `a` to `b` voxels along, its underside a circle of
+/// `radius` centred at height `centre`.
+struct Opening {
+    a: f32,
+    b: f32,
+    centre: f32,
+    radius: f32,
+}
+
+impl Opening {
+    /// Height of the underside of the arch `t` voxels along the bridge.
+    fn intrados(&self, t: f32) -> f32 {
+        let x = t - (self.a + self.b) * 0.5;
+        self.centre + (self.radius * self.radius - x * x).max(0.0).sqrt()
+    }
+}
+
+/// Thickness of a stone bridge's piers along the bridge, in voxels.
+const PIER: f32 = 3.0;
+
+/// What one bridge is built from and how it is laid out, for building it column by column.
+struct Deck<'a> {
+    pal: &'a Palette,
+    cols: &'a [Column],
+    /// Length of the water crossed, in voxels along.
+    len: f32,
+    /// Half-width of the walking surface, in voxels.
+    half: f32,
+    /// Where the bridge begins and ends, in voxels along.
+    ends: (f32, f32),
+    kmax: i32,
+    piers: Vec<f32>,
+    openings: Vec<Opening>,
+}
+
+impl Deck<'_> {
+    fn over(&self, t: f32) -> bool {
+        t >= 0.0 && t < self.len
+    }
+
+    fn at_end(&self, t: f32) -> bool {
+        t < self.ends.0 + 1.0 || t >= self.ends.1 - 1.0
+    }
+
+    /// How far into the bank `t` is, or 0 over the water.
+    fn ashore(&self, t: f32) -> f32 {
+        if t < 0.0 { -t } else { (t - self.len).max(0.0) }
+    }
+
+    /// A deck board, now and then one replaced in a different wood.
+    fn board(&self, n: i32) -> Voxel {
+        if unit(hash2(0xb0a2, n, 0)) < 0.2 {
+            if self.pal.plank == mat::PLANK_DARK { mat::PLANK } else { mat::PLANK_DARK }
+        } else {
+            self.pal.plank
+        }
+    }
+}
+
+/// A timber footbridge: boards across stringers, a kerb and handrail on posts each side,
+/// trestle bents in the water on longer spans, stone abutments and ramps on the banks.
+fn plank_column(s: &mut Shape, d: &Deck, rng: &mut Rng, x: i32, z: i32, c: &Under) {
+    let mut put = |yy: i32, v: Voxel| s.set(IVec3::new(x, yy, z), v);
+    let col = &d.cols[c.i];
+    let (au, y, t) = (c.u.abs(), c.y, c.t);
+    let (wet, bed) = (is_wet(col), col.top());
+    if au > d.half + 1.0 {
+        return;
+    }
+    // On the banks, stonework carries the deck: the abutments and ramps.
+    if !wet {
+        for yy in bed - 2..y {
+            put(yy, d.pal.block(rng));
+        }
+    }
+    if au > d.half {
+        // The kerb beam the posts stand on, posts every 2 m and taller at the ends, and
+        // a handrail at 1.2 m.
+        put(y, d.pal.wood);
+        let end = d.at_end(t);
+        if t.rem_euclid(5.0) < 1.0 || end {
+            for yy in y + 1..=y + 3 + end as i32 {
+                put(yy, d.pal.wood);
+            }
+        }
+        put(y + 3, d.pal.wood);
+    } else {
+        put(y, d.board(t.floor() as i32));
+        if wet && (au > d.half - 1.0 || au < 0.5) {
+            put(y - 1, d.pal.wood);
+        }
+    }
+    // Trestle bents in the water every 4 m: a cap beam under the deck, legs to the bed
+    // under the edge stringers, and a tie halfway down the taller ones.
+    if wet && d.over(t) && d.len > 12.0 && t > 2.0 && t < d.len - 2.0 && (t + 5.0).rem_euclid(10.0) < 1.0 {
+        put(y - 1, d.pal.wood);
+        if au > d.half - 1.0 && au <= d.half {
+            for yy in bed - 1..y - 1 {
+                put(yy, d.pal.wood);
+            }
+        }
+        if y - bed > 5 && au <= d.half {
+            put((bed + y) / 2, d.pal.wood);
+        }
+    }
+}
+
+/// A felled trunk with its top adzed flat, resting a step onto each bank on stone, a
+/// pole handrail on one side, branch stubs on the other, and stone steps down.
+fn log_column(s: &mut Shape, d: &Deck, rng: &mut Rng, x: i32, z: i32, c: &Under) {
+    let mut put = |yy: i32, v: Voxel| s.set(IVec3::new(x, yy, z), v);
+    let col = &d.cols[c.i];
+    let (au, y, t) = (c.u.abs(), c.y, c.t);
+    let bed = col.top();
+    let on_log = t >= -OLD_VOXEL && t < d.len + OLD_VOXEL;
+    if !on_log {
+        if au <= d.half + 0.5 {
+            for yy in bed - 2..=y {
+                put(yy, d.pal.block(rng));
+            }
+        }
+        return;
+    }
+    if au <= d.half {
+        let inner = au <= 0.6;
+        put(y, if inner { mat::WOOD_DEAD } else { d.pal.wood });
+        put(y - 1, d.pal.wood);
+        if inner {
+            put(y - 2, d.pal.wood);
+        }
+        // The ends rest on stone; a long log has a stone prop under its middle.
+        if !d.over(t) || (d.len > 20.0 && (t - d.len * 0.5).abs() < 1.5) {
+            for yy in bed - 2..y - 2 {
+                put(yy, d.pal.block(rng));
+            }
+        }
+    } else if au <= d.half + 1.0 {
+        if c.u > 0.0 {
+            if t.rem_euclid(6.0) < 1.0 || d.at_end(t) {
+                for yy in y - 1..=y + 3 {
+                    put(yy, d.pal.wood);
+                }
+            }
+            put(y + 3, d.pal.wood);
+        } else if d.over(t) && (t.floor() as i32).rem_euclid(9) == 4 {
+            put(y - 1, d.pal.wood);
+        }
+    }
+}
+
+/// A stone bridge: a run of arches with voussoir rings, spandrels, piers with cutwaters,
+/// paved deck, parapets with coping, and wing walls where it meets the banks.
+fn arch_column(s: &mut Shape, d: &Deck, rng: &mut Rng, x: i32, z: i32, c: &Under) {
+    let mut put = |yy: i32, v: Voxel| s.set(IVec3::new(x, yy, z), v);
+    let col = &d.cols[c.i];
+    let (au, y, t) = (c.u.abs(), c.y, c.t);
+    let bed = col.top();
+    let over = d.over(t);
+    if au > d.half + 1.0 {
+        if !over {
+            if d.ashore(t) < 2.0 * OLD_VOXEL && au <= d.half + 2.0 {
+                for yy in bed - 2..y {
+                    put(yy, d.pal.block(rng));
+                }
+            }
+            return;
+        }
+        // Cutwaters: each pier comes to a point upstream and down.
+        for &p in &d.piers {
+            let reach = PIER * 0.5 * (1.0 - (au - d.half - 1.0) / 2.5);
+            if (t - p).abs() <= reach {
+                for yy in bed - 2..=d.kmax {
+                    put(yy, d.pal.block(rng));
+                }
+                put(d.kmax + 1, d.pal.stone_dark);
+            }
+        }
+        return;
+    }
+    // The body under the deck: an arch ring two voxels deep over each opening, solid on
+    // the piers and the banks.
+    let (from, ring) = match d.openings.iter().find(|o| over && t >= o.a && t < o.b) {
+        Some(o) => {
+            let lo = ((o.intrados(t) - 0.5).ceil() as i32).max(bed - 2);
+            (lo, lo + 2)
+        }
+        None => (bed - 2, bed - 2),
+    };
+    let voussoir = if (t.floor() as i32).rem_euclid(2) == 0 { d.pal.stone_dark } else { d.pal.stone };
+    for yy in from..y {
+        put(yy, if yy < ring { voussoir } else { d.pal.block(rng) });
+    }
+    if au > d.half {
+        // A string course, then the parapet with its coping, a post higher at the ends.
+        put(y, d.pal.stone_dark);
+        put(y + 1, d.pal.block(rng));
+        put(y + 2, d.pal.stone_dark);
+        if d.at_end(t) {
+            put(y + 3, d.pal.stone_dark);
+        }
+    } else {
+        put(y, d.pal.block(rng));
+    }
+}
+
 /// Bridges a run of water. Returns the voxels and the sample range the structure covers,
 /// ramps included: the trail is carried by the bridge across that range.
 #[allow(clippy::too_many_arguments)]
@@ -392,21 +609,23 @@ fn bridge(
 ) -> (Vec<(IVec3, Voxel)>, (usize, usize)) {
     let (s0, e0) = run;
     let kmax = (s0..=e0).filter_map(|i| cols[i].water_surface()).max().unwrap_or(0);
-    let deck = kmax + BLOCK * if kind == CrossingKind::Arch { 2 } else { 1 };
-    let half = BLOCK * if kind == CrossingKind::Arch { 2i32 } else { 1 };
+    // A stone bridge stands higher, so its arches have room to open.
+    let deck = kmax + BLOCK * if kind == CrossingKind::Arch { 3 } else { 1 };
     let span = (e0 - s0 + 1) as f32;
     let dir = (pts[e0.min(pts.len() - 1)] - pts[s0]).normalize_or_zero();
     let side = vec2(-dir.y, dir.x);
+    // A log lies a step onto each bank before the steps down begin.
+    let flat = (kind == CrossingKind::Log) as i32;
 
     // Ramps run down each side at one in two until they meet the ground.
     let ramp = |from: usize, step: isize| -> (usize, Vec<i32>) {
         let (mut i, mut ys) = (from, Vec::new());
-        for k in 1..=16 {
+        for k in 1..=24 {
             let next = from as isize + step * k;
             if next < 0 || next as usize >= pts.len() {
                 break;
             }
-            let y = deck - (k as i32 * BLOCK + 1) / 2;
+            let y = deck - ((k as i32 - flat) * BLOCK + 1) / 2;
             i = next as usize;
             let ground = cols[i].top();
             if is_wet(&cols[i]) || y > ground {
@@ -434,68 +653,75 @@ fn bridge(
         samples.push((e0 + k + 1, y));
     }
 
-    let mut s = Shape::raw();
-    let surface = |rng: &mut Rng| match kind {
-        CrossingKind::Arch => pal.block(rng),
-        CrossingKind::Log => pal.wood,
-        _ => pal.plank,
+    let first = samples[0].0;
+    let last = samples[samples.len() - 1].0;
+    let y_at = |i: usize| samples[(i - first).min(samples.len() - 1)].1;
+    let len = span * OLD_VOXEL;
+    // Half-width of the walking surface, and how far out anything reaches.
+    let (half, reach) = match kind {
+        CrossingKind::Arch => (3.1, 6.6),
+        CrossingKind::Log => (1.1, 2.1),
+        _ => (2.1, 3.1),
     };
-    let mut last_rail = 0;
-    for (n, &(i, y)) in samples.iter().enumerate() {
-        let col = &cols[i];
-        let wet = is_wet(col);
-        let over_water = (s0..=e0).contains(&i);
-        // Half-steps along and across so a diagonal deck has no holes.
+
+    // Every column the bridge covers, with where it lies along and across. Half-steps
+    // along and across so a diagonal bridge has no holes; a column takes the sample
+    // nearest the centreline.
+    let mut under: BTreeMap<(i32, i32), Under> = BTreeMap::new();
+    for &(i, y) in &samples {
+        let base = (i as f32 - s0 as f32) * OLD_VOXEL;
         let mut along = 0.0f32;
         while along < OLD_VOXEL {
             let p = pts[i] + dir * along;
+            let mut u = -reach;
+            while u <= reach {
+                let q = deck_voxel(p, side, u, y);
+                let here = Under { t: base + along, u, y, i };
+                under.entry((q.x, q.z)).and_modify(|o| if u.abs() < o.u.abs() { *o = here }).or_insert(here);
+                u += 0.5;
+            }
             along += 0.5;
-            let mut offset = -(half as f32);
-            while offset <= half as f32 {
-                let q = deck_voxel(p, side, offset, y);
-                s.set(q, surface(rng));
-                // Solid underneath wherever the deck rests on ground.
-                if !wet {
-                    for fill in col.top() + 1..y {
-                        s.set(IVec3::new(q.x, fill, q.z), pal.stone_dark);
-                    }
-                }
-                offset += 0.5;
-            }
         }
-        let edge = (half + BLOCK) as f32;
+    }
+
+    // A stone bridge's arches: about 5 m each, between piers, each rising from below
+    // the water to two voxels under the deck at its crown.
+    let (mut piers, mut openings) = (Vec::new(), Vec::new());
+    if kind == CrossingKind::Arch {
+        let n = ((len / 14.0).round() as usize).max(1);
+        piers = (1..n).map(|j| len * j as f32 / n as f32).collect::<Vec<f32>>();
+        for j in 0..n {
+            let a = if j == 0 { 0.0 } else { piers[j - 1] + PIER * 0.5 };
+            let b = if j + 1 == n { len } else { piers[j] - PIER * 0.5 };
+            let c = (b - a) * 0.5;
+            let within = |lo: f32, hi: f32| (s0..=e0).filter(move |&i| {
+                let t = (i - s0) as f32 * OLD_VOXEL;
+                t + OLD_VOXEL > lo && t < hi
+            });
+            let crown = within(a + c * 0.5, b - c * 0.5).map(&y_at).min().unwrap_or(deck) as f32 - 2.0;
+            let bed = within(a, b).map(|i| cols[i].top()).min().unwrap_or(kmax) as f32;
+            let r = (c * 0.8).min(crown - bed).max(2.0);
+            let radius = (c * c + r * r) / (2.0 * r);
+            openings.push(Opening { a, b, centre: crown - radius, radius });
+        }
+    }
+    let d = Deck {
+        pal,
+        cols,
+        len,
+        half,
+        ends: ((first as f32 - s0 as f32) * OLD_VOXEL, (last as f32 + 1.0 - s0 as f32) * OLD_VOXEL),
+        kmax,
+        piers,
+        openings,
+    };
+
+    let mut s = Shape::raw();
+    for (&(x, z), c) in &under {
         match kind {
-            CrossingKind::Arch => {
-                for sign in [-1.0, 1.0] {
-                    for along in 0..BLOCK {
-                        let p = pts[i] + dir * along as f32;
-                        for h in 0..2 * BLOCK {
-                            s.set(deck_voxel(p, side, sign * edge, y + h), pal.block(rng));
-                        }
-                    }
-                }
-            }
-            _ => {
-                if n >= last_rail + 3 {
-                    last_rail = n;
-                    for sign in [-1.0, 1.0] {
-                        for h in 0..2 * BLOCK {
-                            s.set(deck_voxel(pts[i], side, sign * edge, y + h), pal.wood);
-                        }
-                    }
-                }
-            }
-        }
-        // Piers go down to the bed.
-        if over_water && (i - s0) % 6 == 3 {
-            let width = half as f32 + if kind == CrossingKind::Arch { OLD_VOXEL } else { 0.0 };
-            let mut offset = -width;
-            while offset <= width {
-                for yy in col.top() - BLOCK..y {
-                    s.set(deck_voxel(pts[i], side, offset, yy), if kind == CrossingKind::Arch { pal.block(rng) } else { pal.wood });
-                }
-                offset += 0.5;
-            }
+            CrossingKind::Arch => arch_column(&mut s, &d, rng, x, z, c),
+            CrossingKind::Log => log_column(&mut s, &d, rng, x, z, c),
+            _ => plank_column(&mut s, &d, rng, x, z, c),
         }
     }
     (s.into_voxels(), (foot_a, foot_b))
