@@ -202,6 +202,7 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         // Beds change in broad patches: speckle shows through the water as static.
         Cover::RiverBed => (if patch < 0.62 { mat::GRAVEL } else { mat::SAND }, mat::GRAVEL),
         Cover::LakeBed => (if patch < 0.55 { mat::MUD } else { mat::SAND }, mat::MUD),
+        Cover::Beach if col.biome == crate::biome::Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
         Cover::Trail => (trail_material(col, roll, patch), mat::DIRT),
         // Cliff faces take their colour from the rock layer at each height (see the fill
@@ -215,6 +216,7 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Boulders => (if roll < 0.5 { mat::STONE } else if roll < 0.8 { mat::ROCK_DARK } else { mat::GRAVEL }, mat::STONE),
         Cover::Shelf => (if patch < 0.5 || roll < 0.2 { mat::ROCK_DARK } else { mat::STONE }, mat::STONE),
         Cover::Dune if matches!(col.biome, crate::biome::Biome::Desert | crate::biome::Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
+        Cover::Dune if col.biome == crate::biome::Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
         // Wet stone and moss around a spring, with a little mud.
         Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
@@ -656,6 +658,17 @@ mod tests {
 
     use super::*;
     use crate::continent::SimConfig;
+
+    #[test]
+    fn volcanic_beaches_are_black_sand() {
+        use crate::biome::Biome;
+        let col = |cover, biome| Column { ground: 1.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX };
+        assert_eq!(surface_materials(&col(Cover::Beach, Biome::Volcanic), 0.0, 0.5, 0.5).0, mat::BLACK_SAND);
+        assert_eq!(surface_materials(&col(Cover::Dune, Biome::Volcanic), 0.0, 0.5, 0.5).0, mat::BLACK_SAND);
+        assert_eq!(surface_materials(&col(Cover::Beach, Biome::Ocean), 0.0, 0.5, 0.5).0, mat::SAND);
+        // Appended last, so every earlier id is unchanged.
+        assert_eq!(mat::build().len() - 1, mat::BLACK_SAND as usize);
+    }
 
     #[test]
     fn every_column_grows_a_climbing_plant_the_same_way() {

@@ -44,6 +44,10 @@ fn field(col: &Column, surface: Voxel) -> Option<(f32, Rock)> {
     }
     let rock = local_rock(col.biome);
     Some(match (col.cover, surface) {
+        // Storm beaches: sea-rounded stones lying thick, far denser than on land.
+        (Cover::Shingle, _) => (0.6, Rock { main: mat::GRAVEL, other: rock.main, fleck: rock.other }),
+        // Boulder shores: the gaps between the boulders are strewn with big stones.
+        (Cover::Boulders, _) => (0.3, Rock { main: rock.main, other: mat::ROCK_DARK, fleck: mat::GRAVEL }),
         // Beaches: sea-smoothed pebbles and the odd shell.
         (Cover::Beach, _) => (0.07, Rock { main: mat::GRAVEL, other: rock.main, fleck: mat::MUSHROOM_STEM }),
         // Gravel bars and river beds.
@@ -87,6 +91,36 @@ pub fn scatter(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mu
         r if r < 0.45 => rock.other,
         _ => rock.main,
     };
+
+    if col.cover == Cover::Boulders {
+        // A large stone, 0.3 m across and 0.2 to 0.3 m high, sometimes with a smaller
+        // one tucked beside it.
+        let colour = pick(&mut rng);
+        let (lx, lz) = (rng.int(0, 1), rng.int(0, 1));
+        add(lx, lz, 3, 3, rng.int(2, 3), colour);
+        if rng.unit() < 0.4 {
+            let colour = pick(&mut rng);
+            // The one-cell strip the big stone leaves free along its side.
+            let sx = if lx == 0 { 3 } else { 0 };
+            add(sx, rng.int(0, 2), 1, 2, 1, colour);
+        }
+        return;
+    }
+    if col.cover == Cover::Shingle {
+        // Two to four rounded stones, each in a quarter of its own: flat ovals 0.1 to 0.2 m
+        // across, now and then one stacked a cell higher where it rests on another.
+        let mut quarters = QUARTERS;
+        for i in 0..3 {
+            quarters.swap(i, rng.int(i as i32, 3) as usize);
+        }
+        let count = rng.int(2, 4) as usize;
+        for &(qx, qz) in &quarters[..count] {
+            let colour = pick(&mut rng);
+            let (w, d) = if rng.unit() < 0.6 { (2, 2) } else if rng.unit() < 0.5 { (2, 1) } else { (1, 2) };
+            add(qx + rng.int(0, 2 - w), qz + rng.int(0, 2 - d), w, d, 1, colour);
+        }
+        return;
+    }
 
     // Now and then a small rock, 0.3 m by 0.2 m and as high as 0.2 m, on its own.
     if rng.unit() < 0.12 {
@@ -132,6 +166,17 @@ mod tests {
     }
 
     #[test]
+    fn shingle_lies_thick_and_boulder_shores_carry_big_stones() {
+        let land = strewn(&column(Cover::Land, Biome::Alpine), mat::STONE, 3).iter().filter(|v| !v.is_empty()).count();
+        let shingle = strewn(&column(Cover::Shingle, Biome::Ocean), mat::GRAVEL, 3);
+        assert!(shingle.iter().filter(|v| !v.is_empty()).count() > land);
+        assert!(shingle.iter().flatten().all(|b| b.thin == 0 && b.hi[1] - b.lo[1] == 1));
+        let boulders = strewn(&column(Cover::Boulders, Biome::Ocean), mat::STONE, 3);
+        assert!(boulders.iter().filter(|v| !v.is_empty()).count() > 50);
+        assert!(boulders.iter().filter(|v| !v.is_empty()).all(|v| v[0].hi[0] - v[0].lo[0] == 3 && v[0].hi[1] - v[0].lo[1] >= 2));
+    }
+
+    #[test]
     fn stones_stay_in_their_column_and_never_overlap_or_fill_a_voxel() {
         let cases = [
             (column(Cover::RiverBed, Biome::Deciduous), mat::GRAVEL),
@@ -139,6 +184,8 @@ mod tests {
             (column(Cover::Beach, Biome::Ocean), mat::SAND),
             (column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath)),
             (column(Cover::Bank, Biome::Desert), mat::GRAVEL),
+            (column(Cover::Shingle, Biome::Ocean), mat::GRAVEL),
+            (column(Cover::Boulders, Biome::Ocean), mat::STONE),
         ];
         for (col, surface) in cases {
             let all = strewn(&col, surface, 3);

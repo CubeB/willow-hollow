@@ -103,6 +103,7 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
     match col.cover {
         Cover::RiverBed => (mat::GRAVEL, mat::GRAVEL),
         Cover::LakeBed => (mat::MUD, mat::MUD),
+        Cover::Beach | Cover::Dune if col.biome == Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
         Cover::Cliff => (mat::STONE, mat::STONE),
         Cover::Scree => (mat::SCREE, mat::SCREE),
