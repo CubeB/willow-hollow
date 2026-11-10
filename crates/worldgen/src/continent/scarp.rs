@@ -25,6 +25,8 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 
 /// Height of the stone banked against the foot of a face, as a share of the step.
 const TALUS: f32 = 0.28;
+/// Tallest face a step keeps above its talus, simulation units (about 14 m).
+const FACE: f32 = 18.0;
 /// Slope of that stone, rise over run.
 const TALUS_SLOPE: f32 = 0.75;
 /// Steps lower than this, in simulation units, stay the grid's slope; above the
@@ -156,18 +158,21 @@ impl Scarps {
         if strength <= 0.0 {
             return None;
         }
-        let talus = (step * TALUS + d * TALUS_SLOPE).max(0.0);
+        // The face stands at most FACE high: the rest of a big step is a long bank of
+        // fallen stone, as old scarps crumble back.
+        let banked = step * TALUS.max(1.0 - FACE / step.max(1.0));
+        let talus = (banked + d * TALUS_SLOPE).max(0.0);
         let sharp = if d >= 0.0 { step * fault_block(up) } else { talus };
         // Hand back to the grid's own surface at the edge of the reach.
         let fade = 1.0 - smoothstep(self.soft, reach, d.abs());
         let lift = (sharp - smooth) * strength * fade;
-        let height = step * (1.0 - TALUS) * strength;
+        let height = (step - banked) * strength;
         Some(Scarp {
             lift: lift * OLD_VOXEL,
             height: height * OLD_VOXEL,
             dist: d * OLD_VOXEL,
             face: strength > 0.5 && (0.0..0.75).contains(&d),
-            scree: if d < 0.0 && talus > 0.0 { (0.4 + 0.6 * talus / (step * TALUS)) * strength } else { 0.0 },
+            scree: if d < 0.0 && talus > 0.0 { (0.4 + 0.6 * talus / banked) * strength } else { 0.0 },
         })
     }
 }

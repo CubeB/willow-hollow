@@ -49,7 +49,7 @@ pub fn apply(seed: u32, shore: &Shore, slope: f32, wx: f64, wz: f64, ground: &mu
     // height (most of the way up to the highest ground nearby) and the clifftop apron.
     let foot = m(1.4) + m(1.2) * n(0x5ec1, 90.0);
     let shelf = m(0.15) + m(0.45) * n(0x5ec2, 40.0);
-    let height = ((shore.hinter - foot) * (0.6 + 0.25 * n(0x5ec3, 150.0))).clamp(0.0, m(34.0));
+    let height = ((shore.hinter - foot) * (0.5 + 0.2 * n(0x5ec3, 150.0))).clamp(0.0, m(22.0));
     let apron = height * (1.25 + 0.4 * n(0x5ec4, 120.0));
     // A ragged face: moving the height the face stands at moves it along the slope.
     let rough = n(0x5ec5, 12.0) * m(4.0) + n(0x5ec6, 4.0) * m(1.2) + (unit(hash2(seed ^ 0x5ec7, wx as i32, wz as i32)) - 0.5) * m(0.5);

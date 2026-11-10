@@ -180,6 +180,39 @@ pub struct Spawn {
     pub yaw: f32,
 }
 
+/// The overhanging rock over each padded column of a chunk column (see
+/// [`surface::overhang`]), indexed like `columns`.
+pub(crate) fn overhangs(seed: u32, sampler: &Sampler, columns: &[Column], (lx0, lz0): (i32, i32), (wx0, wz0): (i32, i32)) -> Vec<Option<(i32, i32)>> {
+    use surface::overhang::{REACH, Spot, slab};
+    // Every column the pass looks at: the padded ones and a ring around them.
+    let ring = REACH + 1;
+    let n = PAD as i32 + 2 * ring;
+    let spot = |c: &Column| Spot {
+        top: c.top(),
+        cliff: c.cover == Cover::Cliff,
+        open: c.water_surface().is_none() && c.cover != Cover::Trail && c.clear > m(1.5),
+        grown: matches!(c.cover, Cover::Land | Cover::Bank),
+    };
+    let mut spots = Vec::with_capacity((n * n) as usize);
+    for x in -ring..PAD as i32 + ring {
+        for z in -ring..PAD as i32 + ring {
+            spots.push(if (0..PAD as i32).contains(&x) && (0..PAD as i32).contains(&z) {
+                spot(&columns[x as usize * PAD + z as usize])
+            } else {
+                spot(&sampler.column(lx0 + x, lz0 + z))
+            });
+        }
+    }
+    let at = |wx: i32, wz: i32| spots[((wx - wx0 + ring) * n + wz - wz0 + ring) as usize];
+    let mut out = Vec::with_capacity(PAD * PAD);
+    for px in 0..PAD as i32 {
+        for pz in 0..PAD as i32 {
+            out.push(slab(seed, wx0 + px, wz0 + pz, &at));
+        }
+    }
+    out
+}
+
 /// The darker, weathered form of a cliff rock, for the streaks water leaves down a face.
 fn stained(rock: Voxel) -> Voxel {
     match rock {
@@ -438,6 +471,9 @@ impl GameWorld {
             lo = lo.min(s.lo.y);
         }
         hi = plants.iter().fold(hi, |top, p| top.max((p.lo[1]).div_euclid(CELLS)));
+        // Lips of rock jutting out over the ground in front of some faces.
+        let overhangs = overhangs(self.seed, &sampler, &columns, (lx0, lz0), (wx0, wz0));
+        hi = overhangs.iter().flatten().fold(hi, |top, s| top.max(s.1));
 
         // Only chunks that can hold a visible face: from just under the lowest ground
         // to the highest ground or water or tree top.
@@ -458,30 +494,38 @@ impl GameWorld {
                         let (fx, fz) = (wx as f64, wz as f64);
                         let tilt = surface::strata_tilt(self.seed, fx, fz);
                         // Weathering streaks hang down from the lip where water runs
-                        // over it: narrow in plan, so long and vertical on the face.
-                        let streak = perlin2(self.seed ^ 0x57b1, fx / m64(2.2), fz / m64(2.2));
+                        // over it: narrow in plan, so long and vertical on the face. Only
+                        // a few, and only where water gathers.
+                        let streak = perlin2(self.seed ^ 0x57b1, fx / m64(2.6), fz / m64(2.6));
+                        let wet = perlin2(self.seed ^ 0x57b3, fx / m64(30.0), fz / m64(30.0));
                         let run = (perlin2(self.seed ^ 0x57b2, fx / m64(9.0), fz / m64(9.0)) * 0.5 + 0.5).clamp(0.0, 1.0);
-                        let stain = if streak > 0.22 { m(2.0) + m(14.0) * run } else { 0.0 };
+                        let stain = if streak > 0.4 && wet > 0.05 { m(1.5) + m(9.0) * run } else { 0.0 };
                         (tilt, stain)
                     });
                     // Layer edges are ragged: some voxels take the layer above or below.
                     let rock_at = |y: i32, (tilt, stain): (f32, f32)| {
                         let h = hash3(self.seed ^ 0x57a9, wx, y, wz);
-                        let jitter = if unit(h) < 0.3 { (h % 3) as i32 - 1 } else { 0 };
-                        let mut ly = y + jitter * 2;
-                        // Some layers carry a thin bed of other rock in their upper half,
-                        // so the strata are not all one thickness.
-                        let s = ly as f32 + tilt;
+                        let jitter = if unit(h) < 0.25 { (h % 3) as f32 - 1.0 } else { 0.0 };
+                        // Beds of uneven thickness (see `strata_height`); some carry a
+                        // thin bed of other rock in their upper half.
+                        let s = surface::strata_height(self.seed, y as f32 + jitter, tilt);
                         let band = (s / 4.0).floor() as i32;
+                        let mut ly = s.floor() as i32;
                         if s - band as f32 * 4.0 >= 2.0 && unit(hash3(self.seed ^ 0x57b0, band, 5, 0)) < 0.28 {
                             ly += 4 * 37;
                         }
-                        let rock = mat::strata(self.seed, col.biome, ly, tilt);
+                        let rock = mat::strata(self.seed, col.biome, ly, 0.0);
                         if (top - y) as f32 >= stain { rock } else { stained(rock) }
                     };
+                    let slab = overhangs.get(px * PAD + pz).copied().flatten();
+                    let slab_rock = slab.map(|_| rock.unwrap_or((surface::strata_tilt(self.seed, wx as f64, wz as f64), 0.0)));
                     for (py, v) in chunk.column_mut(px, pz).iter_mut().enumerate() {
                         let y = base + py as i32;
-                        *v = if y > top {
+                        *v = if let (Some((a, b)), Some(r)) = (slab, slab_rock)
+                            && (a..=b).contains(&y)
+                        {
+                            rock_at(y, r)
+                        } else if y > top {
                             if y <= water_top { mat::WATER } else { AIR }
                         } else if y == top {
                             match rock {
