@@ -10,7 +10,10 @@ use std::f32::consts::TAU;
 use glam::IVec3;
 use voxel::{AIR, Voxel};
 
-use super::shape::{Rng, Shape};
+use super::{
+    parts,
+    shape::{Rng, Shape},
+};
 use crate::{biome::Biome, materials as mat, scale::m};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,6 +80,8 @@ pub struct Palette {
     pub accent: Voxel,
     /// Share of exposed stonework that has gone green.
     pub moss: f32,
+    /// The biome this palette suits, for choosing among its alternatives.
+    pub biome: Biome,
 }
 
 impl Palette {
@@ -90,6 +95,7 @@ impl Palette {
             roof,
             accent,
             moss,
+            biome,
         };
         match biome {
             Desert | Savanna => Palette {
@@ -100,6 +106,7 @@ impl Palette {
                 roof: mat::THATCH,
                 accent: mat::CLOTH_RED,
                 moss: 0.0,
+                biome,
             },
             Alpine | Tundra | Ocean => stone(mat::BARK_PINE, mat::PLANK_DARK, mat::SLATE, mat::CLOTH_BLUE, 0.04),
             Taiga => stone(mat::BARK_PINE, mat::PLANK_DARK, mat::SLATE, mat::CLOTH_BLUE, 0.2),
@@ -108,6 +115,34 @@ impl Palette {
             Heath | Grassland => stone(mat::BARK_OAK, mat::PLANK, mat::THATCH, mat::CLOTH_BLUE, 0.14),
             Deciduous | Woodland => stone(mat::BARK_OAK, mat::PLANK, mat::ROOF_TILE, mat::CLOTH_RED, 0.3),
         }
+    }
+
+    /// This palette with its choices varied by `seed`: each place draws its roof, timber,
+    /// accent colour and stonework from what suits the biome, so neighbouring structures
+    /// belong together without being copies of one another.
+    pub fn varied(mut self, seed: u32) -> Self {
+        use Biome::*;
+        let h = seed.wrapping_mul(0x9e37_79b1) ^ 0x5bd1_e995;
+        let pick = |list: &[Voxel], k: u32| list[((h >> (k * 4)) as usize) % list.len()];
+        let (roofs, planks): (&[Voxel], &[Voxel]) = match self.biome {
+            Desert | Savanna => (&[mat::THATCH, mat::THATCH, mat::PLANK_PALE], &[mat::PLANK_PALE, mat::PLANK]),
+            Alpine | Tundra | Ocean | Taiga => (&[mat::SLATE, mat::SLATE, mat::PLANK_DARK], &[mat::PLANK_DARK, mat::PLANK]),
+            OldGrowth | Rainforest => (&[mat::THATCH, mat::THATCH, mat::PLANK_RED], &[mat::PLANK_RED, mat::PLANK_PALE]),
+            Heath | Grassland => (&[mat::THATCH, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
+            Deciduous | Woodland => (&[mat::ROOF_TILE, mat::ROOF_TILE, mat::THATCH, mat::SLATE], &[mat::PLANK, mat::PLANK_PALE]),
+        };
+        self.roof = pick(roofs, 0);
+        self.plank = pick(planks, 1);
+        self.accent = pick(&[mat::CLOTH_RED, mat::CLOTH_BLUE, mat::CLOTH_PALE, self.accent], 2);
+        // Where the forest has pale bark the timber is pale too.
+        if matches!(self.biome, Deciduous | Woodland | Heath | Grassland) && (h >> 12) % 4 == 0 {
+            self.wood = mat::BARK_BIRCH;
+        }
+        // Some places are built mostly of the darker rock, never in the desert.
+        if !matches!(self.biome, Desert | Savanna) && (h >> 16) % 5 == 0 {
+            std::mem::swap(&mut self.stone, &mut self.stone_dark);
+        }
+        self
     }
 
     /// A block of weathered stonework.
@@ -144,11 +179,11 @@ fn footing(s: &mut Shape, lo: (i32, i32), hi: (i32, i32), mut f: impl FnMut() ->
     cuboid(s, v(lo.0, -4, lo.1), v(hi.0, -1, hi.1), |_| f());
 }
 
-/// A lit lamp on top of a post rising from `base`.
-fn lamp_post(s: &mut Shape, x: i32, z: i32, height: i32, wood: Voxel, cap: Voxel) {
-    cuboid(s, v(x, -3, z), v(x, height - 1, z), |_| wood);
-    s.set(v(x, height, z), mat::LANTERN);
-    s.set(v(x, height + 1, z), cap);
+/// A lamp post at block (x, z), in a style that varies by landmark, built in 0.4 m voxels.
+fn lamp_post(s: &mut Shape, rng: &mut Rng, p: &Palette, x: i32, z: i32, height: i32) {
+    let style = parts::LampStyle::pick(rng.next_u32());
+    let b = crate::scale::BLOCK;
+    parts::paint_lantern(s, style, p, v(x * b, 0, z * b), height * b, rng.int(0, 3) as u32);
 }
 
 fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
@@ -162,6 +197,16 @@ fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
                 cuboid(s, v(x, 1, -1), v(x, h, 1), |_| p.stone_dark);
             }
             cuboid(s, v(-3, h + 1, -2), v(3, h + 1, 2), |_| p.roof);
+            // The roof's upper layer sits inside its edge, leaving a one-voxel lip all round.
+            let bk = crate::scale::BLOCK;
+            let top = (h + 1) * bk + bk - 1;
+            for x in -3 * bk..=3 * bk + bk - 1 {
+                for z in -2 * bk..=2 * bk + bk - 1 {
+                    if x == -3 * bk || x == 3 * bk + bk - 1 || z == -2 * bk || z == 2 * bk + bk - 1 {
+                        s.paint(v(x, top, z), AIR);
+                    }
+                }
+            }
             cuboid(s, v(-1, 1, 0), v(1, 1, 0), |_| p.stone);
             s.set(v(0, 2, 0), mat::LANTERN);
         }
@@ -320,7 +365,8 @@ fn camp(s: &mut Shape, rng: &mut Rng, p: &Palette) {
             s.set(v(tx + w, y, z), cloth);
         }
     }
-    lamp_post(s, 5, 5, rng.int(2, 3), p.wood, p.wood);
+    let lamp_height = rng.int(2, 3);
+    lamp_post(s, rng, p, 5, 5, lamp_height);
     if rng.unit() < 0.5 {
         cuboid(s, v(4, 0, 2), v(4, 1, 3), |_| p.plank);
     }
@@ -515,27 +561,37 @@ fn hut(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     for x in [-w, w] {
         s.set(v(x, 1, 0), mat::LANTERN);
     }
-    // A gabled roof, overhanging at the eaves.
-    for ridge in 0..=w + 1 {
-        let y = h + (w + 1 - ridge);
-        for z in -d - 1..=d + 1 {
-            s.set(v(ridge, y, z), p.roof);
-            s.set(v(-ridge, y, z), p.roof);
+    // A gabled roof built in voxels, not blocks: a 45 degree pitch, two voxels thick, with
+    // an overhang at the eaves and a timber ridge cap. The walls are blocks 2 voxels wide
+    // and centred on x = 0.5, so the roof is symmetric about that line.
+    let b = crate::scale::BLOCK;
+    let eave = h * b;
+    let half = w * b + 1 + 2;
+    let height_at = |x: i32| eave + half - ((x as f32 - 0.5).abs().ceil() as i32 - 0).max(0) - 1;
+    for x in -half..=half + 1 {
+        let top = height_at(x);
+        for z in -(d + 1) * b..=(d + 1) * b + b - 1 {
+            s.paint(v(x, top, z), p.roof);
+            s.paint(v(x, top - 1, z), p.roof);
         }
     }
-    // Gable ends.
-    for y in h..h + w + 1 {
-        let half = w + h - y;
-        for x in -half..=half {
-            for z in [-d, d] {
-                s.set(v(x, y, z), wall(rng));
+    for z in -(d + 1) * b..=(d + 1) * b + b - 1 {
+        for x in [0, 1] {
+            s.paint(v(x, height_at(x) + 1, z), p.wood);
+        }
+    }
+    // Gable ends: the wall carried up under the roof.
+    for x in -(w * b)..=w * b + 1 {
+        for y in eave..height_at(x) - 1 {
+            for z in [-d * b, -d * b + 1, d * b, d * b + 1] {
+                s.paint(v(x, y, z), if stone_walls { p.stone } else { p.plank });
             }
         }
     }
     // Chimney.
     let (cx, cz) = (w - 1, -d + 1);
     cuboid(s, v(cx, 0, cz), v(cx, h + w + 2, cz), |_| p.stone_dark);
-    lamp_post(s, 2, d + 3, 2, p.wood, p.roof);
+    lamp_post(s, rng, p, 2, d + 3, 2);
 }
 
 /// A pier running out along +X from the shore at the origin, `length` long.
@@ -549,7 +605,7 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
         }
     }
     cuboid(s, v(-1, -3, -1), v(-1, -1, 1), |_| p.stone_dark);
-    lamp_post(s, length - 1, 2, 3, p.wood, p.wood);
+    lamp_post(s, rng, p, length - 1, 2, 3);
     if rng.unit() < 0.6 {
         cuboid(s, v(length - 3, 1, -1), v(length - 2, 1, -1), |_| p.plank);
     }
@@ -557,6 +613,7 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
 
 /// Builds a landmark. `length` only matters for landings: the length of the pier.
 pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(IVec3, Voxel)> {
+    let palette = &palette.varied(seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::new();
     match kind {
@@ -570,14 +627,24 @@ pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(
         Landmark::Hut => hut(&mut s, &mut rng, palette),
         Landmark::Landing => landing(&mut s, &mut rng, palette, length),
     }
+    // Break up the hard block outline of the stonework.
+    let chip = match kind {
+        Landmark::Ruins | Landmark::Stones => 0.22,
+        Landmark::Cairn => 0.3,
+        Landmark::Arch | Landmark::Shrine => 0.16,
+        Landmark::Lookout | Landmark::Hut => 0.08,
+        _ => 0.0,
+    };
+    if chip > 0.0 {
+        parts::weather_stone(&mut s, &mut rng, palette, chip);
+    }
     s.into_voxels()
 }
 
-/// A lamp on a post beside a trail.
-pub fn trail_lantern(palette: &Palette, height: i32) -> Vec<(IVec3, Voxel)> {
-    let mut s = Shape::new();
-    lamp_post(&mut s, 0, 0, height, palette.wood, palette.roof);
-    s.into_voxels()
+/// A lamp on a post beside a trail, in the style `hash` picks.
+pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, Voxel)> {
+    let palette = palette.varied(hash);
+    parts::lantern(parts::LampStyle::pick(hash >> 3), &palette, height * crate::scale::BLOCK, hash >> 7 & 3)
 }
 
 /// A signpost: one arm per direction, each direction in radians.
@@ -608,6 +675,44 @@ mod tests {
             assert_eq!(a, build(kind, &palette, 7, 12), "{kind:?} is not deterministic");
             let differs = (8..40).any(|seed| build(kind, &palette, seed, 12) != a);
             assert!(differs, "{kind:?} never varies");
+        }
+    }
+
+    #[test]
+    fn every_lantern_style_is_lit_deterministic_and_stands_on_its_footing() {
+        for biome in [Biome::Desert, Biome::Deciduous, Biome::Taiga, Biome::OldGrowth] {
+            let p = Palette::of(biome);
+            for style in parts::LampStyle::ALL {
+                for turns in 0..4 {
+                    let a = parts::lantern(style, &p, 8, turns);
+                    assert_eq!(a, parts::lantern(style, &p, 8, turns));
+                    let lights = a.iter().filter(|&&(_, v)| v == mat::LANTERN).count();
+                    assert!(lights == 1 || (style == parts::LampStyle::Pair && lights == 2), "{style:?}: {lights} lights");
+                    // Rooted below the ground, and in one piece: every voxel touches another.
+                    assert!(a.iter().any(|&(q, _)| q == v(0, -3, 0)));
+                    let set: std::collections::HashSet<_> = a.iter().map(|&(q, _)| q).collect();
+                    for &(q, _) in &a {
+                        let touches = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z]
+                            .iter()
+                            .any(|d| set.contains(&(q + *d)));
+                        assert!(touches, "{style:?} turns {turns}: {q:?} floats");
+                    }
+                }
+            }
+        }
+        // Trail lanterns differ in style along a trail.
+        let p = Palette::of(Biome::Deciduous);
+        let styles: std::collections::HashSet<_> = (0..64u32).map(|h| trail_lantern(&p, 3, h.wrapping_mul(2654435761))).collect::<Vec<_>>().into_iter().map(|l| l.len()).collect();
+        assert!(styles.len() >= 3, "lanterns all look alike");
+    }
+
+    #[test]
+    fn palettes_vary_by_place_but_stay_in_the_biome() {
+        let roofs: std::collections::HashSet<_> = (0..40).map(|s| Palette::of(Biome::Deciduous).varied(s).roof).collect();
+        assert!(roofs.len() >= 2);
+        for seed in 0..40 {
+            let d = Palette::of(Biome::Desert).varied(seed);
+            assert_eq!((d.stone, d.stone_dark), (mat::SANDSTONE, mat::SANDSTONE_DARK));
         }
     }
 

@@ -65,6 +65,8 @@ struct ColumnResult {
     /// Whether the small plants are in these meshes.
     planted: bool,
     cascades: Vec<Cascade>,
+    /// Lit lantern voxels in these chunks, in world voxels.
+    lamps: Vec<IVec3>,
     gen_ms: f32,
     mesh_ms: f32,
 }
@@ -120,6 +122,8 @@ pub struct Streamer {
     arena: VertexArena,
     /// Cascade lips in each loaded column, for spray and sound.
     cascades: HashMap<Col, Vec<Cascade>>,
+    /// Lantern voxels in each loaded column, to light the ground around them.
+    lamps: HashMap<Col, Vec<IVec3>>,
     pending: HashSet<Col>,
     /// Columns still to request, farthest first (so the nearest is popped first).
     wanted: Vec<Col>,
@@ -144,6 +148,9 @@ const PLANT_COLUMNS: i32 = (PLANT_REACH / CHUNK as f32) as i32 + 3;
 const COLUMN_BYTES: u64 = 130 << 10;
 /// Roughly how much of that the coarse rings add, as a share of the full-size columns.
 const RINGS_SHARE: f64 = 1.2;
+/// Room reserved beyond that, for rugged or densely wooded land whose meshes run
+/// larger than average. Growing later means a stall while everything is copied.
+const HEADROOM: f64 = 1.5;
 
 impl Streamer {
     pub fn new(gpu: &Gpu, world: Arc<GameWorld>, radius: i32) -> Self {
@@ -158,7 +165,7 @@ impl Streamer {
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();
-        let expected = (std::f64::consts::PI * (radius * radius) as f64 * (1.0 + RINGS_SHARE)) as u64 * COLUMN_BYTES;
+        let expected = (std::f64::consts::PI * (radius * radius) as f64 * (1.0 + RINGS_SHARE) * HEADROOM) as u64 * COLUMN_BYTES;
         Self {
             world,
             models: Arc::default(),
@@ -169,6 +176,7 @@ impl Streamer {
             bare: HashSet::new(),
             arena: VertexArena::new(gpu, "chunk arena", expected, 4 * size_of::<Vertex>() as u64),
             cascades: HashMap::new(),
+            lamps: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
             center: None,
@@ -254,6 +262,18 @@ impl Streamer {
             .filter(move |c| (c.pos.x - p.x).hypot(c.pos.z - p.z) <= radius)
     }
 
+    /// Lantern voxels within `radius` voxels of `pos` (horizontally), from loaded columns.
+    pub fn lamps_near(&self, pos: DVec3, radius: f32) -> impl Iterator<Item = IVec3> + '_ {
+        let r = (radius / CHUNK as f32).ceil() as i32 + 1;
+        let (cx, cz) = ((pos.x / CHUNK as f64).floor() as i32, (pos.z / CHUNK as f64).floor() as i32);
+        (-r..=r)
+            .flat_map(move |dz| (-r..=r).map(move |dx| (0, cx + dx, cz + dz)))
+            .filter_map(move |col| self.lamps.get(&col))
+            .flatten()
+            .copied()
+            .filter(move |p| ((p.x as f64 - pos.x).hypot(p.z as f64 - pos.z)) <= radius as f64)
+    }
+
     /// Call once per frame. Uploads finished columns for about `upload_ms` at most.
     pub fn update(&mut self, gpu: &Gpu, cam: DVec3, upload_ms: f32) {
         let center = (
@@ -305,6 +325,11 @@ impl Streamer {
                     if !result.cascades.is_empty() {
                         self.cascades.insert(result.col, result.cascades);
                     }
+                    if result.lamps.is_empty() {
+                        self.lamps.remove(&result.col);
+                    } else {
+                        self.lamps.insert(result.col, result.lamps);
+                    }
                 }
                 // Skipped by the worker but wanted again by now: put it back in the queue.
                 None if self.focus.in_range(result.col, 0) => self.wanted.push(result.col),
@@ -341,6 +366,7 @@ impl Streamer {
             keep
         });
         self.cascades.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
+        self.lamps.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.bare.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
         if self.columns.len() != before {
             self.recount();
@@ -450,6 +476,27 @@ impl Streamer {
     }
 }
 
+/// The lit voxels (lanterns, embers) in a column's chunks, in world voxels.
+fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Materials) -> Vec<IVec3> {
+    use voxel::PAD;
+    let lit: Vec<bool> = (0..mats.len()).map(|i| mats.get(i as voxel::Voxel).emissive).collect();
+    let mut out = Vec::new();
+    for (cy, chunk) in chunks {
+        let voxels = chunk.voxels();
+        for (i, &v) in voxels.iter().enumerate() {
+            if !lit[v as usize] {
+                continue;
+            }
+            // Index order is (x * PAD + z) * PAD + y, with a one-voxel border.
+            let (y, z, x) = (i % PAD, (i / PAD) % PAD, i / (PAD * PAD));
+            if (1..=CHUNK as usize).contains(&x) && (1..=CHUNK as usize).contains(&z) && (1..=CHUNK as usize).contains(&y) {
+                out.push(IVec3::new(col.1 * CHUNK + x as i32 - 1, cy * CHUNK + y as i32 - 1, col.2 * CHUNK + z as i32 - 1));
+            }
+        }
+    }
+    out
+}
+
 fn in_plant_range(col: Col, center: (i32, i32), columns: i32) -> bool {
     let (dx, dz) = (col.1 - center.0, col.2 - center.1);
     dx * dx + dz * dz <= columns * columns
@@ -468,6 +515,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             chunks: None,
             planted: false,
             cascades: Vec::new(),
+            lamps: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
         };
@@ -492,11 +540,13 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         .filter(|(_, mesh)| !mesh.is_empty())
         .collect();
     let t2 = Instant::now();
+    let lamps = lamp_voxels(&output.chunks, col, world.materials());
     ColumnResult {
         col,
         chunks: Some(chunks),
         planted: plants,
         cascades: output.cascades,
+        lamps,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
     }
@@ -519,6 +569,7 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         // Coarse columns never need building again with plants.
         planted: true,
         cascades: Vec::new(),
+        lamps: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
     }

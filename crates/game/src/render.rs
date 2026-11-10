@@ -57,6 +57,8 @@ struct Globals {
     wind: [f32; 4],
     /// Nearest glowing particles (fireflies): camera-relative xyz, glow in w.
     lights: [[f32; 4]; 4],
+    /// The nearest lanterns: camera-relative xyz, 1 in w (0 = unused).
+    lamps: [[f32; 4]; 4],
     /// x: the date, 0..1 from the spring equinox. y: snow cover. z: ice on water.
     season: [f32; 4],
     /// x: how wet the ground is.
@@ -85,6 +87,21 @@ struct CascadeView {
     texel: f32,
     camera: DVec3,
     fwd: Vec3,
+}
+
+/// The four lantern voxels nearest the camera, relative to it.
+fn nearest_lamps(lamps: &[DVec3], camera: DVec3) -> [[f32; 4]; 4] {
+    let mut best = [([0.0f32; 4], f64::MAX); 4];
+    for &p in lamps {
+        // The middle of the voxel.
+        let d = p + DVec3::splat(0.5) - camera;
+        let d2 = d.length_squared();
+        if d2 < best[3].1 {
+            best[3] = ([d.x as f32, d.y as f32, d.z as f32, 1.0], d2);
+            best.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+    }
+    best.map(|b| b.0)
 }
 
 /// The few brightest-and-nearest glowing particles, which light the ground around them.
@@ -148,6 +165,8 @@ pub struct Scene<'a> {
     pub wind: Vec3,
     /// Snow, ice and wetness on the ground.
     pub ground: crate::season::Ground,
+    /// Lit lantern voxels near the camera (world voxels), which light the ground around them.
+    pub lamps: &'a [DVec3],
 }
 
 #[derive(Default, Clone, Copy)]
@@ -794,7 +813,7 @@ impl Renderer {
 
         let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
         let sea_vertex = |x: f32, z: f32| FarVertex {
-            pos: [x, -0.125, z],
+            pos: [x, crate::farview::SEA_LEVEL, z],
             color: sea_color,
             flags: crate::farview::FLAG_WATER,
             grad: [0, 0],
@@ -1209,6 +1228,7 @@ impl Renderer {
             ],
             wind: v4(scene.wind, 0.0),
             lights: nearest_glows(scene.particles),
+            lamps: nearest_lamps(scene.lamps, camera.pos),
             season: [env.date, scene.ground.snow, scene.ground.frozen, 0.0],
             weather: [scene.ground.wet, 0.0, 0.0, 0.0],
         };
@@ -1673,6 +1693,7 @@ pub fn screenshot(
     props: &[ParticleInstance],
     wind: Vec3,
     ground: crate::season::Ground,
+    lamps: &[DVec3],
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -1716,6 +1737,7 @@ pub fn screenshot(
         props,
         wind,
         ground,
+        lamps,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(

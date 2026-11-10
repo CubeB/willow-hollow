@@ -7,7 +7,11 @@
 //! spanning many chunks is stamped identically by each of them.
 
 pub mod aquatic;
+pub mod attach;
+pub mod climber;
 pub mod landmarks;
+pub mod moss;
+pub mod parts;
 pub mod pebbles;
 pub mod plants;
 pub mod shape;
@@ -469,6 +473,22 @@ pub fn stamp(lib: &Library, mats: &Materials, p: &Placement, mut set: impl FnMut
         let force = mats.get(v).kind == Kind::Solid;
         set(q, v, force);
     }
+}
+
+/// The voxel a placed feature has at world position `q`, if any: the same answer
+/// [`stamp`] gives, for reading a feature without stamping it.
+pub fn model_voxel(lib: &Library, p: &Placement, q: IVec3) -> Option<Voxel> {
+    let t = lib.get(p.species, p.variant);
+    let d = q - p.pos;
+    if d.x.abs().max(d.z.abs()) > t.reach || q.y > p.top(lib) || q.y < p.bottom() {
+        return None;
+    }
+    let mut turned = d;
+    if let Some(lie) = &p.lie {
+        turned.y -= lie.height_at(d.x, d.z)?;
+    }
+    let offset = rotate(turned, p.turns.wrapping_neg());
+    t.voxels.binary_search_by_key(&(offset.y, offset.x, offset.z), |(v, _)| (v.y, v.x, v.z)).ok().map(|i| t.voxels[i].1)
 }
 
 /// How high a feature's top can be above its origin, over all templates. Chunk

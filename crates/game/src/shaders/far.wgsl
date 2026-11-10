@@ -83,7 +83,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // The season: a far forest turns and goes bare, grass dries, snow settles.
         let world = in.rel.xz + G.cam_wrapped.xz;
         var base = season_far_ground(in.color, in.kind > 0.002, world, G.season.x);
-        base = ground_weather(base, up, in.rel, 0.5, false, false);
+        base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0);
         color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.
         color *= 1.0 - clamp(steep * 0.9, 0.0, 0.35);

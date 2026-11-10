@@ -838,6 +838,7 @@ impl Running {
         self.cpu.lap(3);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         let scene = render::Scene {
@@ -850,6 +851,7 @@ impl Running {
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
             ground: season::Ground::at(self.env.date, self.warmth, self.weather.snowpack, self.weather.wet),
+            lamps: &lamps,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
         self.cpu.lap(4);
@@ -1178,6 +1180,7 @@ fn main() -> Result<()> {
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
         log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet));
+        let lamps: Vec<DVec3> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         render::screenshot(
             &gpu,
             path,
@@ -1191,6 +1194,7 @@ fn main() -> Result<()> {
             &props,
             particles.wind.lagged * OLD_VOXEL,
             season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet),
+            &lamps,
         )?;
         let s = streamer.stats;
         log::info!(

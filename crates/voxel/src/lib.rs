@@ -116,7 +116,8 @@ pub mod plant {
     pub const GRASS: u8 = 4;
     /// Blooms and mushrooms: gone in winter.
     pub const FLOWER: u8 = 5;
-    /// Ivy and vines: stay.
+    /// Wood (bark and planks), ivy and vines: the seasons leave their colour alone, and
+    /// snow only dusts them.
     pub const VINE: u8 = 6;
     /// Ground cover coloured like grass: it dries and yellows with the grass, but is
     /// solid ground, so it is never buried or dropped.

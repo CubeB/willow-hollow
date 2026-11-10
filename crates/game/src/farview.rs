@@ -282,6 +282,40 @@ fn cell_color(c: &Continent, mats: &voxel::Materials, i: usize, slope: f32) -> (
     (color(v), 0)
 }
 
+/// Whether the far surface shows water at continent-local voxel `(lx, lz)`: a lake its
+/// coarse grid spreads over the shore, or land it lays below the sea. The true shore
+/// can lie well inside either, so things standing there are better left out.
+pub fn shows_water(c: &Continent, lx: f32, lz: f32) -> bool {
+    let cs = c.cell_size();
+    let max = (c.size - 1) as f32;
+    let (fx, fz) = ((lx / cs - 0.5).clamp(0.0, max), (lz / cs - 0.5).clamp(0.0, max));
+    let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
+    let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+    let (mut lake, mut height, mut ocean) = (0.0, 0.0, false);
+    for (dx, dz, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
+        let i = (z0 + dz) * c.size + x0 + dx;
+        ocean |= c.ocean[i];
+        if c.lake[i] != NO_LAKE {
+            lake += w;
+            height += w * surface::pool_level(c.desc.seed, c.lake[i]) as f32;
+        } else {
+            height += w * land_y(c.height[i] * OLD_VOXEL);
+        }
+    }
+    // The shader paints water only close to a lake's own vertices; half way is generous,
+    // allowing for the voxel shore not matching the grid.
+    lake > 0.5 || (ocean && height < SEA_LEVEL + 1.0)
+}
+
+/// Where the sea plane lies.
+pub const SEA_LEVEL: f32 = -0.125;
+
+/// The far surface's height for land whose ground is at `h`: sunk a little, but never
+/// from above the sea to below it, or low-lying land would be drowned by the sea plane.
+fn land_y(h: f32) -> f32 {
+    (h - SINK).max(h.min(SEA_LEVEL + 0.2))
+}
+
 fn near_ocean(c: &Continent, i: usize) -> bool {
     let s = c.size as isize;
     [-1, 1, -s, s]
@@ -335,7 +369,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                         lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
                             .filter(|_| c.temperature[idx] >= 0.13 && gx.hypot(gz) <= 1.6)
                             .map_or(0.0, |(_, cover, height)| cover * height * 0.6 * OLD_VOXEL);
-                        h(x, z) - SINK
+                        land_y(h(x, z))
                     };
                     if flags == 0 {
                         // Carried to the shader, which raises it only beyond the tree models.
