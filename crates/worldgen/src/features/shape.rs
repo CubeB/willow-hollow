@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use glam::{IVec3, Vec3};
-use voxel::Voxel;
+use voxel::{Voxel, mesh::PlantBox};
 
 use crate::{
     noise::{hash3, unit},
@@ -60,6 +60,9 @@ pub struct Shape {
     block: i32,
     /// For models that lie along the ground: from the origin to the far end, in voxels.
     axis: Option<IVec3>,
+    /// Fine parts drawn as plant boxes alongside the voxels (lantern frames, chains and
+    /// the like), in model cells of 1/CELLS voxel. Only raw models carry them.
+    fine: Vec<PlantBox>,
 }
 
 impl Default for Shape {
@@ -76,6 +79,7 @@ impl Shape {
             unit: OLD_VOXEL,
             block: BLOCK,
             axis: None,
+            fine: Vec::new(),
         }
     }
 
@@ -86,6 +90,7 @@ impl Shape {
             unit: 1.0,
             block: 1,
             axis: None,
+            fine: Vec::new(),
         }
     }
 
@@ -199,6 +204,16 @@ impl Shape {
         let mut v: Vec<IVec3> = self.voxels.keys().copied().collect();
         v.sort_unstable_by_key(|p| (p.y, p.x, p.z));
         v
+    }
+
+    /// Adds a fine part, in model cells.
+    pub fn add_fine(&mut self, part: PlantBox) {
+        self.fine.push(part);
+    }
+
+    /// Takes the fine parts added so far, in the order they were added.
+    pub fn take_fine(&mut self) -> Vec<PlantBox> {
+        std::mem::take(&mut self.fine)
     }
 
     /// Removes air voxels used to carve hollows.

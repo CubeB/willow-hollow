@@ -768,6 +768,11 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
 
 /// Builds a landmark. `length` only matters for landings: the length of the pier.
 pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(IVec3, Voxel)> {
+    build_parts(kind, palette, seed, length).0
+}
+
+/// [`build`], with the fine parts (0.1 m boxes of its lamp posts, in model cells).
+pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = &palette.varied(seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();
@@ -793,13 +798,19 @@ pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(
     if chip > 0.0 {
         parts::weather_stone(&mut s, &mut rng, palette, chip);
     }
-    s.into_voxels()
+    let fine = s.take_fine();
+    (s.into_voxels(), fine)
 }
 
 /// A lamp on a post beside a trail, in the style `hash` picks.
 pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, Voxel)> {
+    trail_lantern_parts(palette, height, hash).0
+}
+
+/// [`trail_lantern`], with its fine parts in model cells.
+pub fn trail_lantern_parts(palette: &Palette, height: i32, hash: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = palette.varied(hash);
-    parts::lantern(parts::LampStyle::pick(hash >> 3), &palette, height * crate::scale::BLOCK, hash >> 7 & 3)
+    parts::lantern_parts(parts::LampStyle::pick_trail(hash >> 3), &palette, height * crate::scale::BLOCK, hash >> 7 & 3)
 }
 
 /// A signpost: a post with a cap, and one board per direction pointing along it, each

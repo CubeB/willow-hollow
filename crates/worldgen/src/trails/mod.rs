@@ -14,7 +14,7 @@ pub mod sites;
 use std::collections::HashMap;
 
 use glam::{IVec3, Vec2, Vec3};
-use voxel::{CHUNK, Voxel};
+use voxel::{CHUNK, Voxel, mesh::{CELLS, PlantBox}};
 
 pub use build::build;
 
@@ -51,6 +51,9 @@ pub struct Stamp {
     pub lo: IVec3,
     pub hi: IVec3,
     pub voxels: Vec<(IVec3, Voxel)>,
+    /// Fine parts (lantern frames, chains and the like) in continent-local cells of
+    /// 1/CELLS voxel. `lo` and `hi` cover these too.
+    pub fine: Vec<PlantBox>,
 }
 
 /// Where a boat is tied up.
@@ -118,11 +121,20 @@ impl Network {
     }
 
     fn add_stamp(&mut self, voxels: Vec<(IVec3, Voxel)>) {
+        self.add_stamp_with(voxels, Vec::new());
+    }
+
+    /// A stamp with fine parts, in continent-local cells.
+    fn add_stamp_with(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
         let Some(&(first, _)) = voxels.first() else { return };
         let (mut lo, mut hi) = (first, first);
         for (p, _) in &voxels {
             lo = lo.min(*p);
             hi = hi.max(*p);
+        }
+        for b in &fine {
+            lo = lo.min(IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)));
+            hi = hi.max((IVec3::from_array(b.hi) - 1).div_euclid(IVec3::splat(CELLS)));
         }
         let id = self.stamps.len() as u32;
         // The one-voxel chunk border means a stamp also touches chunks a voxel beyond.
@@ -131,7 +143,7 @@ impl Network {
                 self.stamp_index.entry((cx, cz)).or_default().push(id);
             }
         }
-        self.stamps.push(Stamp { lo, hi, voxels });
+        self.stamps.push(Stamp { lo, hi, voxels, fine });
     }
 
     /// Trail points and pads that can affect the square from `lo` to `hi`.
