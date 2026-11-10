@@ -144,6 +144,9 @@ const PLANT_COLUMNS: i32 = (PLANT_REACH / CHUNK as f32) as i32 + 3;
 const COLUMN_BYTES: u64 = 130 << 10;
 /// Roughly how much of that the coarse rings add, as a share of the full-size columns.
 const RINGS_SHARE: f64 = 1.2;
+/// Room reserved beyond that, for rugged or densely wooded land whose meshes run
+/// larger than average. Growing later means a stall while everything is copied.
+const HEADROOM: f64 = 1.5;
 
 impl Streamer {
     pub fn new(gpu: &Gpu, world: Arc<GameWorld>, radius: i32) -> Self {
@@ -158,7 +161,7 @@ impl Streamer {
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();
-        let expected = (std::f64::consts::PI * (radius * radius) as f64 * (1.0 + RINGS_SHARE)) as u64 * COLUMN_BYTES;
+        let expected = (std::f64::consts::PI * (radius * radius) as f64 * (1.0 + RINGS_SHARE) * HEADROOM) as u64 * COLUMN_BYTES;
         Self {
             world,
             models: Arc::default(),

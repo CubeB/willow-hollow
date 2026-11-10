@@ -22,6 +22,7 @@ use worldgen::{
 
 use crate::{
     arena::{MeshSpan, VertexArena},
+    farview,
     gfx::Gpu,
     lod,
 };
@@ -268,7 +269,10 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
     for p in features::place(world.seed(), lib, &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE)) {
         // Each tree belongs to the square its trunk is in.
         let inside = (x0..x0 + TILE).contains(&p.pos.x) && (z0..z0 + TILE).contains(&p.pos.z);
-        if inside && lod::stands_tall(p.species) {
+        // The far surface is coarse, and may show water where the tree really stands on
+        // the shore. It would look to be growing out of the lake.
+        let (lx, lz) = ((p.pos.x - mx * MACRO_SIZE) as f32 + 0.5, (p.pos.z - mz * MACRO_SIZE) as f32 + 0.5);
+        if inside && lod::stands_tall(p.species) && !farview::shows_water(&continent, lx, lz) {
             for (lo, size, color) in models.get(world, p.species, p.variant, p.turns).iter() {
                 let at = p.pos + *lo;
                 boxes.push(BoxInstance {
@@ -282,4 +286,37 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
         }
     }
     Some(boxes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trees on low shores, where the far surface shows water, are left out; most are kept.
+    #[test]
+    fn trees_where_the_far_view_shows_water_are_left_out() {
+        let world = GameWorld::new(1);
+        let (mut wet, mut all) = (0, 0);
+        // Low grassland by a lake and a sea inlet.
+        let (x, z) = (25824 / TILE, 28960 / TILE);
+        for tx in x - 16..=x + 16 {
+            for tz in z - 16..=z + 16 {
+                let (x0, z0) = (tx * TILE, tz * TILE);
+                let (mx, mz) = cell_of(x0, z0);
+                let c = world.continent(mx, mz);
+                let (lx0, lz0) = (x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE);
+                let margin = features::MAX_REACH + 1;
+                let sampler = Sampler::new(&c, world.seed(), lx0 - margin, lz0 - margin, TILE + 2 * margin);
+                for p in features::place(world.seed(), world.library(), &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE)) {
+                    if lod::stands_tall(p.species) {
+                        all += 1;
+                        let (lx, lz) = ((p.pos.x - mx * MACRO_SIZE) as f32, (p.pos.z - mz * MACRO_SIZE) as f32);
+                        wet += farview::shows_water(&c, lx, lz) as usize;
+                    }
+                }
+            }
+        }
+        println!("{wet} of {all} trees where the far view shows water");
+        assert!(wet > 0 && wet * 10 < all, "{wet} of {all}");
+    }
 }

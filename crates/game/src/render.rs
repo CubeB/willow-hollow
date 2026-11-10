@@ -787,7 +787,7 @@ impl Renderer {
 
         let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
         let sea_vertex = |x: f32, z: f32| FarVertex {
-            pos: [x, -0.125, z],
+            pos: [x, crate::farview::SEA_LEVEL, z],
             color: sea_color,
             flags: crate::farview::FLAG_WATER,
             grad: [0, 0],
