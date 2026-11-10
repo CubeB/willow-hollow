@@ -271,10 +271,20 @@ fn draw_trails(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
             }
         }
     };
-    for line in &c.trails.lines {
-        for p in line {
+    // Coloured by how used each stretch is: roads dark red and broad, tracks brown,
+    // footpaths dark, faint traces pale and broken.
+    use worldgen::trails::build::{TrailClass, class_of};
+    for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
+        for (k, (p, w)) in line.iter().zip(widths).enumerate() {
             let (x, z) = to_px(p.x, p.y);
-            dot(x, z, 0, [66, 44, 28], img);
+            let (r, color) = match class_of(*w) {
+                TrailClass::Road => (1, [150, 30, 20]),
+                TrailClass::Track => (1, [120, 72, 30]),
+                TrailClass::Footpath => (0, [56, 38, 24]),
+                TrailClass::Trace if k % 2 == 0 => (0, [235, 225, 200]),
+                TrailClass::Trace => continue,
+            };
+            dot(x, z, r, color, img);
         }
     }
     for s in &c.trails.sites {
@@ -282,6 +292,24 @@ fn draw_trails(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
         dot(x, z, 4, [20, 20, 20], img);
         dot(x, z, 3, s.kind.map_color(), img);
     }
+}
+
+/// Length of trail in each traffic class, and crossings by kind.
+fn print_trail_stats(c: &Continent) {
+    use worldgen::trails::build::class_of;
+    let mut km = std::collections::BTreeMap::new();
+    for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
+        for pair in line.windows(2).zip(widths) {
+            let len = (pair.0[1] - pair.0[0]).length() / worldgen::scale::VOXELS_PER_METRE / 1000.0;
+            *km.entry(format!("{:?}", class_of(*pair.1))).or_insert(0.0f32) += len;
+        }
+    }
+    let classes: Vec<String> = km.iter().map(|(k, v)| format!("{k} {v:.1} km")).collect();
+    let mut kinds = std::collections::BTreeMap::new();
+    for x in &c.trails.crossings {
+        *kinds.entry(format!("{:?}", x.kind)).or_insert(0) += 1;
+    }
+    println!("  trails: {}   crossings: {kinds:?}", classes.join(", "));
 }
 
 /// Smallest discharge drawn as a stream.
@@ -563,6 +591,7 @@ fn main() -> Result<()> {
         c.trails.stamp_count(),
         t.elapsed().as_secs_f32()
     );
+    print_trail_stats(&c);
     print_stats(&c);
     if o.poi {
         print_poi(&c);

@@ -1,7 +1,10 @@
 //! Assembles a continent's network: settles the sites on real ground, joins them up,
 //! lays each trail over the terrain and builds what it needs to cross water.
 
-use std::collections::HashMap;
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap},
+};
 
 use glam::{IVec3, Vec2, Vec3, vec2};
 use voxel::Voxel;
@@ -17,13 +20,28 @@ use crate::{
         landmarks::{self, Landmark, Palette},
         shape::{Rng, Shape, rotate},
     },
-    noise::{hash2, unit},
+    noise::{hash2, perlin2, unit},
     scale::{BLOCK, OLD_VOXEL, m},
     surface::{Column, Cover, Sampler},
 };
 
-/// Paved half-width of a trail.
-const HALF_WIDTH: f32 = m(1.2);
+/// Half-width of the worn strip by the traffic a trail carries: (traffic, metres). A
+/// remote trace is a single broken line, a footpath a narrow one, a track a broad firm
+/// strip, and a road between busy places wider still. Widths blend between these.
+/// Today's landmarks bring well-used trails up to tracks; it takes settlements, whose
+/// trips count many times more, to make roads.
+const WIDTHS: [(f32, f32); 4] = [(5.0, 0.25), (20.0, 0.55), (90.0, 0.95), (500.0, 1.5)];
+/// Narrower than this, a trail is a trace that comes and goes.
+const TRACE: f32 = m(0.4);
+/// Trails at least this wide get lanterns.
+const LIT: f32 = m(0.8);
+/// Trips between sites further apart than this count for less, in voxels.
+const TRIP_FALLOFF: f32 = m(2500.0);
+/// When fitting a trail to the ground: trail steps between the points that may shift
+/// sideways, and how far each step of the shift goes.
+const FIT_SPACING: usize = 8;
+const FIT_STEP: f32 = m(3.2);
+const FIT_SHIFTS: usize = 7;
 /// Steepest a trail may rise, as a slope.
 const MAX_SLOPE: f32 = 0.45;
 /// Longest water a trail will bridge, in trail steps.
@@ -56,6 +74,208 @@ fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
 
 fn is_wet(col: &Column) -> bool {
     col.water_surface().is_some()
+}
+
+/// Half-width of the worn strip for a trail carrying `traffic`, in voxels.
+pub fn width_for(traffic: f32) -> f32 {
+    let t = traffic.max(WIDTHS[0].0).ln();
+    let metres = WIDTHS
+        .windows(2)
+        .find(|w| t <= w[1].0.ln())
+        .map_or(WIDTHS[WIDTHS.len() - 1].1, |w| {
+            let f = (t - w[0].0.ln()) / (w[1].0.ln() - w[0].0.ln());
+            w[0].1 + (w[1].1 - w[0].1) * f
+        });
+    m(metres)
+}
+
+/// The narrowest a trail is worn.
+fn widths_min() -> f32 {
+    m(WIDTHS[0].1)
+}
+
+/// The class a trail of this half-width reads as, for maps and statistics.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TrailClass {
+    Trace,
+    Footpath,
+    Track,
+    Road,
+}
+
+pub fn class_of(half_width: f32) -> TrailClass {
+    if half_width < TRACE {
+        TrailClass::Trace
+    } else if half_width < m(0.75) {
+        TrailClass::Footpath
+    } else if half_width < m(1.25) {
+        TrailClass::Track
+    } else {
+        TrailClass::Road
+    }
+}
+
+/// Fits a trail to the ground at a finer scale than the map it was routed on: each
+/// point every [`FIT_SPACING`] steps may shift sideways, and the shifts chosen keep the
+/// grade gentle, stay out of water and off river banks, and otherwise keep to the
+/// line. So the trail bends round small rises and dips and finds the narrow place to
+/// cross a stream, and every bend has a reason. The ends stay where they are.
+fn fit(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Vec2> {
+    let n = pts.len();
+    if n < FIT_SPACING * 3 {
+        return pts.to_vec();
+    }
+    let mut at: Vec<usize> = (0..n).step_by(FIT_SPACING).collect();
+    if *at.last().expect("points") != n - 1 {
+        at.push(n - 1);
+    }
+    let mid = FIT_SHIFTS / 2;
+    let shift = |k: usize| (k as f32 - mid as f32) * FIT_STEP;
+    let normals: Vec<Vec2> = at
+        .iter()
+        .map(|&i| {
+            let t = (pts[(i + 2).min(n - 1)] - pts[i.saturating_sub(2)]).normalize_or_zero();
+            vec2(-t.y, t.x)
+        })
+        .collect();
+    let mut probes = Vec::with_capacity(at.len() * FIT_SHIFTS);
+    for (j, &i) in at.iter().enumerate() {
+        for k in 0..FIT_SHIFTS {
+            probes.push(pts[i] + normals[j] * shift(k));
+        }
+    }
+    let cols = sample(c, seed, &probes);
+    let last = at.len() - 1;
+    let place = |j: usize, k: usize| -> f32 {
+        if (j == 0 || j == last) && k != mid {
+            return f32::INFINITY;
+        }
+        let col = &cols[j * FIT_SHIFTS + k];
+        let mut cost = 0.35 * (k as f32 - mid as f32).abs();
+        if is_wet(col) {
+            cost += 400.0;
+        } else if col.river < m(2.4) {
+            cost += 30.0;
+        }
+        cost
+    };
+    // Cheapest shifts by dynamic programming: each point's shift differs from the one
+    // before by at most one step.
+    let mut best = vec![f32::INFINITY; at.len() * FIT_SHIFTS];
+    let mut from = vec![0u8; at.len() * FIT_SHIFTS];
+    for k in 0..FIT_SHIFTS {
+        best[k] = place(0, k);
+    }
+    for j in 1..at.len() {
+        let dist = (pts[at[j]] - pts[at[j - 1]]).length().max(1.0);
+        for k in 0..FIT_SHIFTS {
+            let here = place(j, k);
+            if here.is_infinite() {
+                continue;
+            }
+            for p in k.saturating_sub(1)..=(k + 1).min(FIT_SHIFTS - 1) {
+                let prev = best[(j - 1) * FIT_SHIFTS + p];
+                if prev.is_infinite() {
+                    continue;
+                }
+                let rise = (cols[j * FIT_SHIFTS + k].ground - cols[(j - 1) * FIT_SHIFTS + p].ground).abs();
+                let grade = rise / dist;
+                let cost = prev + here + dist / 16.0 * (20.0 * grade + 400.0 * grade * grade) + 1.0 * k.abs_diff(p) as f32;
+                if cost < best[j * FIT_SHIFTS + k] {
+                    best[j * FIT_SHIFTS + k] = cost;
+                    from[j * FIT_SHIFTS + k] = p as u8;
+                }
+            }
+        }
+    }
+    let mut k = mid;
+    let mut chosen = vec![mid; at.len()];
+    for j in (1..at.len()).rev() {
+        chosen[j] = k;
+        k = from[j * FIT_SHIFTS + k] as usize;
+    }
+    chosen[0] = k;
+    if chosen.iter().all(|&k| k == mid) {
+        return pts.to_vec();
+    }
+    // Eased, so the trail swings round in curves rather than stepping sideways.
+    let mut offsets: Vec<f32> = chosen.iter().map(|&k| shift(k)).collect();
+    for _ in 0..2 {
+        let copy = offsets.clone();
+        for j in 1..offsets.len() - 1 {
+            offsets[j] = (copy[j - 1] + copy[j] * 2.0 + copy[j + 1]) * 0.25;
+        }
+    }
+    let control: Vec<Vec2> = at.iter().zip(&offsets).zip(&normals).map(|((&i, &off), &nrm)| pts[i] + nrm * off).collect();
+    let mut out = route::resample(&control);
+    // Resampling can fall a fraction of a step short of the end.
+    if out.last().is_some_and(|p| p.distance(pts[n - 1]) > 0.5) {
+        out.push(pts[n - 1]);
+    }
+    out
+}
+
+/// Traffic on the trails: trips between every pair of sites on the same land, along the
+/// shortest way through the network. A trip counts the product of the two sites'
+/// importance, less for distant pairs. Returns a value per map cell.
+fn traffic(c: &Continent, used: &[u32], sites: &[(usize, f32)]) -> Vec<f32> {
+    let n = c.size as i32;
+    let cs = c.cell_size();
+    let mut traffic = vec![0.0f32; used.len()];
+    let mut dist = vec![f32::INFINITY; used.len()];
+    let mut prev = vec![u32::MAX; used.len()];
+    let mut touched: Vec<usize> = Vec::new();
+    for (s, &(start, weight_s)) in sites.iter().enumerate() {
+        if used[start] == 0 {
+            continue;
+        }
+        for &i in &touched {
+            dist[i] = f32::INFINITY;
+            prev[i] = u32::MAX;
+        }
+        touched.clear();
+        dist[start] = 0.0;
+        touched.push(start);
+        let mut open = BinaryHeap::new();
+        open.push(Reverse((0u32, start as u32)));
+        while let Some(Reverse((_, i))) = open.pop() {
+            let i = i as usize;
+            let (x, z) = (i as i32 % n, i as i32 / n);
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                let (nx, nz) = (x + dx, z + dz);
+                if nx < 0 || nz < 0 || nx >= n || nz >= n {
+                    continue;
+                }
+                let j = (nz * n + nx) as usize;
+                if used[j] == 0 {
+                    continue;
+                }
+                let d = dist[i] + if dx != 0 && dz != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
+                if d < dist[j] {
+                    if dist[j].is_infinite() {
+                        touched.push(j);
+                    }
+                    dist[j] = d;
+                    prev[j] = i as u32;
+                    open.push(Reverse(((d * 16.0) as u32, j as u32)));
+                }
+            }
+        }
+        // Each pair once.
+        for &(end, weight_e) in &sites[s + 1..] {
+            if dist[end].is_infinite() {
+                continue;
+            }
+            let trip = weight_s * weight_e / (1.0 + dist[end] * cs / TRIP_FALLOFF);
+            let mut at = end;
+            while at != start {
+                traffic[at] += trip;
+                at = prev[at] as usize;
+            }
+            traffic[start] += trip;
+        }
+    }
+    traffic
 }
 
 /// Index ranges of water along a trail, with brief dry interruptions merged.
@@ -515,23 +735,26 @@ impl Layer<'_> {
         Palette::of(col.biome)
     }
 
-    fn lay(&self, raw: Vec<Vec2>, start_y: Option<f32>, end_y: Option<f32>, salt: u32, net: &mut Network) {
+    /// `widths` is the half-width the traffic calls for at each of `raw`.
+    fn lay(&self, raw: Vec<Vec2>, widths: &[f32], start_y: Option<f32>, end_y: Option<f32>, salt: u32, net: &mut Network) {
         if raw.len() < 8 {
             return;
         }
         // Over water the trail must run straight, which needs the water found first.
         let cols = sample(self.c, self.seed, &raw);
         let pts = straighten(&raw, &wet_runs(&cols));
+        // Straightening barely changes the number of points, so they map across in order.
+        let widths: Vec<f32> = (0..pts.len()).map(|i| widths[i * widths.len() / pts.len()]).collect();
         let mut cols = sample(self.c, self.seed, &pts);
         let runs = wet_runs(&cols);
 
         // Water too wide to bridge ends the trail on each side of it.
         if let Some(&(s, e)) = runs.iter().find(|&&(s, e)| e - s + 1 > MAX_SPAN) {
             if s > 8 {
-                self.lay(pts[..s - 6].to_vec(), start_y, None, salt.wrapping_add(11), net);
+                self.lay(pts[..s - 6].to_vec(), &widths[..s - 6], start_y, None, salt.wrapping_add(11), net);
             }
             if e + 8 < pts.len() {
-                self.lay(pts[e + 6..].to_vec(), None, end_y, salt.wrapping_add(23), net);
+                self.lay(pts[e + 6..].to_vec(), &widths[e + 6..], None, end_y, salt.wrapping_add(23), net);
             }
             return;
         }
@@ -580,6 +803,7 @@ impl Layer<'_> {
 
         let heights = profile(&cols, &pins);
         let is_carried = |i: usize| carried.iter().any(|&(a, b)| (a..=b).contains(&i));
+        let worn: Vec<f32> = (0..pts.len()).map(|i| self.worn(&pts, &widths, i, salt)).collect();
         let points: Vec<TrailPoint> = pts
             .iter()
             .enumerate()
@@ -587,17 +811,45 @@ impl Layer<'_> {
                 x: p.x,
                 z: p.y,
                 y: heights[i],
-                half_width: if is_carried(i) { 0.0 } else { HALF_WIDTH },
+                half_width: if is_carried(i) { 0.0 } else { worn[i] },
             })
             .collect();
         net.add_points(&points);
         net.lines.push(pts.iter().step_by(8).copied().collect());
+        net.line_widths.push(widths.iter().step_by(8).copied().collect());
         cols.truncate(pts.len());
-        self.furnish(&pts, &heights, &cols, &carried, salt, net);
+        self.furnish(&pts, &widths, &heights, &cols, &carried, salt, net);
     }
 
-    /// Lanterns along the way, closer together near landmarks and at bridge heads.
-    fn furnish(&self, pts: &[Vec2], heights: &[f32], cols: &[Column], carried: &[(usize, usize)], salt: u32, net: &mut Network) {
+    /// How wide the trail is actually worn at point `i`: the width its traffic calls
+    /// for, except that a faint trace comes and goes, fading out for stretches and
+    /// picking up again, the fainter the longer its gaps.
+    fn worn(&self, pts: &[Vec2], widths: &[f32], i: usize, salt: u32) -> f32 {
+        let w = widths[i];
+        if w >= TRACE {
+            return w;
+        }
+        // Noise along the trail, so gaps are whole stretches, not single holes.
+        let along = perlin2(self.c.desc.seed ^ 0x7ace ^ salt, i as f64 / 23.0, salt as f64 * 0.61) * 0.5 + 0.5;
+        let faint = 1.0 - (w - widths_min()) / (TRACE - widths_min());
+        // Never at the very ends, where it meets a site or another trail.
+        let end = i.min(pts.len() - 1 - i) < 12;
+        if !end && along < 0.15 + 0.35 * faint { 0.0 } else { w }
+    }
+
+    /// Lanterns along the way, closer together near landmarks and at bridge heads, and
+    /// only on trails worn enough for anyone to light.
+    #[allow(clippy::too_many_arguments)]
+    fn furnish(
+        &self,
+        pts: &[Vec2],
+        widths: &[f32],
+        heights: &[f32],
+        cols: &[Column],
+        carried: &[(usize, usize)],
+        salt: u32,
+        net: &mut Network,
+    ) {
         let mut since = 30usize;
         let mut side = if salt & 1 == 0 { 1.0 } else { -1.0 };
         for i in 8..pts.len().saturating_sub(8) {
@@ -605,12 +857,12 @@ impl Layer<'_> {
             let near_site = self.site_points.iter().any(|s| s.distance_squared(pts[i]) < NEAR_SITE * NEAR_SITE);
             let at_bridge = carried.iter().any(|&(a, b)| i + 3 == a || i == b + 3);
             let due = since >= if near_site { LANTERN_NEAR } else { LANTERN_FAR };
-            if !(at_bridge || due) || carried.iter().any(|&(a, b)| (a..=b).contains(&i)) {
+            if !(at_bridge || due) || widths[i] < LIT || carried.iter().any(|&(a, b)| (a..=b).contains(&i)) {
                 continue;
             }
             let tangent = (pts[i + 4] - pts[i - 4]).normalize_or_zero();
             let normal = vec2(-tangent.y, tangent.x);
-            let q = pts[i] + normal * side * (HALF_WIDTH + m(1.2));
+            let q = pts[i] + normal * side * (widths[i] + m(1.2));
             let col = cols[i];
             if is_wet(&col) || col.river < m(2.4) {
                 continue;
@@ -669,8 +921,20 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     let mut router = Router::new(c);
     let mut lines: HashMap<u32, Vec<Vec2>> = HashMap::new();
     let mut next_id = 1u32;
+    /// A stretch of trail routed but not yet laid: (points, its map cells, start
+    /// height, end height, id).
+    type Pending = (Vec<Vec2>, Vec<u32>, Option<f32>, Option<f32>, u32);
+    let mut pending: Vec<Pending> = Vec::new();
+    let importance: Vec<f32> = net.sites.iter().map(|s| sites::importance(s.kind)).collect();
 
-    for (a, b, _) in links(&at) {
+    // The links between the most important places first, so that lesser trails come
+    // to join them rather than the other way about.
+    let mut order = links(&at);
+    order.sort_by(|p, q| {
+        let key = |&(a, b, d): &(usize, usize, f32)| d / (importance[a] * importance[b]).sqrt();
+        key(p).total_cmp(&key(q))
+    });
+    for (a, b, _) in order {
         let (sa, sb) = (net.sites[a], net.sites[b]);
         let (ca, cb) = (cell_of(at[a].0, at[a].1), cell_of(at[b].0, at[b].1));
         let Some(path) = router.search(ca, cb) else { continue };
@@ -705,7 +969,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
                 continue;
             }
             let cells_here = &path[first..=last];
-            let pts = route::smooth(c, cells_here, start, end, next_id);
+            let pts = fit(c, world_seed, &route::smooth(c, cells_here, start, end, next_id));
             if !from_site {
                 net.junctions.push(start);
             }
@@ -720,8 +984,25 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             for &cell in cells_here {
                 router.used[cell as usize] = id;
             }
-            layer.lay(pts, start_y, end_y, id, &mut net);
+            pending.push((pts, cells_here.to_vec(), start_y, end_y, id));
         }
+    }
+
+    // Now the whole network is known, how much each stretch is used sets how it is worn.
+    let site_cells: Vec<(usize, f32)> = cells.iter().zip(&importance).map(|(&cell, &w)| (cell, w)).collect();
+    let traffic = traffic(c, &router.used, &site_cells);
+    for (pts, cells_here, start_y, end_y, id) in pending {
+        // Each point takes the traffic of the map cell it was routed through, averaged
+        // along the way so the width changes gradually.
+        let raw: Vec<f32> = (0..pts.len()).map(|k| traffic[cells_here[k * cells_here.len() / pts.len()] as usize]).collect();
+        const BLEND: usize = 40;
+        let widths: Vec<f32> = (0..raw.len())
+            .map(|k| {
+                let (lo, hi) = (k.saturating_sub(BLEND), (k + BLEND + 1).min(raw.len()));
+                width_for(raw[lo..hi].iter().sum::<f32>() / (hi - lo) as f32)
+            })
+            .collect();
+        layer.lay(pts, &widths, start_y, end_y, id, &mut net);
     }
 
     // Signposts where trails meet.
