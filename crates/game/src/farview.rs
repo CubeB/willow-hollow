@@ -41,7 +41,7 @@ const LIFT_UNIT: f32 = 0.75;
 const MAX_LIFT_FLAGS: f32 = 100.0;
 
 /// Vertex of the far surface. `flags`: below 128 = land, in steps of how high its forest
-/// stands; 128 = standing water in the surface itself (lake, sea); 255 = river ribbon
+/// stands, lakes included (see `far`); 128 = the sea plane; 255 = river ribbon
 /// (drawn over the land it lies on).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -54,7 +54,8 @@ pub struct FarVertex {
     /// Terrain gradient (rise per voxel along x and z), scaled by 1/4 into -1..1.
     pub grad: [i16; 2],
     /// Land: rgb, how it looks out beyond the tree models, its forest seen as a canopy
-    /// over the ground. The fourth byte is unused.
+    /// over the ground; then how far standing water rises above the ground, 128 at the
+    /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
     pub far: [u8; 4],
 }
 
@@ -356,29 +357,66 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     }
 }
 
-/// Whether the far surface shows water at continent-local voxel `(lx, lz)`: a lake its
-/// coarse grid spreads over the shore, or land it lays below the sea. The true shore
-/// can lie well inside either, so things standing there are better left out.
+/// Water depth, in voxels, at which the far surface's wetness saturates (see [`wetness`]).
+const WET_RANGE: f32 = 32.0;
+
+/// The standing water at the far-surface vertex on cell `(x, z)`, its neighbours
+/// `stride` cells away: the highest lake level among them, in voxels, as the voxel world
+/// floods a column to the highest lake at the corners of its grid square; and how far
+/// that level stands above the vertex's ground, or `-WET_RANGE` with no lake.
+///
+/// Both vary linearly across the surface's triangles, so where they meet, the shore,
+/// is a smooth line close to the voxel world's, not a cell of the grid.
+fn wetness(c: &Continent, x: usize, z: usize, stride: usize) -> (Option<f32>, f32) {
+    let (s, max) = (stride as isize, c.size as isize - 1);
+    let mut level: Option<f32> = None;
+    for dz in [-s, 0, s] {
+        for dx in [-s, 0, s] {
+            let (nx, nz) = ((x as isize + dx).clamp(0, max) as usize, (z as isize + dz).clamp(0, max) as usize);
+            let l = c.lake[nz * c.size + nx];
+            if l != NO_LAKE {
+                let k = surface::pool_level(c.desc.seed, l) as f32;
+                level = Some(level.map_or(k, |m| m.max(k)));
+            }
+        }
+    }
+    let ground = c.height[z * c.size + x] * OLD_VOXEL;
+    // Water fills the voxels above the ground up to one below the level.
+    let w = level.map_or(-WET_RANGE, |k| (k - 1.0 - ground).clamp(-WET_RANGE, WET_RANGE));
+    (level, w)
+}
+
+/// Whether the far surface shows water at continent-local voxel `(lx, lz)`: a lake, or
+/// land it lays below the sea. The true shore can lie a little inside either, so things
+/// standing there are better left out.
 pub fn shows_water(c: &Continent, lx: f32, lz: f32) -> bool {
     let cs = c.cell_size();
     let max = (c.size - 1) as f32;
     let (fx, fz) = ((lx / cs - 0.5).clamp(0.0, max), (lz / cs - 0.5).clamp(0.0, max));
     let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
     let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
-    let (mut lake, mut height, mut ocean) = (0.0, 0.0, false);
+    let (mut wet, mut height, mut ocean) = (0.0, 0.0, false);
     for (dx, dz, w) in [(0, 0, (1.0 - tx) * (1.0 - tz)), (1, 0, tx * (1.0 - tz)), (0, 1, (1.0 - tx) * tz), (1, 1, tx * tz)] {
-        let i = (z0 + dz) * c.size + x0 + dx;
+        let (x, z) = (x0 + dx, z0 + dz);
+        let i = z * c.size + x;
         ocean |= c.ocean[i];
-        if c.lake[i] != NO_LAKE {
-            lake += w;
-            height += w * surface::pool_level(c.desc.seed, c.lake[i]) as f32;
-        } else {
-            height += w * land_y(c.height[i] * OLD_VOXEL);
-        }
+        let (level, depth) = wetness(c, x, z, 1);
+        wet += w * depth;
+        height += w * vertex_y(c.height[i] * OLD_VOXEL, level, depth);
     }
-    // The shader paints water only close to a lake's own vertices; half way is generous,
-    // allowing for the voxel shore not matching the grid.
-    lake > 0.5 || (ocean && height < SEA_LEVEL + 1.0)
+    // The shader's triangles and this square differ a little: half a voxel's grace.
+    wet > -0.5 || (ocean && height < SEA_LEVEL + 1.0)
+}
+
+/// The far surface's height at a vertex whose ground is at `h`, beside water at `level`
+/// standing `depth` above it: the water's surface where it is wet, else the land, which
+/// is never sunk from above the water to below it.
+fn vertex_y(h: f32, level: Option<f32>, depth: f32) -> f32 {
+    match level {
+        Some(k) if depth > 0.0 => k - 0.125,
+        Some(k) => land_y(h).max(h.min(k - 0.125)),
+        None => land_y(h),
+    }
 }
 
 /// Where the sea plane lies.
@@ -402,7 +440,6 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
     let size = c.size;
     let tiles_per_side = size / TILE;
     let n = TILE / stride;
-    let water = mats.get(mat::WATER).color;
     let mut tiles = Vec::new();
 
     for tz in 0..tiles_per_side {
@@ -428,14 +465,26 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
                     let pos = |y: f32| Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
-                    if c.lake[idx] != NO_LAKE {
-                        let p = pos(surface::pool_level(c.desc.seed, c.lake[idx]) as f32 - 0.125);
-                        lo = lo.min(p);
-                        hi = hi.max(p);
-                        verts.push(FarVertex::water(p.to_array(), water, FLAG_WATER));
-                        continue;
+                    let (level, depth) = wetness(c, x, z, stride);
+                    let mut land = look(c, mats, canopies, idx, gx.hypot(gz));
+                    if depth > 0.0 {
+                        // Nothing grows in the water.
+                        land.far = land.ground;
+                        land.lift = 0.0;
                     }
-                    let land = look(c, mats, canopies, idx, gx.hypot(gz));
+                    // The forest comes down to the ground beside water, so the water is
+                    // not tilted up to the canopy across the triangles of its shore.
+                    let s = stride as isize;
+                    let by_water = [(-s, -s), (0, -s), (s, -s), (-s, 0), (s, 0), (-s, s), (0, s), (s, s)].iter().any(|&(dx, dz)| {
+                            let max = size as isize - 1;
+                            let (nx, nz) = ((x as isize + dx).clamp(0, max) as usize, (z as isize + dz).clamp(0, max) as usize);
+                            wetness(c, nx, nz, stride).1 > 0.0
+                        });
+                    // Still a forest, for the seasons, though it no longer stands tall.
+                    let forest = land.lift > 0.0;
+                    if by_water {
+                        land.lift = 0.0;
+                    }
                     // Slight variation from cell to cell, standing in for the texture
                     // voxels have up close.
                     let noise = worldgen::noise::hash2(c.desc.seed ^ 0xfa2, x as i32, z as i32);
@@ -444,8 +493,12 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     let far = srgb(land.far);
                     // Forested land stands higher by about the height of its canopy. That
                     // is carried to the shader, which raises it only beyond the tree models.
-                    let flags = (land.lift / LIFT_UNIT).round().min(MAX_LIFT_FLAGS) as u8;
-                    let p = pos(land_y(h(x, z)));
+                    let mut flags = (land.lift / LIFT_UNIT).round().min(MAX_LIFT_FLAGS) as u8;
+                    if forest {
+                        flags = flags.max(1);
+                    }
+                    let p = pos(vertex_y(h(x, z), level, depth));
+                    let wet = (128.0 + depth / WET_RANGE * 127.0).round().clamp(0.0, 255.0) as u8;
                     lo = lo.min(p);
                     hi = hi.max(p + Vec3::Y * land.lift);
                     let pack = |g: f32| ((g / 4.0).clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -454,7 +507,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         color: srgb(land.ground),
                         flags,
                         grad: [pack(gx), pack(gz)],
-                        far: [far[0], far[1], far[2], 0],
+                        far: [far[0], far[1], far[2], wet],
                     });
                 }
             }
@@ -464,6 +517,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
 
     // Rivers wide enough to see from afar, as flat ribbons along their curves.
     let mut rivers = Vec::new();
+    let water = mats.get(mat::WATER).color;
     let mut pieces: Vec<Piece> = Vec::new();
     for i in 0..size * size {
         if c.ocean[i] || Continent::river_width(c.discharge[i]) * OLD_VOXEL < MIN_RIBBON_WIDTH {
