@@ -191,14 +191,12 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
             // Soil gives way to rock between about 35 and 50 degrees, raggedly.
             let rocky = steepness > 0.72 + roll * 0.45;
             if rocky {
-                let rock = if roll < 0.25 { mat::ROCK_DARK } else { mat::STONE };
-                (rock, mat::STONE)
+                let (light, dark) = mat::bedrock(col.biome);
+                (if roll < 0.25 { dark } else { light }, light)
             } else if col.temperature < 0.10 + (roll - 0.5) * 0.03 {
                 (mat::SNOW, mat::STONE)
-            } else if cover == mat::DESERT_SAND {
-                (cover, mat::DESERT_SAND)
             } else {
-                (cover, mat::DIRT)
+                (cover, mat::subsoil(cover))
             }
         }
     }
@@ -207,12 +205,13 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
 /// What a trail is surfaced with: whatever feet would wear the local ground down to.
 fn trail_material(col: &Column, roll: f32, patch: f32) -> Voxel {
     use crate::biome::Biome::*;
-    let (main, other, mix) = match col.biome {
+    let (main, other, mix) = match col.biome.parent() {
         Desert | Savanna => (mat::PATH_SAND, mat::PATH_DIRT, 0.25),
         Alpine | Tundra | Ocean => (mat::PATH_GRAVEL, mat::STONE, 0.3),
         OldGrowth | Rainforest => (mat::PATH_DARK, mat::MOSS, 0.15),
         Taiga => (mat::PATH_DARK, mat::PATH_GRAVEL, 0.3),
         Heath | Grassland | Deciduous | Woodland => (mat::PATH_DIRT, mat::PATH_GRAVEL, 0.3),
+        other => unreachable!("{other:?} is not an original biome"),
     };
     if roll * 0.6 + patch * 0.4 < mix { other } else { main }
 }

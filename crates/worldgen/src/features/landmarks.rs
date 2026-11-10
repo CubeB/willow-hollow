@@ -91,7 +91,7 @@ impl Palette {
             accent,
             moss,
         };
-        match biome {
+        match biome.parent() {
             Desert | Savanna => Palette {
                 stone: mat::SANDSTONE,
                 stone_dark: mat::SANDSTONE_DARK,
@@ -107,6 +107,7 @@ impl Palette {
             Rainforest => stone(mat::BARK_JUNGLE, mat::PLANK_PALE, mat::THATCH, mat::CLOTH_RED, 0.55),
             Heath | Grassland => stone(mat::BARK_OAK, mat::PLANK, mat::THATCH, mat::CLOTH_BLUE, 0.14),
             Deciduous | Woodland => stone(mat::BARK_OAK, mat::PLANK, mat::ROOF_TILE, mat::CLOTH_RED, 0.3),
+            other => unreachable!("{other:?} is not an original biome"),
         }
     }
 

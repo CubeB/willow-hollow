@@ -262,6 +262,30 @@ fn flora(biome: Biome) -> Flora {
             [(Fern, 6.0), (Bush, 3.0), (FallenLog, 1.5), (MossyBoulder, 1.0)],
             0.3
         ),
+        Biome::Marsh => f!([], 0.0, [(Willow, 4.0), (Birch, 1.0)], 0.07, [(Bush, 3.0), (Stump, 0.5)], 0.08),
+        Biome::BirchGrove => f!(
+            [],
+            0.0,
+            [(Birch, 12.0), (Spruce, 0.6), (Oak, 0.4)],
+            0.55,
+            [(Fern, 3.0), (Bush, 2.0), (FallenLog, 1.0), (MossyBoulder, 0.6)],
+            0.16
+        ),
+        Biome::AlpineMeadow => f!([], 0.0, [(Spruce, 1.0), (DeadSnag, 0.3)], 0.01, [(Boulder, 3.0), (MossyBoulder, 1.0)], 0.08),
+        Biome::SnowyPine => f!(
+            [(TallPine, 1.0)],
+            0.1,
+            [(Spruce, 12.0), (DeadSnag, 0.3)],
+            0.7,
+            [(Boulder, 2.0), (FallenLog, 1.0), (Stump, 0.5)],
+            0.08
+        ),
+        Biome::Bog => f!([], 0.0, [(DeadSnag, 2.0), (Spruce, 1.5), (Birch, 0.6)], 0.06, [(Bush, 3.0), (MossyBoulder, 1.0), (Stump, 1.0)], 0.1),
+        Biome::Steppe => f!([(ElderOak, 1.0)], 0.006, [(Oak, 1.0), (Acacia, 0.3)], 0.006, [(Bush, 2.0), (Boulder, 1.5)], 0.05),
+        Biome::DuneSea => f!([], 0.0, [], 0.0, [(Boulder, 1.0)], 0.004),
+        Biome::RedRock => f!([], 0.0, [(Cactus, 1.0)], 0.015, [(Boulder, 3.0), (Bush, 1.0), (Cactus, 1.0)], 0.06),
+        Biome::Mangrove => f!([], 0.0, [(Willow, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
+        Biome::Volcanic => f!([], 0.0, [(Palm, 1.0), (DeadSnag, 0.5)], 0.02, [(Fern, 2.0), (Boulder, 3.0)], 0.08),
     }
 }
 
@@ -421,14 +445,15 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
     if col.water_surface().is_some() {
         return None;
     }
-    // Riverbanks in temperate and warm country grow willows.
+    // Riverbanks in temperate and warm country grow willows; in the hot dry uplands,
+    // the water makes oases of palms.
     if layer.salt == TREES.salt
         && col.river < m(7.2)
         && col.temperature > 0.3
-        && !matches!(col.biome, Biome::Desert | Biome::Savanna)
+        && !matches!(col.biome, Biome::Desert | Biome::Savanna | Biome::DuneSea)
         && roll_density < 0.35
     {
-        return Some(Species::Willow);
+        return Some(if col.biome == Biome::RedRock { Species::Palm } else { Species::Willow });
     }
     if list.is_empty() || roll_density >= density {
         return None;
@@ -498,6 +523,11 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         Biome::Tundra => (&[mat::FLOWER_WHITE, mat::FLOWER_PURPLE], 0.1),
         Biome::Savanna => (&[mat::FLOWER_YELLOW], 0.08),
         Biome::Rainforest => (&[mat::FLOWER_RED, mat::FLOWER_PINK], 0.08),
+        Biome::AlpineMeadow => (&[mat::FLOWER_BLUE, mat::FLOWER_PURPLE, mat::FLOWER_WHITE, mat::FLOWER_YELLOW], 0.45),
+        Biome::Marsh => (&[mat::FLOWER_YELLOW, mat::FLOWER_WHITE], 0.12),
+        Biome::BirchGrove => (&[mat::FLOWER_WHITE, mat::FLOWER_BLUE], 0.14),
+        Biome::Steppe => (&[mat::FLOWER_YELLOW, mat::FLOWER_PURPLE], 0.06),
+        Biome::Bog => (&[mat::FLOWER_WHITE], 0.06),
         _ => return None,
     };
     // A fast noise marks the drifts; a slow one chooses what grows in each.

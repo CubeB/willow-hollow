@@ -306,6 +306,24 @@ fn lakes_are_flat_and_hold_water() {
 }
 
 #[test]
+fn dunes_heap_sand_without_damming_water() {
+    // A hot, dry continent with a dune sea in it.
+    let c = generate(cell_desc(1, -3, -3), SimConfig { size: 256 });
+    let dunes: Vec<usize> = (0..c.size * c.size).filter(|&i| c.biome[i] == Biome::DuneSea as u8).collect();
+    assert!(dunes.len() > 50, "only {} dune cells", dunes.len());
+    // The odd oasis, but the hollows between dunes do not fill.
+    let wet = dunes.iter().filter(|&&i| c.lake[i] != NO_LAKE).count();
+    assert!(wet * 20 < dunes.len(), "{wet} of {} dune cells under water", dunes.len());
+    for &i in &dunes {
+        let r = c.rcv[i] as usize;
+        assert!(c.water_level[i] >= c.height[i] - 0.3);
+        if !c.ocean[r] {
+            assert!(c.water_level[r] <= c.water_level[i], "water climbs a dune at {i}");
+        }
+    }
+}
+
+#[test]
 fn climate_is_sane() {
     for c in continents() {
         for i in (0..c.size * c.size).filter(|&i| !c.ocean[i]) {

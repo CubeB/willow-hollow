@@ -72,6 +72,12 @@ fn sward(biome: Biome) -> Option<Sward> {
         Biome::Taiga => s(mat::TUFT_ALPINE, mat::TUFT_DRY, 0.025, Grass::Alpine, Grass::Alpine),
         Biome::Heath => s(mat::TUFT_DRY, mat::TUFT, 0.025, Grass::Bunch, Grass::Lawn),
         Biome::Savanna => s(mat::TUFT_DRY, mat::TUFT_MEADOW, 0.04, Grass::Bunch, Grass::Meadow),
+        Biome::Marsh => s(mat::TUFT_SEDGE, mat::REED, 0.06, Grass::Sedge, Grass::Broad),
+        Biome::Bog => s(mat::TUFT_SEDGE, mat::TUFT_DRY, 0.03, Grass::Sedge, Grass::Alpine),
+        Biome::BirchGrove => s(mat::TUFT, mat::TUFT_MEADOW, 0.04, Grass::Lawn, Grass::Meadow),
+        Biome::AlpineMeadow => s(mat::TUFT_ALPINE, mat::TUFT_MEADOW, 0.05, Grass::Alpine, Grass::Meadow),
+        Biome::Steppe => s(mat::TUFT_STRAW, mat::TUFT_DRY, 0.05, Grass::Bunch, Grass::Meadow),
+        Biome::Mangrove => s(mat::TUFT_LUSH, mat::TUFT_SEDGE, 0.03, Grass::Broad, Grass::Sedge),
         _ => return None,
     })
 }

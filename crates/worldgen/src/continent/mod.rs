@@ -5,6 +5,7 @@
 //! (Braun & Willett 2013; Cordonnier et al. 2016), run coarse-to-fine so large-scale
 //! drainage is settled cheaply before fine detail is added.
 
+mod biomes;
 mod border;
 pub mod climate;
 pub mod flow;
@@ -349,15 +350,12 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
     border::finish(&mut level, &mut flow, &mut height, &mut water_level, &mut lake, &rain, &pins);
     let mut temperature = climate::temperature(level.w, &height, &desc);
     border::blend_climate(&level, &pins, &shape, &height, &mut temperature, &mut rain);
-    let biome = (0..height.len())
-        .map(|i| {
-            if level.ocean[i] {
-                Biome::Ocean as u8
-            } else {
-                Biome::classify(temperature[i], rain[i]) as u8
-            }
-        })
-        .collect();
+    let biome = biomes::classify(&level, &shape, &flow, &height, &lake, &temperature, &rain);
+    let mut held = vec![false; height.len()];
+    for p in &pins {
+        held[p.i as usize] = true;
+    }
+    biomes::dunes(&level, &shape, &flow, &biome, &held, &lake, &mut height, &mut water_level);
     Continent {
         desc,
         size: cfg.size,

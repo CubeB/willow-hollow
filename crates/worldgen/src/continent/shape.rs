@@ -166,6 +166,11 @@ impl Shape {
         (ordinary + range) * keep
     }
 
+    /// 0..1, how much a spot belongs to a volcano.
+    pub fn volcanic(&self, _px: f32, _pz: f32) -> f32 {
+        0.0
+    }
+
     /// Large-scale relief the land starts with, in voxels. It decides which way the
     /// first rivers run, so it needs structure at every scale.
     pub fn initial_relief(&self, px: f32, pz: f32) -> f32 {
