@@ -428,6 +428,37 @@ fn land_y(h: f32) -> f32 {
     (h - SINK).max(h.min(SEA_LEVEL + 0.2))
 }
 
+/// Whether grid cell `i` carries a river drawn as a ribbon.
+fn ribbon_at(c: &Continent, i: usize) -> bool {
+    !c.ocean[i] && Continent::river_width(c.discharge[i]) * OLD_VOXEL >= MIN_RIBBON_WIDTH
+}
+
+/// The far surface's height (before the shader's forest lift) at continent-local voxel
+/// `(lx, lz)`, from its vertices `stride` cells apart, split into triangles as
+/// [`grid_indices`] splits them.
+fn far_surface_y(c: &Continent, stride: usize, lx: f32, lz: f32) -> f32 {
+    let cs = c.cell_size();
+    let size = c.size;
+    let vy = |x: usize, z: usize| {
+        let (x, z) = (x.min(size - 1), z.min(size - 1));
+        let (level, depth) = wetness(c, x, z, stride);
+        vertex_y(c.height[z * size + x] * OLD_VOXEL, level, depth)
+    };
+    let s = stride as f32;
+    let u = ((lx / cs - 0.5) / s).max(0.0);
+    let v = ((lz / cs - 0.5) / s).max(0.0);
+    let (gi, gj) = (u.floor() as usize, v.floor() as usize);
+    let (fu, fv) = ((u - gi as f32).min(1.0), (v - gj as f32).min(1.0));
+    let (x0, z0, x1, z1) = (gi * stride, gj * stride, (gi + 1) * stride, (gj + 1) * stride);
+    let (a, b, cc, d) = (vy(x0, z0), vy(x1, z0), vy(x0, z1), vy(x1, z1));
+    // Triangles a-c-b and b-c-d: the diagonal runs from b to c.
+    if fu + fv <= 1.0 {
+        a + (b - a) * fu + (cc - a) * fv
+    } else {
+        d + (cc - d) * (1.0 - fu) + (b - d) * (1.0 - fv)
+    }
+}
+
 fn near_ocean(c: &Continent, i: usize) -> bool {
     let s = c.size as isize;
     [-1, 1, -s, s]
@@ -482,7 +513,17 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         });
                     // Still a forest, for the seasons, though it no longer stands tall.
                     let forest = land.lift > 0.0;
-                    if by_water {
+                    // Nor does it stand tall over a river, which would be hidden under it.
+                    let by_river = || {
+                        let max = size as isize - 1;
+                        (-s..=s).any(|dz| {
+                            (-s..=s).any(|dx| {
+                                let (nx, nz) = ((x as isize + dx).clamp(0, max) as usize, (z as isize + dz).clamp(0, max) as usize);
+                                ribbon_at(c, nz * size + nx)
+                            })
+                        })
+                    };
+                    if by_water || (land.lift > 0.0 && by_river()) {
                         land.lift = 0.0;
                     }
                     // Slight variation from cell to cell, standing in for the texture
@@ -520,31 +561,46 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
     let water = mats.get(mat::WATER).color;
     let mut pieces: Vec<Piece> = Vec::new();
     for i in 0..size * size {
-        if c.ocean[i] || Continent::river_width(c.discharge[i]) * OLD_VOXEL < MIN_RIBBON_WIDTH {
+        if !ribbon_at(c, i) {
             continue;
         }
         pieces.clear();
         surface::add_pieces(c, i, &mut pieces);
         for piece in &pieces {
             let segs = piece.pts.len() - 1;
-            // Every other point is plenty at this distance.
-            for k in (0..segs).step_by(2) {
-                let (a, b) = (piece.pts[k], piece.pts[(k + 2).min(segs)]);
-                let dir = (b - a).normalize_or_zero();
-                let side = glam::vec2(-dir.y, dir.x);
-                let (ta, tb) = (k as f32 / segs as f32, (k + 2).min(segs) as f32 / segs as f32);
-                let corner = |p: glam::Vec2, t: f32, sign: f32| {
-                    let q = p + side * (piece.half_width(t).max(worldgen::scale::m(1.0)) * sign);
-                    let y = surface::pool_level(c.desc.seed, piece.level(t)) as f32 - 0.125;
-                    FarVertex::water([q.x, y, q.y], water, FLAG_RIBBON)
-                };
+            // Every other point is plenty at this distance; the last is always kept.
+            let mut ks: Vec<usize> = (0..segs).step_by(2).collect();
+            ks.push(segs);
+            // Consecutive quads share their corners, each point's side square to the
+            // curve's tangent there, so bends leave no gaps or overlaps.
+            let corners: Vec<[FarVertex; 2]> = ks
+                .iter()
+                .enumerate()
+                .map(|(n, &k)| {
+                    let prev = piece.pts[ks[n.saturating_sub(1)]];
+                    let next = piece.pts[ks[(n + 1).min(ks.len() - 1)]];
+                    let dir = (next - prev).normalize_or_zero();
+                    let side = glam::vec2(-dir.y, dir.x);
+                    let t = k as f32 / segs as f32;
+                    let p = piece.pts[k];
+                    // On the far surface as its triangles lie at the centreline, so the
+                    // coarse ground never stands over the water and cuts it into dashes.
+                    let level = surface::pool_level(c.desc.seed, piece.level(t)) as f32 - 0.125;
+                    let y = level.max(far_surface_y(c, stride, p.x, p.y));
+                    let hw = piece.half_width(t).max(worldgen::scale::m(1.0));
+                    [1.0f32, -1.0].map(|sign| {
+                        let q = p + side * (hw * sign);
+                        let mut v = FarVertex::water([q.x, y, q.y], water, FLAG_RIBBON);
+                        // The shader widens the ribbon to a pixel along this.
+                        let pack = |g: f32| (g.clamp(-1.0, 1.0) * 32767.0) as i16;
+                        v.grad = [pack(side.x * sign), pack(side.y * sign)];
+                        v
+                    })
+                })
+                .collect();
+            for w in corners.windows(2) {
                 // Counter-clockwise seen from above.
-                rivers.extend_from_slice(&[
-                    corner(a, ta, 1.0),
-                    corner(b, tb, 1.0),
-                    corner(b, tb, -1.0),
-                    corner(a, ta, -1.0),
-                ]);
+                rivers.extend_from_slice(&[w[0][0], w[1][0], w[1][1], w[0][1]]);
             }
         }
     }

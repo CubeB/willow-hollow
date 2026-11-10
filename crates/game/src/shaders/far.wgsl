@@ -47,6 +47,16 @@ fn vs(in: VIn) -> VOut {
         let sunk = rel.y - (1.0 - smoothstep(G.fog.y, G.fog.y + 4000.0, dist)) * 3.0;
         rel.y = max(sunk, min(rel.y, sea));
     }
+    if (in.color.a > 0.75) {
+        // A ribbon's grad is its side, outward from the centreline. Narrow rivers are
+        // far under a pixel wide a few km out and would break up into dashes, so each
+        // side is pushed out by about half a pixel (at 1080 lines; the resolution is
+        // not in the globals). Wide rivers barely change.
+        let tan_half = length(G.cam_up.xyz) / max(length(G.cam_fwd.xyz), 1e-6);
+        let pixel = length(rel) * 2.0 * tan_half / 1080.0;
+        rel.x += in.grad.x * pixel * 0.6;
+        rel.z += in.grad.y * pixel * 0.6;
+    }
     out.rel = rel;
     var depth_pos = rel;
     if (in.color.a > 0.75) {
