@@ -292,6 +292,7 @@ impl GameWorld {
         finder.trees(&mut roots);
         finder.stamps(found.iter().map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
+        finder.rims(&mut roots);
         let before = plants.len();
         climber::grow_column(roots, run.chunk, run.voxels, &world, &self.materials, self.seed, &self.climbers, plants, inspect);
         taken.extend(plants[before..].iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))));

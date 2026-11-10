@@ -190,13 +190,38 @@ pub const LIANA: Climber = Climber {
     stick: 0.0,
     light: 0.0,
     hanging: true,
-    stem_budget: (60, 260),
+    stem_budget: (120, 700),
     max_height: 0,
     branch_rate: 0.015,
     max_generations: 2,
     leaf_gap: 5,
     leaf_density: 0.5,
     box_budget: 220,
+};
+
+/// A low creeper sprawling over fallen logs and boulders on a wet forest floor: hardly
+/// climbs, keeps close to what it covers.
+pub const TRAILING_CREEPER: Climber = Climber {
+    name: "trailing creeper",
+    stem: mat::IVY_STEM,
+    wood: mat::IVY_WOOD,
+    leaves: [mat::CREEPER_LEAF_DARK, mat::VINE_LEAF, mat::IVY_LEAF_PALE],
+    autumn: None,
+    flowers: None,
+    berries: None,
+    up: 0.15,
+    inertia: 1.0,
+    wander: 0.9,
+    stick: 2.4,
+    light: 0.2,
+    hanging: false,
+    stem_budget: (60, 380),
+    max_height: 40,
+    branch_rate: 0.14,
+    max_generations: 3,
+    leaf_gap: 2,
+    leaf_density: 0.85,
+    box_budget: 400,
 };
 
 /// Where a plant starts: a cell just off a surface, with the way out of the surface and
@@ -335,7 +360,7 @@ pub fn grow_stems(params: &Climber, root: &Root, world: &impl Voxels, mats: &Mat
     let mut tips = vec![Tip { node: 0, dir: first, generation: 0, since: 0, life: budget, air: 0, sky: 0.5 }];
     let reach = REACH * CELL;
     let top = root.cell.y + params.max_height;
-    let bottom = root.cell.y - if params.hanging { 240 } else { 8 };
+    let bottom = root.cell.y - if params.hanging { 700 } else { 8 };
 
     let mut steps = 0u32;
     while steps < budget && !tips.is_empty() {
@@ -347,7 +372,12 @@ pub fn grow_stems(params: &Climber, root: &Root, world: &impl Voxels, mats: &Mat
             let tip = &tips[i];
             let (c, dir, generation, since, air, node_index) = (nodes[tip.node as usize].cell, tip.dir, tip.generation, tip.since, tip.air, tip.node);
             let out_here = nodes[node_index as usize].out;
-            let sky = if since % 6 == 0 { sense.sky(c) } else { tip.sky };
+            // A hanging stem that has come down onto something rests there.
+            if params.hanging && !sense.air(c - IVec3::Y) {
+                tips[i].life = 0;
+                continue;
+            }
+            let sky =if since % 6 == 0 { sense.sky(c) } else { tip.sky };
             let shade = 1.0 - sky;
 
             // The direction the plant would like to go.
@@ -646,6 +676,7 @@ pub fn suited(biome: Biome, warm: bool) -> Option<Climber> {
         Biome::OldGrowth | Biome::Deciduous => Some(IVY),
         Biome::Woodland => Some(if warm { VIRGINIA_CREEPER } else { IVY }),
         Biome::Taiga | Biome::Heath | Biome::Grassland => Some(VIRGINIA_CREEPER),
+        Biome::Savanna => Some(FLOWERING_VINE),
         _ => None,
     }
 }
@@ -786,6 +817,75 @@ pub fn tree_root(placement: &Placement, world: &impl Voxels, mats: &Materials, s
     None
 }
 
+/// How likely a tree is to carry lianas: the big rainforest trees, a few on the others.
+fn liana_chance(species: Species) -> f32 {
+    match species {
+        Species::Kapok => 0.9,
+        Species::Jungle => 0.55,
+        Species::ElderOak | Species::Baobab => 0.15,
+        _ => 0.0,
+    }
+}
+
+/// The underside of whatever is overhead at `(x, z)`, going up from `y`: the last air
+/// voxel below it, if there is open air at `y` and something before `top`.
+pub fn underside(world: &impl Voxels, mats: &Materials, x: i32, y: i32, z: i32, top: i32) -> Option<IVec3> {
+    let open = |v: Voxel| v == voxel::AIR || mats.get(v).kind == Kind::Air;
+    if !open(world.voxel(IVec3::new(x, y, z))) {
+        return None;
+    }
+    (y..top).find(|&k| !open(world.voxel(IVec3::new(x, k + 1, z)))).map(|k| IVec3::new(x, k, z))
+}
+
+/// Roots of lianas hanging from under a tree's crown, a few per tree.
+pub fn canopy_roots(placement: &Placement, lib: &Library, world: &impl Voxels, mats: &Materials, seed: u32, chance_scale: f32) -> Vec<Root> {
+    let mut roots = Vec::new();
+    let chance = liana_chance(placement.species) * chance_scale;
+    if chance <= 0.0 {
+        return roots;
+    }
+    let pos = placement.pos;
+    let h = hash3(seed ^ 0x11a7, pos.x, pos.y, pos.z);
+    let mut rng = Rng::new(h);
+    let reach = lib.get(placement.species, placement.variant).reach.clamp(3, REACH - 2);
+    let top = placement.top(lib);
+    for k in 0..4u32 {
+        if rng.unit() >= chance * 0.6 {
+            continue;
+        }
+        let (dir, _) = rng.heading();
+        let dist = rng.range(2.0, reach as f32);
+        let (x, z) = (pos.x + (dir.x * dist).round() as i32, pos.z + (dir.z * dist).round() as i32);
+        let Some(air) = underside(world, mats, x, pos.y + 3, z, top) else { continue };
+        // Only where there is a real drop beneath.
+        if air.y - pos.y < 6 {
+            continue;
+        }
+        let cell = air * CELL + IVec3::new(CELL / 2, CELL - 1, CELL / 2);
+        roots.push(Root { cell, out: IVec3::NEG_Y, age: rng.range(0.4, 1.0), seed: h ^ k.wrapping_mul(0x9e37_79b9) });
+    }
+    roots
+}
+
+/// How likely cliff rims in a biome are to have lianas hanging over them.
+fn rim_chance(biome: Biome) -> f32 {
+    match biome {
+        Biome::Rainforest => 0.7,
+        Biome::OldGrowth | Biome::Deciduous => 0.12,
+        _ => 0.0,
+    }
+}
+
+/// Where a liana hangs over a drop beside the column at `(x, z)` with ground at `top`:
+/// the air voxel over the edge, and the way out from the cliff face, if the ground
+/// falls away by at least 6 voxels on some side. `top_at` gives other columns' tops.
+pub fn rim_root(world: &impl Voxels, mats: &Materials, x: i32, z: i32, top: i32, top_at: impl Fn(i32, i32) -> i32) -> Option<(IVec3, IVec3)> {
+    [IVec3::X, IVec3::NEG_X, IVec3::Z, IVec3::NEG_Z].into_iter().find_map(|d| {
+        let air = IVec3::new(x + d.x, top, z + d.z);
+        (top_at(air.x, air.z) <= top - 6 && !solid(world.voxel(air), mats)).then_some((air, d))
+    })
+}
+
 /// The cell of air voxel `air` right against the surface it grows out from, at the foot
 /// of the voxel and in the middle along the surface.
 fn cell_beside(air: IVec3, out: IVec3) -> IVec3 {
@@ -922,10 +1022,22 @@ impl RootFinder<'_> {
             if chance <= 0.0 {
                 continue;
             }
+            let col = self.world.column(p.pos.x, p.pos.z);
             if let Some(root) = tree_root(p, self.world, self.mats, self.seed, chance) {
-                let col = self.world.column(p.pos.x, p.pos.z);
-                if let Some(params) = suited(col.biome, col.temperature > 0.6) {
+                let low = matches!(p.species, Species::FallenLog | Species::Boulder | Species::MossyBoulder | Species::Stump);
+                let wet = matches!(col.biome, Biome::Rainforest | Biome::OldGrowth | Biome::Deciduous);
+                if low && wet {
+                    out.push((root, TRAILING_CREEPER));
+                } else if let Some(params) = suited(col.biome, col.temperature > 0.6) {
                     out.push((root, params));
+                }
+            }
+            if col.biome == Biome::Rainforest {
+                for root in canopy_roots(p, self.world.lib, self.world, self.mats, self.seed, chance) {
+                    let (x, z) = (root.cell.x.div_euclid(CELL), root.cell.z.div_euclid(CELL));
+                    if self.within(x, z) {
+                        out.push((root, LIANA));
+                    }
                 }
             }
         }
@@ -947,6 +1059,38 @@ impl RootFinder<'_> {
                 if let Some(params) = suited(col.biome, col.temperature > 0.5) {
                     out.push((root, if flowers { FLOWERING_VINE } else { params }));
                 }
+            }
+        }
+    }
+
+    /// Lianas hanging over the rims of cliffs and steep banks in wet country.
+    pub fn rims(&self, out: &mut Vec<(Root, Climber)>) {
+        let cell = 8;
+        for gz in self.z0.div_euclid(cell)..=self.z1.div_euclid(cell) {
+            for gx in self.x0.div_euclid(cell)..=self.x1.div_euclid(cell) {
+                let (x, z) = (
+                    gx * cell + (hashed_chance(self.seed, gx, gz, 0x3a1) * cell as f32) as i32,
+                    gz * cell + (hashed_chance(self.seed, gx, gz, 0x3a2) * cell as f32) as i32,
+                );
+                if !self.within(x, z) {
+                    continue;
+                }
+                let col = self.world.column(x, z);
+                let chance = rim_chance(col.biome) * place_chance(&col);
+                if chance <= 0.0 || col.cover != Cover::Land || col.water_surface().is_some() {
+                    continue;
+                }
+                let h = hash3(self.seed ^ 0x51e, x, col.top(), z);
+                if unit(h) >= chance {
+                    continue;
+                }
+                let Some((air, d)) = rim_root(self.world, self.mats, x, z, col.top(), |x, z| self.world.column(x, z).top()) else { continue };
+                if !self.within(air.x, air.z) {
+                    continue;
+                }
+                let mut cell = cell_beside(air, d);
+                cell.y = air.y * CELL + CELL - 1;
+                out.push((Root { cell, out: d, age: unit(h.rotate_left(13)) * 0.6 + 0.4, seed: h }, LIANA));
             }
         }
     }
@@ -1198,7 +1342,7 @@ mod tests {
     #[test]
     fn the_piece_budget_holds() {
         let (world, mats) = wall(90);
-        for params in [IVY, VIRGINIA_CREEPER, FLOWERING_VINE, LIANA] {
+        for params in [IVY, VIRGINIA_CREEPER, FLOWERING_VINE, LIANA, TRAILING_CREEPER] {
             let root = Root { age: 1.0, ..root_on_wall() };
             let boxes = rastered(&params, &root, &world, &mats);
             assert!(boxes.len() <= params.box_budget, "{}: {} boxes", params.name, boxes.len());
@@ -1291,6 +1435,33 @@ mod tests {
         }
     }
 
+    /// Prints rainforest spots near the spawn of a seed, for finding lianas:
+    /// `BIOME_SEED=1 cargo test -p worldgen --release find_rainforest -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn find_rainforest() {
+        use crate::world::GameWorld;
+        let seed = std::env::var("BIOME_SEED").map_or(1, |s| s.parse().unwrap());
+        let w = GameWorld::new(seed);
+        let spawn = w.spawn_point();
+        let (sx, sz) = (spawn.x, spawn.z);
+        let mut found = 0;
+        for r in (0..6000).step_by(96) {
+            for k in 0..16 {
+                let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                let (x, z) = (sx + (a.cos() * r as f32) as i32, sz + (a.sin() * r as f32) as i32);
+                let col = w.column(x, z);
+                if col.biome == Biome::Rainforest && col.cover == Cover::Land {
+                    println!("rainforest at {x},{z} ground {} temperature {:.2}", col.top(), col.temperature);
+                    found += 1;
+                    if found >= 12 {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn ivy_flowers_in_autumn_and_fruits_over_winter() {
         let at = |season| cluster_at(&IVY, season, 0.0);
@@ -1303,6 +1474,84 @@ mod tests {
         assert_eq!(cluster_at(&IVY, 0.73, 0.0), Some(mat::IVY_FLOWER));
         assert_eq!(cluster_at(&IVY, 0.73, 1.0), None);
         assert_eq!(cluster_at(&LIANA, 0.8, 0.0), None);
+    }
+
+    #[test]
+    fn a_liana_starts_under_a_crown_and_falls_clear() {
+        // A trunk with a slab of leaves over it at height 20.
+        let mats = build();
+        let mut map = HashMap::new();
+        for y in 0..24 {
+            map.insert(IVec3::new(0, y, 0), mat::BARK_JUNGLE);
+        }
+        for x in -6..=6 {
+            for z in -6..=6 {
+                map.insert(IVec3::new(x, 20, z), mat::LEAVES_JUNGLE);
+            }
+        }
+        let world = Blocks { map, floor: 0, floor_voxel: mat::STONE };
+        assert_eq!(underside(&world, &mats, 4, 3, 2, 30), Some(IVec3::new(4, 19, 2)));
+        assert_eq!(underside(&world, &mats, 0, 3, 0, 30), None, "inside the trunk");
+        assert_eq!(underside(&world, &mats, 12, 3, 0, 30), None, "nothing overhead");
+        let air = IVec3::new(4, 19, 2);
+        let root = Root { cell: air * CELLS + IVec3::new(5, 9, 5), out: IVec3::NEG_Y, age: 0.9, seed: 3 };
+        let skel = grow_stems(&LIANA, &root, &world, &mats);
+        let lowest = skel.nodes.iter().map(|n| n.cell.y).min().unwrap();
+        assert!(lowest < 8 * CELLS, "hung only to {lowest}");
+        let boxes = rastered(&LIANA, &root, &world, &mats);
+        assert!(boxes.iter().any(|b| b.voxel == mat::LIANA_STEM));
+        assert!(boxes.len() <= LIANA.box_budget);
+    }
+
+    #[test]
+    fn a_liana_hangs_over_a_cliff_rim() {
+        // Ground at 30 for x < 0, a drop to 0 beyond.
+        let mats = build();
+        let mut map = HashMap::new();
+        for x in -6..0 {
+            for z in -6..6 {
+                for y in 0..=30 {
+                    map.insert(IVec3::new(x, y, z), mat::STONE);
+                }
+            }
+        }
+        let world = Blocks { map, floor: 0, floor_voxel: mat::STONE };
+        let top_at = |x: i32, _z: i32| if x < 0 { 30 } else { 0 };
+        let (air, d) = rim_root(&world, &mats, -1, 0, 30, top_at).expect("no rim found");
+        assert_eq!((air, d), (IVec3::new(0, 30, 0), IVec3::X));
+        assert_eq!(rim_root(&world, &mats, -3, 0, 30, top_at), None, "away from the edge");
+        let mut cell = cell_beside(air, d);
+        cell.y = air.y * CELLS + CELLS - 1;
+        let root = Root { cell, out: d, age: 1.0, seed: 77 };
+        let skel = grow_stems(&LIANA, &root, &world, &mats);
+        let lowest = skel.nodes.iter().map(|n| n.cell.y).min().unwrap();
+        assert!(lowest < 20 * CELLS, "hung only to {lowest}");
+        // Down the face, not out into the air.
+        let far = skel.nodes.iter().map(|n| n.cell.x).max().unwrap();
+        assert!(far < 4 * CELLS, "strayed out to {far}, lowest {lowest}, {} nodes", skel.nodes.len());
+    }
+
+    #[test]
+    fn a_trailing_creeper_stays_low_over_a_log() {
+        // A log 2 voxels high and long along X.
+        let mats = build();
+        let mut map = HashMap::new();
+        for x in -10..10 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    map.insert(IVec3::new(x, y, z), mat::BARK_OAK);
+                }
+            }
+        }
+        let world = Blocks { map, floor: 0, floor_voxel: mat::STONE };
+        let root = Root { cell: cell_beside(IVec3::new(0, 0, -1), IVec3::NEG_Z), out: IVec3::NEG_Z, age: 1.0, seed: 5 };
+        let skel = grow_stems(&TRAILING_CREEPER, &root, &world, &mats);
+        let highest = skel.nodes.iter().map(|n| n.cell.y).max().unwrap();
+        assert!(skel.nodes.len() > 100, "only {} nodes", skel.nodes.len());
+        assert!(highest <= root.cell.y + TRAILING_CREEPER.max_height);
+        assert!(highest >= 2 * CELLS, "never got onto the log");
+        let boxes = rastered(&TRAILING_CREEPER, &root, &world, &mats);
+        assert!(boxes.len() <= TRAILING_CREEPER.box_budget);
     }
 
     #[test]
