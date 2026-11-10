@@ -63,6 +63,9 @@ pub struct Shape {
     /// Fine parts drawn as plant boxes alongside the voxels (lantern frames, chains and
     /// the like), in model cells of 1/CELLS voxel. Only raw models carry them.
     fine: Vec<PlantBox>,
+    /// Boxes of model voxels (inclusive) that must be left open to walk through: doors,
+    /// stairs and the like. Props keep out of them.
+    clear: Vec<(IVec3, IVec3)>,
 }
 
 impl Default for Shape {
@@ -80,6 +83,7 @@ impl Shape {
             block: BLOCK,
             axis: None,
             fine: Vec::new(),
+            clear: Vec::new(),
         }
     }
 
@@ -91,6 +95,7 @@ impl Shape {
             block: 1,
             axis: None,
             fine: Vec::new(),
+            clear: Vec::new(),
         }
     }
 
@@ -214,6 +219,16 @@ impl Shape {
     /// Takes the fine parts added so far, in the order they were added.
     pub fn take_fine(&mut self) -> Vec<PlantBox> {
         std::mem::take(&mut self.fine)
+    }
+
+    /// Marks an inclusive box of voxels as a way through, to be kept clear of props.
+    pub fn keep_clear(&mut self, lo: IVec3, hi: IVec3) {
+        self.clear.push((lo.min(hi), lo.max(hi)));
+    }
+
+    /// Whether voxel `p` is in a way through marked by [`Shape::keep_clear`].
+    pub fn must_stay_clear(&self, p: IVec3) -> bool {
+        self.clear.iter().any(|&(lo, hi)| p.cmpge(lo).all() && p.cmple(hi).all())
     }
 
     /// Removes air voxels used to carve hollows.

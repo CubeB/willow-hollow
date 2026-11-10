@@ -198,6 +198,15 @@ palette! {
     IVY_ROPE_DARK     = ( 96,  86,  74), Foliage, 1;
     // Volcanic beaches: basalt ground to black sand by the surf.
     BLACK_SAND        = ( 46,  44,  48), Solid, 1;
+    // The props left about landmarks (features::props): iron fittings and the rust they
+    // turn to, rope new and rotten, fired clay, bottle glass and sackcloth.
+    IRON              = ( 64,  62,  64), Solid, 1;
+    RUST              = (126,  72,  46), Solid, 2;
+    ROPE              = (172, 148, 102), Solid, 2;
+    ROPE_ROTTEN       = (110,  98,  78), Solid, 2;
+    CLAY              = (170, 100,  68), Solid, 1;
+    GLASS_GREEN       = ( 62, 116,  90), Solid, 0;
+    SACKCLOTH         = (180, 160, 120), Solid, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
