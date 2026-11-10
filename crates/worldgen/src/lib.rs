@@ -5,6 +5,7 @@ pub mod continent;
 pub mod features;
 pub mod macro_layout;
 pub mod materials;
+pub mod names;
 pub mod noise;
 pub mod scale;
 pub mod structures;

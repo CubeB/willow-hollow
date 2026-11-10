@@ -374,9 +374,21 @@ fn print_poi(c: &Continent) {
         format!("{x:.0},{z:.0}")
     };
     let local = |x: i32, z: i32| (c.desc.mx * MACRO_SIZE + x, c.desc.mz * MACRO_SIZE + z);
-    for s in &c.trails.sites {
+    for (k, s) in c.trails.sites.iter().enumerate() {
         let (x, z) = local(s.x, s.z);
-        println!("  poi site       {x},{z}  {:?}, ground {}", s.kind, s.y);
+        let name = c.trails.names.site(k).map_or("", |p| p.name.as_str());
+        println!("  poi site       {x},{z}  {:?}, ground {}  \"{name}\"", s.kind, s.y);
+    }
+    // Every named place, with the tongue spoken there.
+    for p in &c.trails.names.places {
+        let (x, z) = local(p.at.x as i32, p.at.y as i32);
+        println!(
+            "  poi name       {x},{z}  {:<8} {:<10} {:>4.1}  {}",
+            c.trails.names.tongue_at(p.at),
+            p.kind.key(),
+            p.importance,
+            p.name
+        );
     }
     for x in &c.trails.crossings {
         let (wx, wz) = local(x.x, x.z);
@@ -583,6 +595,7 @@ fn main() -> Result<()> {
     println!("  simulated {0}x{0} in {1:.2} s", o.size, t.elapsed().as_secs_f32());
     let t = Instant::now();
     c.trails = worldgen::trails::build(&c, o.seed);
+    c.trails.names = worldgen::names::survey(&c, o.seed);
     println!(
         "  {} landmarks, {} trails, {} crossings, {} structures in {:.2} s",
         c.trails.sites.len(),

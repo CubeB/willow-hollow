@@ -102,6 +102,9 @@ pub struct Network {
     pub lines: Vec<Vec<Vec2>>,
     /// The half-width its traffic gives each trail at each point of `lines`.
     pub line_widths: Vec<Vec<f32>>,
+    /// The name of every place on the continent, landmarks and natural features alike.
+    /// Filled in once the network itself is built (see [`crate::names::survey`]).
+    pub names: crate::names::Gazetteer,
     tiles: HashMap<(i32, i32), Vec<TrailPoint>>,
     pads: Vec<Pad>,
     stamps: Vec<Stamp>,
