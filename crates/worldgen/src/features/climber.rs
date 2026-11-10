@@ -41,6 +41,12 @@ const CELL: i32 = CELLS;
 /// The six steps a stem can take.
 const STEPS: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
 
+/// Where a solid neighbour holds a clinging stem up: walls and the floor, not a ceiling.
+const BRACES: [IVec3; 5] = [IVec3::X, IVec3::NEG_X, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+
+/// Fewest cells a fork keeps: shorter ones are stubs that read as stray dashes.
+const MIN_BRANCH: u32 = 6;
+
 /// Stems may leave a surface for this many cells at a time, to round a corner, reach
 /// the far side of a wall top or follow a trunk that steps in by a voxel.
 const AIR_GAP: u32 = 4;
@@ -99,6 +105,9 @@ pub struct Climber {
     pub max_generations: u8,
     /// Cells between leaves along a stem.
     pub leaf_gap: u32,
+    /// The outline of one leaf of a clinging plant, as cells across (u) and from the
+    /// stalk toward the tip (v). Every leaf has the same size.
+    pub leaf: &'static [(i32, i32)],
     /// Share of possible leaves actually placed.
     pub leaf_density: f32,
     /// Leaves bunched in clusters along the stem rather than spread evenly.
@@ -107,13 +116,21 @@ pub struct Climber {
     pub box_budget: usize,
 }
 
+/// Ivy's leaf: two basal lobes either side of the stalk, a broad middle and a pointed
+/// tip, 0.3 m across.
+const IVY_LEAF_SHAPE: [(i32, i32); 6] = [(-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1), (0, 2)];
+/// Virginia creeper's: leaflets fanning out from the stalk like a hand.
+const CREEPER_LEAF_SHAPE: [(i32, i32); 6] = [(0, 0), (-1, 1), (0, 1), (1, 1), (-1, 2), (1, 2)];
+/// A plain pointed oval.
+const VINE_LEAF_SHAPE: [(i32, i32); 5] = [(0, 0), (-1, 1), (0, 1), (1, 1), (0, 2)];
+
 pub const IVY: Climber = Climber {
     name: "common ivy",
-    stem: mat::IVY_STEM,
-    wood: mat::IVY_WOOD,
-    streak: mat::IVY_WOOD_DARK,
-    leaves: [mat::IVY_LEAF_DARK, mat::IVY_LEAF, mat::IVY_LEAF_PALE],
-    autumn: Some((mat::IVY_LEAF_RED, 0.03)),
+    stem: mat::IVY_TWIG,
+    wood: mat::IVY_ROPE,
+    streak: mat::IVY_ROPE_DARK,
+    leaves: [mat::IVY_GLOSS, mat::IVY_GLOSS_LIT, mat::IVY_GLOSS_NEW],
+    autumn: None,
     flowers: Some((mat::IVY_FLOWER, Span(0.72, 0.92))),
     berries: Some((mat::IVY_BERRY_GREEN, Span(0.92, 0.12), mat::IVY_BERRY, Span(0.12, 0.3))),
     up: 1.0,
@@ -126,19 +143,20 @@ pub const IVY: Climber = Climber {
     max_height: 180,
     branch_rate: 0.09,
     max_generations: 4,
-    leaf_gap: 2,
-    leaf_density: 0.9,
+    leaf_gap: 3,
+    leaf: &IVY_LEAF_SHAPE,
+    leaf_density: 0.85,
     clusters: false,
     box_budget: 900,
 };
 
 pub const VIRGINIA_CREEPER: Climber = Climber {
     name: "virginia creeper",
-    stem: mat::IVY_STEM,
-    wood: mat::IVY_WOOD,
-    streak: mat::IVY_WOOD_DARK,
-    leaves: [mat::CREEPER_LEAF_DARK, mat::CREEPER_LEAF, mat::CREEPER_LEAF_RED],
-    autumn: Some((mat::CREEPER_LEAF_RED, 0.6)),
+    stem: mat::IVY_TWIG,
+    wood: mat::IVY_ROPE,
+    streak: mat::IVY_ROPE_DARK,
+    leaves: [mat::CREEPER_GREEN_DARK, mat::CREEPER_GREEN, mat::CREEPER_GREEN],
+    autumn: Some((mat::CREEPER_SCARLET, 0.6)),
     flowers: None,
     berries: Some((mat::IVY_BERRY_GREEN, Span(0.55, 0.72), mat::IVY_BERRY, Span(0.72, 0.9))),
     up: 1.15,
@@ -152,6 +170,7 @@ pub const VIRGINIA_CREEPER: Climber = Climber {
     branch_rate: 0.12,
     max_generations: 4,
     leaf_gap: 4,
+    leaf: &CREEPER_LEAF_SHAPE,
     leaf_density: 0.7,
     clusters: false,
     box_budget: 700,
@@ -160,10 +179,10 @@ pub const VIRGINIA_CREEPER: Climber = Climber {
 /// Climbing rose and honeysuckle: fewer stems, showy flowers, near people.
 pub const FLOWERING_VINE: Climber = Climber {
     name: "flowering vine",
-    stem: mat::IVY_STEM,
-    wood: mat::IVY_WOOD,
-    streak: mat::IVY_WOOD_DARK,
-    leaves: [mat::VINE_LEAF, mat::VINE_LEAF, mat::IVY_LEAF_PALE],
+    stem: mat::IVY_TWIG,
+    wood: mat::IVY_ROPE,
+    streak: mat::IVY_ROPE_DARK,
+    leaves: [mat::VINE_GREEN, mat::VINE_GREEN, mat::VINE_GREEN],
     autumn: None,
     flowers: Some((mat::VINE_FLOWER, Span(0.25, 0.85))),
     berries: None,
@@ -178,6 +197,7 @@ pub const FLOWERING_VINE: Climber = Climber {
     branch_rate: 0.1,
     max_generations: 3,
     leaf_gap: 3,
+    leaf: &VINE_LEAF_SHAPE,
     leaf_density: 0.6,
     clusters: false,
     box_budget: 450,
@@ -205,6 +225,7 @@ pub const LIANA: Climber = Climber {
     branch_rate: 0.015,
     max_generations: 2,
     leaf_gap: 1,
+    leaf: &VINE_LEAF_SHAPE,
     leaf_density: 0.9,
     clusters: true,
     box_budget: 320,
@@ -214,10 +235,10 @@ pub const LIANA: Climber = Climber {
 /// climbs, keeps close to what it covers.
 pub const TRAILING_CREEPER: Climber = Climber {
     name: "trailing creeper",
-    stem: mat::IVY_STEM,
-    wood: mat::IVY_WOOD,
-    streak: mat::IVY_WOOD_DARK,
-    leaves: [mat::CREEPER_LEAF_DARK, mat::VINE_LEAF, mat::IVY_LEAF_PALE],
+    stem: mat::IVY_TWIG,
+    wood: mat::IVY_ROPE,
+    streak: mat::IVY_ROPE_DARK,
+    leaves: [mat::CREEPER_GREEN_DARK, mat::VINE_GREEN, mat::VINE_GREEN],
     autumn: None,
     flowers: None,
     berries: None,
@@ -231,7 +252,8 @@ pub const TRAILING_CREEPER: Climber = Climber {
     max_height: 40,
     branch_rate: 0.14,
     max_generations: 3,
-    leaf_gap: 2,
+    leaf_gap: 3,
+    leaf: &CREEPER_LEAF_SHAPE,
     leaf_density: 0.85,
     clusters: false,
     box_budget: 400,
@@ -308,6 +330,12 @@ impl<V: Voxels> Sensing<'_, V> {
             }
         }
         IVec3::ZERO
+    }
+
+    /// Whether a cell rests against a wall or lies on a floor, as opposed to clinging only
+    /// to a ceiling or floating free.
+    fn braced(&mut self, cell: IVec3) -> bool {
+        BRACES.iter().any(|&s| !self.air(cell + s))
     }
 
     /// How open the sky is straight overhead, 0..1.
@@ -429,6 +457,11 @@ pub fn grow_stems(params: &Climber, root: &Root, world: &impl Voxels, mats: &Mat
                 let mut score = desired.dot(step.as_vec3());
                 if attached {
                     score += params.stick;
+                    // Clinging plants avoid the undersides of things: a stem may cross one
+                    // to reach another surface, but should not wander about under it.
+                    if !params.hanging && !sense.braced(next) {
+                        score -= 0.8;
+                    }
                 }
                 // Tips avoid running over each other, so the plant keeps a fan shape.
                 let crowded = STEPS.iter().filter(|s| occupied.contains(&(next + **s))).count() as f32;
@@ -495,6 +528,7 @@ pub fn grow_stems(params: &Climber, root: &Root, world: &impl Voxels, mats: &Mat
         tips.retain(|t| t.life > 0);
     }
 
+    let mut nodes = prune(params, nodes, &mut sense);
     // Each node's load is itself plus everything grown beyond it.
     for k in (1..nodes.len()).rev() {
         nodes[k].load += 1;
@@ -504,6 +538,86 @@ pub fn grow_stems(params: &Climber, root: &Root, world: &impl Voxels, mats: &Mat
     }
     nodes[0].load += 1;
     Skeleton { nodes }
+}
+
+/// Cuts what would dangle from a clinging plant: stems that end under a ceiling or out
+/// in the air, tips that run down to the bottom edge of something and stop there like
+/// an icicle, and forks too short to read as anything but a stray dash. A stem may still
+/// turn under an edge or cross a gap, as long as it goes on to another surface. Hanging
+/// plants are meant to dangle and are left alone. Loads are left for the caller.
+fn prune<V: Voxels>(params: &Climber, nodes: Vec<Node>, sense: &mut Sensing<'_, V>) -> Vec<Node> {
+    let n = nodes.len();
+    if params.hanging || n < 2 {
+        return nodes;
+    }
+    let braced: Vec<bool> = nodes.iter().map(|node| sense.braced(node.cell)).collect();
+    // Children come after their parents, so a backward sweep sees a node's whole stem
+    // beyond it and a forward one sees its parent settled. Each cut can leave a new end
+    // that needs cutting in turn, so sweep until nothing changes.
+    let mut alive = vec![true; n];
+    let mut count = n;
+    loop {
+        let mut children = vec![0u32; n];
+        for k in 1..n {
+            if alive[k] {
+                children[nodes[k].parent as usize] += 1;
+            }
+        }
+        // Tips that came down to an edge with nothing under them lose the run down.
+        for k in 1..n {
+            let below = nodes[k].cell - IVec3::Y;
+            if !alive[k] || children[k] != 0 || !sense.air(below) || sense.braced(below) {
+                continue;
+            }
+            let mut m = k;
+            while m != 0 && nodes[m].dir == IVec3::NEG_Y && (m == k || children[m] == 1) {
+                alive[m] = false;
+                m = nodes[m].parent as usize;
+            }
+        }
+        // A node stays if it is braced or leads on to one that is; and how many cells
+        // stay from each node on, to find the stubs.
+        let mut leads = vec![false; n];
+        let mut beyond = vec![0u32; n];
+        leads[0] = true;
+        for k in (1..n).rev() {
+            if !alive[k] {
+                continue;
+            }
+            leads[k] |= braced[k];
+            if leads[k] {
+                let p = nodes[k].parent as usize;
+                leads[p] = true;
+                beyond[k] += 1;
+                beyond[p] += beyond[k];
+            }
+        }
+        for k in 1..n {
+            let p = nodes[k].parent as usize;
+            let fork = nodes[p].generation != nodes[k].generation;
+            alive[k] = alive[k] && leads[k] && alive[p] && !(fork && beyond[k] < MIN_BRANCH);
+        }
+        let now = alive.iter().filter(|a| **a).count();
+        if now == count {
+            break;
+        }
+        count = now;
+    }
+    let mut index = vec![u32::MAX; n];
+    let mut out = Vec::with_capacity(count);
+    for k in 0..n {
+        if !alive[k] {
+            continue;
+        }
+        let mut node = nodes[k];
+        if k > 0 {
+            node.parent = index[node.parent as usize];
+        }
+        node.load = 0;
+        index[k] = out.len() as u32;
+        out.push(node);
+    }
+    out
 }
 
 /// How thick a stem is at a node, in cells, from the share of the plant it carries
@@ -528,6 +642,7 @@ pub fn raster_stems(params: &Climber, root: &Root, skel: &Skeleton, world: &impl
     let mut sense = Sensing { world, mats, cache: HashMap::new() };
     let total = skel.nodes.first().map_or(1, |n| n.load);
     let phase = unit(root.seed) * std::f32::consts::TAU;
+    let twist = (root.seed % 7) as i32;
     for node in &skel.nodes {
         let mut t = thickness(node.load, total, root.age);
         // Hanging cords stay thin.
@@ -557,8 +672,9 @@ pub fn raster_stems(params: &Climber, root: &Root, skel: &Skeleton, world: &impl
                 }
                 let voxel = if !wood {
                     params.stem
-                } else if (a + b + node.cell.y.div_euclid(2)).rem_euclid(3) == 0 {
-                    // Strands spiralling round the rope.
+                } else if width >= 3 && b == (node.cell.y.div_euclid(5) + twist).rem_euclid(width) {
+                    // One darker strand winding slowly round an old rope: long runs, so
+                    // the rope reads as one line and not as dashes.
                     params.streak
                 } else {
                     params.wood
@@ -596,12 +712,136 @@ fn leaf_shape(size: u32, variant: u32) -> &'static [(i32, i32)] {
     }
 }
 
-/// The second pass: walks each stem and hangs leaves off it, at alternating nodes, angled
-/// out like shingles. Separate from the stems so it can be tuned or dropped on its own.
+/// The second pass: walks each stem and dresses it in leaves. Separate from the stems so
+/// it can be tuned or dropped on its own. `leaves` is the share of leaves to place.
 pub fn raster_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &impl Voxels, mats: &Materials, raster: &mut Raster, leaves: f32) {
     if leaves <= 0.0 {
         return;
     }
+    if params.hanging {
+        hanging_leaves(params, root, skel, world, mats, raster, leaves);
+    } else {
+        clinging_leaves(params, root, skel, world, mats, raster, leaves);
+    }
+}
+
+/// One way to lay a leaf: where its stalk end sits, and the directions across it and
+/// from stalk to tip.
+#[derive(Clone, Copy)]
+struct Lay {
+    origin: IVec3,
+    across: IVec3,
+    down: IVec3,
+}
+
+impl Lay {
+    fn at(self, (u, v): (i32, i32)) -> IVec3 {
+        self.origin + self.across * u + self.down * v
+    }
+}
+
+/// Where a leaf off `node` may go, best first, on side `sign` of the stem by preference.
+/// Leaves lie flat one cell off the surface, over the stem's own layer, clear of the
+/// stem itself so it shows as a line between them. On a wall they hang tip down whichever
+/// way the stem runs; on the ground they point away from the stem. Nothing grows off a
+/// ceiling or from a stem out in the air.
+fn leaf_lays(node: &Node, sign: i32) -> Vec<Lay> {
+    let out = node.out;
+    if out == IVec3::ZERO || out == IVec3::NEG_Y {
+        return Vec::new();
+    }
+    let lift = node.cell + out;
+    if out == IVec3::Y {
+        let along = if node.dir.y == 0 && node.dir != out { node.dir } else { IVec3::X };
+        let side = perpendicular(out, along);
+        return [sign, -sign].map(|s| Lay { origin: lift + side * s, across: along, down: side * s }).to_vec();
+    }
+    let across = perpendicular(out, IVec3::Y);
+    if node.dir.y != 0 {
+        // Up a stem: beside it, the basal lobes level with the cell above.
+        [2 * sign, -2 * sign, sign, -sign].map(|k| Lay { origin: lift + across * k + IVec3::Y, across, down: IVec3::NEG_Y }).to_vec()
+    } else {
+        // Along a stem: below it or above it, a cell clear either way.
+        let below = Lay { origin: lift - IVec3::Y * 2, across, down: IVec3::NEG_Y };
+        let above = Lay { origin: lift + IVec3::Y * 4, across, down: IVec3::NEG_Y };
+        if sign > 0 { vec![below, above] } else { vec![above, below] }
+    }
+}
+
+/// Leaves on a clinging plant, one shape ([`Climber::leaf`]) of one size, every
+/// `leaf_gap` cells along each stem and on alternate sides of it, so they overlap down
+/// the stem like shingles. A leaf goes in whole or not at all: every cell of it held a
+/// cell off the surface it grows on, so none overhangs an edge, and none touching
+/// another leaf, so the surface and stem show between them. Colours come in patches
+/// over the plant, not leaf by leaf.
+fn clinging_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &impl Voxels, mats: &Materials, raster: &mut Raster, leaves: f32) {
+    let mut sense = Sensing { world, mats, cache: HashMap::new() };
+    let mut rng = Rng::new(root.seed ^ 0x1ea7);
+    let nodes = &skel.nodes;
+    let total = nodes.first().map_or(1, |n| n.load);
+    // Distance from the root along the stems, and the fork each node's branch began at.
+    let mut dist = vec![0u32; nodes.len()];
+    let mut branch = vec![0u32; nodes.len()];
+    for k in 1..nodes.len() {
+        let p = nodes[k].parent as usize;
+        dist[k] = dist[p] + 1;
+        branch[k] = if nodes[p].generation != nodes[k].generation { k as u32 } else { branch[p] };
+    }
+    let gap = params.leaf_gap.max(1);
+    let mut placed: HashSet<IVec3> = HashSet::new();
+    let mut cells = Vec::with_capacity(params.leaf.len());
+    for (k, node) in nodes.iter().enumerate() {
+        // Bare tips where it is still growing.
+        if !dist[k].is_multiple_of(gap) || node.load < 3 {
+            continue;
+        }
+        // Bare wood at the base of old plants.
+        let t = thickness(node.load, total, root.age);
+        if (t >= 3 && rng.unit() < 0.85) || (t == 2 && rng.unit() < 0.4) {
+            continue;
+        }
+        if rng.unit() > params.leaf_density * leaves {
+            continue;
+        }
+        let sign = if (dist[k] / gap).is_multiple_of(2) { 1 } else { -1 };
+        let out = node.out;
+        let mut fits = |c: IVec3| {
+            sense.air(c)
+                && !raster.taken(c)
+                && sense.air(c - out)
+                && !sense.air(c - out * 2)
+                && !(-1..=1).any(|x| (-1..=1).any(|y| (-1..=1).any(|z| placed.contains(&(c + IVec3::new(x, y, z))))))
+        };
+        let Some(lay) = leaf_lays(node, sign).into_iter().find(|&lay| params.leaf.iter().all(|&uv| fits(lay.at(uv)))) else {
+            continue;
+        };
+        cells.clear();
+        cells.extend(params.leaf.iter().map(|&uv| lay.at(uv)));
+        let colour = patch_colour(params, root, node, branch[k]);
+        for &c in &cells {
+            raster.set(c, colour);
+            placed.insert(c);
+        }
+    }
+}
+
+/// A leaf's colour, the same over patches of a plant: turned leaves a branch at a time,
+/// fresh growth at the very tips, and two close greens over areas a metre or two across.
+fn patch_colour(params: &Climber, root: &Root, node: &Node, branch: u32) -> Voxel {
+    if let Some((voxel, share)) = params.autumn
+        && unit(hash3(root.seed ^ 0xa07, branch as i32, 0, 0)) < share
+    {
+        return voxel;
+    }
+    if node.load < 6 {
+        return params.leaves[2];
+    }
+    let patch = node.cell.div_euclid(IVec3::splat(12));
+    if unit(hash3(root.seed ^ 0x5ade, patch.x, patch.y, patch.z)) < 0.55 { params.leaves[0] } else { params.leaves[1] }
+}
+
+/// Leaves on a hanging cord: bunched in clusters along it, at alternating nodes.
+fn hanging_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &impl Voxels, mats: &Materials, raster: &mut Raster, leaves: f32) {
     let mut sense = Sensing { world, mats, cache: HashMap::new() };
     let mut rng = Rng::new(root.seed ^ 0x1ea7);
     let longest = skel.nodes.iter().map(|n| n.load).max().unwrap_or(1).max(1);
@@ -622,9 +862,6 @@ pub fn raster_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &imp
             continue;
         }
         let out = if node.out == IVec3::ZERO {
-            if !params.hanging {
-                continue;
-            }
             IVec3::new(if rng.unit() < 0.5 { 1 } else { -1 }, 0, 0)
         } else {
             node.out
@@ -691,7 +928,8 @@ pub fn raster_fruit(params: &Climber, root: &Root, skel: &Skeleton, world: &impl
     let top = skel.nodes.iter().map(|n| n.cell.y).max().unwrap_or(root.cell.y);
     let high = root.cell.y + ((top - root.cell.y) as f32 * 0.55) as i32;
     for (i, node) in skel.nodes.iter().enumerate() {
-        if i % 11 != 0 || node.cell.y < high || node.out == IVec3::ZERO {
+        // Nothing hangs off a ceiling or out in the air.
+        if i % 11 != 0 || node.cell.y < high || node.out == IVec3::ZERO || node.out == IVec3::NEG_Y {
             continue;
         }
         if rng.unit() > 0.5 || sense.sky(node.cell) < 0.3 {
@@ -700,11 +938,14 @@ pub fn raster_fruit(params: &Climber, root: &Root, skel: &Skeleton, world: &impl
         let Some(voxel) = cluster_at(params, SEASON, rng.unit()) else { continue };
         let side = perpendicular(node.out, node.dir);
         let across = side.cross(node.out);
-        for (a, b) in [(0, 0), (1, 0), (0, 1)] {
-            let cell = node.cell + node.out + side * a + across * b;
-            if sense.air(cell) {
-                raster.set(cell, voxel);
-            }
+        let cells = [(0, 0), (1, 0), (0, 1)].map(|(a, b)| node.cell + node.out + side * a + across * b);
+        // Whole clusters over the surface only, never a stray cube or two.
+        let out = node.out;
+        if !cells.iter().all(|&c| sense.air(c) && !raster.taken(c) && !sense.air(c - out * 2)) {
+            continue;
+        }
+        for cell in cells {
+            raster.set(cell, voxel);
         }
     }
 }
@@ -1322,14 +1563,13 @@ mod tests {
         let (world, mats) = wall(16);
         let skel = grow_stems(&IVY, &root_on_wall(), &world, &mats);
         let mut sense = Sensing { world: &world, mats: &mats, cache: HashMap::new() };
-        let mut run = 0;
-        for n in &skel.nodes {
+        // Cells off a surface in a row along each stem, back to its last hold.
+        let mut runs = vec![0u32; skel.nodes.len()];
+        for (k, n) in skel.nodes.iter().enumerate() {
             assert!(sense.air(n.cell), "{:?} is inside rock", n.cell);
             if sense.surface_out(n.cell) == IVec3::ZERO {
-                run += 1;
-                assert!(run <= AIR_GAP, "stem floated {run} cells at {:?}", n.cell);
-            } else {
-                run = 0;
+                runs[k] = if k == 0 { 1 } else { runs[n.parent as usize] + 1 };
+                assert!(runs[k] <= AIR_GAP, "stem floated {} cells at {:?}", runs[k], n.cell);
             }
         }
     }
@@ -1423,8 +1663,94 @@ mod tests {
         let colours = |boxes: &[PlantBox]| boxes.iter().map(|b| b.voxel).collect::<HashSet<_>>();
         assert!(!ivy.is_empty() && !creeper.is_empty());
         assert_ne!(colours(&ivy), colours(&creeper));
-        assert!(colours(&ivy).contains(&mat::IVY_LEAF_DARK) || colours(&ivy).contains(&mat::IVY_LEAF));
-        assert!(colours(&creeper).contains(&mat::CREEPER_LEAF) || colours(&creeper).contains(&mat::CREEPER_LEAF_DARK));
+        assert!(colours(&ivy).contains(&mat::IVY_GLOSS) || colours(&ivy).contains(&mat::IVY_GLOSS_LIT));
+        assert!(colours(&creeper).contains(&mat::CREEPER_GREEN) || colours(&creeper).contains(&mat::CREEPER_GREEN_DARK));
+    }
+
+    /// A wall with an eave: a slab at height `height` jutting `jut` voxels out over the -X
+    /// face, like a tower roof or a signboard over its post.
+    fn eaved_wall(height: i32, jut: i32) -> (Blocks, Materials) {
+        let (mut world, mats) = wall(height);
+        for x in -jut..2 {
+            for z in -20..20 {
+                world.map.insert(IVec3::new(x, height, z), mat::PLANK);
+            }
+        }
+        (world, mats)
+    }
+
+    /// Plant cells whose leaf colour is one of the climber's.
+    fn leaf_cells(params: &Climber, raster: &Raster) -> Vec<IVec3> {
+        let autumn = params.autumn.map(|a| a.0);
+        raster.cells().into_iter().filter(|(_, v)| params.leaves.contains(v) || Some(*v) == autumn).map(|(c, _)| c).collect()
+    }
+
+    #[test]
+    fn nothing_dangles_under_an_eave() {
+        let (world, mats) = eaved_wall(14, 4);
+        let mut sense = Sensing { world: &world, mats: &mats, cache: HashMap::new() };
+        for seed in 0..12 {
+            for params in [IVY, VIRGINIA_CREEPER, FLOWERING_VINE] {
+                let root = Root { age: 0.4 + seed as f32 * 0.05, seed: 9000 + seed, ..root_on_wall() };
+                let skel = grow_stems(&params, &root, &world, &mats);
+                let mut children = vec![0; skel.nodes.len()];
+                for n in &skel.nodes[1..] {
+                    children[n.parent as usize] += 1;
+                }
+                for (k, n) in skel.nodes.iter().enumerate() {
+                    if children[k] > 0 {
+                        continue;
+                    }
+                    // Every stem ends on a wall or the floor, never under the eave or in the air,
+                    assert!(sense.braced(n.cell), "{}: a stem ends hanging at {:?}", params.name, n.cell);
+                    // and never by running down off a bottom edge.
+                    let below = n.cell - IVec3::Y;
+                    let off_edge = sense.air(below) && !sense.braced(below);
+                    assert!(!(n.dir == IVec3::NEG_Y && off_edge), "{}: a strand hangs down to {:?}", params.name, n.cell);
+                }
+                // Every leaf lies a cell off a wall or the ground, none off a ceiling.
+                let raster = plant(&params, &root, &world, &mats);
+                for c in leaf_cells(&params, &raster) {
+                    let held = BRACES.iter().any(|&d| sense.air(c + d) && !sense.air(c + d * 2));
+                    assert!(held, "{}: a leaf hangs at {c:?}", params.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_are_whole_and_kept_apart() {
+        let (world, mats) = wall(60);
+        for params in [IVY, VIRGINIA_CREEPER] {
+            let root = Root { age: 0.8, ..root_on_wall() };
+            let raster = plant(&params, &root, &world, &mats);
+            let cells: HashSet<IVec3> = leaf_cells(&params, &raster).into_iter().collect();
+            // Group touching leaf cells, corners included: each group is one whole leaf.
+            let mut seen = HashSet::new();
+            let mut groups = 0;
+            for &start in &cells {
+                if !seen.insert(start) {
+                    continue;
+                }
+                let (mut stack, mut size) = (vec![start], 0);
+                while let Some(c) = stack.pop() {
+                    size += 1;
+                    for x in -1..=1 {
+                        for y in -1..=1 {
+                            for z in -1..=1 {
+                                let n = c + IVec3::new(x, y, z);
+                                if cells.contains(&n) && seen.insert(n) {
+                                    stack.push(n);
+                                }
+                            }
+                        }
+                    }
+                }
+                assert_eq!(size, params.leaf.len(), "{}: leaves touch or one is broken, near {start:?}", params.name);
+                groups += 1;
+            }
+            assert!(groups >= 12, "{}: only {groups} leaves", params.name);
+        }
     }
 
     #[test]
@@ -1498,6 +1824,59 @@ mod tests {
             let yaw = ((-back.z) as f32).atan2((-back.x) as f32).to_degrees();
             println!("{n:5} cells, rises {:3} voxels, root {at} out {out}: --over {},{},4 --look {yaw:.0},20", rise / CELLS, eye.x, eye.z);
         }
+    }
+
+    /// Counts climber pieces around a few places in a real world, for comparing changes:
+    /// `CLIMBER_STATS=seed,x,z;x,z cargo test -p worldgen --release climber_stats -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn climber_stats() {
+        use crate::world::GameWorld;
+        let spec = std::env::var("CLIMBER_STATS").unwrap_or("1,38997,13564;26456,28228;40115,22603".into());
+        let mut parts = spec.split(';');
+        let first: Vec<i32> = parts.next().unwrap().split(',').map(|s| s.parse().unwrap()).collect();
+        let w = GameWorld::new(first[0] as u32);
+        let mut spots = vec![(first[1], first[2])];
+        spots.extend(parts.map(|p| {
+            let v: Vec<i32> = p.split(',').map(|s| s.parse().unwrap()).collect();
+            (v[0], v[1])
+        }));
+        let mats = build();
+        let (mut plants, mut boxes, mut cells, mut leaf_cells, mut lone) = (0, 0, 0, 0, 0);
+        let mut faces = 0usize;
+        for (x, z) in spots {
+            let (cx0, cz0) = (x.div_euclid(voxel::CHUNK), z.div_euclid(voxel::CHUNK));
+            let mut seen: HashMap<IVec3, ()> = HashMap::new();
+            for cz in cz0 - 2..=cz0 + 2 {
+                for cx in cx0 - 2..=cx0 + 2 {
+                    w.generate_column_with(cx, cz, &mut |root, raster| {
+                        if seen.insert(root.cell, ()).is_some() {
+                            return;
+                        }
+                        plants += 1;
+                        let all = raster.cells();
+                        let set: HashSet<IVec3> = all.iter().map(|c| c.0).collect();
+                        cells += all.len();
+                        for (c, v) in &all {
+                            if mats.get(*v).kind == Kind::Foliage && !matches!(*v, mat::IVY_STEM | mat::IVY_WOOD | mat::IVY_WOOD_DARK | mat::IVY_TWIG | mat::IVY_ROPE | mat::IVY_ROPE_DARK | mat::LIANA_STEM | mat::LIANA_WOOD) {
+                                leaf_cells += 1;
+                            }
+                            // A cell with no plant cell beside it: speckle.
+                            if STEPS.iter().all(|s| !set.contains(&(*c + *s))) {
+                                lone += 1;
+                            }
+                        }
+                        let mut out = Vec::new();
+                        let mut copy = Raster::new();
+                        copy.absorb_clone(raster);
+                        copy.finish(&mut out, |_| (false, false));
+                        boxes += out.len();
+                        faces += out.len() * 6;
+                    });
+                }
+            }
+        }
+        println!("plants {plants} cells {cells} leaf cells {leaf_cells} lone cells {lone} boxes {boxes} quads<= {faces}");
     }
 
     /// Prints rainforest spots near the spawn of a seed, for finding lianas:

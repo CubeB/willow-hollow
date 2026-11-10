@@ -174,6 +174,19 @@ palette! {
     // Dark streaks in old climber wood, where the stems twist round each other.
     IVY_WOOD_DARK     = ( 98,  88,  78), Foliage, 2;
     LIANA_WOOD        = ( 78,  66,  52), Foliage, 2;
+    // Climber leaves and stems that read as leaves and lines, not moss: ivy a dark,
+    // bluish, glossy green well apart from moss's yellow greens, and little per-voxel
+    // jitter, so a leaf is one colour and its neighbours hardly jump.
+    IVY_GLOSS         = ( 30,  72,  46), Foliage, 1;
+    IVY_GLOSS_LIT     = ( 40,  88,  54), Foliage, 1;
+    IVY_GLOSS_NEW     = ( 70, 118,  64), Foliage, 1;
+    CREEPER_GREEN     = ( 82, 122,  50), Foliage, 1;
+    CREEPER_GREEN_DARK = ( 62, 102,  46), Foliage, 1;
+    CREEPER_SCARLET   = (172,  56,  42), Foliage, 1;
+    VINE_GREEN        = ( 64, 114,  56), Foliage, 1;
+    IVY_TWIG          = ( 90,  80,  58), Foliage, 1;
+    IVY_ROPE          = (114, 102,  84), Foliage, 1;
+    IVY_ROPE_DARK     = ( 96,  86,  74), Foliage, 1;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -264,9 +277,9 @@ fn classify(m: &mut Materials) {
     let kinds: [(&[Voxel], u8); 9] = [
         (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
         // Virginia creeper turns and drops like a broadleaf tree.
-        (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED], pk::DECIDUOUS),
+        (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED, CREEPER_GREEN, CREEPER_GREEN_DARK, CREEPER_SCARLET], pk::DECIDUOUS),
         // Ivy is evergreen; vines and lianas keep their leaves.
-        (&[IVY_LEAF_DARK, IVY_LEAF, IVY_LEAF_PALE, IVY_LEAF_RED, VINE_LEAF], pk::VINE),
+        (&[IVY_LEAF_DARK, IVY_LEAF, IVY_LEAF_PALE, IVY_LEAF_RED, VINE_LEAF, IVY_GLOSS, IVY_GLOSS_LIT, IVY_GLOSS_NEW, VINE_GREEN], pk::VINE),
         (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB], pk::EVERGREEN),
         (&[LEAVES_MAPLE, LEAVES_MAPLE_RED], pk::AUTUMN),
         (
@@ -287,6 +300,7 @@ fn classify(m: &mut Materials) {
             &[
                 VINE, BARK_OAK, BARK_BIRCH, BARK_PINE, BARK_REDWOOD, BARK_JUNGLE, BARK_PALM, BARK_WILLOW, BARK_ACACIA, BARK_BAOBAB,
                 WOOD_DEAD, PLANK, PLANK_PALE, PLANK_DARK, PLANK_RED, IVY_STEM, IVY_WOOD, LIANA_STEM, IVY_WOOD_DARK, LIANA_WOOD,
+                IVY_TWIG, IVY_ROPE, IVY_ROPE_DARK,
             ],
             pk::VINE,
         ),
