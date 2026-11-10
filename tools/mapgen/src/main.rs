@@ -19,7 +19,9 @@ usage: mapgen [options]
   --out DIR          output directory (default maps)
   --zoom CX,CZ,SPAN  also render a close-up centred on cell CX,CZ, SPAN cells wide
   --px N             output image size in pixels (default 1024)
-  --poi              list points of interest with world voxel coordinates";
+  --poi              list points of interest with world voxel coordinates
+  --atlas MX,MZ,N    instead, render NxN macro-cells from MX,MZ stitched together
+  --cell-px N        pixels per macro-cell in an atlas (default 200)";
 
 struct Options {
     seed: u32,
@@ -29,6 +31,8 @@ struct Options {
     zoom: Option<(f32, f32, f32)>,
     px: u32,
     poi: bool,
+    atlas: Option<(i32, i32, i32)>,
+    cell_px: u32,
 }
 
 fn parse_args() -> Result<Options> {
@@ -40,6 +44,8 @@ fn parse_args() -> Result<Options> {
         zoom: None,
         px: 1024,
         poi: false,
+        atlas: None,
+        cell_px: 200,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -69,6 +75,14 @@ fn parse_args() -> Result<Options> {
             }
             "--px" => o.px = value()?.parse()?,
             "--poi" => o.poi = true,
+            "--atlas" => {
+                let v = nums(value()?)?;
+                if v.len() != 3 {
+                    bail!("--atlas needs MX,MZ,N");
+                }
+                o.atlas = Some((v[0] as i32, v[1] as i32, v[2] as i32));
+            }
+            "--cell-px" => o.cell_px = value()?.parse()?,
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -456,8 +470,81 @@ fn print_poi(c: &Continent) {
     }
 }
 
+/// Renders many macro-cells side by side on a coarse grid, to judge the world at scale.
+fn atlas(o: &Options, (mx0, mz0, n): (i32, i32, i32)) -> Result<()> {
+    let size = if o.size == 1024 { 256 } else { o.size };
+    let px = o.cell_px;
+    let cells: Vec<(i32, i32)> = (0..n)
+        .flat_map(|z| (0..n).map(move |x| (mx0 + x, mz0 + z)))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |p| p.get()).min(8);
+    let done = std::sync::Mutex::new(Vec::with_capacity(cells.len()));
+    let t = Instant::now();
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(mx, mz)) = cells.get(k) else { break };
+                    let c = continent::generate(cell_desc(o.seed, mx, mz), SimConfig { size });
+                    let view = View { x0: 0.0, z0: 0.0, span: c.size as f32 };
+                    let relief = render_relief(&c, view, px, Layer::Elevation);
+                    let biome = render_relief(&c, view, px, Layer::Biome);
+                    done.lock().unwrap().push((mx, mz, relief, biome));
+                }
+            });
+        }
+    });
+    let side = px * n as u32;
+    let (mut relief_img, mut biome_img) = (RgbImage::new(side, side), RgbImage::new(side, side));
+    for (mx, mz, relief, biome) in done.into_inner().unwrap() {
+        let (ox, oz) = (((mx - mx0) as u32) * px, ((mz - mz0) as u32) * px);
+        for y in 0..px {
+            for x in 0..px {
+                relief_img.put_pixel(ox + x, oz + y, *relief.get_pixel(x, y));
+                biome_img.put_pixel(ox + x, oz + y, *biome.get_pixel(x, y));
+            }
+        }
+    }
+    println!("atlas {n}x{n} of {size}x{size} cells in {:.1} s", t.elapsed().as_secs_f32());
+    std::fs::create_dir_all(&o.out)?;
+    let name = |kind: &str| o.out.join(format!("s{}_atlas_{mx0}_{mz0}_{n}_{kind}.png", o.seed));
+    relief_img.save(name("relief"))?;
+    biome_img.save(name("biome"))?;
+    println!("  wrote {}", name("relief").display());
+
+    // Every structure touching the atlas, once each, for finding them in the game.
+    let mut seen = std::collections::HashSet::new();
+    for z in 0..n {
+        for x in 0..n {
+            let (mx, mz) = (mx0 + x, mz0 + z);
+            for s in worldgen::structures::Field::new(o.seed, mx, mz).structures() {
+                if seen.insert(s.seed) {
+                    let (a, b) = (s.points[0], s.points[s.points.len() - 1]);
+                    println!(
+                        "  {:?} length {:.0}, half-width {:.2}, amplitude {:.1}, cell {mx},{mz}: from voxel {:.0},{:.0} to {:.0},{:.0}",
+                        s.kind,
+                        s.length,
+                        s.half_width,
+                        s.amplitude,
+                        a.0 * MACRO_SIZE as f64,
+                        a.1 * MACRO_SIZE as f64,
+                        b.0 * MACRO_SIZE as f64,
+                        b.1 * MACRO_SIZE as f64
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let o = parse_args()?;
+    if let Some(a) = o.atlas {
+        return atlas(&o, a);
+    }
     let desc = cell_desc(o.seed, o.cell.0, o.cell.1);
     println!(
         "seed {} cell {:?}: {:?}, ruggedness {:.2}, temperature {:.2}, wetness {:.2}",

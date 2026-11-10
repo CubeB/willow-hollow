@@ -223,8 +223,9 @@ impl World for GameWorld {
     }
 
     fn generate_column(&self, cx: i32, cz: i32) -> ColumnOutput {
-        // A chunk never straddles macro-cells, and its one-voxel border can only reach
-        // into the uniform deep sea that separates them.
+        // A chunk never straddles macro-cells. Its one-voxel border reaches into the
+        // uniform deep sea between them, or onto a range held to the same height on
+        // both sides of the border (see `continent::border`).
         let (mx, mz) = cell_of(cx * CHUNK, cz * CHUNK);
         let continent = self.continent(mx, mz);
         let (wx0, wz0) = (cx * CHUNK - 1, cz * CHUNK - 1);

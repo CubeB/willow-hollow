@@ -5,6 +5,7 @@
 use crate::{
     macro_layout::{CellDesc, CellKind},
     noise::{fbm2, hash2, perlin2, ridged2, unit},
+    structures::Field,
 };
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -20,6 +21,8 @@ pub struct Shape {
     desc: CellDesc,
     /// Island blobs for `CellKind::Islands`: centre and radius.
     blobs: Vec<(f32, f32, f32)>,
+    /// The mega-structures passing through this cell.
+    pub field: Field,
 }
 
 impl Shape {
@@ -34,7 +37,12 @@ impl Shape {
                 blobs.push((x, z, 0.10 + r(i * 3 + 3) * 0.17));
             }
         }
-        Self { desc, blobs }
+        let field = Field::new(desc.world_seed, desc.mx, desc.mz);
+        Self { desc, blobs, field }
+    }
+
+    pub fn desc(&self) -> &CellDesc {
+        &self.desc
     }
 
     /// Signed "landness" at a cell-normalised position (-1..1): positive is land, and
@@ -65,7 +73,12 @@ impl Shape {
                 .fold(-1.0, f32::max),
         };
         let edge = px.abs().max(pz.abs());
-        (base + coast).min((EDGE - edge) * 3.0)
+        let own = (base + coast).min((EDGE - edge) * 3.0);
+        // A mountain range's spine may run out over the border sea, right to the edge.
+        match self.field.land(px, pz) {
+            Some(spine) => own.max(spine),
+            None => own,
+        }
     }
 
     /// Tectonic uplift rate, 0..~1. High values become mountains.
@@ -87,10 +100,14 @@ impl Shape {
         let province = perlin2(s ^ 0xdd, x * 1.3, z * 1.3)
             + 0.3 * perlin2(s ^ 0xee, x * 3.1, z * 3.1);
         let upland = smoothstep(-0.30, 0.30, province);
-        0.03 + interior
-            * (0.02
-                + upland * (0.09 + 0.17 * hills + 0.12 * plateau)
-                + 0.95 * self.desc.ruggedness * belts * (0.4 + 0.6 * upland))
+        let ordinary = 0.03
+            + interior
+                * (0.02
+                    + upland * (0.09 + 0.17 * hills + 0.12 * plateau)
+                    + 0.95 * self.desc.ruggedness * belts * (0.4 + 0.6 * upland));
+        // Great ranges stand on narrow spines of land too, so reach the coast sooner.
+        let (range, keep) = self.field.uplift(px, pz, smoothstep(0.0, 0.07, land));
+        (ordinary + range) * keep
     }
 
     /// Large-scale relief the land starts with, in voxels. It decides which way the
