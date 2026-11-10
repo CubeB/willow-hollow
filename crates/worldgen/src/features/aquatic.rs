@@ -91,6 +91,11 @@ pub fn kind_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Aquatic, f32)
         Cover::SeaFloor if wet > SHALLOWS && wet <= KELP_MAX => {
             (patch(seed, 0x4e1b, x, z, 8.0) > 0.0).then_some((Aquatic::Kelp, 0.30))
         }
+        // Kelp holds fast to the bare rock of a wave-cut shelf. Shelves only form on
+        // sea coasts, and the bed must lie below sea level, which keeps it out of fresh water.
+        Cover::Shelf if wet > m(1.0) && wet <= KELP_MAX && col.ground < 0.0 => {
+            (patch(seed, 0x5e1f, x, z, 6.4) > -0.15).then_some((Aquatic::Kelp, 0.35))
+        }
         _ => None,
     }
 }
@@ -253,6 +258,17 @@ mod tests {
             }
         }
         all
+    }
+
+    #[test]
+    fn kelp_grows_on_sea_shelves_only() {
+        let mut shelf = column(Cover::Shelf, Biome::Ocean, None, 0.5);
+        shelf.ground = -m(4.0);
+        shelf.water = Some(1);
+        assert!(strewn(&shelf).iter().any(|(_, _, b)| b.iter().any(|b| b.voxel == mat::BARK_WILLOW)));
+        // A shelf above sea level, under fresh water, grows none.
+        let fresh = column(Cover::Shelf, Biome::Ocean, Some(m(4.0)), 0.5);
+        assert!(strewn(&fresh).iter().all(|(_, _, b)| b.is_empty()));
     }
 
     #[test]

@@ -196,6 +196,8 @@ palette! {
     IVY_TWIG          = ( 90,  80,  58), Foliage, 1;
     IVY_ROPE          = (114, 102,  84), Foliage, 1;
     IVY_ROPE_DARK     = ( 96,  86,  74), Foliage, 1;
+    // Volcanic beaches: basalt ground to black sand by the surf.
+    BLACK_SAND        = ( 46,  44,  48), Solid, 1;
 }
 
 /// Thickness of one rock layer, in voxels.

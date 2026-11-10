@@ -366,6 +366,14 @@ pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut V
                 grass(&mut plot, &mut rng, kind, &sward);
             }
         }
+        // Marram grass binding the dunes: sparse dry clumps on the seaward face, thicker
+        // further up and behind, where the sand is higher and sheltered from the spray.
+        Cover::Dune if col.water_surface().is_none() && col.biome != Biome::Volcanic => {
+            let landward = ((col.ground - m(2.0)) / m(3.0)).clamp(0.0, 1.0);
+            if a < 0.03 + 0.12 * landward && patch(seed, 0x3a77, x, z, 4.0) > -0.25 {
+                bunch(&mut plot, &mut rng);
+            }
+        }
         _ => {}
     }
 }
@@ -394,6 +402,17 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn marram_grows_on_dunes_and_thickest_landward() {
+        let mut low = column(Cover::Dune, Biome::Ocean);
+        low.ground = m(2.0);
+        let mut high = column(Cover::Dune, Biome::Ocean);
+        high.ground = m(5.0);
+        let (seaward, landward) = (grown(&low, mat::SAND), grown(&high, mat::SAND));
+        assert!(!seaward.is_empty() && landward.len() > 2 * seaward.len());
+        assert!(landward.iter().all(|b| matches!(b.voxel, mat::TUFT_DRY | mat::TUFT_STRAW) && b.thin == 0));
     }
 
     #[test]
