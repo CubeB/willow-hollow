@@ -184,6 +184,11 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::LakeBed => (if patch < 0.55 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
         Cover::Trail => (trail_material(col, roll, patch), mat::DIRT),
+        // Cliff faces take their colour from the rock layer at each height (see the fill
+        // loop). The tops of ledges, which are nearly level, keep some soil.
+        Cover::Cliff if steepness < 0.9 && roll < 0.55 => (cover, mat::STONE),
+        Cover::Cliff => (mat::STONE, mat::STONE),
+        Cover::Scree => (if roll < 0.8 { mat::SCREE } else { mat::GRAVEL }, mat::SCREE),
         Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),
         Cover::Bank if roll < 0.42 => (mat::MUD, mat::DIRT),
         Cover::Bank | Cover::Land => {
@@ -325,12 +330,24 @@ impl World for GameWorld {
                     let (surface, under) = skins[px * PAD + pz];
                     let top = col.top();
                     let water_top = col.water_surface().map_or(i32::MIN, |k| k - 1);
+                    let rock = (col.cover == Cover::Cliff).then(|| {
+                        let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
+                        perlin2(self.seed ^ 0xc11d, wx / m64(70.0), wz / m64(70.0)) as f32 * m(2.4)
+                    });
                     for (py, v) in chunk.column_mut(px, pz).iter_mut().enumerate() {
                         let y = base + py as i32;
                         *v = if y > top {
                             if y <= water_top { mat::WATER } else { AIR }
                         } else if y == top {
-                            surface
+                            match rock {
+                                Some(tilt) if surface == mat::STONE => mat::strata(self.seed, col.biome, y, tilt),
+                                _ => surface,
+                            }
+                        } else if let Some(tilt) = rock
+                            && y >= top - 3 * BLOCK
+                            && under == mat::STONE
+                        {
+                            mat::strata(self.seed, col.biome, y, tilt)
                         } else if y >= top - 3 * BLOCK {
                             under
                         } else {

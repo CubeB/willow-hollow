@@ -125,6 +125,42 @@ palette! {
     MUSHROOM_RED   = (196,  56,  48), Foliage, 2;
     MUSHROOM_TAN   = (178, 142, 100), Foliage, 2;
     LILY           = ( 70, 138,  64), Foliage, 2;
+    // Cliff strata and the scree at their feet (added last so existing ids keep their numbers).
+    ROCK_PALE      = (172, 166, 154), Solid, 2;
+    ROCK_BROWN     = (112, 102,  94), Solid, 2;
+    SANDSTONE_RED  = (188, 112,  78), Solid, 2;
+    SCREE          = (140, 134, 128), Solid, 3;
+}
+
+/// Thickness of one rock layer, in voxels.
+const STRATA_THICKNESS: i32 = 4;
+
+/// The rock a cliff shows at height `y`: horizontal bands that change with elevation.
+/// `tilt` shifts the bands a little from place to place so they gently dip, and
+/// neighbouring columns with the same `tilt` agree on every layer.
+pub fn strata(seed: u32, biome: Biome, y: i32, tilt: f32) -> Voxel {
+    use crate::noise::{hash2, unit};
+    let layer = |k: i32| unit(hash2(seed ^ 0x57a7, k, 3));
+    let band = ((y as f32 + tilt) / STRATA_THICKNESS as f32).floor() as i32;
+    // Some layers are as thick as two, so thickness varies.
+    let k = if layer(band) < 0.4 { band - 1 } else { band };
+    let r = unit(hash2(seed ^ 0x57a8, k, 7));
+    let dry = matches!(biome, Biome::Desert | Biome::Savanna | Biome::Heath);
+    if dry {
+        match r {
+            ..0.30 => SANDSTONE,
+            ..0.55 => SANDSTONE_RED,
+            ..0.80 => SANDSTONE_DARK,
+            _ => ROCK_PALE,
+        }
+    } else {
+        match r {
+            ..0.30 => STONE,
+            ..0.52 => ROCK_DARK,
+            ..0.75 => ROCK_PALE,
+            _ => ROCK_BROWN,
+        }
+    }
 }
 
 /// The ground cover a biome grows.

@@ -46,6 +46,10 @@ pub enum Cover {
     SeaFloor,
     /// A trodden path.
     Trail,
+    /// Sheer rock face or ledge.
+    Cliff,
+    /// Loose stone at the foot of a cliff.
+    Scree,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -268,8 +272,18 @@ impl<'a> Sampler<'a> {
             + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
             + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
         let mut ground = base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0);
+        let spread = {
+            let (lo, hi) = corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &i| (lo.min(c.height[i]), hi.max(c.height[i])));
+            hi - lo
+        };
+        let cliff = self.cliff(fx, fz, spread, wx, wz, &mut ground);
         let mut water: Option<i32> = None;
         let mut cover = Cover::Land;
+        if cliff.strength > 0.55 {
+            cover = Cover::Cliff;
+        } else if cliff.foot && unit(hash2(seed ^ 0x5c4e, lx >> 1, lz >> 1)) < 0.85 {
+            cover = Cover::Scree;
+        }
         let mut river = f32::MAX;
 
         // Standing water this column could be under: it must not be given river banks.
@@ -548,6 +562,82 @@ fn sinuosity(c: &Continent, i: usize, size: f32) -> Vec2 {
     side * wave * SINUOSITY_CELLS * size * (c.size as f32 / 1024.0)
 }
 
+
+/// Ground steepness of the simulated terrain at a grid position, in voxels of rise per
+/// voxel, from the bicubic surface so it varies smoothly.
+fn grid_slope(c: &Continent, fx: f32, fz: f32) -> (f32, Vec2) {
+    const STEP: f32 = 0.5;
+    let cs = c.cell_size();
+    let k = OLD_VOXEL / (2.0 * STEP * cs);
+    let gx = (bicubic(c, fx + STEP, fz) - bicubic(c, fx - STEP, fz)) * k;
+    let gz = (bicubic(c, fx, fz + STEP) - bicubic(c, fx, fz - STEP)) * k;
+    (gx.hypot(gz), vec2(gx, gz))
+}
+
+/// Vertical spacing of cliff ledges, in voxels.
+const LEDGE: f32 = m(1.8);
+
+/// How cliff-like a column is (0 to 1) and, for the gentler ground around cliffs,
+/// whether it lies at their foot. Where the simulated slope is steep, the ground is
+/// stepped into flat ledges joined by near-vertical faces.
+struct Cliff {
+    strength: f32,
+    foot: bool,
+}
+
+impl Sampler<'_> {
+    /// The cliff treatment for a column whose natural ground is `ground`. Changes
+    /// `ground` in place.
+    fn cliff(&self, fx: f32, fz: f32, corners_spread: f32, wx: f64, wz: f64, ground: &mut f32) -> Cliff {
+        const NONE: Cliff = Cliff { strength: 0.0, foot: false };
+        let c = self.c;
+        let cs = c.cell_size();
+        // Flat country is the overwhelming majority: skip it before the costly part.
+        if corners_spread * OLD_VOXEL / cs < 0.30 || *ground < m(6.0) {
+            return NONE;
+        }
+        let seed = self.world_seed;
+        let (slope, grad) = grid_slope(c, fx, fz);
+        // Cliffs form in patches, so a steep slope is not sheer along its whole length.
+        let patch = perlin2(seed ^ 0xc11f, wx / m64(55.0), wz / m64(55.0)) as f32 * 0.30;
+        let s = slope + patch;
+        let high = smoothstep(m(6.0), m(14.0), *ground);
+        let strength = smoothstep(CLIFF_SLOPE, CLIFF_SLOPE + 0.2, s) * high;
+        if strength <= 0.0 {
+            // A moderate slope that steepens uphill is the foot of one.
+            if s < CLIFF_SLOPE * 0.55 || high < 0.5 || grad.length() < 1e-4 {
+                return NONE;
+            }
+            let up = grad.normalize() * 1.2;
+            let (s_up, _) = grid_slope(c, fx + up.x, fz + up.y);
+            return Cliff { strength: 0.0, foot: s_up > s + 0.08 && s_up + patch > CLIFF_SLOPE };
+        }
+        // Layers are hard rock, so they stand at fixed heights, warped a little from
+        // place to place. Within each the ground snaps up a face and levels onto a ledge.
+        let warp = perlin2(seed ^ 0xc11e, wx / m64(26.0), wz / m64(26.0)) as f32 * m(1.4);
+        // Only some of the possible ledge levels are kept, so faces vary in height.
+        let level = |n: i32| unit(hash2(seed ^ 0xc11b, n, 5)) < 0.42;
+        let u = (*ground + warp) / LEDGE;
+        let n = u.floor() as i32;
+        let (mut lo, mut hi) = (n, n + 1);
+        while !level(lo) && n - lo < 3 {
+            lo -= 1;
+        }
+        while !level(hi) && hi - n < 4 {
+            hi += 1;
+        }
+        let t = (u - lo as f32) / (hi - lo) as f32;
+        let riser = smoothstep(0.5 - 0.05, 0.5 + 0.05, t);
+        // Ledges keep a fifth of the natural fall, so they tilt rather than lie dead level.
+        let stepped = (lo as f32 + (hi - lo) as f32 * (0.8 * riser + 0.2 * t)) * LEDGE - warp;
+        *ground += (stepped - *ground) * strength;
+        Cliff { strength, foot: false }
+    }
+}
+
+/// Simulated slope at which cliffs begin to form.
+const CLIFF_SLOPE: f32 = 0.66;
+
 /// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid.
 fn bicubic(c: &Continent, fx: f32, fz: f32) -> f32 {
     let (x1, z1) = (fx.floor() as isize, fz.floor() as isize);
@@ -627,5 +717,51 @@ mod tests {
         let straight = longest_straight(&c, 4000.0, m(5.0));
         eprintln!("longest straight reach: {straight} voxels = {} m", straight / m(1.0));
         assert!(straight < m(190.0), "straight reach {straight}");
+    }
+
+    #[test]
+    fn steep_ground_gets_cliffs_with_scree_and_flat_ground_does_not() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let slope = |i: usize| {
+            let gx = (c.height[i + 1] - c.height[i - 1]) * OLD_VOXEL / (2.0 * cs);
+            let gz = (c.height[i + c.size] - c.height[i - c.size]) * OLD_VOXEL / (2.0 * cs);
+            gx.hypot(gz)
+        };
+        let mut sites: Vec<(f32, usize)> = Vec::new();
+        for z in (8..c.size - 8).step_by(6) {
+            for x in (8..c.size - 8).step_by(6) {
+                let i = z * c.size + x;
+                if !c.ocean[i] && c.height[i] * OLD_VOXEL > m(10.0) {
+                    sites.push((slope(i), i));
+                }
+            }
+        }
+        sites.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        let count = |i: usize| {
+            let (lx, lz) = ((i % c.size) as f32 * cs, (i / c.size) as f32 * cs);
+            let (lx, lz) = (lx as i32, lz as i32);
+            let s = Sampler::new(&c, 7, lx - 24, lz - 24, 48);
+            let (mut cliff, mut scree) = (0, 0);
+            for dz in -24..24 {
+                for dx in -24..24 {
+                    let col = s.column(lx + dx, lz + dz);
+                    match col.cover {
+                        Cover::Cliff => {
+                            assert!(col.ground > m(5.0), "cliff down at the shore");
+                            cliff += 1;
+                        }
+                        Cover::Scree => scree += 1,
+                        _ => {}
+                    }
+                }
+            }
+            (cliff, scree)
+        };
+        let steep: (i32, i32) = sites.iter().take(60).map(|s| count(s.1)).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        assert!(steep.0 > 2000, "steepest ground shows few cliffs: {steep:?}");
+        assert!(steep.1 > 200, "no scree at the foot of cliffs: {steep:?}");
+        let gentle: i32 = sites.iter().rev().take(60).map(|s| count(s.1).0 + count(s.1).1).sum();
+        assert!(gentle * 20 < steep.0, "cliffs or scree on gentle ground: {gentle}");
     }
 }
