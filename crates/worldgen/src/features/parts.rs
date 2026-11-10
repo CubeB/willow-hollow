@@ -75,8 +75,20 @@ pub fn lantern(style: LampStyle, p: &Palette, height: i32, turns: u32) -> Vec<(I
 /// A lantern's voxels and its fine parts, the parts in cells (1/[`CELLS`] voxel) of the
 /// same model space.
 pub fn lantern_parts(style: LampStyle, p: &Palette, height: i32, turns: u32) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
+    lantern_parts_spanning(style, p, height, turns, GATE_HALF)
+}
+
+/// The usual distance of a gate's posts either side of its middle.
+pub const GATE_HALF: i32 = 2;
+/// The furthest a gate's posts stand either side of its middle: its lintel, one voxel
+/// further out each side, is then 11 voxels wide.
+pub const GATE_HALF_MAX: i32 = 4;
+
+/// [`lantern_parts`], with a gate's posts `half` voxels either side of its middle (up to
+/// [`GATE_HALF_MAX`]), so it spans a wider trail. Other styles ignore `half`.
+pub fn lantern_parts_spanning(style: LampStyle, p: &Palette, height: i32, turns: u32, half: i32) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
     let mut s = Shape::raw();
-    paint_lantern(&mut s, style, p, IVec3::ZERO, height, turns);
+    paint_lantern_spanning(&mut s, style, p, IVec3::ZERO, height, turns, half);
     let fine = s.take_fine();
     (s.into_voxels(), fine)
 }
@@ -207,6 +219,12 @@ impl Fine<'_> {
 /// Puts a lantern into a shape, with its foot at voxel `at` (the first layer above the
 /// ground), and its fine parts with it.
 pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, height: i32, turns: u32) {
+    paint_lantern_spanning(s, style, p, at, height, turns, GATE_HALF);
+}
+
+/// [`paint_lantern`], with a gate's posts `half` voxels either side of its middle.
+pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, height: i32, turns: u32, half: i32) {
+    let half = half.clamp(GATE_HALF, GATE_HALF_MAX);
     let h = height.max(5);
     let mut voxels: Vec<(IVec3, Voxel)> = Vec::new();
     let mut put = |x: i32, y: i32, z: i32, v: Voxel| voxels.push((IVec3::new(x, y, z), v));
@@ -288,9 +306,9 @@ pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, he
             }
         }
         LampStyle::Gate => {
-            // Posts two voxels either side, the lamp on a tie beam between them.
+            // Posts `half` voxels either side, the lamp on a tie beam between them.
             let (l, lintel) = (h - 2, h + 1);
-            for x in [-2, 2] {
+            for x in [-half, half] {
                 for y in -3..0 {
                     put(x, y, 0, p.stone_dark);
                 }
@@ -300,14 +318,14 @@ pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, he
                     put(x, y, 0, p.wood);
                 }
             }
-            for x in -1..=1 {
+            for x in -(half - 1)..=half - 1 {
                 put(x, l - 1, 0, p.wood);
             }
             put(0, l, 0, mat::LANTERN);
-            for x in -3..=3 {
+            for x in -(half + 1)..=half + 1 {
                 put(x, lintel, 0, p.wood);
             }
-            for x in -2..=2 {
+            for x in -half..=half {
                 put(x, lintel + 1, 0, p.roof);
             }
         }
@@ -358,12 +376,12 @@ pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, he
         }
         LampStyle::Gate => {
             let (l, lintel) = (h - 2, h + 1);
-            for x in [-2, 2] {
+            for x in [-half, half] {
                 f.moulding(v(x, 1, 0), p.stone);
             }
             // Knee braces from the posts in under the lintel.
-            f.strut(v(-2, 0, 0), lintel, 1, p.wood);
-            f.strut(v(2, 0, 0), lintel, -1, p.wood);
+            f.strut(v(-half, 0, 0), lintel, 1, p.wood);
+            f.strut(v(half, 0, 0), lintel, -1, p.wood);
             let top = f.lamp(v(0, l, 0), iron, p.roof, 1, 2);
             f.chain(v(0, l, 0), top, (lintel - l) * CELLS, iron);
             f.finial(v(0, lintel + 1, 0), CELLS, iron, p.accent);

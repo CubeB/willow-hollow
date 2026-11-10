@@ -391,6 +391,7 @@ fn nothing_stands_on_the_walkable_trail() {
         *styles.entry(l.style).or_insert(0) += 1;
     }
     println!("lantern styles: {styles:?}");
+    assert!(styles.get(&crate::features::parts::LampStyle::Gate).copied().unwrap_or(0) >= 1, "no gates");
     let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
     for l in &net.lanterns {
         assert!(!l.footprint.is_empty());

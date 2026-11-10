@@ -905,7 +905,7 @@ pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, V
 
 /// [`trail_lantern`], with its fine parts in model cells.
 pub fn trail_lantern_parts(palette: &Palette, height: i32, hash: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
-    trail_lantern_styled(palette, height, hash, parts::LampStyle::pick_trail(hash >> 3), hash >> 7 & 3)
+    trail_lantern_styled(palette, height, hash, parts::LampStyle::pick_trail(hash >> 3), hash >> 7 & 3, parts::GATE_HALF)
 }
 
 /// [`trail_lantern_parts`] in a given style and turned a given number of quarter turns.
@@ -915,9 +915,10 @@ pub fn trail_lantern_styled(
     hash: u32,
     style: parts::LampStyle,
     turns: u32,
+    gate_half: i32,
 ) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = palette.varied(hash);
-    parts::lantern_parts(style, &palette, height * crate::scale::BLOCK, turns)
+    parts::lantern_parts_spanning(style, &palette, height * crate::scale::BLOCK, turns, gate_half)
 }
 
 /// A signpost: a post with a cap, and one board per direction pointing along it, each
