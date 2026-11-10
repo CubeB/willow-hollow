@@ -98,6 +98,9 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::RiverBed => (mat::GRAVEL, mat::GRAVEL),
         Cover::LakeBed => (mat::MUD, mat::MUD),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
+        // Coarse cells skip the strata bands; plain stone reads the same at this distance.
+        Cover::Cliff => (mat::STONE, mat::STONE),
+        Cover::Scree => (mat::SCREE, mat::SCREE),
         Cover::Trail => (
             match col.biome {
                 Biome::Desert | Biome::Savanna => mat::PATH_SAND,
