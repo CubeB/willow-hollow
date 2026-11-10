@@ -332,22 +332,29 @@ impl World for GameWorld {
                     let water_top = col.water_surface().map_or(i32::MIN, |k| k - 1);
                     let rock = (col.cover == Cover::Cliff).then(|| {
                         let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
-                        perlin2(self.seed ^ 0xc11d, wx / m64(70.0), wz / m64(70.0)) as f32 * m(2.4)
+                        perlin2(self.seed ^ 0xc11d, wx / m64(70.0), wz / m64(70.0)) * m(2.4)
                     });
+                    // Layer edges are ragged: some voxels take the layer above or below.
+                    let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
+                    let rock_at = |y: i32, tilt: f32| {
+                        let h = hash3(self.seed ^ 0x57a9, wx, y, wz);
+                        let jitter = if unit(h) < 0.3 { (h % 3) as i32 - 1 } else { 0 };
+                        mat::strata(self.seed, col.biome, y + jitter * 2, tilt)
+                    };
                     for (py, v) in chunk.column_mut(px, pz).iter_mut().enumerate() {
                         let y = base + py as i32;
                         *v = if y > top {
                             if y <= water_top { mat::WATER } else { AIR }
                         } else if y == top {
                             match rock {
-                                Some(tilt) if surface == mat::STONE => mat::strata(self.seed, col.biome, y, tilt),
+                                Some(tilt) if surface == mat::STONE => rock_at(y, tilt),
                                 _ => surface,
                             }
                         } else if let Some(tilt) = rock
-                            && y >= top - 3 * BLOCK
                             && under == mat::STONE
                         {
-                            mat::strata(self.seed, col.biome, y, tilt)
+                            // All the way down: a face can be far taller than the soil.
+                            rock_at(y, tilt)
                         } else if y >= top - 3 * BLOCK {
                             under
                         } else {
