@@ -95,10 +95,10 @@ fn shade(in: VOut) -> vec4<f32> {
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
     let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(0.7, 1.0, in.ao);
-    var light = direct + ambient(n) * ao;
+    var light = direct + ambient(n) * ao + local_lights(in.rel, n) * ao;
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
-        light += vec3<f32>(mix(9.0, 1.2, G.sun_color.w));
+        light += vec3<f32>(mix(14.0, 1.2, G.sun_color.w));
     }
     let color = apply_fog(base * light, in.rel);
     return vec4<f32>(color, 1.0);

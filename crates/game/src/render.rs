@@ -54,6 +54,8 @@ struct Globals {
     mist: [f32; 4],
     cascades: [f32; 4],
     wind: [f32; 4],
+    /// Nearest glowing particles (fireflies): camera-relative xyz, glow in w.
+    lights: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -77,6 +79,19 @@ struct CascadeView {
     texel: f32,
     camera: DVec3,
     fwd: Vec3,
+}
+
+/// The few brightest-and-nearest glowing particles, which light the ground around them.
+fn nearest_glows(particles: &[ParticleInstance]) -> [[f32; 4]; 4] {
+    let mut best = [([0.0f32; 4], f32::MAX); 4];
+    for p in particles.iter().filter(|p| p.glow > 6.0) {
+        let d = Vec3::from(p.pos).length_squared();
+        if d < best[3].1 {
+            best[3] = ([p.pos[0], p.pos[1], p.pos[2], p.glow], d);
+            best.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+    }
+    best.map(|b| b.0)
 }
 
 /// Whether cascade `i` takes its turn this frame. The far ones cover so much that they
@@ -1078,6 +1093,7 @@ impl Renderer {
                 CLOUD_HEIGHT - camera.pos.y as f32,
             ],
             wind: v4(scene.wind, 0.0),
+            lights: nearest_glows(scene.particles),
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

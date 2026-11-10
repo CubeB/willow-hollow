@@ -52,13 +52,13 @@ impl Environment {
         } else {
             // Moonlight from the opposite side of the sky.
             let moon = Vec3::new(-sun.x, (-sun.y).max(0.15), -sun.z).normalize();
-            (moon, Vec3::new(0.45, 0.55, 0.80) * 0.16 * smoothstep(-0.06, -0.2, elev))
+            (moon, Vec3::new(0.45, 0.55, 0.80) * 0.21 * smoothstep(-0.06, -0.2, elev))
         };
 
         // Eye adaptation: a high sun puts far more light on the ground than a low one, so
         // expose down toward midday. Every light source is one of these three colours,
         // so scaling them here exposes the whole scene.
-        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0));
+        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0)) * (1.0 + 1.1 * smoothstep(-0.02, -0.22, elev));
         // Mist gathers in the valleys around dawn, and a little at dusk.
         let dawn = smoothstep(3.5, 6.0, time) * smoothstep(9.5, 7.0, time);
         let dusk = smoothstep(17.0, 18.5, time) * smoothstep(21.0, 19.5, time);
