@@ -42,6 +42,16 @@ pub struct SpringMark {
     pub radius: f32,
 }
 
+/// Where sea water breaks against rock: a shelf, boulders or a sea cliff. Surf spray
+/// is thrown up here.
+#[derive(Clone, Copy, Debug)]
+pub struct Surf {
+    /// World position of the sea surface at the foot of the rock.
+    pub pos: Vec3,
+    /// Horizontal direction from the water towards the rock (unit length).
+    pub dir: Vec3,
+}
+
 /// Everything generated for one chunk column.
 pub struct ColumnOutput {
     /// `(chunk y, voxels)`, lowest first with none skipped.
@@ -49,6 +59,8 @@ pub struct ColumnOutput {
     pub cascades: Vec<Cascade>,
     /// Springs whose pool centre is in this chunk column.
     pub springs: Vec<SpringMark>,
+    /// A few places in this chunk column where the sea breaks on rock.
+    pub surf: Vec<Surf>,
     /// The current in each column, indexed `x * PAD + z` in padded coordinates like the
     /// chunks' voxels, or empty if no water here runs.
     pub currents: Vec<Current>,

@@ -16,7 +16,7 @@ use voxel::{
     CHUNK,
     mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk, mesh_chunk_with_currents},
 };
-use worldgen::{Cascade, SpringMark, World, scale::m, world::GameWorld};
+use worldgen::{Cascade, SpringMark, Surf, World, scale::m, world::GameWorld};
 
 use crate::{
     arena::{MeshSpan, VertexArena},
@@ -66,6 +66,7 @@ struct ColumnResult {
     planted: bool,
     cascades: Vec<Cascade>,
     springs: Vec<SpringMark>,
+    surf: Vec<Surf>,
     /// Lit lantern voxels in these chunks, in world voxels.
     lamps: Vec<IVec3>,
     gen_ms: f32,
@@ -124,6 +125,7 @@ pub struct Streamer {
     /// Cascade lips in each loaded column, for spray and sound.
     cascades: HashMap<Col, Vec<Cascade>>,
     springs: HashMap<Col, Vec<SpringMark>>,
+    surf: HashMap<Col, Vec<Surf>>,
     /// Lantern voxels in each loaded column, to light the ground around them.
     lamps: HashMap<Col, Vec<IVec3>>,
     pending: HashSet<Col>,
@@ -179,6 +181,7 @@ impl Streamer {
             arena: VertexArena::new(gpu, "chunk arena", expected, 4 * size_of::<Vertex>() as u64),
             cascades: HashMap::new(),
             springs: HashMap::new(),
+            surf: HashMap::new(),
             lamps: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
@@ -265,6 +268,18 @@ impl Streamer {
             .filter(move |c| (c.pos.x - p.x).hypot(c.pos.z - p.z) <= radius)
     }
 
+    /// Surf on rock within `radius` voxels of `pos` (horizontally), from loaded columns.
+    pub fn surf_near(&self, pos: DVec3, radius: f32) -> impl Iterator<Item = &Surf> {
+        let r = (radius / CHUNK as f32).ceil() as i32 + 1;
+        let (cx, cz) = ((pos.x / CHUNK as f64).floor() as i32, (pos.z / CHUNK as f64).floor() as i32);
+        let p = pos.as_vec3();
+        (-r..=r)
+            .flat_map(move |dz| (-r..=r).map(move |dx| (0, cx + dx, cz + dz)))
+            .filter_map(move |col| self.surf.get(&col))
+            .flatten()
+            .filter(move |s| (s.pos.x - p.x).hypot(s.pos.z - p.z) <= radius)
+    }
+
     /// Spring pools within `radius` voxels of `pos` (horizontally), from loaded columns.
     pub fn springs_near(&self, pos: DVec3, radius: f32) -> impl Iterator<Item = &SpringMark> {
         let r = (radius / CHUNK as f32).ceil() as i32 + 1;
@@ -343,6 +358,9 @@ impl Streamer {
                     if !result.springs.is_empty() {
                         self.springs.insert(result.col, result.springs);
                     }
+                    if !result.surf.is_empty() {
+                        self.surf.insert(result.col, result.surf);
+                    }
                     if result.lamps.is_empty() {
                         self.lamps.remove(&result.col);
                     } else {
@@ -385,6 +403,7 @@ impl Streamer {
         });
         self.cascades.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.springs.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
+        self.surf.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.lamps.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.bare.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
         if self.columns.len() != before {
@@ -535,6 +554,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             planted: false,
             cascades: Vec::new(),
             springs: Vec::new(),
+            surf: Vec::new(),
             lamps: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
@@ -567,6 +587,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         planted: plants,
         cascades: output.cascades,
         springs: output.springs,
+        surf: output.surf,
         lamps,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
@@ -591,6 +612,7 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         planted: true,
         cascades: Vec::new(),
         springs: Vec::new(),
+        surf: Vec::new(),
         lamps: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
