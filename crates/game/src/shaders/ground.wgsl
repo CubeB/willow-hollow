@@ -1,13 +1,19 @@
 // Snow and wet ground, drawn on top of what the surface already is. Terrain only, after
-// common.wgsl: it reads the globals. G.season.y is the snow cover at sea level, 0..1
-// (see season.rs); G.weather.x is how wet the ground is, 0..1.
+// common.wgsl: it reads the globals, so the near terrain, the far terrain and the far
+// trees all show the same snow. G.season.y is the snow lying at sea level, 0..1, from the
+// weather (weather::lying), G.season.w the summit snowline in metres and G.weather.y how
+// much the cold of height adds this winter (both season::Ground; no snow, no hill snow and
+// only a very high snowline where it never snows); G.weather.x is how wet the ground is.
 
 const SNOW_COLOUR: vec3<f32> = vec3<f32>(0.80, 0.86, 0.93);
 
-// Snow settles thicker the higher the ground: a little more cover for each metre of
-// height, and the very highest ground keeps a cap through the summer.
+// Snow settles thicker the higher the ground: a little more of what lies for each metre of
+// height, hills that hold some through a winter thaw, and summits above the snowline that
+// keep a cap through the summer.
 fn snow_depth(alt_m: f32) -> f32 {
-    return G.season.y * (1.0 + alt_m * 0.01) + max(alt_m - 90.0, 0.0) * 0.008;
+    let lying = G.season.y * (1.0 + max(alt_m, 0.0) * 0.01);
+    let hills = G.weather.y * max(alt_m - 25.0, 0.0) * 0.003;
+    return lying + hills + max(alt_m - G.season.w, 0.0) * 0.008;
 }
 
 // `wood` is bark and planks, which keep their colour; `edge` is the height up the face within its voxel.

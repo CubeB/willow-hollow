@@ -47,11 +47,12 @@ pub struct BoxInstance {
     pub size: [u8; 3],
     pub _pad: u8,
     pub color: [u8; 3],
-    pub _pad2: u8,
+    /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near tree's.
+    pub plant: u8,
 }
 
-/// The boxes of a model, turned, relative to where it stands.
-type ModelBoxes = Arc<Vec<(IVec3, [u8; 3], [u8; 3])>>;
+/// The boxes of a model, turned, relative to where it stands: low corner, size, colour, plant kind.
+type ModelBoxes = Arc<Vec<(IVec3, [u8; 3], [u8; 3], u8)>>;
 type ModelKey = (Species, usize, u32);
 
 #[derive(Default)]
@@ -72,7 +73,8 @@ impl Models {
                 let (a, c) = (rotate(b.lo, turns), rotate(b.hi - IVec3::ONE, turns));
                 let (lo, hi) = (a.min(c), a.max(c) + IVec3::ONE);
                 let size = (hi - lo).min(IVec3::splat(255));
-                (lo, [size.x as u8, size.y as u8, size.z as u8], mats.get(b.voxel).color)
+                let m = mats.get(b.voxel);
+                (lo, [size.x as u8, size.y as u8, size.z as u8], m.color, m.plant)
             })
             .collect();
         let model: ModelBoxes = Arc::new(boxes);
@@ -273,14 +275,14 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
         // the shore. It would look to be growing out of the lake.
         let (lx, lz) = ((p.pos.x - mx * MACRO_SIZE) as f32 + 0.5, (p.pos.z - mz * MACRO_SIZE) as f32 + 0.5);
         if inside && lod::stands_tall(p.species) && !farview::shows_water(&continent, lx, lz) {
-            for (lo, size, color) in models.get(world, p.species, p.variant, p.turns).iter() {
+            for (lo, size, color, plant) in models.get(world, p.species, p.variant, p.turns).iter() {
                 let at = p.pos + *lo;
                 boxes.push(BoxInstance {
                     lo: at.to_array(),
                     size: *size,
                     _pad: 0,
                     color: *color,
-                    _pad2: 0,
+                    plant: *plant,
                 });
             }
         }

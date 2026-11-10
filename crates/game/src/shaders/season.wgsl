@@ -34,15 +34,19 @@ struct Leaf {
     tree: f32,
 }
 
-fn season_leaf(s: f32, vox: vec3<i32>) -> Leaf {
+// The year of a broadleaf: it turns from late summer, and every leaf is down by early
+// winter (0.70, before midwinter at 0.75). A maple turns and drops a little ahead of the
+// rest, so the last red is gone first. Keep in step with season::leaf_fall.
+fn season_leaf(s: f32, vox: vec3<i32>, maple: bool) -> Leaf {
     var out: Leaf;
     let h = season_hash(vox);
     let cell = vec3<i32>(vec2<i32>(floor(vec2<f32>(f32(vox.x), f32(vox.z)) / 10.0)), 7).xzy;
     out.tree = season_hash(cell);
+    let early = select(0.0, 0.025, maple);
     let bud_at = 0.02 + 0.10 * out.tree + 0.03 * h;
-    let fall_at = 0.62 + 0.14 * out.tree + 0.07 * h;
+    let fall_at = 0.595 + 0.075 * out.tree + 0.03 * h - early;
     out.keep = s >= bud_at && s < fall_at;
-    out.turn = smoothstep(0.48 + 0.08 * out.tree, 0.62 + 0.08 * out.tree, s);
+    out.turn = smoothstep(0.47 + 0.06 * out.tree - early, 0.57 + 0.06 * out.tree - early, s);
     out.bud = 1.0 - smoothstep(bud_at, bud_at + 0.12, s);
     return out;
 }
@@ -56,7 +60,7 @@ fn season_gone(s: f32, kind: u32, vox: vec3<i32>) -> bool {
         if (s > 0.27 && s < 0.40) {
             return false;
         }
-        return !season_leaf(s, vox).keep;
+        return !season_leaf(s, vox, kind == PLANT_AUTUMN).keep;
     }
     if (kind == PLANT_FLOWER) {
         let h = season_hash(vox);
@@ -99,12 +103,26 @@ fn season_apply(c: vec3<f32>, vox: vec3<i32>, kind: u32, s: f32) -> vec3<f32> {
         return c;
     }
     if (kind == PLANT_DECIDUOUS || kind == PLANT_AUTUMN) {
-        return season_leaf_colour(c, season_leaf(s, vox), kind == PLANT_AUTUMN);
+        return season_leaf_colour(c, season_leaf(s, vox, kind == PLANT_AUTUMN), kind == PLANT_AUTUMN);
     }
     if (kind == PLANT_GRASS || kind == PLANT_GROUND) {
         return season_grass(c, s);
     }
     return c;
+}
+
+// A far tree's box (impostors), which carries the plant kind of the voxels it stands for:
+// its colour this date, and alpha 0 once its leaves have fallen, on the near leaves' dates.
+fn season_box_leaf(c: vec3<f32>, lo: vec3<i32>, kind: u32, s: f32) -> vec4<f32> {
+    if (kind != PLANT_DECIDUOUS && kind != PLANT_AUTUMN) {
+        return vec4<f32>(c, 1.0);
+    }
+    let maple = kind == PLANT_AUTUMN;
+    if (!maple && s > 0.27 && s < 0.40) {
+        return vec4<f32>(c, 1.0);
+    }
+    let leaf = season_leaf(s, lo, maple);
+    return vec4<f32>(season_leaf_colour(c, leaf, maple), select(0.0, 1.0, leaf.keep));
 }
 
 // --- Distant things, which carry no plant kind -------------------------------------------
@@ -125,18 +143,23 @@ fn season_maple(q: vec3<f32>) -> bool {
     return q.r > q.g * 1.5 && q.b < q.g * 0.8 && q.r > 0.6;
 }
 
-// A far canopy or tree box: its colour this date, and alpha 0 where its leaves have fallen.
+// Cherry blossom pink: a broadleaf too.
+fn season_blossom(q: vec3<f32>) -> bool {
+    return q.r > q.g * 1.2 && q.b > q.g * 1.05 && q.r > 0.6;
+}
+
+// A far canopy: its colour this date, and alpha 0 where its leaves have fallen.
 fn season_far_leaf(c: vec3<f32>, world: vec2<f32>, s: f32) -> vec4<f32> {
     let q = sqrt(c);
     let maple = season_maple(q);
-    if (!((season_green(q) && !season_evergreen(q)) || maple)) {
+    if (!((season_green(q) && !season_evergreen(q)) || maple || season_blossom(q))) {
         return vec4<f32>(c, 1.0);
     }
     if (s > 0.27 && s < 0.40 && !maple) {
         return vec4<f32>(c, 1.0);
     }
     let cell = vec3<i32>(i32(floor(world.x / 40.0)) * 10, 0, i32(floor(world.y / 40.0)) * 10);
-    let leaf = season_leaf(s, cell);
+    let leaf = season_leaf(s, cell, maple);
     return vec4<f32>(season_leaf_colour(c, leaf, maple), select(0.0, 1.0, leaf.keep));
 }
 

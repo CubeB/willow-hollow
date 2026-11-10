@@ -43,29 +43,44 @@ pub fn declination(date: f32) -> f32 {
     (date * std::f32::consts::TAU).sin()
 }
 
-/// How much of the year's leaf fall is happening now, 0 to 1, peaking in mid autumn. The
-/// falling leaf particles follow it.
+/// The date by which every broadleaf, maple or not, has dropped its last leaf: early
+/// winter, before midwinter (0.75). season.wgsl's `season_leaf` keeps to it.
+pub const LEAVES_DOWN: f32 = 0.70;
+
+/// How much of the year's leaf fall is happening now, 0 to 1, peaking in mid autumn and
+/// over by `LEAVES_DOWN`. The falling leaf particles follow it.
 pub fn leaf_fall(date: f32) -> f32 {
-    smoothstep(0.46, 0.58, date) * (1.0 - smoothstep(0.66, 0.78, date))
+    smoothstep(0.46, 0.57, date) * (1.0 - smoothstep(0.64, LEAVES_DOWN, date))
 }
 
-/// How much snow lies on low ground at this date and cold: 0 in summer, 1 in deep winter.
+/// How wintry the date is, 0 in summer and 1 in deep winter: how far below the snowline
+/// cold reaches down the hills (the lying snow itself comes from the weather).
 pub fn snow_cover(date: f32) -> f32 {
     smoothstep(0.62, 0.80, date).max(1.0 - smoothstep(0.0, 0.12, date))
 }
 
-/// How warm a biome is against the year: the share of the winter that must pass before
-/// snow settles there. Negative for the cold biomes, where it settles earlier and deeper;
-/// above 1 where it never does.
+/// From this warmth up a biome never sees snow: none falls, none lies, and only real high
+/// mountains above `Ground::snowline` keep a cap.
+pub const NEVER_SNOWS: f32 = 0.9;
+
+/// How warm a biome is: 0.25 for the temperate lowlands, negative for the cold biomes,
+/// where winters are long and snowy, and `NEVER_SNOWS` or more where it never snows.
+/// weather.rs turns it into a temperature.
 pub fn warmth(biome: Biome) -> f32 {
     match biome {
-        // Snowy pine is snow-covered by definition; the other newer biomes follow their parent.
         Biome::SnowyPine => -0.3,
         Biome::Alpine => -0.5,
         Biome::Tundra => -0.35,
         Biome::Taiga => -0.2,
-        Biome::Heath | Biome::Grassland | Biome::Deciduous | Biome::Woodland | Biome::OldGrowth | Biome::Ocean => 0.25,
+        Biome::Heath | Biome::Grassland | Biome::Deciduous | Biome::OldGrowth | Biome::Ocean => 0.25,
+        // Steppe is the dry, warm side of the heath: snow is rare there.
+        Biome::Steppe => 0.45,
+        // Woodland is the wet tropics between savanna and rainforest.
+        Biome::Woodland => 1.1,
         Biome::Savanna | Biome::Desert | Biome::Rainforest => 1.5,
+        // Volcanic islands are warm ground; only their high summits see snow.
+        Biome::Volcanic => 1.0,
+        // The other newer biomes (mangrove, dune sea, red rock, marsh, bog...) follow their parent.
         b => warmth(b.parent()),
     }
 }
@@ -79,16 +94,27 @@ pub struct Ground {
     /// Ice on water, 0..1.
     pub frozen: f32,
     pub wet: f32,
+    /// How much the cold of height adds to the snow on hills, 0..1: winter, in a biome that snows.
+    pub highland: f32,
+    /// Metres above which summits keep snow all year.
+    pub snowline: f32,
 }
 
 impl Ground {
-    /// The ground at `date` in a biome of this warmth, with `fallen` snow from the weather.
-    pub fn at(date: f32, warmth: f32, fallen: f32, wet: f32) -> Self {
-        let season = snow_cover(date);
-        let settled = if warmth < 0.0 { season * (1.0 - warmth) } else { (season - warmth).max(0.0) / (1.0 - warmth).max(0.05) };
-        // Ponds freeze only after the ground has been snowy a while.
-        let frozen = ((season - 0.45 - warmth.max(0.0) * 0.5) * 2.0).clamp(0.0, 1.0);
-        Self { snow: settled.max(fallen).clamp(0.0, 1.0), frozen, wet }
+    /// The ground at `date` in a biome of this warmth, with `lying` snow and `ice` from the
+    /// weather (weather::lying).
+    pub fn at(date: f32, warmth: f32, lying: f32, ice: f32, wet: f32) -> Self {
+        if warmth >= NEVER_SNOWS {
+            return Self { snow: 0.0, frozen: 0.0, wet, highland: 0.0, snowline: Self::snowline(warmth) };
+        }
+        let highland = snow_cover(date) * ((NEVER_SNOWS - warmth) / (NEVER_SNOWS - 0.25)).clamp(0.0, 1.0);
+        Self { snow: lying.clamp(0.0, 1.0), frozen: ice.clamp(0.0, 1.0), wet, highland, snowline: Self::snowline(warmth) }
+    }
+
+    /// The height of the year-round summit snow: lower in the cold, and only on real high
+    /// mountains where it never snows below.
+    pub fn snowline(warmth: f32) -> f32 {
+        if warmth >= NEVER_SNOWS { 220.0 + (warmth - NEVER_SNOWS) * 150.0 } else { 70.0 + 80.0 * warmth.max(-0.5) }
     }
 }
 
@@ -104,12 +130,45 @@ mod tests {
         assert!(snow_cover(0.86) > 0.99 && snow_cover(DEFAULT_DATE) == 0.0);
         assert!(snow_cover(0.7) > snow_cover(0.65));
         let temperate = warmth(Biome::Deciduous);
-        assert_eq!(Ground::at(DEFAULT_DATE, temperate, 0.0, 0.0).snow, 0.0);
-        assert!(Ground::at(0.86, warmth(Biome::Tundra), 0.0, 0.0).snow > Ground::at(0.7, temperate, 0.0, 0.0).snow);
-        assert_eq!(Ground::at(0.86, warmth(Biome::Desert), 0.0, 0.0).snow, 0.0);
-        assert!(Ground::at(0.86, temperate, 0.0, 0.0).frozen > 0.8 && Ground::at(0.5, temperate, 0.0, 0.0).frozen == 0.0);
-        assert_eq!(Ground::at(DEFAULT_DATE, temperate, 0.6, 0.0).snow, 0.6);
+        assert_eq!(Ground::at(DEFAULT_DATE, temperate, 0.6, 0.0, 0.0).snow, 0.6);
         assert_eq!(named("winter"), Some(0.86));
         assert_eq!(named("monsoon"), None);
+    }
+
+    #[test]
+    fn leaves_are_down_by_early_winter() {
+        assert!(leaf_fall(0.57) > 0.99);
+        assert_eq!(leaf_fall(LEAVES_DOWN), 0.0);
+        assert!(LEAVES_DOWN < 0.75);
+        // The shader's latest fall (season_leaf): the latest tree and leaf, not a maple.
+        let latest = 0.595 + 0.075 + 0.03;
+        assert!(latest <= LEAVES_DOWN + 1e-6);
+        // Maples go a little before the rest.
+        assert!(latest - 0.025 < LEAVES_DOWN);
+    }
+
+    #[test]
+    fn warm_biomes_never_snow() {
+        let warm = [
+            Biome::Desert,
+            Biome::Savanna,
+            Biome::Rainforest,
+            Biome::Woodland,
+            Biome::Mangrove,
+            Biome::DuneSea,
+            Biome::RedRock,
+            Biome::Volcanic,
+        ];
+        for b in warm {
+            assert!(warmth(b) >= NEVER_SNOWS, "{b:?}");
+            for i in 0..100 {
+                let g = Ground::at(i as f32 / 100.0, warmth(b), 1.0, 1.0, 0.0);
+                assert_eq!((g.snow, g.frozen, g.highland), (0.0, 0.0, 0.0), "{b:?}");
+                assert!(g.snowline >= 220.0);
+            }
+        }
+        for b in [Biome::Tundra, Biome::Alpine, Biome::Taiga, Biome::SnowyPine, Biome::Deciduous, Biome::Bog, Biome::Steppe] {
+            assert!(warmth(b) < NEVER_SNOWS, "{b:?}");
+        }
     }
 }
