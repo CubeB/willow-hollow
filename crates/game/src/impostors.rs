@@ -12,6 +12,7 @@ use std::{
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec3};
+use voxel::plant;
 use worldgen::{
     World,
     features::{self, shape::rotate, trees::{self, Species}},
@@ -45,11 +46,18 @@ pub struct BoxInstance {
     /// World voxel position of the box's low corner.
     pub lo: [i32; 3],
     pub size: [u8; 3],
-    pub _pad: u8,
+    /// The tree's tag (features::tree_tag), so it turns and drops on the near tree's date.
+    pub tree: u8,
     pub color: [u8; 3],
-    /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near tree's.
+    /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near
+    /// tree's, plus [`BARE`] for the bare crown shown once they have.
     pub plant: u8,
 }
+
+/// Marks the box standing for a broadleaf's bare crown in winter, in place of its leaves.
+const BARE: u8 = 8;
+/// The colour of a crown of bare twigs from afar, as the far view's bare forest.
+const BARE_CROWN: [u8; 3] = [92, 80, 72];
 
 /// The boxes of a model, turned, relative to where it stands: low corner, size, colour, plant kind.
 type ModelBoxes = Arc<Vec<(IVec3, [u8; 3], [u8; 3], u8)>>;
@@ -67,16 +75,20 @@ impl Models {
             return model.clone();
         }
         let mats = world.materials();
-        let boxes = trees::impostor(world.library().get(species, variant), mats)
-            .into_iter()
-            .map(|b| {
-                let (a, c) = (rotate(b.lo, turns), rotate(b.hi - IVec3::ONE, turns));
-                let (lo, hi) = (a.min(c), a.max(c) + IVec3::ONE);
-                let size = (hi - lo).min(IVec3::splat(255));
-                let m = mats.get(b.voxel);
-                (lo, [size.x as u8, size.y as u8, size.z as u8], m.color, m.plant)
-            })
-            .collect();
+        let mut boxes = Vec::new();
+        for b in trees::impostor(world.library().get(species, variant), mats) {
+            let (a, c) = (rotate(b.lo, turns), rotate(b.hi - IVec3::ONE, turns));
+            let (lo, hi) = (a.min(c), a.max(c) + IVec3::ONE);
+            let size = (hi - lo).min(IVec3::splat(255));
+            let size = [size.x as u8, size.y as u8, size.z as u8];
+            let m = mats.get(b.voxel);
+            boxes.push((lo, size, m.color, m.plant));
+            // A broadleaf's crown has a twin in the grey-brown of bare twigs, drawn in its
+            // place once its leaves are down.
+            if m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN {
+                boxes.push((lo, size, BARE_CROWN, m.plant | BARE));
+            }
+        }
         let model: ModelBoxes = Arc::new(boxes);
         self.cache.lock().expect("model cache poisoned").insert(key, model.clone());
         model
@@ -275,12 +287,13 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
         // the shore. It would look to be growing out of the lake.
         let (lx, lz) = ((p.pos.x - mx * MACRO_SIZE) as f32 + 0.5, (p.pos.z - mz * MACRO_SIZE) as f32 + 0.5);
         if inside && lod::stands_tall(p.species) && !farview::shows_water(&continent, lx, lz) {
+            let tree = features::tree_tag(p.pos);
             for (lo, size, color, plant) in models.get(world, p.species, p.variant, p.turns).iter() {
                 let at = p.pos + *lo;
                 boxes.push(BoxInstance {
                     lo: at.to_array(),
                     size: *size,
-                    _pad: 0,
+                    tree,
                     color: *color,
                     plant: *plant,
                 });

@@ -14,9 +14,9 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk, mesh_chunk_with_currents},
+    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk, mesh_chunk_with_currents, tag_trees},
 };
-use worldgen::{Cascade, SpringMark, World, scale::m, world::GameWorld};
+use worldgen::{Cascade, SpringMark, World, features, scale::m, world::GameWorld};
 
 use crate::{
     arena::{MeshSpan, VertexArena},
@@ -555,6 +555,11 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
             add_plants(&mut mesh, inside, origin, world.materials());
+            // Each tree's leaves go on its own date.
+            let (lib, mats) = (world.library(), world.materials());
+            tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
+                features::leaf_tag(lib, mats, &output.trees, IVec3::from_array(q))
+            });
             (*cy, mesh)
         })
         .filter(|(_, mesh)| !mesh.is_empty())
@@ -576,11 +581,24 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
 /// A column of one of the coarse rings: no plants, cascades or spray this far out.
 fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> ColumnResult {
     let t0 = Instant::now();
-    let chunks = lod::generate(world, models, col.0, col.1, col.2);
+    let (chunks, trees) = lod::generate(world, models, col.0, col.1, col.2);
     let t1 = Instant::now();
+    // Trunks in coarse cells, for giving each tree's leaves its own date: here simply the
+    // nearest tree's, as coarse cells are too big to say exactly.
+    let step = 1 << col.0;
+    let trunks: Vec<(IVec3, u8)> = trees.iter().map(|p| (p.pos.div_euclid(IVec3::splat(step)), features::tree_tag(p.pos))).collect();
     let meshes = chunks
         .iter()
-        .map(|(cy, chunk)| (*cy, mesh_chunk(chunk, world.materials())))
+        .map(|(cy, chunk)| {
+            let mut mesh = mesh_chunk(chunk, world.materials());
+            tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
+                trunks
+                    .iter()
+                    .min_by_key(|(t, _)| (t.x - q[0]).pow(2) + (t.z - q[2]).pow(2))
+                    .map_or(0, |t| t.1)
+            });
+            (*cy, mesh)
+        })
         .filter(|(_, mesh)| !mesh.is_empty())
         .collect();
     let t2 = Instant::now();

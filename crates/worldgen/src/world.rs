@@ -663,6 +663,7 @@ impl GameWorld {
             springs,
             currents,
             plants,
+            trees: placements,
         }
     }
 }
