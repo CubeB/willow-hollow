@@ -125,6 +125,17 @@ palette! {
     MUSHROOM_RED   = (196,  56,  48), Foliage, 2;
     MUSHROOM_TAN   = (178, 142, 100), Foliage, 2;
     LILY           = ( 70, 138,  64), Foliage, 2;
+    // Moss and lichen: fine pieces on trunks, stone and shaded ground.
+    MOSS_CUSHION      = ( 74, 118,  52), Foliage, 3;
+    MOSS_CUSHION_LIT  = (110, 152,  66), Foliage, 3;
+    MOSS_CUSHION_DEEP = ( 58,  98,  52), Foliage, 3;
+    MOSS_CARPET       = ( 92, 132,  56), Foliage, 3;
+    MOSS_CARPET_LIT   = (124, 158,  70), Foliage, 3;
+    MOSS_CARPET_DEEP  = ( 68, 110,  48), Foliage, 3;
+    MOSS_SHAG         = ( 84, 112,  58), Foliage, 3;
+    MOSS_SHAG_TIP     = (132, 154,  84), Foliage, 3;
+    LICHEN_YELLOW     = (176, 176,  84), Foliage, 2;
+    LICHEN_GREY       = (156, 164, 142), Foliage, 2;
 }
 
 /// The ground cover a biome grows.

@@ -1,7 +1,7 @@
 //! The real world: continents generated on demand and turned into voxel chunks.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -406,6 +406,17 @@ impl World for GameWorld {
                 put(p + origin, v, true);
             }
         }
+        // Now the world's shape is final, things can grow on it.
+        let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
+        let standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
+        let soil = features::moss::Soil {
+            columns: &columns,
+            x0: wx0,
+            z0: wz0,
+            seed: self.seed,
+            taken: &standing,
+        };
+        features::moss::grow(&voxels, &self.materials, &soil, &mut plants);
         ColumnOutput {
             chunks: out,
             cascades,
