@@ -100,6 +100,8 @@ pub struct Network {
     pub junctions: Vec<Vec2>,
     /// Each trail as a line, for maps.
     pub lines: Vec<Vec<Vec2>>,
+    /// The half-width its traffic gives each trail at each point of `lines`.
+    pub line_widths: Vec<Vec<f32>>,
     tiles: HashMap<(i32, i32), Vec<TrailPoint>>,
     pads: Vec<Pad>,
     stamps: Vec<Stamp>,

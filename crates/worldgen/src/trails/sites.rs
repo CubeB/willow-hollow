@@ -26,6 +26,22 @@ fn weight(kind: Landmark) -> f32 {
     }
 }
 
+/// How much a site draws people, for the traffic on the trails between sites. A trip
+/// between two sites counts the product of theirs. Settlements, when they come, slot in
+/// above all of these (a hamlet about 6, a town 12 or more), and the busiest trails
+/// between them become roads.
+pub fn importance(kind: Landmark) -> f32 {
+    match kind {
+        Landmark::Landing => 3.0,
+        Landmark::Camp => 2.5,
+        Landmark::Ruins | Landmark::Shrine => 2.0,
+        Landmark::Hut => 1.5,
+        Landmark::Lookout | Landmark::Stones => 1.0,
+        Landmark::Arch => 0.7,
+        Landmark::Cairn => 0.5,
+    }
+}
+
 /// Connected land, as a label per cell (0 for water). Trails only join sites with the
 /// same label.
 pub fn land_components(c: &Continent) -> Vec<u32> {

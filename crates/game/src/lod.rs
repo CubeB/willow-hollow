@@ -34,6 +34,10 @@ pub fn stands_tall(species: Species) -> bool {
 
 type ModelKey = (Species, usize, u32, u8);
 
+/// Voxel columns between the ground heights sampled under each coarse cell.
+/// Corners alone (4) measured as safe on today's hills, but cliffs would find the gaps.
+const SAMPLE_STRIDE: usize = 2;
+
 /// Trees rebuilt at coarse resolution, made once per model, turn and level.
 #[derive(Default)]
 pub struct Models {
@@ -117,6 +121,45 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
     }
 }
 
+/// For each cell, the top of the lowest voxel column under it, edges included, so that
+/// the cell can sit at or below all the ground under it. Just one column higher than the
+/// finer ground at a ring's edge would leave a crack to see through.
+///
+/// Only every `stride`-th column each way is sampled, sampling being most of the cost of
+/// a coarse column. The columns skipped are allowed for by going one voxel lower.
+/// `corners` are the columns at the cell corners, `PAD + 1` each way, already sampled.
+fn lowest_ground(sampler: &Sampler, corners: &[Column], lx0: i32, lz0: i32, step: i32, stride: usize) -> Vec<i32> {
+    let n = PAD + 1;
+    let s = step as usize;
+    let stride = stride.clamp(1, s);
+    let per_cell = s / stride;
+    let fine = PAD * per_cell + 1;
+    let mut tops = vec![0i32; fine * fine];
+    for x in 0..fine {
+        for z in 0..fine {
+            tops[x * fine + z] = if x % per_cell == 0 && z % per_cell == 0 {
+                corners[(x / per_cell) * n + z / per_cell].top()
+            } else {
+                sampler.column(lx0 + (x * stride) as i32, lz0 + (z * stride) as i32).top()
+            };
+        }
+    }
+    let skipped = if stride > 1 { 1 } else { 0 };
+    let mut lowest = vec![i32::MAX; PAD * PAD];
+    for cx in 0..PAD {
+        for cz in 0..PAD {
+            let cell = &mut lowest[cx * PAD + cz];
+            for x in cx * per_cell..=(cx + 1) * per_cell {
+                for z in cz * per_cell..=(cz + 1) * per_cell {
+                    *cell = (*cell).min(tops[x * fine + z]);
+                }
+            }
+            *cell -= skipped;
+        }
+    }
+    lowest
+}
+
 /// The chunks of one coarse column: `(chunk y, voxels)`, in coarse cells.
 pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> Vec<(i32, PaddedChunk)> {
     let step = 1 << level;
@@ -137,30 +180,7 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
             corners.push(sampler.column(lx0 + x as i32 * step, lz0 + z as i32 * step));
         }
     }
-    // The height of every voxel column underneath, edges included, so that each cell
-    // can sit at or below all of them. Just one column higher than the finer ground at
-    // a ring's edge would leave a crack to see through.
-    let fine = PAD * step as usize + 1;
-    let mut tops = vec![0i32; fine * fine];
-    for x in 0..fine {
-        for z in 0..fine {
-            tops[x * fine + z] = if x % step as usize == 0 && z % step as usize == 0 {
-                corners[(x / step as usize) * n + z / step as usize].top()
-            } else {
-                sampler.column(lx0 + x as i32, lz0 + z as i32).top()
-            };
-        }
-    }
-    let lowest_under = |cx: usize, cz: usize| {
-        let s = step as usize;
-        let mut lowest = i32::MAX;
-        for x in cx * s..=(cx + 1) * s {
-            for z in cz * s..=(cz + 1) * s {
-                lowest = lowest.min(tops[x * fine + z]);
-            }
-        }
-        lowest
-    };
+    let lowest_under = lowest_ground(&sampler, &corners, lx0, lz0, step, SAMPLE_STRIDE);
 
     struct Cell {
         top: i32,
@@ -174,7 +194,7 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
     for x in 0..PAD {
         for z in 0..PAD {
             let four = [&corners[x * n + z], &corners[(x + 1) * n + z], &corners[x * n + z + 1], &corners[(x + 1) * n + z + 1]];
-            let lowest = lowest_under(x, z);
+            let lowest = lowest_under[x * PAD + z];
             let highest = four.iter().map(|c| c.top()).max().expect("four corners");
             // The top of a column is its highest solid voxel, so its ground lies at
             // top + 1. The cell's ground must not lie above that, or the finer ring next
@@ -276,6 +296,15 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
     let mats = world.materials();
     for p in &placements {
         let at = IVec3::new(p.pos.x.div_euclid(step), p.pos.y.div_euclid(step), p.pos.z.div_euclid(step));
+        // A cell floods if water reaches any of its corners, so a tree on the shore can
+        // find its cell under water. Better left out than seen growing from the lake.
+        let (px, pz) = (at.x - (cx * CHUNK - 1), at.z - (cz * CHUNK - 1));
+        if (0..PAD as i32).contains(&px)
+            && (0..PAD as i32).contains(&pz)
+            && cells[px as usize * PAD + pz as usize].water.is_some()
+        {
+            continue;
+        }
         for (offset, v) in models.get(world, p.species, p.variant, p.turns, level).iter() {
             put(at + *offset, *v, mats.get(*v).kind == Kind::Solid);
         }
@@ -303,6 +332,61 @@ mod tests {
             assert!(cells.len() < voxels, "coarse cells must be fewer");
             let wood = cells.iter().filter(|(_, v)| world.materials().get(*v).kind != Kind::Foliage).count();
             assert!(wood > 0, "level {level} lost the trunk");
+        }
+    }
+
+    /// Sampling every other column must still keep almost every coarse cell's ground at
+    /// or below all the full-size ground under it.
+    #[test]
+    fn sparse_sampling_keeps_cells_under_the_ground() {
+        let world = GameWorld::new(1);
+        let (mut cells, mut above) = (0, 0);
+        // Hills in deciduous forest and steep taiga.
+        for (x, z) in [(38944, 13600), (38560, 37024), (27808, 14368)] {
+            let step = 4;
+            let (mx, mz) = cell_of(x, z);
+            let continent = world.continent(mx, mz);
+            let (lx0, lz0) = (x - mx * MACRO_SIZE, z - mz * MACRO_SIZE);
+            let sampler = Sampler::new(&continent, world.seed(), lx0, lz0, PAD as i32 * step + 1);
+            let n = PAD + 1;
+            let corners: Vec<_> = (0..n * n)
+                .map(|i| sampler.column(lx0 + (i / n) as i32 * step, lz0 + (i % n) as i32 * step))
+                .collect();
+            let exact = lowest_ground(&sampler, &corners, lx0, lz0, step, 1);
+            let sparse = lowest_ground(&sampler, &corners, lx0, lz0, step, SAMPLE_STRIDE);
+            for (e, s) in exact.iter().zip(&sparse) {
+                cells += 1;
+                // Compared as the cells are built: ground rounded down to the cell size.
+                if (s + 1).div_euclid(step) > (e + 1).div_euclid(step) {
+                    above += 1;
+                }
+            }
+        }
+        println!("{above} of {cells} cells above the ground");
+        assert!(above * 200 <= cells, "{above} of {cells} cells stand above the ground under them");
+    }
+
+    /// Times coarse column generation. Run with
+    /// `cargo test --release -p game coarse_generation_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn coarse_generation_time() {
+        let world = GameWorld::new(1);
+        let models = Models::default();
+        // Deciduous forest and taiga, as in the benchmarks.
+        for (x, z) in [(38944, 13600), (38560, 37024)] {
+            for level in 1..=2u8 {
+                let span = CHUNK * (1 << level);
+                let (cx, cz) = (x / span, z / span);
+                generate(&world, &models, level, cx, cz); // continent and models warm
+                let began = std::time::Instant::now();
+                let n = 6;
+                for i in 0..n {
+                    generate(&world, &models, level, cx + i + 1, cz);
+                }
+                let ms = began.elapsed().as_secs_f32() * 1000.0 / n as f32;
+                println!("({x}, {z}) level {level}: {ms:.1} ms per column");
+            }
         }
     }
 }
