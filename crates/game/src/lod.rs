@@ -94,19 +94,20 @@ fn downsample(world: &GameWorld, species: Species, variant: usize, turns: u32, l
     out
 }
 
-/// What the top of a coarse cell is made of: the same choice the voxel world makes,
-/// without the voxel-to-voxel speckle, which would only shimmer at this distance.
+/// What the top of a coarse cell is made of, and the layer under it: the choice
+/// `world::surface_materials` makes, each biome with its own ground, soil and rock,
+/// taking the commonest of its voxel-to-voxel speckle, which would only shimmer at this
+/// distance. Cliffs are banded by height as they are filled (see [`cliff_rock`]).
 fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
     let cover = mat::ground_cover(col.biome);
     match col.cover {
         Cover::RiverBed => (mat::GRAVEL, mat::GRAVEL),
         Cover::LakeBed => (mat::MUD, mat::MUD),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
-        // Coarse cells skip the strata bands; plain stone reads the same at this distance.
         Cover::Cliff => (mat::STONE, mat::STONE),
         Cover::Scree => (mat::SCREE, mat::SCREE),
         Cover::Trail => (
-            match col.biome {
+            match col.biome.parent() {
                 Biome::Desert | Biome::Savanna => mat::PATH_SAND,
                 Biome::Alpine | Biome::Tundra | Biome::Ocean => mat::PATH_GRAVEL,
                 Biome::OldGrowth | Biome::Rainforest | Biome::Taiga => mat::PATH_DARK,
@@ -114,11 +115,21 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
             },
             mat::DIRT,
         ),
-        Cover::Bank | Cover::Land if slope > 0.95 => (mat::STONE, mat::STONE),
+        // Tidal flats.
+        Cover::Bank if col.ground < worldgen::scale::m(1.0) => (mat::MUD, mat::MUD),
+        Cover::Bank | Cover::Land if slope > 0.95 => {
+            let (light, _) = mat::bedrock(col.biome);
+            (light, light)
+        }
         Cover::Bank | Cover::Land if col.temperature < 0.10 => (mat::SNOW, mat::STONE),
-        Cover::Bank | Cover::Land if cover == mat::DESERT_SAND => (cover, mat::DESERT_SAND),
-        Cover::Bank | Cover::Land => (cover, mat::DIRT),
+        Cover::Bank | Cover::Land => (cover, mat::subsoil(cover)),
     }
+}
+
+/// The rock a coarse cliff shows in its cell at coarse height `y`: the band of the
+/// voxel world's strata at the middle of the cell.
+fn cliff_rock(seed: u32, biome: Biome, y: i32, step: i32) -> Voxel {
+    mat::strata(seed, biome, y * step + step / 2, 0.0)
 }
 
 /// For each cell, the top of the lowest voxel column under it, edges included, so that
@@ -188,6 +199,8 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
         water: Option<i32>,
         surface: Voxel,
         under: Voxel,
+        /// For a cliff, the biome whose rock bands it shows.
+        cliff: Option<Biome>,
     }
     let mut cells = Vec::with_capacity(PAD * PAD);
     let (mut lo, mut hi) = (i32::MAX, i32::MIN);
@@ -208,9 +221,10 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
             }
             let low_corner = four.iter().map(|c| c.top()).min().expect("four corners");
             let (surface, under) = skin(four[0], (highest - low_corner) as f32 / step as f32);
+            let cliff = (four[0].cover == Cover::Cliff).then_some(four[0].biome);
             lo = lo.min(top);
             hi = hi.max(top).max(water.unwrap_or(i32::MIN));
-            cells.push(Cell { top, water, surface, under });
+            cells.push(Cell { top, water, surface, under, cliff });
         }
     }
 
@@ -246,6 +260,7 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
     // Keep enough rock below for the slope's side faces.
     let cy_min = (lo - 2 * BLOCK).div_euclid(CHUNK);
     let cy_max = hi.div_euclid(CHUNK);
+    let seed = world.seed();
     let mut chunks: Vec<(i32, PaddedChunk)> = Vec::with_capacity((cy_max - cy_min + 1) as usize);
     for cy in cy_min..=cy_max {
         let base = cy * CHUNK - 1;
@@ -257,6 +272,9 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
                     let y = base + py as i32;
                     *v = if y > cell.top {
                         if cell.water.is_some_and(|w| y <= w) { mat::WATER } else { AIR }
+                    } else if let Some(biome) = cell.cliff {
+                        // A face can be far taller than the soil: banded all the way down.
+                        cliff_rock(seed, biome, y, step)
                     } else if y == cell.top {
                         cell.surface
                     } else if y >= cell.top - 2 {

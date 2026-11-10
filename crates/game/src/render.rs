@@ -694,7 +694,7 @@ impl Renderer {
         });
 
         let far_module = shader(device, "far", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/far.wgsl")));
-        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2];
+        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2, 4 => Unorm8x4];
         let far_instance_attrs = wgpu::vertex_attr_array![3 => Float32x3];
         let far = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("far"),
@@ -812,12 +812,7 @@ impl Renderer {
         });
 
         let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
-        let sea_vertex = |x: f32, z: f32| FarVertex {
-            pos: [x, crate::farview::SEA_LEVEL, z],
-            color: sea_color,
-            flags: crate::farview::FLAG_WATER,
-            grad: [0, 0],
-        };
+        let sea_vertex = |x: f32, z: f32| FarVertex::water([x, crate::farview::SEA_LEVEL, z], sea_color, crate::farview::FLAG_WATER);
         const SEA_EXTENT: f32 = m(320_000.0);
         let sea = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sea"),

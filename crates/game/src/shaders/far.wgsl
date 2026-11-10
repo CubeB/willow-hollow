@@ -12,6 +12,8 @@ struct VIn {
     @location(2) grad: vec2<f32>,
     // Per continent: its origin corner relative to the camera.
     @location(3) offset: vec3<f32>,
+    // Land: rgb, sRGB colour out beyond the tree models, the forest seen as a canopy.
+    @location(4) far: vec4<f32>,
 };
 
 struct VOut {
@@ -20,6 +22,7 @@ struct VOut {
     @location(1) color: vec3<f32>,
     @location(2) grad: vec2<f32>,
     @location(3) kind: f32,
+    @location(4) far: vec3<f32>,
 };
 
 @vertex
@@ -50,6 +53,7 @@ fn vs(in: VIn) -> VOut {
     }
     out.clip = G.view_proj * vec4<f32>(depth_pos, 1.0);
     out.color = srgb_to_linear(in.color.rgb);
+    out.far = srgb_to_linear(in.far.rgb);
     out.grad = in.grad * 4.0;
     out.kind = in.color.a;
     return out;
@@ -82,7 +86,14 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
         // The season: a far forest turns and goes bare, grass dries, snow settles.
         let world = in.rel.xz + G.cam_wrapped.xz;
-        var base = season_far_ground(in.color, in.kind > 0.002, world, G.season.x);
+        // While the tree models stand on it, the ground is seen between them; out beyond,
+        // the forest they drew is seen as its canopy, over the same reach the surface
+        // rises to the canopy's height.
+        var base = season_far_ground(in.color, false, world, G.season.x);
+        let canopy = smoothstep(G.cam_wrapped.w * 0.85, G.cam_wrapped.w, length(in.rel.xz));
+        if (canopy > 0.0) {
+            base = mix(base, season_far_ground(in.far, in.kind > 0.002, world, G.season.x), canopy);
+        }
         base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0);
         color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.

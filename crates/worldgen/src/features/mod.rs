@@ -317,6 +317,13 @@ pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
     Some((mats.get(leaves).color, cover, height))
 }
 
+/// The tree a biome's forest is mostly made of, as [`canopy`] chooses it, for drawing
+/// that forest from afar in its own colours.
+pub fn canopy_tree(biome: Biome) -> Option<Species> {
+    let fl = flora(biome);
+    fl.trees.iter().chain(fl.giants).max_by(|a, b| a.1.total_cmp(&b.1)).map(|t| t.0)
+}
+
 fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
     let total: f32 = list.iter().map(|w| w.1).sum();
     let mut r = roll * total;
