@@ -17,16 +17,30 @@ struct VIn {
     @location(4) scale: f32,
 };
 
+// A vertex's position in its chunk, in voxels: as in terrain.wgsl, which explains it.
+fn vertex_local(a: u32) -> vec3<f32> {
+    let q = vec3<u32>((a >> 23u) & 3u, (a >> 25u) & 3u, (a >> 27u) & 3u);
+    let bit = vec3<u32>((a >> 29u) & 1u, (a >> 30u) & 1u, (a >> 31u) & 1u);
+    let half = (bit == vec3<u32>(1u)) & (q != vec3<u32>(0u));
+    let nudge = select(vec3<f32>(-0.125), vec3<f32>(0.125), q >= vec3<u32>(2u));
+    return vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u))
+        + vec3<f32>(q) * 0.25 + select(vec3<f32>(0.0), nudge, half);
+}
+
+fn vertex_corner(a: u32) -> vec3<i32> {
+    let q = vec3<u32>((a >> 23u) & 3u, (a >> 25u) & 3u, (a >> 27u) & 3u);
+    let bit = vec3<i32>(i32((a >> 29u) & 1u), i32((a >> 30u) & 1u), i32((a >> 31u) & 1u));
+    return select(vec3<i32>(0), bit, q == vec3<u32>(0u));
+}
+
 // Leaves that have fallen cast no shadow.
 @vertex
 fn vs(in: VIn) -> @builtin(position) vec4<f32> {
-    let local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u))
-        + vec3<f32>(f32((in.a >> 23u) & 3u), f32((in.a >> 25u) & 3u), f32((in.a >> 27u) & 3u)) * 0.25;
+    let local = vertex_local(in.a);
     let kind = (in.b >> 29u) & 7u;
     if ((kind == PLANT_DECIDUOUS || kind == PLANT_AUTUMN) && (C.season.x < 0.27 || C.season.x > 0.40)) {
         // The same voxel the terrain shader names, so a leaf and its shadow fall together.
-        let corner = vec3<i32>(i32((in.a >> 29u) & 1u), i32((in.a >> 30u) & 1u), i32((in.a >> 31u) & 1u));
-        let vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - corner;
+        let vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
         if (season_gone(C.season.x, kind, vox)) {
             return vec4<f32>(0.0, 0.0, 2.0, 1.0);
         }

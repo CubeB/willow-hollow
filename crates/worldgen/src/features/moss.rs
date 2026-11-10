@@ -1,5 +1,9 @@
 //! Moss and lichen: colonies of 0.1 m pieces on trunks, boulders, walls and dark ground.
 //!
+//! Moss lies flat: a skin half a cell (0.05 m) thick against its face, with here and
+//! there a cell raised to a full 0.1 m, never a mound or a hanging strand. On a ceiling
+//! it is only skin, and only where the underside is well shaded.
+//!
 //! Each candidate face gets a score from shade, moisture, the way it faces and how old
 //! its host is, and a slow noise groups the winners into connected colonies. Everything
 //! is decided from the air voxel the moss occupies and the voxels next to it, through
@@ -12,7 +16,7 @@ use std::collections::HashSet;
 use glam::IVec3;
 use voxel::{Materials, Voxel, mesh::PlantBox};
 
-use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, Voxels, for_each_site};
+use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, for_each_site};
 use super::shape::Rng;
 use crate::{
     biome::Biome,
@@ -26,6 +30,16 @@ use crate::{
 pub const COLUMN_BOXES: usize = 500;
 /// Faces considered per chunk column before the budget is applied, most deserving first.
 const COLUMN_SITES: usize = 2400;
+/// How far an underside's score is held below a wall's.
+const UNDERSIDE_PENALTY: f32 = 0.45;
+/// Opaque voxels overhead, the ceiling's own included, before an underside is dark enough
+/// for moss: a thick overhang, a cliff, or a branch under leaves, not a signboard.
+const UNDERSIDE_CANOPY: u32 = 4;
+/// Where a second slow noise falls below this, moss leaves bare gaps, so colonies are
+/// sparser without breaking into speckle. Cuts out about a quarter to a third.
+const GAP_CUT: f32 = -0.1;
+/// Size of the bare gaps.
+const GAP_SCALE: f32 = 3.5;
 
 /// What a voxel is, as far as moss cares.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -50,11 +64,11 @@ pub fn host_of(v: Voxel) -> Option<Host> {
 /// The kinds of moss, each with its own form and colours.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Moss {
-    /// Soft mounds.
+    /// Soft, uneven pads with raised crowns.
     Cushion,
     /// A flat mat that spreads.
     Carpet,
-    /// Shaggy, with strands that hang.
+    /// Shaggy, in streaks that run down a wall.
     Shaggy,
     /// A thin yellow or grey crust on stone and bark.
     Lichen,
@@ -148,13 +162,15 @@ fn appeal(host: Host, toward: Toward, shade: f32, wet: f32) -> f32 {
         Host::Ground => (0.45, 0.0),
     };
     // The sun tracks across the +Z side of the sky, so -Z walls stay in the shade.
+    // Undersides are held well below walls: a little moss on a dark ceiling looks right,
+    // a lot reads as something hanging.
     let aspect = facing
         + match toward {
             Toward::NegZ => 0.26,
             Toward::PosX | Toward::NegX => 0.10,
             Toward::PosZ => -0.1,
             Toward::Below => 0.05,
-            Toward::Above => 0.2,
+            Toward::Above => -UNDERSIDE_PENALTY,
         };
     let (shade, wet) = (shade.clamp(0.0, 1.0), wet.clamp(0.0, 1.0));
     match host {
@@ -214,7 +230,7 @@ pub fn grow(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, out: &mut Vec<
     }
     let mut raster = Raster::new();
     for p in &patches {
-        plant(p, soil.seed, voxels, &mut raster);
+        plant(p, soil.seed, &mut raster);
     }
     let start = out.len();
     raster.finish(out, |_| (false, false));
@@ -229,6 +245,11 @@ pub fn grow(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, out: &mut Vec<
 
 /// Decides whether a site grows moss.
 fn judge(site: &Site, soil: &Soil) -> Option<Patch> {
+    judge_with(site, soil, GAP_CUT)
+}
+
+/// [`judge`], with the gaps cut where their noise is below `gap_cut`.
+fn judge_with(site: &Site, soil: &Soil, gap_cut: f32) -> Option<Patch> {
     if soil.taken.contains(&site.air) {
         return None;
     }
@@ -237,23 +258,33 @@ fn judge(site: &Site, soil: &Soil) -> Option<Patch> {
     if !matches!(col.cover, Cover::Land | Cover::Bank) || col.water_surface().is_some() {
         return None;
     }
-    // Under an overhang counts as shaded even with no canopy.
-    let shade = (site.canopy as f32 / 5.0).min(1.0) + if site.toward == Toward::Above { 0.6 } else { 0.0 };
+    // A ceiling only in deep shade: the thin board of a signpost or the eave of a tower out
+    // in the open stays bare.
+    if site.toward == Toward::Above && site.canopy < UNDERSIDE_CANOPY {
+        return None;
+    }
+    let shade = (site.canopy as f32 / 5.0).min(1.0);
     let wet = moisture(col);
     if wet == 0.0 {
         return None;
     }
     let (x, y, z) = (site.air.x as f64, site.air.y as f64, site.air.z as f64);
+    let gap = perlin3(soil.seed ^ 0x3057, x / m(GAP_SCALE) as f64, y / m(GAP_SCALE) as f64, z / m(GAP_SCALE) as f64);
+    if gap < gap_cut {
+        return None;
+    }
     // Bigger colonies, with a noisy edge.
     let colony = perlin3(soil.seed ^ 0x3055, x / m(5.6) as f64, y / m(5.6) as f64, z / m(5.6) as f64)
         + 0.45 * perlin3(soil.seed ^ 0x3056, x / m(1.4) as f64, y / m(1.4) as f64, z / m(1.4) as f64);
     let score = appeal(host, site.toward, shade, wet) + colony * 0.55;
-    (score > 0.0).then_some(Patch { site: *site, host, strength: (score * 2.5).clamp(0.0, 1.0), score })
+    // Thinning toward the edge of a gap as toward the edge of a colony.
+    let strength = (score * 2.5).min((gap - gap_cut) * 6.0).clamp(0.0, 1.0);
+    (score > 0.0).then_some(Patch { site: *site, host, strength, score })
 }
 
 /// Plants one face. A colony's moss kind and shade come from a slow noise, so patches read
 /// as one plant.
-fn plant(p: &Patch, seed: u32, voxels: &ColumnVoxels, raster: &mut Raster) {
+fn plant(p: &Patch, seed: u32, raster: &mut Raster) {
     let site = &p.site;
     let (x, y, z) = (site.air.x, site.air.y, site.air.z);
     let at = |f: f64| (x as f64 * f, y as f64 * f, z as f64 * f);
@@ -265,51 +296,86 @@ fn plant(p: &Patch, seed: u32, voxels: &ColumnVoxels, raster: &mut Raster) {
     let mut moss = Moss::pick(p.host, roll);
     let h = hash3(seed ^ 0xe7ba, x, y * 7 + site.toward as i32, z);
     let mut rng = Rng::new(h);
-    // Only hanging moss clings to a ceiling.
-    if site.toward == Toward::Above {
-        moss = Moss::Shaggy;
+    let ceiling = site.toward == Toward::Above;
+    // A ceiling carries only the flat kinds.
+    if ceiling && matches!(moss, Moss::Cushion | Moss::Shaggy) {
+        moss = Moss::Carpet;
     }
     let (main, tip) = moss.colours(shade);
-    let mut plot = site.plot(raster);
-    match moss {
-        Moss::Carpet => carpet(&mut plot, &mut rng, p.strength, main, tip),
-        Moss::Cushion => cushion(&mut plot, &mut rng, p.strength, main, tip),
-        Moss::Shaggy => shaggy(site, voxels, &mut plot, &mut rng, p.strength, main, tip),
-        Moss::Lichen => lichen(&mut plot, &mut rng, p.strength, main, tip),
-    }
+    let face = match moss {
+        Moss::Carpet => carpet(&mut rng, p.strength, main, tip),
+        Moss::Cushion => cushion(&mut rng, p.strength, main, tip),
+        Moss::Shaggy => shaggy(site.toward, &mut rng, p.strength, main, tip),
+        Moss::Lichen => lichen(&mut rng, p.strength, main, tip),
+    };
+    lay(&mut site.plot(raster), &face, ceiling);
 }
 
-/// A flat mat, ragged where the colony thins.
-fn carpet(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) {
-    let solid = strength > 0.85;
-    let mut cells = [[false; 4]; 4];
-    for (v, row) in cells.iter_mut().enumerate() {
-        for (u, cell) in row.iter_mut().enumerate() {
-            let edge = u == 0 || v == 0 || u == 3 || v == 3;
-            let chance = if solid { 1.0 } else if edge { strength * 0.75 } else { (strength + 0.25).min(1.0) };
-            *cell = rng.unit() < chance;
-        }
-    }
-    for (v, row) in cells.iter().enumerate() {
-        for (u, cell) in row.iter().enumerate() {
-            if *cell {
-                plot.fill(u as i32, u as i32 + 1, v as i32, v as i32 + 1, 0, 1, main);
+/// One cell of a face of moss.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Cell {
+    Bare,
+    /// Lying flat: half a cell, 0.05 m, thick.
+    Skin(Voxel),
+    /// Standing a full cell, 0.1 m, off the face.
+    Raised(Voxel),
+}
+
+/// A face of moss, cell by cell, `[v][u]` in the face's own coordinates.
+type Face = [[Cell; 4]; 4];
+
+/// Most cells of a face raised to a full cell: enough to break up the plane, never a mound.
+const RAISED_PER_FACE: usize = 2;
+
+/// Puts a face of moss on its plot. On a ceiling nothing is raised: a cell standing down
+/// from it would read as a drip.
+fn lay(plot: &mut FacePlot, face: &Face, ceiling: bool) {
+    for (v, row) in face.iter().enumerate() {
+        for (u, &cell) in row.iter().enumerate() {
+            let (u, v) = (u as i32, v as i32);
+            match cell {
+                Cell::Bare => {}
+                Cell::Raised(voxel) if !ceiling => plot.fill(u, u + 1, v, v + 1, 0, 1, voxel),
+                Cell::Skin(voxel) | Cell::Raised(voxel) => plot.skin(u, u + 1, v, v + 1, voxel),
             }
         }
     }
-    // A few raised spots of a lighter green break up the flat plane.
-    for _ in 0..rng.int(0, 2) {
-        let (u, v) = (rng.int(0, 3), rng.int(0, 3));
-        if cells[v as usize][u as usize] {
-            plot.fill(u, u + 1, v, v + 1, 1, 2, tip);
+}
+
+/// Raises up to `n` of a face's skin cells, chosen at random, in `voxel`, keeping to
+/// [`RAISED_PER_FACE`] in all.
+fn raise(face: &mut Face, rng: &mut Rng, n: i32, voxel: Voxel) {
+    for _ in 0..n {
+        let raised = face.iter().flatten().filter(|c| matches!(c, Cell::Raised(_))).count();
+        let (u, v) = (rng.int(0, 3) as usize, rng.int(0, 3) as usize);
+        if raised < RAISED_PER_FACE && matches!(face[v][u], Cell::Skin(_)) {
+            face[v][u] = Cell::Raised(voxel);
         }
     }
 }
 
-/// Low, uneven mounds: a few overlapping humps of different sizes, each column of cells
-/// its own height, so neighbouring faces never line up into one even block.
-fn cushion(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) {
-    let mut height = [[0i32; 4]; 4];
+/// A flat mat, ragged where the colony thins, with a lighter spot or two raised.
+fn carpet(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
+    let solid = strength > 0.85;
+    let mut face = [[Cell::Bare; 4]; 4];
+    for (v, row) in face.iter_mut().enumerate() {
+        for (u, cell) in row.iter_mut().enumerate() {
+            let edge = u == 0 || v == 0 || u == 3 || v == 3;
+            let chance = if solid { 1.0 } else if edge { strength * 0.75 } else { (strength + 0.25).min(1.0) };
+            if rng.unit() < chance {
+                *cell = Cell::Skin(main);
+            }
+        }
+    }
+    let n = rng.int(0, 2) - 1;
+    raise(&mut face, rng, n, tip);
+    face
+}
+
+/// Uneven pads: a few overlapping humps, the skin raised a cell where a hump is high, and
+/// the highest crowns lighter, so neighbouring faces never line up into one even sheet.
+fn cushion(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
+    let mut height = [[0.0f32; 4]; 4];
     let mounds = 1 + (strength > 0.45) as i32 + (rng.unit() < 0.35) as i32;
     for _ in 0..mounds {
         let (cu, cv) = (rng.range(-0.5, 3.5), rng.range(-0.5, 3.5));
@@ -319,66 +385,77 @@ fn cushion(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: 
             for (u, h) in row.iter_mut().enumerate() {
                 let d2 = (u as f32 - cu).powi(2) + (v as f32 - cv).powi(2);
                 let here = peak * (1.0 - d2 / (r * r)) + rng.range(-0.35, 0.35);
-                *h = (*h).max(here.round() as i32);
+                *h = h.max(here);
             }
         }
     }
-    let top = height.iter().flatten().copied().max().unwrap_or(0);
+    let mut face = [[Cell::Bare; 4]; 4];
+    // The highest few points of the humps are raised, the rest lies flat.
+    let mut crowns: Vec<(f32, usize, usize)> = Vec::new();
     for (v, row) in height.iter().enumerate() {
         for (u, &h) in row.iter().enumerate() {
-            let h = h.min(3);
-            if h <= 0 {
-                continue;
-            }
-            let (u, v) = (u as i32, v as i32);
-            // The crowns of the taller humps catch the light.
-            if h >= 2 && h == top.min(3) && rng.unit() < 0.6 {
-                plot.fill(u, u + 1, v, v + 1, 0, h - 1, main);
-                plot.fill(u, u + 1, v, v + 1, h - 1, h, tip);
-            } else {
-                plot.fill(u, u + 1, v, v + 1, 0, h, main);
+            if h >= 0.5 {
+                face[v][u] = Cell::Skin(main);
+                if h >= 1.5 {
+                    crowns.push((h, u, v));
+                }
             }
         }
     }
+    crowns.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    for &(_, u, v) in crowns.iter().take(RAISED_PER_FACE) {
+        face[v][u] = Cell::Raised(if rng.unit() < 0.6 { tip } else { main });
+    }
+    face
 }
 
-/// Shaggy moss: a short mat with strands that fall down the face, or stand as tufts on a
-/// floor.
-fn shaggy(site: &Site, voxels: &ColumnVoxels, plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) {
-    plot.fill(0, 4, 2, 4, 0, 1, main);
-    if site.toward == Toward::Below {
-        // A low mat of feathery tufts.
+/// Shaggy moss: a band along the top of a wall with streaks running down from it, all
+/// flat to the face. On a floor, a mat with a tuft or two.
+fn shaggy(toward: Toward, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
+    let mut face = [[Cell::Bare; 4]; 4];
+    for row in &mut face[2..] {
+        row.fill(Cell::Skin(main));
+    }
+    if toward == Toward::Below {
         for _ in 0..rng.int(2, 4) {
-            let (u, v, h) = (rng.int(0, 3), rng.int(0, 3), rng.int(2, 3));
-            plot.fill(u, u + 1, v, v + 1, 0, h, if rng.unit() < 0.4 { tip } else { main });
+            let (u, v) = (rng.int(0, 3) as usize, rng.int(0, 3) as usize);
+            face[v][u] = Cell::Skin(if rng.unit() < 0.4 { tip } else { main });
         }
-        return;
+        let n = rng.int(1, 2);
+        raise(&mut face, rng, n, tip);
+        return face;
     }
     let strands = if strength > 0.5 { 3 } else { 2 };
     for _ in 0..strands {
-        let u = rng.int(0, 3);
+        let u = rng.int(0, 3) as usize;
         let len = rng.int(2, 4);
         let colour = if rng.unit() < 0.5 { main } else { tip };
-        if site.toward == Toward::Above {
-            // Strands hanging from a branch or overhang, stopping if there is no air below.
-            let below = voxels.voxel(site.air - IVec3::Y);
-            let reach = if below == voxel::AIR { len + 3 } else { len };
-            plot.fill(u, u + 1, 1, 2, 0, reach, colour);
-        } else {
-            let v = rng.int(0, 3);
-            plot.fill(u, u + 1, v - len, v + 1, 0, 2, colour);
+        let v = rng.int(0, 3);
+        for row in (v - len).max(0)..=v {
+            face[row as usize][u] = Cell::Skin(colour);
         }
     }
+    let n = (rng.unit() < 0.4) as i32;
+    raise(&mut face, rng, n, tip);
+    face
 }
 
-/// A thin crust in scattered flat blotches.
-fn lichen(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) {
+/// A thin crust in scattered flat blotches, nothing raised.
+fn lichen(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
+    let mut face = [[Cell::Bare; 4]; 4];
     let blotches = if strength > 0.5 { 3 } else { 2 };
     for i in 0..blotches {
         let (u, v) = (rng.int(0, 3), rng.int(0, 3));
         let (w, h) = (rng.int(1, 3), rng.int(1, 3));
-        plot.fill(u, u + w, v, v + h, 0, 1, if i == 0 { main } else { tip });
+        for row in &mut face[v as usize..(v + h).min(4) as usize] {
+            for cell in &mut row[u as usize..(u + w).min(4) as usize] {
+                if *cell == Cell::Bare {
+                    *cell = Cell::Skin(if i == 0 { main } else { tip });
+                }
+            }
+        }
     }
+    face
 }
 
 /// The share of columns of open, dry ground that end up with moss.
@@ -401,7 +478,7 @@ mod tests {
     use voxel::{CHUNK, PaddedChunk, mesh::CELLS};
 
     use super::*;
-    use crate::{World, continent::SimConfig, materials::build, world::GameWorld};
+    use crate::{World, continent::SimConfig, features::attach::Voxels, materials::build, world::GameWorld};
 
     fn column(biome: Biome) -> Column {
         Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX }
@@ -644,5 +721,123 @@ mod tests {
         }
         assert!(any > 100 && any < total, "any {any} of {total}");
         assert!(same as f32 > total as f32 * 0.8, "{same} of {total} neighbours agree");
+    }
+
+    /// Cells of moss in a box, and whether they are skin.
+    fn cells(b: &PlantBox) -> i32 {
+        (0..3).map(|i| b.hi[i] - b.lo[i]).product()
+    }
+
+    #[test]
+    fn moss_lies_flat_with_few_raised_cells() {
+        for (biome, seed) in [(Biome::OldGrowth, 5), (Biome::Rainforest, 7), (Biome::Taiga, 9)] {
+            let out = grown(biome, 64, seed);
+            let (mut skin, mut raised) = (0, 0);
+            for b in &out {
+                let dims = [b.hi[0] - b.lo[0], b.hi[1] - b.lo[1], b.hi[2] - b.lo[2]];
+                if b.thin != 0 {
+                    // A skin: one face pulled in, one cell deep along it, drawn as half.
+                    assert_eq!(b.thin.count_ones(), 1, "{b:?}");
+                    let axis = b.thin.trailing_zeros() as usize / 2;
+                    assert_eq!(dims[axis], 1, "{b:?} is a skin more than a cell deep");
+                    skin += cells(b);
+                } else {
+                    // Raised: never more than one cell off its face.
+                    assert_eq!(*dims.iter().min().unwrap(), 1, "{b:?} stands too tall");
+                    raised += cells(b);
+                }
+            }
+            assert!(skin > 0, "{biome:?} grew no skin");
+            // Mostly a 0.05 m skin, with a few full cells breaking it up.
+            let share = raised as f32 / (skin + raised) as f32;
+            assert!(share < 0.15, "{biome:?}: {raised} raised cells of {}", skin + raised);
+        }
+    }
+
+    #[test]
+    fn faces_are_skin_with_at_most_a_few_cells_raised() {
+        let mut raised_faces = 0;
+        for i in 0..4000u32 {
+            let mut rng = Rng::new(i);
+            let strength = (i % 11) as f32 / 10.0;
+            let toward = Toward::ALL[(i % 6) as usize];
+            let (main, tip) = (mat::MOSS_CARPET, mat::MOSS_CARPET_LIT);
+            let face = match i % 4 {
+                0 => carpet(&mut rng, strength, main, tip),
+                1 => cushion(&mut rng, strength, main, tip),
+                2 => shaggy(toward, &mut rng, strength, main, tip),
+                _ => lichen(&mut rng, strength, main, tip),
+            };
+            let raised = face.iter().flatten().filter(|c| matches!(c, Cell::Raised(_))).count();
+            assert!(raised <= RAISED_PER_FACE, "{face:?}");
+            if i % 4 == 3 {
+                assert_eq!(raised, 0, "lichen is only a crust");
+            }
+            raised_faces += (raised > 0) as u32;
+        }
+        assert!(raised_faces > 200, "some unevenness: {raised_faces}");
+    }
+
+    #[test]
+    fn ceilings_get_only_a_flat_skin_and_only_in_deep_shade() {
+        let cols = vec![column(Biome::Rainforest); voxel::PAD * voxel::PAD];
+        let at = |i: i32| IVec3::new(i * 3, 41 + i % 17, i * 7 % 900);
+        let judge_at = |i: i32, toward: Toward, host: Voxel, canopy: u32| {
+            let site = Site { air: at(i), toward, host, canopy };
+            let soil = Soil { columns: &cols, x0: site.air.x, z0: site.air.z, seed: 13, taken: &HashSet::new() };
+            judge(&site, &soil)
+        };
+        // A signboard or an eave out in the open: never.
+        for canopy in 1..UNDERSIDE_CANOPY {
+            for i in 0..3000 {
+                assert!(judge_at(i, Toward::Above, mat::PLANK, canopy).is_none(), "moss under a ceiling {canopy} thick");
+            }
+        }
+        // Deep under an overhang or a crown: some, but clearly less than on the walls.
+        for host in [mat::STONE, mat::BARK_OAK, mat::MOSSY_STONE] {
+            let (mut under, mut side) = (0, 0);
+            for i in 0..6000 {
+                under += judge_at(i, Toward::Above, host, 8).is_some() as u32;
+                side += judge_at(i, Toward::PosX, host, 8).is_some() as u32;
+            }
+            assert!(under > 0, "{host}: no moss under a dark overhang");
+            assert!((under as f32) < side as f32 * 0.5, "{host}: {under} under, {side} on the side");
+        }
+        // Whatever grows there is skin against the ceiling, pulled up toward it.
+        let mut boxes = Vec::new();
+        for i in 0..3000 {
+            let Some(p) = judge_at(i, Toward::Above, mat::STONE, 8) else { continue };
+            let mut raster = Raster::new();
+            plant(&p, 13, &mut raster);
+            raster.finish(&mut boxes, |_| (false, false));
+            for b in boxes.drain(..) {
+                assert_eq!(b.thin, 1 << 3, "{b:?} hangs");
+                assert_eq!(b.hi[1], (p.site.air.y + 1) * CELLS, "{b:?} is not against the ceiling");
+                assert_eq!(b.hi[1] - b.lo[1], 1, "{b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn colonies_are_a_quarter_to_a_third_sparser_than_before() {
+        // The same sites judged with and without the gaps, over the kinds of place moss grows.
+        let (mut with, mut without) = (0, 0);
+        for biome in [Biome::OldGrowth, Biome::Deciduous, Biome::Taiga, Biome::Woodland] {
+            let cols = vec![column(biome); voxel::PAD * voxel::PAD];
+            for i in 0..8000 {
+                let (host, toward) = match i % 4 {
+                    0 => (mat::GRASS_LUSH, Toward::Below),
+                    1 => (mat::BARK_OAK, Toward::ALL[(i / 4 % 4 + 2) as usize]),
+                    2 => (mat::STONE, Toward::ALL[(i / 4 % 4 + 2) as usize]),
+                    _ => (mat::MOSSY_STONE, Toward::ALL[(i / 4 % 4 + 2) as usize]),
+                };
+                let site = Site { air: IVec3::new(i * 5, 30 + i % 23, i * 11 % 1300), toward, host, canopy: (i % 7) as u32 };
+                let soil = Soil { columns: &cols, x0: site.air.x, z0: site.air.z, seed: 17, taken: &HashSet::new() };
+                with += judge_with(&site, &soil, GAP_CUT).is_some() as u32;
+                without += judge_with(&site, &soil, f32::NEG_INFINITY).is_some() as u32;
+            }
+        }
+        let kept = with as f32 / without as f32;
+        assert!((0.62..=0.80).contains(&kept), "kept {kept}: {with} of {without}");
     }
 }

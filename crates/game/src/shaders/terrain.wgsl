@@ -21,6 +21,26 @@ struct VOut {
     @location(7) @interpolate(flat) band: vec2<f32>,
 };
 
+// A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
+// voxels, quarters `q`, and per axis a bit that, with `q` set, moves the corner an eighth
+// of a voxel toward the nearer face of its voxel (q 1, 2, 3 -> 1/8, 5/8, 7/8), for skins
+// half a cell thick. shadow.wgsl has the same two functions.
+fn vertex_local(a: u32) -> vec3<f32> {
+    let q = vec3<u32>((a >> 23u) & 3u, (a >> 25u) & 3u, (a >> 27u) & 3u);
+    let bit = vec3<u32>((a >> 29u) & 1u, (a >> 30u) & 1u, (a >> 31u) & 1u);
+    let half = (bit == vec3<u32>(1u)) & (q != vec3<u32>(0u));
+    let nudge = select(vec3<f32>(-0.125), vec3<f32>(0.125), q >= vec3<u32>(2u));
+    return vec3<f32>(f32(a & 63u), f32((a >> 6u) & 63u), f32((a >> 12u) & 63u))
+        + vec3<f32>(q) * 0.25 + select(vec3<f32>(0.0), nudge, half);
+}
+
+// Per axis, 1 where a corner on a voxel boundary belongs to the voxel before it.
+fn vertex_corner(a: u32) -> vec3<i32> {
+    let q = vec3<u32>((a >> 23u) & 3u, (a >> 25u) & 3u, (a >> 27u) & 3u);
+    let bit = vec3<i32>(i32((a >> 29u) & 1u), i32((a >> 30u) & 1u), i32((a >> 31u) & 1u));
+    return select(vec3<i32>(0), bit, q == vec3<u32>(0u));
+}
+
 // True if this ring of terrain has given way to another at this distance. Each pixel is
 // drawn by exactly one ring.
 fn outside_band(rel: vec3<f32>, band: vec2<f32>) -> bool {
@@ -47,8 +67,7 @@ const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 @vertex
 fn vs(in: VIn) -> VOut {
     var out: VOut;
-    var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u))
-        + vec3<f32>(f32((in.a >> 23u) & 3u), f32((in.a >> 25u) & 3u), f32((in.a >> 27u) & 3u)) * 0.25;
+    var local = vertex_local(in.a);
     out.face = (in.a >> 18u) & 7u;
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
     out.flags = in.b >> 24u;
@@ -76,8 +95,7 @@ fn vs(in: VIn) -> VOut {
     // dropped here: every corner of the face names the same voxel, so the whole face goes.
     let kind = (in.b >> 29u) & 7u;
     if (kind != 0u && kind != PLANT_EVERGREEN && kind < 6u) {
-        let corner = vec3<i32>(i32((in.a >> 29u) & 1u), i32((in.a >> 30u) & 1u), i32((in.a >> 31u) & 1u));
-        var vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - corner;
+        var vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
         if (kind >= PLANT_GRASS) {
             vox.y = 0;
         }

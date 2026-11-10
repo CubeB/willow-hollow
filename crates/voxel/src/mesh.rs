@@ -8,8 +8,13 @@ use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 ///
 /// `a`: x (6 bits) | y (6) << 6 | z (6) << 12 | face (3) << 18 | ao (2) << 21
 ///      | quarter-voxel fractions of x, y, z (2 bits each) << 23, 25, 27
-///      | which side of its voxel the corner is on, per axis, << 29, 30, 31 (set for
-///        single leaf voxels and plant boxes, so the voxel is `floor(position) - bits`)
+///      | one more bit per axis, << 29, 30, 31, read with that axis's quarter `q`:
+///        - `q == 0`: which side of its voxel the corner is on (set for single leaf
+///          voxels and plant boxes, so the voxel is `floor(position) - bit`);
+///        - `q != 0`: a half step, for plant skins half a cell thick. The corner moves an
+///          eighth of a voxel toward the nearer face of its voxel, so `q` 1, 2, 3 put it
+///          at 1/8, 5/8 and 7/8 of the voxel. That combination was unused before, so no
+///          bits were added; see [`half_quarter`].
 /// `b`: r | g << 8 | b << 16 | flags << 24 (flags include a 3-bit plant kind << 29)
 ///
 /// Positions are chunk-local, 0..=32. Face index: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
@@ -45,6 +50,24 @@ pub struct PlantBox {
     /// Whether the bottom and top of the box move in the wind.
     pub sway_lo: bool,
     pub sway_hi: bool,
+    /// Faces drawn half a cell in from where `lo` and `hi` put them, one bit per face
+    /// index (bit 2 is the top, +Y): a box one cell thick with one of these is a skin
+    /// 0.05 m thick, like moss flat on a stone. Only half steps that land at 1/8, 5/8 or
+    /// 7/8 of a voxel can be drawn (see [`Vertex`]); a skin flush against the voxel's
+    /// near or far face always does. A box with bit 3 (its underside) is also drawn from
+    /// below, which other plants are not.
+    pub thin: u8,
+}
+
+/// The quarter and half-step bit that put a vertex `r` eighths of a voxel into its voxel,
+/// for odd `r`, or `None` for 3/8, which the format cannot hold.
+pub fn half_quarter(r: u32) -> Option<u32> {
+    match r {
+        1 => Some(1),
+        5 => Some(2),
+        7 => Some(3),
+        _ => None,
+    }
 }
 
 impl ChunkMesh {
@@ -263,14 +286,15 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a PlantBox> + Clone, origin: [i32; 3], mats: &Materials) {
     for face in 0..6usize {
         mesh.faces[6 + face] = (mesh.opaque.len() / 4) as u32;
-        // Undersides are never seen from where a person stands.
-        if face == 3 {
-            continue;
-        }
         let n_axis = face / 2;
         let positive = face.is_multiple_of(2);
         let (u_axis, v_axis) = ((n_axis + 1) % 3, (n_axis + 2) % 3);
         for b in boxes.clone() {
+            // Undersides are never seen from where a person stands, except a skin on a
+            // ceiling, which is nothing but its underside.
+            if face == 3 && b.thin & 1 << 3 == 0 {
+                continue;
+            }
             let m = mats.get(b.voxel);
             let n = if positive { b.hi[n_axis] } else { b.lo[n_axis] };
             let corners = [
@@ -287,10 +311,25 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                 let at_top = cell[1] == b.hi[1];
                 let mut p = [0u32; 3];
                 let mut frac = [0u32; 3];
+                // Half steps, per axis: a skin's face pulled half a cell in.
+                let mut half = [false; 3];
                 for axis in 0..3 {
-                    let local = cell[axis] - origin[axis];
-                    p[axis] = local.div_euclid(CELLS) as u32;
-                    frac[axis] = local.rem_euclid(CELLS) as u32;
+                    let inset = (cell[axis] == b.hi[axis] && b.thin & 1 << (2 * axis) != 0) as i32
+                        - (cell[axis] == b.lo[axis] && b.thin & 1 << (2 * axis + 1) != 0) as i32;
+                    // In eighths of a voxel: half cells.
+                    let local = 2 * (cell[axis] - origin[axis]) - inset;
+                    let r = local.rem_euclid(2 * CELLS) as u32;
+                    p[axis] = local.div_euclid(2 * CELLS) as u32;
+                    if r % 2 == 0 {
+                        frac[axis] = r / 2;
+                    } else if let Some(q) = half_quarter(r) {
+                        frac[axis] = q;
+                        half[axis] = true;
+                    } else {
+                        // 3/8 has no encoding: draw the face where the box puts it.
+                        debug_assert!(false, "{b:?} has a half step at 3/8 of a voxel");
+                        frac[axis] = ((r as i32 + inset) / 2) as u32;
+                    }
                 }
                 // Darker where a rooted stem meets the ground.
                 let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
@@ -299,10 +338,10 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                     | if sways { flags::FOLIAGE } else { 0 }
                     | m.plant << flags::PLANT_SHIFT;
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
-                // voxel before it.
+                // voxel before it. With a quarter set, the same bit is a half step instead.
                 let mut corner = 0u32;
                 for axis in 0..3 {
-                    corner |= ((frac[axis] == 0 && cell[axis] == b.hi[axis]) as u32) << axis;
+                    corner |= (((frac[axis] == 0 && cell[axis] == b.hi[axis]) || half[axis]) as u32) << axis;
                 }
                 Vertex {
                     a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27 | corner << 29,
@@ -446,6 +485,7 @@ mod tests {
             voxel: stone,
             sway_lo: false,
             sway_hi: true,
+            thin: 0,
         };
         add_plants(&mut mesh, [plant].iter(), chunk, &m);
         assert_eq!(mesh.opaque.len(), (6 + 5) * 4, "bottom face is skipped");
@@ -460,6 +500,96 @@ mod tests {
             let top = fine(6, 25) == 11;
             assert_eq!((v.b >> 24) as u8 & flags::FOLIAGE != 0, top, "only the free end sways");
         }
+    }
+
+    /// A vertex's position in eighths of a voxel, decoded the way the shaders do it.
+    fn eighths(v: &Vertex) -> [i32; 3] {
+        let p = pos(v);
+        std::array::from_fn(|axis| {
+            let q = (v.a >> (23 + 2 * axis)) & 3;
+            let bit = (v.a >> (29 + axis)) & 1;
+            let nudge = match (bit, q) {
+                (1, 1) => -1,
+                (1, 2 | 3) => 1,
+                _ => 0,
+            };
+            (p[axis] * 8 + q * 2) as i32 + nudge
+        })
+    }
+
+    /// The voxel a vertex says it belongs to, as the shaders work it out.
+    fn named_voxel(v: &Vertex) -> [i32; 3] {
+        let e = eighths(v);
+        std::array::from_fn(|axis| {
+            let q = (v.a >> (23 + 2 * axis)) & 3;
+            let bit = ((v.a >> (29 + axis)) & 1) as i32;
+            e[axis].div_euclid(8) - if q == 0 { bit } else { 0 }
+        })
+    }
+
+    #[test]
+    fn skins_are_half_a_cell_thick_on_every_side() {
+        let (m, stone, _) = mats();
+        let chunk = [32 * CELLS, 0, 0];
+        // A skin on each of the six faces of the voxel at (3, 4, 5) of the chunk: the boxes
+        // fill the air voxels around it, against it.
+        let v = [3 * CELLS, 4 * CELLS, 5 * CELLS];
+        for face in 0..6usize {
+            let axis = face / 2;
+            let positive = face.is_multiple_of(2);
+            let (mut lo, mut hi) = ([v[0] + 1, v[1] + 1, v[2] + 1], [v[0] + 3, v[1] + 3, v[2] + 3]);
+            // In the neighbouring voxel, one cell thick against the shared face; the skin's
+            // outer face, away from the stone, is the one pulled in.
+            if positive {
+                lo[axis] = v[axis] + CELLS;
+                hi[axis] = lo[axis] + 1;
+            } else {
+                hi[axis] = v[axis];
+                lo[axis] = hi[axis] - 1;
+            }
+            let outer = if positive { 2 * axis } else { 2 * axis + 1 };
+            let b = PlantBox {
+                lo: [lo[0] + chunk[0], lo[1], lo[2]],
+                hi: [hi[0] + chunk[0], hi[1], hi[2]],
+                voxel: stone,
+                sway_lo: false,
+                sway_hi: false,
+                thin: 1 << outer,
+            };
+            let mut mesh = ChunkMesh::default();
+            add_plants(&mut mesh, [b].iter(), chunk, &m);
+            // A ceiling skin is seen from below, so it keeps its underside.
+            let quads = mesh.opaque.len() / 4;
+            assert_eq!(quads, if face == 3 { 6 } else { 5 }, "face {face}");
+            let host = if positive { v[axis] + CELLS } else { v[axis] };
+            let mut depths = std::collections::BTreeSet::new();
+            for vert in &mesh.opaque {
+                let e = eighths(vert);
+                depths.insert((e[axis] - 2 * host).abs());
+                // Across the face, corners stay on whole cells.
+                for other in (0..3).filter(|&o| o != axis) {
+                    assert_eq!(e[other] % 2, 0, "face {face}: {e:?}");
+                }
+                // Every corner names the air voxel the skin is in.
+                let mut air = [3, 4, 5];
+                air[axis] += if positive { 1 } else { -1 };
+                assert_eq!(named_voxel(vert), air, "face {face}: {e:?}");
+            }
+            assert_eq!(depths.into_iter().collect::<Vec<_>>(), vec![0, 1], "face {face}: half a cell from the stone");
+        }
+    }
+
+    #[test]
+    fn only_ceiling_skins_are_drawn_from_below() {
+        let (m, stone, _) = mats();
+        let skin = |thin| PlantBox { lo: [0, 7, 0], hi: [4, 8, 4], voxel: stone, sway_lo: false, sway_hi: false, thin };
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, [skin(1 << 3)].iter(), [0, 0, 0], &m);
+        assert_eq!(mesh.opaque.len() / 4, 6);
+        assert_eq!(mesh.faces[9] + 1, mesh.faces[10], "one downward quad");
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, [skin(1 << 2)].iter(), [0, 0, 0], &m);
+        assert_eq!(mesh.opaque.len() / 4, 5);
     }
 
     #[test]
