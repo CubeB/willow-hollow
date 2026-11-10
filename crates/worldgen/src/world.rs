@@ -75,6 +75,7 @@ impl GameWorld {
         slot.get_or_init(|| {
             let mut c = continent::generate(cell_desc(self.seed, mx, mz), self.config);
             c.trails = trails::build(&c, self.seed);
+            c.trails.names = crate::names::survey(&c, self.seed);
             Arc::new(c)
         })
         .clone()

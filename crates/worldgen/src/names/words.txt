@@ -1,0 +1,247 @@
+# Words that place names are made from. Data, not code: lists can be extended, and new
+# tongues added, without touching the logic in names/mod.rs.
+#
+# Each line is `key = values`. Values are separated by `|` where a line has any, else by
+# spaces. Repeating a value makes it likelier. Everything after `#` is a comment.
+#
+# Patterns fill these slots:
+#   {root}   a word of the region's tongue, such as Haldvik    {low}  the same, lower case
+#   {stem}   just the first part of it, such as Hald
+#   {word}   a word for the surroundings, from [feature]: Bog, Goldtree, Willow
+#   {role}   what the place does, from its kind: watch, rest, hold
+#   {type}   what the place is, from its kind: Outlook, Ruin, Shrine
+#   {adj}    a word of age or character, from its kind: Old, Lone, Quiet
+#   {near}   the name of a natural feature it stands by: Greymere, Haldvik
+#   {owner}  someone who lives there, or a name from the tongue for places people keep
+# A slot written straight against letters or another slot ("{word}{role}", "{word}mere")
+# makes a compound, and only short single words are put into those.
+
+# --- Tongues ---------------------------------------------------------------------------
+# Each region speaks one, chosen by its climate. A tongue's own patterns for a kind are
+# used alongside the English ones in [kind ...].
+
+[tongue north]
+first = Skar Hald Ulv Bjor Frey Ast Grim Tor Kvi Eid Ran Hvit Sval Ing Rok Ves Har Lod Sig Brei Thol Alv Vard Ost
+second = vik heim stad dal by nes holm rud berg mark gard lund ey vang fell sund
+given = Ragna Ulf Sigrid Eirik Hild Torvald Astrid Bjorn Ingrid Halvar Solveig Leif
+region = {stem}mark | {stem}land | {root}
+lake = {stem}vatn | Lake {root} | {stem}sjo
+peak = {stem}tind | {root} Fell | Mount {root}
+river = The {stem}elv | The {root} River
+island = {stem}holm | {stem}ey
+bay = {stem}fjord | {root} Bay
+inlet = {stem}fjord | {root} Sound
+falls = {stem}foss | {root} Falls
+range = The {root} Fells | The {root} Mountains
+
+[tongue vale]
+first = Llan Pen Caer Aber Bryn Glyn Tre Dol Maen Rhos Cor Hen Mor Tal Nant Gwen Car Lys
+second = wen dur ith ell an oc eth yn on aeth og is
+given = Bronwen Cadoc Elin Gwyn Rhiannon Owain Mabon Ceri Dilys Teilo Nia Emrys
+region = {root} | The Vale of {root}
+lake = Llyn {root} | Lake {root}
+peak = Moel {root} | {root} Peak
+river = Afon {root} | The {root}
+island = Ynys {root} | {root} Isle
+bay = {root} Bay | Porth {root}
+falls = {root} Falls
+range = The {root} Hills | The {root} Mountains
+
+[tongue old]
+first = Ash Brad Ald Wen Hal Stan Thorn Wil Lang Mar Ed Brom Hart Elm Bur Wych Hen Ren
+second = ford ley ton bury wick ham stead worth field combe dale by thorpe well hurst
+given = Marren Edwin Alys Hal Wenna Osric Bess Tamsin Aldric Maud Godric Elsie
+region = {stem}shire | {root} | The {root} Wold
+lake = {root} Mere | Lake {root}
+peak = {root} Pike | {root} Beacon | Mount {root}
+river = The {root} | River {root}
+island = {root} Isle | {root} Holm
+bay = {root} Bay
+falls = {root} Force | {root} Falls
+range = The {root} Hills | The {root} Edge
+
+[tongue sun]
+first = Sol Val Mir Cal Ser Ar Lun Cor Tal Ven Ros Alb Lor Mon Pal Sar
+second = ara ena ossa ino era ida ano eira ona ella ia ante ero oso
+given = Lucia Mateo Ines Tomas Clara Aurelio Rosa Teo Paola Silvio Marta Elio
+region = {root} | The {root} Coast
+lake = Lago {root} | Lake {root}
+peak = Monte {root} | Mount {root}
+river = Rio {root} | The {root}
+island = Isla {root} | {root} Isle
+bay = Cala {root} | {root} Bay
+falls = Salto {root} | {root} Falls
+range = Sierra {root} | The {root} Mountains
+
+[tongue isle]
+first = Ka Moa Lei Ho Mau Ki Wai Ana Ta Ma Ri Ola Nai Ke Pua Tua
+second = lami nolu kea hana mai rau tolo vani pele luma waro niu
+given = Kai Moana Leilo Tavi Nalu Ana Hemi Mele Iolo Ravi Tama Loa
+region = {root} | The {root} Isles
+lake = Lake {root} | Wai{low}
+peak = Mount {root} | {root} Peak
+river = The {root} | {root} River
+island = {root} | Motu {root} | {root} Isle
+bay = {root} Lagoon | {root} Bay
+falls = {root} Falls
+range = The {root} Heights | The {root} Mountains
+
+[tongue dune]
+first = Zar Kef Sab Tam Ir Dah Mer Kal Nef Qar Sal Tir Hab Sur Mez Yar
+second = esh ar im oun ara ir ab un ez an ul ira
+given = Zara Kemal Nadir Samira Tarek Leyla Idris Selim Yasmin Farid Nour Hadi
+region = {root} | The {root} Wastes
+lake = {root} Oasis | Lake {root}
+peak = Mount {root} | {root} Peak
+river = Wadi {root} | The {root}
+island = {root} Isle
+bay = {root} Bay
+falls = {root} Falls
+range = The {root} Heights | The {root} Mountains
+
+# --- Words for the surroundings ---------------------------------------------------------
+# Keyed by what the place is near or stands in: its forest, ground, water and landform.
+
+[feature]
+taiga = Pine Fir Spruce Dark Needle Owl
+snowypine = Snow Frost Pine White Rime
+birch = Birch Silver White Pale
+maple = Goldtree | Redleaf | Amber | Gold | Red | Russet
+cherry = Blossom Cherry Petal Rose
+oak = Oak Acorn Green Holly Hazel
+oldgrowth = Elder Moss Giant Deep Redwood Fern
+woodland = Hazel Thorn Oak Linden Dapple
+rainforest = Fern Vine Orchid Green Rain Parrot
+mangrove = Root Heron Mud Tangle Salt
+marsh = Reed Willow Sedge Heron Rush
+bog = Bog Fen Mire Peat Moss
+heath = Heather Ling Gorse Bracken Lark
+grassland = Meadow Lark Clover Green Hay Fair
+steppe = Wind Feather Dry Tall Kestrel
+savanna = Thorn Tawny Acacia Dust Honey
+desert = Sand Sun Dust Dune Bone Glass
+dunesea = Dune Sand Drift Sun Mirage
+redrock = Red Rust Ochre Ember Copper
+volcanic = Ash Cinder Black Ember Smoke
+tundra = Frost Lichen Grey Cold Moss
+alpine = Snow White Ice Frost Cloud Eagle
+alpinemeadow = Bell Gentian Cloud High Sky
+lake = Mere Still Clear Mirror Deep Silver Grey
+river = Brook Ford Rush Swift Silver Alder
+falls = Grey White Silver Thunder Bright Misty Spray
+sea = Gull Tide Salt Shell Wave Gale Seal
+shore = Shell Sand Gull Drift Tide
+peak = High Crag Cloud Eagle Storm Wind Raven
+hill = Wind Lark Brow Fair Round
+valley = Low Dell Hollow Deep Shade Glen
+range = Grey Storm Iron White Blue Long Cloud Thunder High Old Red
+fault = Long Broken Great High Grey Iron Sheer
+rift = Deep Black Long Dark Hollow Split Narrow
+
+# --- Kinds of place ---------------------------------------------------------------------
+
+[kind region]
+type = Lands | Country | Marches
+pattern = {root} | {root} | The {root} {type} | The {word} {type}
+
+[kind range]
+type = Mountains | Mountains | Hills | Fells | Heights | Peaks
+pattern = The {root} {type} | The {word} {type} | The {root} {type}
+
+[kind fault]
+type = Edge | Scarp | Wall | Step
+pattern = The {root} {type} | The {word} {type} | The {word} {type}
+
+[kind rift]
+type = Rift | Gorge | Gap | Cleft
+pattern = The {root} {type} | The {word} {type} | {root} {type}
+
+[kind island]
+type = Isle | Island | Isle
+pattern = {root} {type} | The Isle of {root} | {word} {type} | {word} Isle
+
+[kind lake]
+type = Lake | Mere | Water | Tarn | Pool
+pattern = Lake {root} | {word}mere | {word} Water | {root} Water | The {word} {type} | {word} Lake
+
+[kind river]
+type = River | Water
+pattern = The {root} | The {root} River | {word}water | The {word} River | River {root}
+
+[kind bay]
+type = Bay | Cove | Sound | Haven
+pattern = {root} {type} | {word} {type} | The {word} {type}
+
+[kind inlet]
+type = Reach | Inlet | Sound | Arm
+pattern = The Long {type} | The {word} {type} | {root} {type} | The {root} Reach
+
+[kind peak]
+type = Peak | Crag | Pike | Top | Horn
+adj = Lone | Old | Grey | Bald | High | Sleeping
+pattern = Mount {root} | {root} {type} | The {word} {type} | {word} {type} | The {adj} {type}
+
+[kind falls]
+type = Falls | Falls | Force | Cascade | Leap
+pattern = {word}water Falls | {near} Falls | {root} Falls | The {word} {type} | {word} {type}
+
+[kind shrine]
+type = Shrine | Shrine | Well | Sanctum
+role = rest bless well hallow
+adj = Old | Quiet | Hidden | Mossy | Little
+pattern = {word}{role} {type} | The {adj} {word} {type} | {root} {type} | {near} {type} | {word} {type} | Shrine of {root}
+
+[kind lookout]
+type = Outlook | Lookout | Tower | Watch
+role = watch view sight ward
+adj = Old | High | Lone | Windy
+pattern = {word}{role} {type} | {word} {type} | {near} {type} | {root} {type} | The {adj} {word} {type}
+
+[kind camp]
+type = Camp | Camp | Rest | Hearth
+role = rest fire
+adj = Old | Quiet | Last | Long
+pattern = {word} {type} | {owner}'s {type} | {near} {type} | {root} {type} | The {adj} {word} {type}
+
+[kind ruins]
+type = Ruin | Ruins | Keep | Walls
+role = hold keep wall watch gate
+adj = Old | Broken | Fallen | Forgotten | Grey
+pattern = {word}{role} {type} | The {adj} {word} {type} | {root} {type} | {near} {type} | The Ruins of {root}
+
+[kind stones]
+type = Stones | Ring | Circle | Standing Stones
+role = stone ring
+adj = Old | Grey | Silent | Leaning
+pattern = The {word} {type} | {root} {type} | {near} {type} | {word}{role} {type} | The {adj} {word} {type}
+
+[kind cairn]
+type = Cairn | Cairn | Stone
+role = mark
+adj = Lone | High | Old
+pattern = {word} {type} | {root} {type} | {near} {type} | {word}{role} Cairn | The {adj} {word} {type}
+
+[kind arch]
+type = Arch | Arch | Gate | Bridge
+role = gate bow
+pattern = The {word} {type} | {root} {type} | {word}{role} | {near} {type}
+
+[kind hut]
+type = Hut | Cabin | Lodge | Cot
+role = stead cot hearth
+pattern = {owner}'s {type} | {word}{role} | {word} {type} | {near} {type} | {owner}'s {type}
+
+[kind landing]
+type = Landing | Quay | Haven | Jetty
+role = haven
+pattern = {near} {type} | {word} {type} | {root} {type} | {owner}'s {type} | {word}{role}
+
+# Settlements, once there are any: a hamlet about as much a draw as the busiest
+# landmark twice over, a town much more.
+[kind hamlet]
+role = ford ton by stead wick ley
+pattern = {root} | {word}{role} | {stem}{role} | {near}{role}
+
+[kind town]
+role = ford ton bury bridge port
+pattern = {root} | {root} | {word}{role} | {stem}{role}
