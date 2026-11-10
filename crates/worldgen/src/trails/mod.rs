@@ -143,6 +143,9 @@ pub struct Network {
     /// Lanterns chosen but not yet built, waiting until every trail is down so none
     /// is built on a trail laid after it: (its index in `lanterns`, voxels, fine parts).
     held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
+    /// Props laid about sites, held in the same way: voxels, fine parts, and the world
+    /// columns they stand in.
+    held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
 }

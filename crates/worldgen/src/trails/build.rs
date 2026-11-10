@@ -903,6 +903,18 @@ fn place_sites(c: &Continent, seed: u32, comp: &[u32], net: &mut Network) -> Vec
     cells
 }
 
+/// Keeps a site's props back until the trails are down, so none is left on one.
+fn hold_props(net: &mut Network, props: Vec<crate::features::props::Placed>, origin: IVec3, turns: u32) {
+    for prop in props {
+        let foot = prop.footprint().into_iter().map(|c| {
+            let r = rotate(IVec3::new(c.x, 0, c.y), turns);
+            IVec2::new(origin.x + r.x, origin.z + r.z)
+        });
+        let foot = foot.collect();
+        net.held_props.push((absolute(prop.voxels, origin, turns), parts::place_fine(&prop.fine, origin, turns), foot));
+    }
+}
+
 fn place_land(c: &Continent, seed: u32, kind: Landmark, cell: usize, site_seed: u32, net: &mut Network) -> Option<Site> {
     let (x, z, ground) = settle(c, seed, kind, cell)?;
     let biome = Sampler::new(c, seed, x, z, 1).column(x, z).biome;
@@ -916,8 +928,9 @@ fn place_land(c: &Continent, seed: u32, kind: Landmark, cell: usize, site_seed: 
     });
     let origin = IVec3::new(x, y as i32 + 1, z);
     let turns = site_seed & 3;
-    let (voxels, fine) = landmarks::build_parts(kind, &palette, site_seed, 0);
+    let (voxels, fine, props) = landmarks::build_site(kind, &palette, site_seed, 0);
     net.add_stamp_with(absolute(voxels, origin, turns), parts::place_fine(&fine, origin, turns));
+    hold_props(net, props, origin, turns);
     Some(Site {
         kind,
         x,
@@ -939,8 +952,9 @@ fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mu
         y,
     });
     let origin = IVec3::new(shore.x, shore.level + 1, shore.z);
-    let (pier, fine) = landmarks::build_parts(Landmark::Landing, &palette, site_seed, shore.length / BLOCK);
+    let (pier, fine, props) = landmarks::build_site(Landmark::Landing, &palette, site_seed, shore.length / BLOCK);
     net.add_stamp_with(absolute(pier, origin, shore.turns), parts::place_fine(&fine, origin, shore.turns));
+    hold_props(net, props, origin, shore.turns);
     let along = rotate(IVec3::new(shore.length - 3 * BLOCK, 0, 4 * BLOCK), shore.turns);
     let heading = shore.turns as f32 * std::f32::consts::FRAC_PI_2;
     Some(Site {
@@ -1386,6 +1400,20 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         k += 1;
         keep[k - 1]
     });
+
+    // Site props, except any standing where a trail runs.
+    for (voxels, fine, foot) in std::mem::take(&mut net.held_props) {
+        let Some(first) = foot.first() else { continue };
+        let first = first.as_vec2() + 0.5;
+        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(first) < m(12.0).powi(2)).collect();
+        let on_way = foot.iter().any(|c| {
+            let c = c.as_vec2() + 0.5;
+            near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
+        });
+        if !on_way {
+            net.add_stamp_with(voxels, fine);
+        }
+    }
 
     // Signposts where trails meet.
     let mut junction_cells = std::collections::HashSet::new();

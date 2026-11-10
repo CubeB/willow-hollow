@@ -14,6 +14,7 @@ pub mod moss;
 pub mod parts;
 pub mod pebbles;
 pub mod plants;
+pub mod props;
 pub mod shape;
 pub mod tree_detail;
 pub mod trees;

@@ -11,7 +11,7 @@ use glam::IVec3;
 use voxel::{AIR, Voxel};
 
 use super::{
-    parts,
+    parts, props,
     shape::{Rng, Shape},
 };
 use crate::{biome::Biome, materials as mat, scale::m};
@@ -264,6 +264,8 @@ fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
                 cuboid(s, v(x, h + 1 + up, -1), v(x, h + 2 + up, 0), |_| p.wood);
             }
             cuboid(s, v(-7, h + 3, -1), v(7, h + 3, 0), |_| p.stone_dark);
+            // The way through the gate to the altar.
+            s.keep_clear(v(-3, 0, -10), v(3, 8, 2));
             // The altar beyond it.
             cuboid(s, v(-4, 1, 3), v(4, 1, 6), |_| p.stone);
             cuboid(s, v(-2, 2, 4), v(2, 3, 5), |_| p.stone_dark);
@@ -355,6 +357,15 @@ fn lookout(s: &mut Shape, rng: &mut Rng, p: &Palette) {
         cuboid(s, v(9, 0, z), v(11, 6, z), |_| p.wood);
     }
     cuboid(s, v(12, 0, -2), v(13, 0, 2), |_| p.stone);
+    // Nothing is left inside the tower, before its door, or where the stair comes out on
+    // the top floor.
+    s.keep_clear(v(-9, 0, -9), v(9, height, 9));
+    s.keep_clear(v(7, 0, -4), v(18, 7, 4));
+    for step in height - 3..height + 4 {
+        for (x, z) in tread_cells(step) {
+            s.keep_clear(v(x - 1, height + 1, z - 1), v(x + 1, height + 4, z + 1));
+        }
+    }
     // Treads, one voxel (0.4 m) above the last: climbable by walking.
     for step in 0..height {
         for (x, z) in tread_cells(step) {
@@ -463,11 +474,9 @@ fn camp(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     }
     // A bedroll inside.
     cuboid(s, v(tx - 1, 0, tz + 3), v(tx + 1, 0, tz + 6), |_| mat::CLOTH_BLUE);
+    // The tent's mouth and the floor inside it.
+    s.keep_clear(v(tx - 5, 0, tz - 5), v(tx + 5, 6, tz + len - 2));
     lamp_post(s, rng, p, 10, 10, 9);
-    if rng.unit() < 0.6 {
-        // A stack of firewood.
-        cuboid(s, v(7, 0, 5), v(10, 2, 6), |_| p.wood);
-    }
 }
 
 fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
@@ -499,6 +508,7 @@ fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
                 wall(s, rng, w - 1, z, 1, 0);
             }
             cuboid(s, v(-2, 0, -d), v(2, 6, -d + 1), |_| AIR);
+            s.keep_clear(v(-3, 0, -d - 5), v(3, 8, -d + 5));
             cuboid(s, v(-3, 7, -d), v(3, 7, -d + 1), |_| p.stone_dark);
             // Fallen stones inside and out.
             scatter(s, rng, p, 24, w);
@@ -695,6 +705,7 @@ fn hut(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     cuboid(s, v(2, 1, d), v(2, 6, d), |_| p.wood);
     cuboid(s, v(-2, 6, d), v(2, 6, d), |_| p.wood);
     cuboid(s, v(-2, 0, d + 1), v(2, 0, d + 2), |_| p.stone);
+    s.keep_clear(v(-3, 0, d - 4), v(3, 7, d + 5));
     for x in [-w, w] {
         cuboid(s, v(x, 3, -1), v(x, 5, 1), |_| p.wood);
         s.set(v(x, 4, 0), mat::LANTERN);
@@ -759,11 +770,10 @@ fn landing(s: &mut Shape, rng: &mut Rng, p: &Palette, length: i32) {
     cuboid(s, v(-3, -3, -3), v(-1, -1, 3), |_| p.stone_dark);
     cuboid(s, v(-2, 0, -3), v(-1, 0, 3), |_| p.stone);
     lamp_post(s, rng, p, length - 3, 2, 8);
-    if rng.unit() < 0.6 {
-        // A crate and a coil of rope on the boards.
-        cuboid(s, v(length - 8, 1, -2), v(length - 6, 2, -1), |_| p.plank);
-        cuboid(s, v(length - 8, 1, 1), v(length - 7, 1, 2), |_| mat::THATCH);
-    }
+    // The boards on the -Z side of the middle, the steps up and the end where boats tie
+    // up stay open; props go along the +Z side.
+    s.keep_clear(v(-3, 0, -3), v(length + 1, 6, 0));
+    s.keep_clear(v(length - 5, 0, -4), v(length + 1, 6, 4));
 }
 
 /// How long a site has stood and how well it is looked after, both 0 to 1.
@@ -866,9 +876,23 @@ pub fn build(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Vec<(
     build_parts(kind, palette, seed, length).0
 }
 
-/// [`build`], with the fine parts (0.1 m boxes of its lamp posts, in model cells).
+/// [`build`], with the fine parts (0.1 m boxes of its lamp posts and props, in model
+/// cells). Props are merged in, every one of them: [`build_site`] keeps them apart, so
+/// those on a trail can be left out.
 pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
+    let (mut voxels, mut fine, props) = build_site(kind, palette, seed, length);
+    for prop in props {
+        voxels.extend(prop.voxels);
+        fine.extend(prop.fine);
+    }
+    (voxels, fine)
+}
+
+/// A landmark's voxels and fine parts, and apart from them the props laid about it,
+/// each in its intact or decayed form by the site's [`History`].
+pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
     let palette = &palette.varied(seed);
+    let history = History::of(kind, seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();
     match kind {
@@ -893,9 +917,10 @@ pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) ->
     if chip > 0.0 {
         parts::weather_stone(&mut s, &mut rng, palette, chip);
     }
-    decay(&mut s, kind, palette, seed, History::of(kind, seed));
+    decay(&mut s, kind, palette, seed, history);
+    let props = props::dress(kind, palette, seed, history, &s, length * crate::scale::BLOCK);
     let fine = s.take_fine();
-    (s.into_voxels(), fine)
+    (s.into_voxels(), fine, props)
 }
 
 /// A lamp on a post beside a trail, in the style `hash` picks.
