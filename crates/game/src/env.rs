@@ -2,6 +2,7 @@ use glam::Vec3;
 use worldgen::scale::VOXELS_PER_METRE;
 
 /// Lighting and sky state for a moment in the day. All colours are linear.
+#[derive(Clone)]
 pub struct Environment {
     /// Hours, 0..24.
     pub time: f32,

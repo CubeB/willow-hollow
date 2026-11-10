@@ -11,6 +11,7 @@ mod profile;
 mod render;
 mod season;
 mod settings;
+mod weather;
 mod terrain;
 mod vehicles;
 
@@ -67,6 +68,8 @@ struct Options {
     time: Option<f32>,
     /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
     date: Option<f32>,
+    /// Weather to hold for this run (clear, overcast, rain, snow, storm, fog).
+    weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
     fresh: bool,
     /// Render one frame to this PNG without opening a window, then exit.
@@ -89,6 +92,7 @@ impl Default for Options {
             look: (35.0, -18.0),
             time: None,
             date: None,
+            weather: None,
             fresh: false,
             screenshot: None,
             audio: true,
@@ -111,6 +115,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
   --date F              time of year, 0-1 from the spring equinox
+  --weather W           hold the weather: clear, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
@@ -160,6 +165,10 @@ fn parse_args() -> Result<Options> {
             }
             "--time" => o.time = Some(value()?.parse()?),
             "--date" => o.date = Some(value()?.parse::<f32>()?.rem_euclid(1.0)),
+            "--weather" => {
+                let name = value()?;
+                o.weather = Some(weather::Forced::named(&name).ok_or_else(|| anyhow::anyhow!("unknown weather {name}"))?);
+            }
             "--season" => {
                 let name = value()?;
                 o.date = Some(season::named(&name).ok_or_else(|| anyhow::anyhow!("unknown season {name}"))?);
@@ -358,6 +367,7 @@ struct Running {
     biome: worldgen::biome::Biome,
     /// How warm the biome underfoot is, eased as the player crosses into another.
     warmth: f32,
+    weather: weather::Weather,
     audio: Option<Audio>,
     /// The settings in force.
     settings: Settings,
@@ -494,6 +504,7 @@ impl Running {
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
             warmth: season::warmth(worldgen::biome::Biome::Grassland),
+            weather: weather::Weather::new(opts.weather),
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
             saved,
@@ -762,12 +773,13 @@ impl Running {
         self.cpu.lap(1);
 
         // The day turns.
-        if self.settings.day_minutes > 0.0 {
-            let days = dt / (self.settings.day_minutes * 60.0);
+        let days = if self.settings.day_minutes > 0.0 { dt / (self.settings.day_minutes * 60.0) } else { 0.0 };
+        if days > 0.0 {
             let date = season::advance(self.env.date, days, self.settings.year_days);
             self.env = Environment::at(self.env.time + days * 24.0, date);
         }
         self.save_timer -= dt;
+        self.weather.update(dt, days, self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         self.warmth += (season::warmth(self.biome) - self.warmth) * (1.0 - (-0.4 * dt).exp());
 
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
@@ -792,6 +804,9 @@ impl Running {
             flowers: &self.flowers,
             player_entered_water: entered_water,
             leaf_fall: season::leaf_fall(self.env.date),
+            rain: self.weather.now.rain,
+            snow: self.weather.now.snow,
+            storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
         };
         self.particles.update(dt, &surroundings, &mut self.voxels);
@@ -817,15 +832,17 @@ impl Running {
         self.cpu.lap(3);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        let mut lit = self.env.clone();
+        self.weather.apply(&mut lit);
         let scene = render::Scene {
             camera: &self.camera,
-            env: &self.env,
+            env: &lit,
             terrain: &self.streamer,
             far: &self.far,
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
-            ground: season::Ground::at(self.env.date, self.warmth, 0.0, 0.0),
+            ground: season::Ground::at(self.env.date, self.warmth, self.weather.snowpack, self.weather.wet),
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
         self.cpu.lap(4);
@@ -1117,7 +1134,10 @@ fn main() -> Result<()> {
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let t = Instant::now();
-        let env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
+        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
+        // Screenshots are clear unless a weather is asked for.
+        let weather = weather::Weather::new(opts.weather);
+        weather.apply(&mut env);
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
@@ -1140,6 +1160,9 @@ fn main() -> Result<()> {
                 flowers: &flowers,
                 player_entered_water: None,
                 leaf_fall: season::leaf_fall(env.date),
+                rain: weather.now.rain,
+                snow: weather.now.snow,
+                storm: weather.now.storm,
                 time: step as f64 / 60.0,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
@@ -1155,7 +1178,7 @@ fn main() -> Result<()> {
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,
-            season::Ground::at(env.date, season::warmth(biome), 0.0, 0.0),
+            season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet),
         )?;
         let s = streamer.stats;
         log::info!(
