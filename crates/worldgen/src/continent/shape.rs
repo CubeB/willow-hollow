@@ -23,10 +23,32 @@ pub struct Shape {
     blobs: Vec<(f32, f32, f32)>,
     /// The mega-structures passing through this cell.
     pub field: Field,
+    /// The eight cells around this one, as `(dx, dz, shape)`, when a range could carry
+    /// land to a border; their uplift is shared near the borders (see [`Shape::uplift`]).
+    neighbours: Vec<(i32, i32, Shape)>,
 }
+
+/// How far from a border, in cell half-widths, uplift is shared with the neighbour.
+const SHARED_UPLIFT: f32 = 0.16;
 
 impl Shape {
     pub fn new(desc: CellDesc) -> Self {
+        let mut shape = Self::bare(desc);
+        if shape.field.structures().iter().any(|s| s.kind == crate::structures::Kind::Range) {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) != (0, 0) {
+                        let n = crate::macro_layout::cell_desc(desc.world_seed, desc.mx + dx, desc.mz + dz);
+                        shape.neighbours.push((dx, dz, Self::bare(n)));
+                    }
+                }
+            }
+        }
+        shape
+    }
+
+    /// A shape that does not look at its neighbours.
+    fn bare(desc: CellDesc) -> Self {
         let mut blobs = Vec::new();
         if desc.kind == CellKind::Islands {
             let r = |k: i32| unit(hash2(desc.seed ^ 0x15_1a2d, k, 7));
@@ -38,7 +60,7 @@ impl Shape {
             }
         }
         let field = Field::new(desc.world_seed, desc.mx, desc.mz);
-        Self { desc, blobs, field }
+        Self { desc, blobs, field, neighbours: Vec::new() }
     }
 
     pub fn desc(&self) -> &CellDesc {
@@ -82,7 +104,41 @@ impl Shape {
     }
 
     /// Tectonic uplift rate, 0..~1. High values become mountains.
+    ///
+    /// Near a border a range crosses, two cells simulate the same land, and if each
+    /// raised it by its own rules their mountains would not meet. So there the rate
+    /// eases toward a weighted mean of every cell meeting at that point, all of which
+    /// compute the same mean on the border itself.
     pub fn uplift(&self, px: f32, pz: f32, land: f32) -> f32 {
+        let own = self.own_uplift(px, pz, land);
+        if self.neighbours.is_empty() {
+            return own;
+        }
+        // Weight of a neighbour across one side: full on the border, none past the reach.
+        let near = |p: f32, d: i32| -> f32 {
+            match d {
+                0 => 1.0,
+                d => 1.0 - smoothstep(0.0, SHARED_UPLIFT, 1.0 - p * d as f32),
+            }
+        };
+        let mut terms: Vec<(f32, f32)> = vec![(own, 1.0)];
+        for (dx, dz, s) in &self.neighbours {
+            let w = near(px, *dx) * near(pz, *dz);
+            if w > 0.0 {
+                let (qx, qz) = (px - 2.0 * *dx as f32, pz - 2.0 * *dz as f32);
+                terms.push((s.own_uplift(qx, qz, s.land(qx, qz)), w));
+            }
+        }
+        if terms.len() == 1 {
+            return own;
+        }
+        // Summed in a fixed order, so every cell gets the same bits on the border.
+        terms.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let (sum, total) = terms.iter().fold((0.0f32, 0.0f32), |(s, t), &(u, w)| (s + u * w, t + w));
+        sum / total
+    }
+
+    fn own_uplift(&self, px: f32, pz: f32, land: f32) -> f32 {
         let s = self.desc.seed;
         let (x, z) = (px as f64, pz as f64);
         // Some coasts rise straight from the sea; most have a lowland fringe.

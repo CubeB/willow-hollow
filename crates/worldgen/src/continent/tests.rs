@@ -105,17 +105,93 @@ fn a_range_crossing_a_border_matches_on_both_sides() {
     assert!(land > 0, "scan found a crossing but no land reached the border");
 }
 
+/// Asserts that two cells agree along the border they share, `a` on the low side.
+/// `along_x` is true for a border running along x (cells stacked in z).
+fn assert_shared_border(a: &Continent, b: &Continent, along_x: bool) -> usize {
+    let n = a.size;
+    let mut land = 0;
+    for k in 0..n {
+        let (ia, ib) = if along_x { ((n - 1) * n + k, k) } else { (k * n + n - 1, k * n) };
+        assert_eq!(a.ocean[ia], b.ocean[ib], "land and sea disagree at {k} on {:?}", (a.desc.mx, a.desc.mz));
+        assert_eq!(a.height[ia], b.height[ib], "height differs at {k} on {:?}", (a.desc.mx, a.desc.mz));
+        if !a.ocean[ia] {
+            land += 1;
+            assert_eq!(a.biome[ia], b.biome[ib], "biome differs at {k}");
+        }
+    }
+    land
+}
+
 #[test]
-fn no_water_leaves_across_a_border() {
-    // Whatever land there is at the border, rivers must end inside the cell.
+fn a_range_crossing_a_four_cell_corner_matches_all_round() {
+    // Every cell meeting at the corner must agree with both of its neighbours, including
+    // a cell the range only grazes, which would otherwise be simulated as open sea.
+    let found = (0u32..200).find_map(|seed| {
+        (-8..8).find_map(|mz| {
+            (-8..8).find_map(|mx| {
+                let field = crate::structures::Field::new(seed, mx, mz);
+                field.land(1.0, 1.0).is_some_and(|l| l > 0.05).then_some((seed, mx, mz))
+            })
+        })
+    });
+    let (seed, mx, mz) = found.expect("no range crosses a cell corner in the seeds scanned");
+    const S: usize = 128;
+    let cell = |dx: i32, dz: i32| generate(cell_desc(seed, mx + dx, mz + dz), SimConfig { size: S });
+    let (a, b, c, d) = (cell(0, 0), cell(1, 0), cell(0, 1), cell(1, 1));
+    assert_shared_border(&a, &b, false);
+    assert_shared_border(&c, &d, false);
+    assert_shared_border(&a, &c, true);
+    assert_shared_border(&b, &d, true);
+    let corners = [a.height[S * S - 1], b.height[(S - 1) * S], c.height[S - 1], d.height[0]];
+    assert!(corners.iter().all(|&h| h == corners[0]), "corner heights differ: {corners:?}");
+    assert!(!a.ocean[S * S - 1], "the corner should be land");
+}
+
+#[test]
+fn every_border_along_a_range_matches() {
+    // Walk the cells of several ranges and check each border with land on it, so the
+    // edges of crossings, where a cell is barely touched, are covered too.
+    let mut checked = 0;
+    for seed in [3u32, 11] {
+        for mz in -4..4 {
+            for mx in -4..4 {
+                let field = crate::structures::Field::new(seed, mx, mz);
+                let east = (0..33).any(|k| field.land(1.0, -1.0 + k as f32 / 16.0).is_some_and(|l| l > 0.0));
+                let south = (0..33).any(|k| field.land(-1.0 + k as f32 / 16.0, 1.0).is_some_and(|l| l > 0.0));
+                if !east && !south {
+                    continue;
+                }
+                let a = generate(cell_desc(seed, mx, mz), SimConfig { size: 128 });
+                if east {
+                    let b = generate(cell_desc(seed, mx + 1, mz), SimConfig { size: 128 });
+                    checked += assert_shared_border(&a, &b, false);
+                }
+                if south {
+                    let b = generate(cell_desc(seed, mx, mz + 1), SimConfig { size: 128 });
+                    checked += assert_shared_border(&a, &b, true);
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no shared land found on any border");
+}
+
+#[test]
+fn water_leaves_across_a_border_only_downhill_onto_the_shared_ring() {
+    // Water may only cross a border where the land runs down to it: there it ends on
+    // the ring, whose height both cells share, and never climbs onto it.
     let (seed, mx, mz) = cells_sharing_a_range();
     let c = generate(cell_desc(seed, mx, mz), SimConfig { size: SIZE });
     let ring = |i: usize| i % SIZE == 0 || i / SIZE == 0 || i % SIZE == SIZE - 1 || i / SIZE == SIZE - 1;
     for i in 0..SIZE * SIZE {
-        if !c.ocean[i] {
-            // The ring may still be sea beside a crossing, and that sea is shared.
-            let r = c.rcv[i] as usize;
-            assert!(!ring(r) || c.ocean[r], "cell {i} drains onto land at the border ring");
+        if c.ocean[i] {
+            continue;
+        }
+        let r = c.rcv[i] as usize;
+        if ring(i) {
+            assert_eq!(r, i, "border cell {i} drains back into the cell");
+        } else if ring(r) && !c.ocean[r] {
+            assert!(c.water_level[i] >= c.water_level[r], "cell {i} climbs onto the border");
         }
     }
 }
@@ -161,6 +237,12 @@ fn every_land_cell_drains_downhill_to_the_sea() {
                 continue;
             }
             let r = c.rcv[start] as usize;
+            let s = c.size;
+            let ring = start % s == 0 || start / s == 0 || start % s == s - 1 || start / s == s - 1;
+            if ring && r == start {
+                // Water leaving across a border, where a range crosses it.
+                continue;
+            }
             assert_ne!(r, start, "land cell {start} drains nowhere");
             let (dx, dz) = (
                 (r % c.size) as i32 - (start % c.size) as i32,
@@ -178,7 +260,7 @@ fn every_land_cell_drains_downhill_to_the_sea() {
         // And walk a sample of full paths to the sea as a direct check.
         for start in (0..n).step_by(97).filter(|&i| !c.ocean[i]) {
             let (mut i, mut steps) = (start, 0);
-            while !c.ocean[i] {
+            while !c.ocean[i] && c.rcv[i] as usize != i {
                 i = c.rcv[i] as usize;
                 steps += 1;
                 assert!(steps <= n, "cycle in drainage from {start}");
