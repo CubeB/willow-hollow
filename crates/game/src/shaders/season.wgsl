@@ -74,8 +74,10 @@ fn season_grass(c: vec3<f32>, q: vec3<f32>, s: f32) -> vec3<f32> {
     }
     let dry = max(smoothstep(0.40, 0.56, s), 1.0 - smoothstep(0.0, 0.07, s));
     let winter = max(smoothstep(0.72, 0.82, s), 1.0 - smoothstep(0.0, 0.05, s));
-    var o = mix(c, c.g * vec3<f32>(1.9, 1.25, 0.5), dry * 0.65);
-    o = mix(o, o * vec3<f32>(0.85, 0.72, 0.6), winter);
+    // Late summer grass dries to a deep straw: olive and russet, darker than it was green.
+    let straw = vec3<f32>(0.30, 0.19, 0.05) * (0.55 + c.g * 1.7);
+    var o = mix(c, straw, dry * 0.85);
+    o = mix(o, o * vec3<f32>(0.8, 0.7, 0.62), winter);
     return o;
 }
 

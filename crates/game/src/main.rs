@@ -1177,6 +1177,7 @@ fn main() -> Result<()> {
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
+        log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet));
         render::screenshot(
             &gpu,
             path,

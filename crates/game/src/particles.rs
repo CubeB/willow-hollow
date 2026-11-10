@@ -534,10 +534,14 @@ impl Particles {
                 }
                 PKind::Rain => {
                     // Lit by the day, not by the sun: streaks must read in dull light and dark.
-                    alpha *= 0.35;
+                    // Drops this close would be thick white bars, so they fade out.
+                    alpha *= 0.35 * near_fade(p.pos, s.camera);
                     glow = 0.25 + 0.9 * s.sun_elevation.clamp(0.0, 1.0);
                 }
-                PKind::Snow => glow = 0.35 + 1.1 * s.sun_elevation.clamp(0.0, 1.0),
+                PKind::Snow => {
+                    alpha *= near_fade(p.pos, s.camera);
+                    glow = 0.35 + 1.1 * s.sun_elevation.clamp(0.0, 1.0);
+                }
                 PKind::Mote => {
                     glow = 1.4;
                     color = [1.0, 0.95, 0.75];
@@ -561,6 +565,12 @@ impl Particles {
     pub fn len(&self) -> usize {
         self.particles.len()
     }
+}
+
+/// Rain and snow within a metre or two of the eye fade out: up close they are thick bars.
+fn near_fade(pos: DVec3, camera: DVec3) -> f32 {
+    let metres = (pos - camera).length() as f32 / worldgen::scale::VOXELS_PER_METRE;
+    ((metres - 2.0) / 4.0).clamp(0.0, 1.0)
 }
 
 /// Top of the ground at the column under `from`, searching downward.

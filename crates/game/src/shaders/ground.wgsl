@@ -12,7 +12,7 @@ fn snow_depth(alt_m: f32) -> f32 {
 
 fn ground_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, h: f32, foliage: bool, emissive: bool) -> vec3<f32> {
     var o = c * (1.0 - 0.3 * G.weather.x);
-    if (emissive || n.y < 0.6) {
+    if (emissive) {
         return o;
     }
     let alt_m = (G.cam_wrapped.y + rel.y) / VOXELS_PER_METRE;
@@ -23,6 +23,12 @@ fn ground_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, h: f32, foliage: b
     // Drifts: patchy where the cover is thin, even where it is thick.
     let world_xz = rel.xz + G.cam_wrapped.xz;
     let drift = vnoise(world_xz / (VOXELS_PER_METRE * 1.8));
+    if (n.y < 0.6) {
+        // The sides of snowy ground look buried: dusted and dulled toward a cold earth.
+        let buried = smoothstep(0.05, 0.5, depth - 0.3 * drift) * select(0.85, 0.5, foliage);
+        let cold = o * vec3<f32>(0.5, 0.52, 0.58) + vec3<f32>(0.025, 0.03, 0.04);
+        return mix(o, mix(cold, SNOW_COLOUR * 0.55, 0.3), buried);
+    }
     let cover = smoothstep(0.0, 0.3, depth - 0.5 * drift - 0.12 * h)
         * smoothstep(0.6, 0.95, n.y) * select(1.0, 0.85, foliage);
     return mix(o, SNOW_COLOUR * (0.9 + 0.1 * h), cover);
