@@ -216,6 +216,8 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Shelf => (if patch < 0.5 || roll < 0.2 { mat::ROCK_DARK } else { mat::STONE }, mat::STONE),
         Cover::Dune if matches!(col.biome, crate::biome::Biome::Desert | crate::biome::Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
+        // Wet stone and moss around a spring, with a little mud.
+        Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
         // Banks and flats at sea level are tidal mud, with a little sand.
         Cover::Bank if col.ground < m(1.0) => (if roll < 0.8 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),

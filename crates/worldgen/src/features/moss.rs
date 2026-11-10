@@ -255,7 +255,7 @@ fn judge_with(site: &Site, soil: &Soil, gap_cut: f32) -> Option<Patch> {
     }
     let host = host_of(site.host)?;
     let col = soil.column(site.air.x, site.air.z);
-    if !matches!(col.cover, Cover::Land | Cover::Bank) || col.water_surface().is_some() {
+    if !matches!(col.cover, Cover::Land | Cover::Bank | Cover::Spring) || col.water_surface().is_some() {
         return None;
     }
     // A ceiling only in deep shade: the thin board of a signpost or the eave of a tower out

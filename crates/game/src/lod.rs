@@ -111,6 +111,7 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::Shelf => (mat::ROCK_DARK, mat::STONE),
         Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
+        Cover::Spring => (mat::MOSSY_STONE, mat::STONE),
         Cover::Trail => (
             match col.biome.parent() {
                 Biome::Desert | Biome::Savanna => mat::PATH_SAND,
