@@ -8,6 +8,7 @@
 
 pub mod aquatic;
 pub mod landmarks;
+pub mod parts;
 pub mod pebbles;
 pub mod plants;
 pub mod shape;
