@@ -24,6 +24,8 @@ pub const MIN_RIVER_Q: f32 = 24.0;
 const SEGS: usize = 6;
 /// Narrowest channel half-width, so the thinnest brooks are still unbroken water.
 const MIN_HALF_WIDTH: f32 = m(0.6);
+/// How far, in cells of the 1024 grid, the largest rivers swing sideways to meander.
+const SINUOSITY_CELLS: f32 = 4.0;
 /// Taken from the distance to a trail's centreline to give the distance to its edge.
 const TRAIL_CLEARANCE: f32 = m(1.2);
 
@@ -204,7 +206,7 @@ impl<'a> Sampler<'a> {
         let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q)) * OLD_VOXEL;
         // A piece lies within a cell of its node, so gather nodes that close plus the
         // farthest a river can reach.
-        let margin = reach(widest * 0.5) + cs * 1.5;
+        let margin = reach(widest * 0.5) + cs * (3.0 + SINUOSITY_CELLS * 1.5);
         let cell = |v: f32| ((v / cs).floor() as i32).clamp(1, c.size as i32 - 2) as usize;
         let (x0, x1) = (cell(lx0 as f32 - margin), cell((lx0 + span) as f32 + margin));
         let (z0, z1) = (cell(lz0 as f32 - margin), cell((lz0 + span) as f32 + margin));
@@ -510,8 +512,40 @@ pub(crate) fn node(c: &Continent, i: usize) -> Vec2 {
         let drift = 0.35 + 1.25 * size;
         let (nx, nz) = (x as f64 / 4.5, z as f64 / 4.5);
         p += vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift;
+        p += sinuosity(c, i, size);
     }
     p * c.cell_size()
+}
+
+/// A sideways swing, in cells, that turns the long straight runs the router leaves on
+/// big rivers into meanders.
+///
+/// Routing on a grid follows one slope direction for as long as a valley does, so a
+/// large river can run dead straight for hundreds of metres. This pushes each node
+/// across the local direction of flow by low-frequency noise sampled at its position.
+/// Nodes along one reach sample neighbouring points, so the swing is smooth along the
+/// river, and a node's position stays a function of its own cell alone, so tributaries
+/// and the river they join still meet. Water levels belong to the nodes and are
+/// untouched, which keeps every river flowing downhill. `size` is 0 for brooks and 1
+/// for the largest rivers.
+fn sinuosity(c: &Continent, i: usize, size: f32) -> Vec2 {
+    if size <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let (x, z) = (i % c.size, i / c.size);
+    let cell = |j: usize| vec2((j % c.size) as f32, (j / c.size) as f32);
+    // Direction of flow over the next couple of cells, so it turns gently.
+    let r = c.rcv[i] as usize;
+    let r2 = c.rcv[r] as usize;
+    let ahead = cell(r2) - cell(i);
+    let Some(dir) = ahead.try_normalize() else { return Vec2::ZERO };
+    let side = vec2(-dir.y, dir.x);
+    // Wavelength about 7 cells at the 1024 grid, scaled so it is the same distance
+    // on the ground at any grid size.
+    let k = 1024.0 / c.size as f64 / 7.0;
+    let wave = perlin2(c.desc.seed ^ 0x3ea3, x as f64 * k, z as f64 * k)
+        + 0.5 * perlin2(c.desc.seed ^ 0x3ea4, x as f64 * k * 2.3, z as f64 * k * 2.3);
+    side * wave * SINUOSITY_CELLS * size * (c.size as f32 / 1024.0)
 }
 
 /// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid.
@@ -540,4 +574,58 @@ fn bicubic(c: &Continent, fx: f32, fz: f32) -> f32 {
         sum += row * wzj;
     }
     sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{continent::{SimConfig, generate}, macro_layout::cell_desc};
+
+    /// Longest dead-straight stretch (in voxels) of any large river: how far the node
+    /// chain runs while staying within `tol` voxels of one straight line.
+    fn longest_straight(c: &Continent, min_q: f32, tol: f32) -> f32 {
+        let mut best = 0.0f32;
+        for i in 0..c.size * c.size {
+            if c.ocean[i] || c.lake[i] != NO_LAKE || c.discharge[i] < min_q {
+                continue;
+            }
+            // Only start where no larger river feeds in from upstream along the chain.
+            let mut chain = vec![node(c, i)];
+            let mut j = i;
+            for _ in 0..400 {
+                let r = c.rcv[j] as usize;
+                if r == j || c.ocean[r] || c.lake[r] != NO_LAKE {
+                    break;
+                }
+                chain.push(node(c, r));
+                j = r;
+            }
+            let mut a = 0;
+            for b in 2..chain.len() {
+                // Shrink from the start until every point is within tol of chord a..b.
+                loop {
+                    let (pa, pb) = (chain[a], chain[b]);
+                    let d = (pb - pa).normalize_or_zero();
+                    let ok = chain[a..=b].iter().all(|q| {
+                        let v = *q - pa;
+                        (v.x * d.y - v.y * d.x).abs() <= tol
+                    });
+                    if ok || a + 2 > b {
+                        break;
+                    }
+                    a += 1;
+                }
+                best = best.max((chain[b] - chain[a]).length());
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn rivers_do_not_run_straight_for_long() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let straight = longest_straight(&c, 4000.0, m(5.0));
+        eprintln!("longest straight reach: {straight} voxels = {} m", straight / m(1.0));
+        assert!(straight < m(190.0), "straight reach {straight}");
+    }
 }
