@@ -528,6 +528,18 @@ impl GameWorld {
                 put(p + origin, v, true);
             }
         }
+        // Their fine parts, each box grown by the chunk column its corner is in, so a part
+        // straddling a border is drawn once. Before the moss, which keeps off them.
+        let cells = IVec3::splat(CELLS);
+        for s in &stamps {
+            for b in &s.fine {
+                let (lo, hi) = (IVec3::from_array(b.lo) + origin * cells, IVec3::from_array(b.hi) + origin * cells);
+                let q = lo.div_euclid(cells);
+                if (wx0 + 1..=wx0 + CHUNK).contains(&q.x) && (wz0 + 1..=wz0 + CHUNK).contains(&q.z) {
+                    plants.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), ..*b });
+                }
+            }
+        }
         // Now the world's shape is final, things can grow on it.
         let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
         let mut standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();

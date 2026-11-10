@@ -18,6 +18,7 @@ use crate::{
     continent::Continent,
     features::{
         landmarks::{self, Landmark, Palette},
+        parts,
         shape::{Rng, Shape, rotate},
     },
     noise::{hash2, perlin2, unit},
@@ -656,7 +657,8 @@ fn place_land(c: &Continent, seed: u32, kind: Landmark, cell: usize, site_seed: 
     });
     let origin = IVec3::new(x, y as i32 + 1, z);
     let turns = site_seed & 3;
-    net.add_stamp(absolute(landmarks::build(kind, &palette, site_seed, 0), origin, turns));
+    let (voxels, fine) = landmarks::build_parts(kind, &palette, site_seed, 0);
+    net.add_stamp_with(absolute(voxels, origin, turns), parts::place_fine(&fine, origin, turns));
     Some(Site {
         kind,
         x,
@@ -678,8 +680,8 @@ fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mu
         y,
     });
     let origin = IVec3::new(shore.x, shore.level + 1, shore.z);
-    let pier = landmarks::build(Landmark::Landing, &palette, site_seed, shore.length / BLOCK);
-    net.add_stamp(absolute(pier, origin, shore.turns));
+    let (pier, fine) = landmarks::build_parts(Landmark::Landing, &palette, site_seed, shore.length / BLOCK);
+    net.add_stamp_with(absolute(pier, origin, shore.turns), parts::place_fine(&fine, origin, shore.turns));
     let along = rotate(IVec3::new(shore.length - 3 * BLOCK, 0, 4 * BLOCK), shore.turns);
     let heading = shore.turns as f32 * std::f32::consts::FRAC_PI_2;
     Some(Site {
@@ -907,7 +909,9 @@ impl Layer<'_> {
             let (x, z) = (q.x.floor() as i32, q.y.floor() as i32);
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
-            net.add_stamp(absolute(landmarks::trail_lantern(&self.palette_at(&col), height, hash2(salt, x, z)), IVec3::new(x, y, z), 0));
+            let at = IVec3::new(x, y, z);
+            let (voxels, fine) = landmarks::trail_lantern_parts(&self.palette_at(&col), height, hash2(salt, x, z));
+            net.add_stamp_with(absolute(voxels, at, 0), parts::place_fine(&fine, at, 0));
             since = 0;
             side = -side;
         }
