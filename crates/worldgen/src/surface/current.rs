@@ -56,7 +56,7 @@ impl Sampler<'_> {
             if p.x < piece.lo.x || p.x > piece.hi.x || p.y < piece.lo.y || p.y > piece.hi.y {
                 continue;
             }
-            let (dist, t) = piece.nearest(p);
+            let (dist, t, _) = piece.nearest(p);
             let sd = dist - piece.half_width(t);
             if nearest.is_none_or(|n| sd < n.0) {
                 nearest = Some((sd, piece, t));
