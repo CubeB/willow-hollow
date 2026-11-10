@@ -88,11 +88,15 @@ pub struct Streamer {
     center: Option<Col>,
     focus: Arc<Focus>,
     max_in_flight: usize,
+    /// The largest load radius the GPU has shown it can hold.
+    radius_limit: i32,
     pub stats: Stats,
 }
 
 /// Columns stay loaded this far beyond the load radius, so small movements don't thrash.
 const UNLOAD_SLACK: i32 = 2;
+/// The view is never pulled in closer than this for lack of GPU memory.
+const MIN_RADIUS: i32 = 8;
 
 impl Streamer {
     pub fn new(gpu: &Gpu, world: Arc<dyn World>, radius: i32) -> Self {
@@ -124,6 +128,7 @@ impl Streamer {
                 radius: AtomicI32::new(radius),
             }),
             max_in_flight: threads * 2,
+            radius_limit: i32::MAX,
             stats: Stats::default(),
         }
     }
@@ -133,6 +138,7 @@ impl Streamer {
     }
 
     pub fn set_radius(&mut self, radius: i32) {
+        let radius = radius.min(self.radius_limit);
         if radius != self.radius() {
             self.focus.radius.store(radius, Ordering::Relaxed);
             self.center = None; // force a rebuild of the wanted list
@@ -215,10 +221,11 @@ impl Streamer {
                     let s = &mut self.stats;
                     s.gen_ms += (result.gen_ms - s.gen_ms) * 0.05;
                     s.mesh_ms += (result.mesh_ms - s.mesh_ms) * 0.05;
-                    let chunks = meshes
-                        .into_iter()
-                        .map(|(cy, mesh)| self.upload(gpu, IVec3::new(result.col.0, cy, result.col.1), mesh))
-                        .collect();
+                    let Some(chunks) = self.upload_column(gpu, result.col, meshes) else {
+                        // Out of GPU memory. The rest can wait until the view has shrunk.
+                        self.shrink_view();
+                        break;
+                    };
                     if let Some(old) = self.columns.insert(result.col, chunks) {
                         release(&mut self.arena, &old);
                     }
@@ -284,21 +291,61 @@ impl Streamer {
         self.wanted.sort_unstable_by_key(|c| std::cmp::Reverse(dist2(c)));
     }
 
-    fn upload(&mut self, gpu: &Gpu, pos: IVec3, mesh: ChunkMesh) -> GpuChunk {
-        let mut make = |verts: &[Vertex]| -> Option<MeshSpan> {
-            if verts.is_empty() {
+    /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
+    fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>) -> Option<Vec<GpuChunk>> {
+        let mut chunks = Vec::with_capacity(meshes.len());
+        for (cy, mesh) in meshes {
+            let Some(chunk) = self.upload(gpu, IVec3::new(col.0, cy, col.1), mesh) else {
+                release(&mut self.arena, &chunks);
+                self.recount();
                 return None;
+            };
+            chunks.push(chunk);
+        }
+        Some(chunks)
+    }
+
+    /// Stores one chunk's meshes, or None if the GPU has no room for them.
+    fn upload(&mut self, gpu: &Gpu, pos: IVec3, mesh: ChunkMesh) -> Option<GpuChunk> {
+        let opaque = self.store(gpu, &mesh.opaque)?;
+        let Some(water) = self.store(gpu, &mesh.water) else {
+            if let Some(span) = opaque {
+                self.arena.remove(span);
             }
-            let span = self.arena.add(gpu, verts)?;
-            self.stats.quads += span.quads as u64;
-            self.stats.mesh_bytes += size_of_val(verts) as u64;
-            Some(span)
+            return None;
         };
-        let opaque = make(&mesh.opaque);
-        let water = make(&mesh.water);
-        let faces = mesh.faces;
         self.stats.chunks += 1;
-        GpuChunk { pos, opaque, water, faces }
+        Some(GpuChunk {
+            pos,
+            opaque,
+            water,
+            faces: mesh.faces,
+        })
+    }
+
+    /// Puts vertices in the arena. The outer None means the GPU has no room; the inner
+    /// one that there was nothing to store.
+    fn store(&mut self, gpu: &Gpu, verts: &[Vertex]) -> Option<Option<MeshSpan>> {
+        if verts.is_empty() {
+            return Some(None);
+        }
+        let span = self.arena.add(gpu, verts)?;
+        self.stats.quads += span.quads as u64;
+        self.stats.mesh_bytes += size_of_val(verts) as u64;
+        Some(Some(span))
+    }
+
+    /// Pulls the view in after running out of GPU memory, which unloads the outer
+    /// columns to make room, and stops it being pushed back out.
+    fn shrink_view(&mut self) {
+        let now = self.radius();
+        let next = (now - (now / 8).max(1)).max(MIN_RADIUS);
+        self.radius_limit = next;
+        if next < now {
+            log::warn!("out of GPU memory: load radius reduced from {now} to {next}");
+            self.focus.radius.store(next, Ordering::Relaxed);
+            self.center = None; // force a rebuild of the wanted list
+        }
     }
 
     fn recount(&mut self) {

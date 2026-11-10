@@ -58,6 +58,8 @@ pub struct Shape {
     unit: f32,
     /// Whole voxels along a block's edge.
     block: i32,
+    /// For models that lie along the ground: from the origin to the far end, in voxels.
+    axis: Option<IVec3>,
 }
 
 impl Default for Shape {
@@ -73,6 +75,7 @@ impl Shape {
             voxels: HashMap::new(),
             unit: OLD_VOXEL,
             block: BLOCK,
+            axis: None,
         }
     }
 
@@ -82,6 +85,7 @@ impl Shape {
             voxels: HashMap::new(),
             unit: 1.0,
             block: 1,
+            axis: None,
         }
     }
 
@@ -112,6 +116,11 @@ impl Shape {
 
     pub fn get(&self, p: IVec3) -> Option<Voxel> {
         self.voxels.get(&p).copied()
+    }
+
+    /// Marks the model as lying along the ground, from its origin in direction `span`.
+    pub fn lie_along(&mut self, span: Vec3) {
+        self.axis = Some((span * self.unit).round().as_ivec3());
     }
 
     /// A tapered limb from `a` (radius `ra`) to `b` (radius `rb`): trunks, branches,
@@ -207,6 +216,7 @@ impl Shape {
     /// Finishes the model: voxels sorted for deterministic stamping, with bounds.
     pub fn build(mut self) -> Template {
         self.drop_air();
+        let (block, axis) = (self.block, self.axis);
         let mut voxels: Vec<(IVec3, Voxel)> = self.voxels.into_iter().collect();
         voxels.sort_unstable_by_key(|(p, _)| (p.y, p.x, p.z));
         let (mut lo, mut hi) = (IVec3::MAX, IVec3::MIN);
@@ -216,10 +226,18 @@ impl Shape {
         }
         // How far it reaches from its own vertical axis, whichever way it is turned.
         let reach = lo.x.abs().max(hi.x.abs()).max(lo.z.abs()).max(hi.z.abs());
+        let base = voxels
+            .iter()
+            .filter(|(p, _)| p.y <= block)
+            .map(|(p, _)| p.x.abs().max(p.z.abs()))
+            .max()
+            .unwrap_or(0);
         Template {
             voxels,
             reach,
+            base,
             top: hi.y,
+            axis,
         }
     }
 }
@@ -229,8 +247,12 @@ pub struct Template {
     pub voxels: Vec<(IVec3, Voxel)>,
     /// Largest horizontal distance from the origin to any voxel.
     pub reach: i32,
+    /// Largest horizontal distance to any voxel near the ground: what it stands on.
+    pub base: i32,
     /// Highest voxel, relative to the origin.
     pub top: i32,
+    /// For models that lie along the ground: from the origin to the far end, in voxels.
+    pub axis: Option<IVec3>,
 }
 
 /// Turns a model-space offset by quarter turns about the vertical axis.

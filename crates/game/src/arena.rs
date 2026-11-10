@@ -83,6 +83,13 @@ fn create(gpu: &Gpu, quads: u32) -> wgpu::Buffer {
     })
 }
 
+/// Like [`create`], but reports running out of GPU memory instead of treating it as fatal.
+fn try_create(gpu: &Gpu, quads: u32) -> Option<wgpu::Buffer> {
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let buffer = create(gpu, quads);
+    pollster::block_on(scope.pop()).is_none().then_some(buffer)
+}
+
 impl VertexArena {
     pub fn new(gpu: &Gpu) -> Self {
         // Vertex numbers are u32, so four billion vertices is the ceiling regardless.
@@ -103,7 +110,7 @@ impl VertexArena {
         self.free.capacity as u64 * QUAD_BYTES
     }
 
-    /// Stores a mesh. None only if the GPU cannot hold a large enough buffer.
+    /// Stores a mesh. None if the arena is full and the GPU cannot hold a larger one.
     pub fn add(&mut self, gpu: &Gpu, verts: &[Vertex]) -> Option<MeshSpan> {
         let quads = verts.len() as u32 / 4;
         let start = loop {
@@ -111,7 +118,6 @@ impl VertexArena {
                 break start;
             }
             if !self.grow(gpu) {
-                log::warn!("chunk arena is full at {} MiB, dropping a mesh", self.capacity_bytes() >> 20);
                 return None;
             }
         };
@@ -129,7 +135,12 @@ impl VertexArena {
         if capacity == self.free.capacity {
             return false;
         }
-        let buffer = create(gpu, capacity);
+        // The old and new buffers exist together during the copy, so the GPU has to hold both.
+        let Some(buffer) = try_create(gpu, capacity) else {
+            log::warn!("no GPU memory for a larger chunk arena, staying at {} MiB", self.capacity_bytes() >> 20);
+            self.max_quads = self.free.capacity;
+            return false;
+        };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(&self.buffer, 0, &buffer, 0, self.capacity_bytes());
         // Submitting also flushes earlier writes into the old buffer, ahead of the copy.

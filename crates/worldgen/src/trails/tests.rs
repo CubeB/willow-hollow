@@ -199,7 +199,7 @@ fn trees_keep_off_the_trails() {
             let (x, z) = (p.x as i32, p.y as i32);
             let margin = features::MAX_REACH + 1;
             let s = Sampler::new(&c, w.seed(), x - margin - 16, z - margin - 16, 2 * margin + 32);
-            for placed in features::place(w.seed(), &s, x - 16, z - 16, 32, (0, 0)) {
+            for placed in features::place(w.seed(), w.library(), &s, x - 16, z - 16, 32, (0, 0)) {
                 if placed.pos.x < 0 || placed.pos.z < 0 || placed.pos.x >= MACRO_SIZE || placed.pos.z >= MACRO_SIZE {
                     continue;
                 }

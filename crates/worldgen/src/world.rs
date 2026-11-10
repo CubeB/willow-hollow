@@ -280,6 +280,7 @@ impl World for GameWorld {
         let lib = self.library();
         let placements = features::place(
             self.seed,
+            lib,
             &sampler,
             lx0,
             lz0,
@@ -298,9 +299,8 @@ impl World for GameWorld {
             })
             .collect();
         for p in &placements {
-            let t = lib.get(p.species, p.variant);
-            hi = hi.max(p.pos.y + t.top);
-            lo = lo.min(p.pos.y - 4 * BLOCK);
+            hi = hi.max(p.top(lib));
+            lo = lo.min(p.bottom());
         }
         // Landmarks, bridges and lanterns, whose voxels are continent-local.
         let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));

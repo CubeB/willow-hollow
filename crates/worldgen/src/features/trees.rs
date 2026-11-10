@@ -423,11 +423,12 @@ fn boulder(s: &mut Shape, rng: &mut Rng, mossy: bool) {
 
 fn fallen_log(s: &mut Shape, rng: &mut Rng) {
     let (dir, _) = rng.heading();
-    let len = rng.range(6.0, 12.0);
+    let len = rng.range(6.0, 10.0);
     let r = rng.range(0.8, 1.3);
     let a = Vec3::new(0.5, r, 0.5);
     let b = a + dir * len;
     s.limb(a, b, r, r * 0.8, mat::BARK_OAK);
+    s.lie_along(dir * len);
     // Hollow a stretch of the big ones.
     if r > 1.1 && rng.unit() < 0.5 {
         s.limb(a + dir * 1.5, b - dir * 1.5, r * 0.45, r * 0.4, voxel::AIR);

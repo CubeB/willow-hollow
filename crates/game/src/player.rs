@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use glam::{DVec3, Vec3};
+use glam::{DVec3, IVec3, Vec3};
 use voxel::{CHUNK, Kind, PaddedChunk};
 use worldgen::{
     World,
@@ -30,6 +30,15 @@ const STEP: f64 = m64(0.8);
 /// Out of water a swimmer can haul up a taller bank.
 const CLIMB_OUT: f64 = m64(1.6);
 const SKIN: f64 = 1e-4;
+
+/// Share of the body's space filled with foliage that counts as fully thick.
+const THICKET_FULL: f32 = 0.5;
+/// How much of its speed a body loses in a full thicket.
+const THICKET_SLOW: f32 = 0.65;
+/// How quickly pushing into or out of foliage is felt, per second.
+const THICKET_RATE: f32 = 8.0;
+/// Extra airspeed the glider loses per second in foliage, as a share of its airspeed.
+const THICKET_GLIDE_DRAG: f32 = 1.5;
 
 /// Airspeed the glider settles at when flown level.
 const GLIDE_TRIM: f32 = m(10.4);
@@ -89,6 +98,8 @@ pub struct Player {
     pub heading: f32,
     /// Advances while afloat, for the rocking of the boat.
     swell: f32,
+    /// How much foliage the body is pushing through, smoothed, 0 to 1.
+    thicket: f32,
 }
 
 impl Player {
@@ -104,6 +115,7 @@ impl Player {
             bank: 0.0,
             heading: 0.0,
             swell: 0.0,
+            thicket: 0.0,
         }
     }
 
@@ -213,7 +225,8 @@ impl Player {
         let look = controls.look.normalize_or_zero();
         let pitch = look.y.asin().clamp(-GLIDE_DIVE, GLIDE_CLIMB);
         let heading = Vec3::new(look.x, 0.0, look.z).normalize_or_zero();
-        let accel = -GLIDE_GRAVITY * pitch.sin() - (self.airspeed - GLIDE_TRIM) * GLIDE_DRAG;
+        let brush = self.airspeed * (self.thicket / THICKET_FULL).min(1.0) * THICKET_GLIDE_DRAG;
+        let accel = -GLIDE_GRAVITY * pitch.sin() - (self.airspeed - GLIDE_TRIM) * GLIDE_DRAG - brush;
         self.airspeed = (self.airspeed + accel * dt).clamp(GLIDE_MIN_SPEED, GLIDE_MAX_SPEED);
         // Below trim the wing starts to lose its grip and sink rate climbs quickly.
         let slow = ((GLIDE_TRIM - self.airspeed) / 3.0).max(0.0);
@@ -222,11 +235,32 @@ impl Player {
         self.vel += (target - self.vel) * (1.0 - (-3.0 * dt).exp());
     }
 
-    fn blocked(pos: DVec3, v: &mut impl Voxels) -> bool {
+    /// The range of voxels the body overlaps at `pos`.
+    fn body(pos: DVec3) -> (IVec3, IVec3) {
         let lo = (pos - DVec3::new(HALF_WIDTH, 0.0, HALF_WIDTH)).floor().as_ivec3();
         let hi = (pos + DVec3::new(HALF_WIDTH - SKIN, HEIGHT - SKIN, HALF_WIDTH - SKIN))
             .floor()
             .as_ivec3();
+        (lo, hi)
+    }
+
+    /// The share of the body's space that is foliage.
+    fn foliage_around(pos: DVec3, v: &mut impl Voxels) -> f32 {
+        let (lo, hi) = Self::body(pos);
+        let (mut leaves, mut all) = (0u32, 0u32);
+        for y in lo.y..=hi.y {
+            for z in lo.z..=hi.z {
+                for x in lo.x..=hi.x {
+                    all += 1;
+                    leaves += (v.kind(x, y, z) == Kind::Foliage) as u32;
+                }
+            }
+        }
+        leaves as f32 / all as f32
+    }
+
+    fn blocked(pos: DVec3, v: &mut impl Voxels) -> bool {
+        let (lo, hi) = Self::body(pos);
         for y in lo.y..=hi.y {
             for z in lo.z..=hi.z {
                 for x in lo.x..=hi.x {
@@ -323,6 +357,9 @@ impl Player {
         let lean = if gliding { (controls.turn * 0.35).clamp(-0.5, 0.5) } else { 0.0 };
         self.bank += (lean - self.bank) * (1.0 - (-4.0 * dt).exp());
 
+        let foliage = Self::foliage_around(self.pos, v);
+        self.thicket += (foliage - self.thicket) * (1.0 - (-THICKET_RATE * dt).exp());
+
         let wish = Vec3::new(controls.wish.x, 0.0, controls.wish.z).normalize_or_zero();
         let speed = if self.swimming {
             SWIM_SPEED
@@ -330,7 +367,7 @@ impl Player {
             SPRINT_SPEED
         } else {
             WALK_SPEED
-        };
+        } * (1.0 - THICKET_SLOW * (self.thicket / THICKET_FULL).min(1.0));
         // Quick to respond on the ground, slower in air and water.
         let response = if self.swimming {
             4.0
@@ -517,6 +554,75 @@ mod tests {
         };
         run(&mut p, &mut world, sprint, 4.0);
         assert!(p.pos.x > walked * 1.4);
+    }
+
+    /// A floor at y = 10 with foliage over `x` in 5..45 wherever `leafy` says so.
+    fn thicket(leafy: impl Fn(i32, i32, i32) -> bool) -> Fake<impl Fn(i32, i32, i32) -> Kind> {
+        Fake(move |x, y, z| {
+            if y < 10 {
+                Kind::Solid
+            } else if (5..45).contains(&x) && leafy(x, y, z) {
+                Kind::Foliage
+            } else {
+                Kind::Air
+            }
+        })
+    }
+
+    #[test]
+    fn pushing_through_foliage_is_slower_but_never_stops_you() {
+        let mut open = thicket(|_, _, _| false);
+        let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut p, &mut open, forward(), 3.0);
+        let free = p.pos.x;
+
+        let mut dense = thicket(|_, _, _| true);
+        let mut q = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut q, &mut dense, forward(), 3.0);
+        assert!(q.pos.x < free * 0.75, "went {} against {free} in the open", q.pos.x);
+        assert!(q.pos.x > 5.0 + (3.0 * WALK_SPEED as f64) * 0.1, "stuck at {}", q.pos.x);
+
+        // It gets out the far side and picks up speed again.
+        run(&mut q, &mut dense, forward(), 12.0);
+        assert!(q.pos.x > 45.0, "still in the thicket at {}", q.pos.x);
+        let before = q.pos.x;
+        run(&mut q, &mut dense, forward(), 2.0);
+        assert!(q.pos.x - before > 2.0 * WALK_SPEED as f64 * 0.9);
+    }
+
+    #[test]
+    fn brushing_one_leaf_is_barely_felt() {
+        let mut open = thicket(|_, _, _| false);
+        let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut p, &mut open, forward(), 3.0);
+        let free = p.pos.x;
+        let mut sparse = thicket(|x, y, z| x % 12 == 0 && y == 12 && z == 0);
+        let mut q = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut q, &mut sparse, forward(), 3.0);
+        assert!(q.pos.x > free * 0.96, "went {} against {free}", q.pos.x);
+    }
+
+    #[test]
+    fn a_glider_loses_speed_in_foliage_but_keeps_flying() {
+        fn launch(world: &mut impl Voxels) -> Player {
+            let level = Controls {
+                look: Vec3::X,
+                ..Default::default()
+            };
+            let mut p = Player::new(DVec3::new(0.5, 200.0, 0.5));
+            p.mode = Mode::Glide;
+            p.airspeed = GLIDE_TRIM;
+            p.vel = Vec3::X * GLIDE_TRIM;
+            run(&mut p, world, level, 0.6);
+            p
+        }
+        let mut air = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Air });
+        let clear = launch(&mut air);
+        let mut canopy = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Foliage });
+        let brushed = launch(&mut canopy);
+        assert!(brushed.airspeed < clear.airspeed * 0.75, "{} against {}", brushed.airspeed, clear.airspeed);
+        assert!(brushed.airspeed >= GLIDE_MIN_SPEED);
+        assert_eq!(brushed.mode, Mode::Glide);
     }
 
     #[test]

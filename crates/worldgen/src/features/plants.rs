@@ -1,7 +1,8 @@
 //! Small plants: grass tufts, flowers, reeds, mushrooms and lily pads, modelled from
 //! blocks a quarter of a voxel across that stand on top of the voxel grid. Each is
 //! decided by its own column alone and stays inside it, so neighbouring chunks agree
-//! without looking at each other.
+//! without looking at each other. The boxes of one plant never overlap, because faces
+//! sharing a plane flicker against each other.
 
 use voxel::{
     Voxel,
@@ -72,15 +73,22 @@ impl Plot<'_> {
 }
 
 fn tuft(p: &mut Plot, rng: &mut Rng, main: Voxel, other: Voxel) {
-    for blade in 0..rng.int(4, 7) {
-        let (x, z) = (rng.int(0, CELLS - 1), rng.int(0, CELLS - 1));
+    // Every blade gets a cell of its own.
+    let mut cells: Vec<(i32, i32)> = (0..CELLS).flat_map(|x| (0..CELLS).map(move |z| (x, z))).collect();
+    let blades = rng.int(4, 7) as usize;
+    for i in 0..blades {
+        cells.swap(i, rng.int(i as i32, CELLS * CELLS - 1) as usize);
+    }
+    let mut taken = cells[..blades].to_vec();
+    for (blade, &(x, z)) in cells[..blades].iter().enumerate() {
         let height = rng.int(2, 5);
         let colour = if blade % 3 == 2 { other } else { main };
         p.stem(x, z, height, colour);
-        // Some blades bend over at the tip.
-        if rng.unit() < 0.3 {
-            let lean = if x < CELLS / 2 { 1 } else { -1 };
-            p.add([x + lean, height, z], [x + lean + 1, height + rng.int(1, 2), z + 1], colour, (true, true));
+        // Some blades bend over at the tip, into a cell nothing else is using.
+        let tip = (x + if x < CELLS / 2 { 1 } else { -1 }, z);
+        if rng.unit() < 0.3 && !taken.contains(&tip) {
+            taken.push(tip);
+            p.add([tip.0, height, z], [tip.0 + 1, height + rng.int(1, 2), z + 1], colour, (true, true));
         }
     }
 }
@@ -94,18 +102,30 @@ fn flower(p: &mut Plot, rng: &mut Rng, petals: Voxel) {
     p.add([x + side, 1, z], [x + side + 1, 2, z + 1], mat::TUFT, (false, true));
     // Petals in a cross, with a contrasting eye on top.
     p.add([x - 1, height, z], [x + 2, height + 1, z + 1], petals, (true, true));
-    p.add([x, height, z - 1], [x + 1, height + 1, z + 2], petals, (true, true));
+    p.add([x, height, z - 1], [x + 1, height + 1, z], petals, (true, true));
+    p.add([x, height, z + 1], [x + 1, height + 1, z + 2], petals, (true, true));
     let eye = if petals == mat::BLOOM_YELLOW { mat::REED_HEAD } else { mat::BLOOM_YELLOW };
     p.add([x, height + 1, z], [x + 1, height + 2, z + 1], eye, (true, true));
 }
 
 fn reeds(p: &mut Plot, rng: &mut Rng) {
-    for _ in 0..rng.int(2, 3) {
-        let (x, z) = (rng.int(0, CELLS - 2), rng.int(0, CELLS - 2));
+    // Each stem has a quarter of the voxel to itself, room for a head around it.
+    let mut quarters = [(0, 0), (2, 0), (0, 2), (2, 2)];
+    let stems = rng.int(2, 3) as usize;
+    for i in 0..stems {
+        quarters.swap(i, rng.int(i as i32, 3) as usize);
+    }
+    for &(qx, qz) in &quarters[..stems] {
+        let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
         let height = rng.int(10, 20);
-        p.stem(x, z, height, mat::REED);
         if rng.unit() < 0.5 {
-            p.add([x, height - 5, z], [x + 2, height - 1, z + 2], mat::REED_HEAD, (true, true));
+            // The stem stops under the head and a spike carries on above it.
+            let (below, above) = (height - 5, height - 1);
+            p.stem(x, z, below, mat::REED);
+            p.add([qx, below, qz], [qx + 2, above, qz + 2], mat::REED_HEAD, (true, true));
+            p.add([x, above, z], [x + 1, height, z + 1], mat::REED, (true, true));
+        } else {
+            p.stem(x, z, height, mat::REED);
         }
     }
 }
@@ -237,6 +257,36 @@ mod tests {
             }
             assert!((0..3).all(|axis| b.lo[axis] < b.hi[axis]), "{b:?} is empty");
         }
+    }
+
+    #[test]
+    fn the_boxes_of_a_plant_never_overlap() {
+        let mut lake = column(Cover::LakeBed, Biome::Deciduous);
+        lake.water = Some(40 + 8 * BLOCK);
+        let kinds = [
+            (column(Cover::Bank, Biome::Deciduous), mat::GRAVEL),
+            (lake, mat::MUD),
+            (column(Cover::Land, Biome::OldGrowth), mat::GRASS_LUSH),
+            (column(Cover::Land, Biome::Grassland), mat::GRASS_MEADOW),
+            (column(Cover::Land, Biome::Grassland), mat::FLOWER_YELLOW),
+        ];
+        let mut plants = 0;
+        for (col, surface) in &kinds {
+            for x in 0..300 {
+                for z in 0..300 {
+                    let mut boxes = Vec::new();
+                    grow(col, *surface, x, z, 5, &mut boxes);
+                    plants += !boxes.is_empty() as u32;
+                    for (i, a) in boxes.iter().enumerate() {
+                        for b in &boxes[i + 1..] {
+                            let overlap = (0..3).all(|axis| a.lo[axis] < b.hi[axis] && b.lo[axis] < a.hi[axis]);
+                            assert!(!overlap, "{a:?} overlaps {b:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(plants > 100);
     }
 
     #[test]

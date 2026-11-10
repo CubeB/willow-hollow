@@ -13,7 +13,7 @@ pub mod trees;
 
 use std::collections::HashMap;
 
-use glam::IVec3;
+use glam::{IVec2, IVec3, Vec2};
 use voxel::{Kind, Materials, Voxel};
 
 use crate::{
@@ -65,6 +65,103 @@ pub struct Placement {
     pub species: Species,
     pub variant: usize,
     pub turns: u32,
+    /// How the model follows the ground, for those that lie along it.
+    pub lie: Option<Lie>,
+}
+
+impl Placement {
+    /// How far the far end of the model is above its origin, or below if negative.
+    fn rise(&self) -> i32 {
+        self.lie.map_or(0, |l| l.rise)
+    }
+
+    /// The highest voxel the model can reach.
+    pub fn top(&self, lib: &Library) -> i32 {
+        self.pos.y + lib.get(self.species, self.variant).top + self.rise().max(0)
+    }
+
+    /// The lowest voxel the model can reach.
+    pub fn bottom(&self) -> i32 {
+        self.pos.y - 4 * BLOCK + self.rise().min(0)
+    }
+}
+
+/// How a long model lies on sloping ground: it is sheared from its origin to its far
+/// end, `length` voxels away along `dir`, which is `rise` voxels higher. Anything past
+/// `length` is left off, so a log can stop short of a drop or a river.
+#[derive(Clone, Copy, Debug)]
+pub struct Lie {
+    dir: Vec2,
+    length: f32,
+    rise: i32,
+}
+
+impl Lie {
+    /// How far to raise the voxel column at this offset from the origin, or None if the
+    /// log does not reach it.
+    fn height_at(&self, x: i32, z: i32) -> Option<i32> {
+        let along = (Vec2::new(x as f32, z as f32).dot(self.dir)).max(0.0);
+        (along <= self.length).then(|| (along / self.length * self.rise as f32).round() as i32)
+    }
+}
+
+/// Steepest slope a log will lie on, in voxels of rise per voxel.
+const LOG_MAX_SLOPE: f32 = 0.7;
+/// How far the ground may stray from a straight log, up or down: a log bridges a small
+/// dip and beds into a small hump.
+const LOG_MAX_GAP: f32 = 3.0;
+/// Shares of its full length a log may be shortened to, to fit the ground.
+const LOG_LENGTHS: [f32; 3] = [1.0, 0.8, 0.6];
+
+/// Fits a log running from the origin to offset `far`. `start` is the height it rests
+/// at on its origin column, and `ground` the same for the column at an offset, or None
+/// where a log may not lie.
+fn fit_log(far: IVec2, start: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<Lie> {
+    let full = far.as_vec2().length();
+    if full < 1.0 {
+        return None;
+    }
+    let dir = far.as_vec2() / full;
+    let at = |s: f32| {
+        let p = dir * s;
+        ground(p.x.round() as i32, p.y.round() as i32)
+    };
+    'lengths: for share in LOG_LENGTHS {
+        let length = full * share;
+        let Some(end) = at(length) else { continue };
+        let rise = end - start;
+        if rise.abs() as f32 > length * LOG_MAX_SLOPE {
+            continue;
+        }
+        let samples = (length / 2.0).ceil() as i32;
+        for k in 1..samples {
+            let t = k as f32 / samples as f32;
+            let Some(g) = at(length * t) else { continue 'lengths };
+            if (start as f32 + rise as f32 * t - g as f32).abs() > LOG_MAX_GAP {
+                continue 'lengths;
+            }
+        }
+        return Some(Lie { dir, length, rise });
+    }
+    None
+}
+
+/// Where a small model with a footprint `base` voxels in radius should stand so that no
+/// side of it hangs in the air, or None if the ground is too uneven. `ground` gives the
+/// height of the surface at an offset, or None over water.
+fn settle(species: Species, base: i32, start: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<i32> {
+    let (mut lowest, mut highest) = (start, start);
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
+        if let Some(g) = ground(dx * base, dz * base) {
+            lowest = lowest.min(g);
+            highest = highest.max(g);
+        }
+    }
+    if matches!(species, Species::Boulder | Species::MossyBoulder) {
+        // Rock can sit on any ground, but should not sink out of sight.
+        return Some(lowest.max(start - 2 * BLOCK));
+    }
+    (highest - lowest <= 3 * BLOCK).then_some(lowest)
 }
 
 /// Size classes. Each is a grid of square cells in world space.
@@ -88,7 +185,7 @@ const TREES: Layer = Layer {
 };
 const SMALL: Layer = Layer {
     cell: 6 * BLOCK,
-    reach: 5 * BLOCK,
+    reach: 12 * BLOCK,
     salt: 0x5a11,
 };
 
@@ -206,6 +303,7 @@ fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
 /// wide. `sampler` must cover that square plus the largest reach.
 pub fn place(
     world_seed: u32,
+    lib: &Library,
     sampler: &Sampler,
     lx0: i32,
     lz0: i32,
@@ -230,7 +328,7 @@ pub fn place(
                 let Some(species) = choose(&col, &layer, roll(3), roll(4), x, z, world_seed) else {
                     continue;
                 };
-                let pos = IVec3::new(x, col.top() + 1, z);
+                let mut pos = IVec3::new(x, col.top() + 1, z);
                 if layer.salt == GIANTS.salt {
                     giants.push(pos);
                 } else if layer.salt == TREES.salt
@@ -245,11 +343,42 @@ pub fn place(
                 if rise > 1.6 && !matches!(species, Species::Boulder | Species::MossyBoulder) {
                     continue;
                 }
+                let variant = (roll(5) * 64.0) as usize;
+                let turns = (roll(6) * 4.0) as u32;
+                let mut lie = None;
+                if layer.salt == SMALL.salt {
+                    let model = lib.get(species, variant);
+                    if let Some(axis) = model.axis {
+                        // A log needs clear, dry ground along its whole length.
+                        let bed = |dx: i32, dz: i32| {
+                            let c = sampler.column(lx + dx, lz + dz);
+                            let dry = matches!(c.cover, Cover::Land | Cover::Bank) && c.water_surface().is_none();
+                            (dry && c.clear >= m(1.2)).then_some(c.top() + 1)
+                        };
+                        let far = rotate(axis, turns);
+                        lie = fit_log(IVec2::new(far.x, far.z), pos.y, bed);
+                        if lie.is_none() {
+                            continue;
+                        }
+                        // Bedded in a little, so neither end shows daylight.
+                        pos.y -= 1;
+                    } else {
+                        let surface = |dx: i32, dz: i32| {
+                            let c = sampler.column(lx + dx, lz + dz);
+                            c.water_surface().is_none().then_some(c.top() + 1)
+                        };
+                        let Some(y) = settle(species, model.base, pos.y, surface) else {
+                            continue;
+                        };
+                        pos.y = y;
+                    }
+                }
                 out.push(Placement {
                     pos,
                     species,
-                    variant: (roll(5) * 64.0) as usize,
-                    turns: (roll(6) * 4.0) as u32,
+                    variant,
+                    turns,
+                    lie,
                 });
             }
         }
@@ -326,7 +455,14 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
 pub fn stamp(lib: &Library, mats: &Materials, p: &Placement, mut set: impl FnMut(IVec3, Voxel, bool)) {
     let t = lib.get(p.species, p.variant);
     for &(offset, v) in &t.voxels {
-        let q = p.pos + rotate(offset, p.turns);
+        let turned = rotate(offset, p.turns);
+        let mut q = p.pos + turned;
+        if let Some(lie) = &p.lie {
+            let Some(dy) = lie.height_at(turned.x, turned.z) else {
+                continue;
+            };
+            q.y += dy;
+        }
         // Wood and rock displace whatever is there; leaves only fill empty space.
         let force = mats.get(v).kind == Kind::Solid;
         set(q, v, force);
@@ -344,8 +480,9 @@ pub fn max_top(lib: &Library) -> i32 {
         .unwrap_or(0)
 }
 
-/// The tallest feature reach, for sizing sampler margins.
-pub const MAX_REACH: i32 = GIANTS.reach;
+/// How far from a chunk column the ground can matter to it: the widest feature reach,
+/// or a small feature that close whose far end looks at the ground as far again.
+pub const MAX_REACH: i32 = if GIANTS.reach > 2 * SMALL.reach { GIANTS.reach } else { 2 * SMALL.reach };
 
 /// Flowers and heather: drifts of colour on grass, one species per drift.
 pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxel> {
@@ -369,4 +506,94 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
     let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
     let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
     (roll < density * edge).then(|| kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_models_fit_within_the_reach_chunks_look_for() {
+        let lib = Library::build();
+        let small = [
+            Species::Bush,
+            Species::Fern,
+            Species::Boulder,
+            Species::MossyBoulder,
+            Species::FallenLog,
+            Species::Stump,
+            Species::Cactus,
+        ];
+        for species in small {
+            for variant in 0..species.variants() {
+                let reach = lib.get(species, variant).reach;
+                assert!(reach <= SMALL.reach, "{species:?} reaches {reach}, chunks only look {}", SMALL.reach);
+            }
+        }
+    }
+
+    #[test]
+    fn a_log_lies_flush_along_a_slope() {
+        let lib = Library::build();
+        for variant in 0..Species::FallenLog.variants() {
+            let model = lib.get(Species::FallenLog, variant);
+            for turns in 0..4 {
+                for slope in [-0.5f32, -0.2, 0.0, 0.3, 0.6] {
+                    let far = rotate(model.axis.expect("logs have an axis"), turns);
+                    let dir = Vec2::new(far.x as f32, far.z as f32).normalize();
+                    let ground = move |x: i32, z: i32| 100 + (Vec2::new(x as f32, z as f32).dot(dir) * slope).round() as i32;
+                    let lie = fit_log(IVec2::new(far.x, far.z), 100, |x, z| Some(ground(x, z))).expect("an even slope is fine");
+                    let p = Placement {
+                        pos: IVec3::new(0, 99, 0),
+                        species: Species::FallenLog,
+                        variant,
+                        turns,
+                        lie: Some(lie),
+                    };
+                    let mut bottoms: HashMap<(i32, i32), i32> = HashMap::new();
+                    stamp(&lib, &mat::build(), &p, |q, _, _| {
+                        let b = bottoms.entry((q.x, q.z)).or_insert(q.y);
+                        *b = (*b).min(q.y);
+                    });
+                    assert!(!bottoms.is_empty());
+                    // The columns on the log's centre line show how it sits on the ground.
+                    for (&(x, z), &bottom) in &bottoms {
+                        let v = Vec2::new(x as f32, z as f32);
+                        let along = v.dot(dir);
+                        if (v - dir * along).length() < 1.0 && along > 1.0 && along < lie.length - 1.0 {
+                            let g = ground(x, z);
+                            assert!(bottom <= g + 2 && bottom >= g - 3, "slope {slope}: bottom {bottom} on ground {g} at {x},{z}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_log_stops_short_of_a_drop_and_gives_up_on_a_cliff() {
+        let far = IVec2::new(20, 0);
+        // Water from 18 voxels out: the shorter length fits.
+        let lie = fit_log(far, 50, |x, _| (x < 18).then_some(50)).expect("shortened");
+        assert!(lie.length < 18.0);
+        // A cliff right at the start: nothing fits.
+        assert!(fit_log(far, 50, |x, _| Some(if x > 3 { 30 } else { 50 })).is_none());
+        // A deep dip mid-way is too wide to bridge, a shallow one is not.
+        let dip = |depth: i32| move |x: i32, _: i32| Some(if (8..12).contains(&x) { 50 - depth } else { 50 });
+        assert!(fit_log(far, 50, dip(2)).is_some());
+        assert!(fit_log(far, 50, dip(8)).is_none());
+    }
+
+    #[test]
+    fn bushes_stand_on_the_lowest_ground_and_avoid_rough_ground() {
+        let gentle = |x: i32, _: i32| Some(50 + x / 3);
+        assert_eq!(settle(Species::Bush, 6, 50, gentle), Some(48));
+        let rough = |x: i32, _: i32| Some(50 + x * 2);
+        assert_eq!(settle(Species::Bush, 6, 50, rough), None);
+        // Water does not drag a bush down into the river.
+        let bank = |x: i32, _: i32| (x >= 0).then_some(50);
+        assert_eq!(settle(Species::Bush, 6, 50, bank), Some(50));
+        // Rock always lands, without sinking out of sight.
+        assert_eq!(settle(Species::Boulder, 6, 50, rough), Some(50 - 2 * BLOCK));
+    }
 }
