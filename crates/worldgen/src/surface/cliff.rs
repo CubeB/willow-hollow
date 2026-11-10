@@ -84,10 +84,7 @@ pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part 
     if slope < STEEP || *ground < m(8.0) {
         return Part::None;
     }
-    // Hard rock outcrops: a minority of the land, a few hundred metres across.
-    let hard = perlin2(seed ^ 0xc110, wx / m64(420.0), wz / m64(420.0))
-        + 0.4 * perlin2(seed ^ 0xc112, wx / m64(150.0), wz / m64(150.0));
-    let zone = smoothstep(0.1, 0.26, hard);
+    let zone = hardness(seed, wx, wz);
     if zone <= 0.0 {
         return Part::None;
     }
@@ -184,4 +181,12 @@ impl Face {
             Part::None
         }
     }
+}
+
+/// How much the rock at world position `(wx, wz)` stands as cliffs, 0 to 1: hard rock
+/// outcrops are a minority of the land, a few hundred metres across.
+pub fn hardness(seed: u32, wx: f64, wz: f64) -> f32 {
+    let hard = perlin2(seed ^ 0xc110, wx / m64(420.0), wz / m64(420.0))
+        + 0.4 * perlin2(seed ^ 0xc112, wx / m64(150.0), wz / m64(150.0));
+    smoothstep(0.1, 0.26, hard)
 }
