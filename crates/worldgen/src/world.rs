@@ -9,7 +9,7 @@ use glam::{IVec3, Vec3};
 
 use voxel::{
     AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel,
-    mesh::{CELLS, PlantBox},
+    mesh::{CELLS, Current, PlantBox},
 };
 
 use crate::{
@@ -492,6 +492,21 @@ impl GameWorld {
             out.push((cy, chunk));
         }
 
+        // Which way the water runs in each column, for its surface and what floats on it.
+        let mut currents = Vec::new();
+        for (i, col) in columns.iter().enumerate() {
+            if col.water_surface().is_none() {
+                continue;
+            }
+            let (px, pz) = ((i / PAD) as i32, (i % PAD) as i32);
+            if let Some(v) = sampler.current(lx0 + px, lz0 + pz, col) {
+                if currents.is_empty() {
+                    currents = vec![Current::default(); PAD * PAD];
+                }
+                currents[i] = Current { x: v.x, z: v.y, river: true };
+            }
+        }
+
         // Cascade lips: water columns whose neighbour's water surface is lower.
         let mut cascades = Vec::new();
         for px in 1..PAD - 1 {
@@ -509,10 +524,19 @@ impl GameWorld {
                     }
                 }
                 if total > 0.0 {
+                    // A river goes over the lip the way it runs, however the pool below
+                    // happens to meet the voxels around it.
+                    let mut dir = dir.normalize_or_zero();
+                    let current = currents.get(px * PAD + pz).map_or(Vec3::ZERO, |c| Vec3::new(c.x, 0.0, c.z));
+                    let downstream = current.normalize_or_zero();
+                    if downstream.dot(dir) > 0.0 {
+                        dir = downstream;
+                    }
                     cascades.push(Cascade {
                         pos: Vec3::new((wx0 + px as i32) as f32 + 0.5, k as f32, (wz0 + pz as i32) as f32 + 0.5),
-                        dir: dir.normalize_or_zero(),
+                        dir,
                         drop: total,
+                        speed: current.length(),
                     });
                 }
             }
@@ -610,6 +634,7 @@ impl GameWorld {
         ColumnOutput {
             chunks: out,
             cascades,
+            currents,
             plants,
         }
     }

@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use glam::{DVec3, IVec3, Vec3};
-use voxel::{CHUNK, Kind, PaddedChunk};
+use glam::{DVec3, IVec3, Vec2, Vec3};
+use voxel::{CHUNK, Kind, PAD, PaddedChunk, mesh::Current};
 use worldgen::{
     World,
     scale::{m, m64},
@@ -13,6 +13,12 @@ use worldgen::{
 /// Answers "what is at this voxel?" for collision.
 pub trait Voxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind;
+
+    /// Which way the water in column `(x, z)` runs, metres per second along x and z;
+    /// zero where it is still or there is none.
+    fn current(&mut self, _x: i32, _z: i32) -> Vec2 {
+        Vec2::ZERO
+    }
 }
 
 /// Character size.
@@ -431,6 +437,22 @@ impl Player {
 pub struct WorldVoxels {
     world: Arc<GameWorld>,
     columns: HashMap<(i32, i32), Vec<(i32, PaddedChunk)>>,
+    /// The currents in the same columns (see `ColumnOutput::currents`).
+    currents: HashMap<(i32, i32), Vec<Current>>,
+}
+
+/// The chunks of column `col`, generating it if it is not held yet.
+fn load<'a>(
+    world: &GameWorld,
+    columns: &'a mut HashMap<(i32, i32), Vec<(i32, PaddedChunk)>>,
+    currents: &mut HashMap<(i32, i32), Vec<Current>>,
+    col: (i32, i32),
+) -> &'a [(i32, PaddedChunk)] {
+    columns.entry(col).or_insert_with(|| {
+        let out = world.generate_column(col.0, col.1);
+        currents.insert(col, out.currents);
+        out.chunks
+    })
 }
 
 impl WorldVoxels {
@@ -438,6 +460,7 @@ impl WorldVoxels {
         Self {
             world,
             columns: HashMap::new(),
+            currents: HashMap::new(),
         }
     }
 
@@ -450,6 +473,7 @@ impl WorldVoxels {
             );
             self.columns
                 .retain(|&(x, z), _| (x - cx).abs() <= 2 && (z - cz).abs() <= 2);
+            self.currents.retain(|c, _| self.columns.contains_key(c));
         }
     }
 }
@@ -458,11 +482,7 @@ impl WorldVoxels {
     /// The voxel id at a world position (air outside generated chunks).
     pub fn voxel(&mut self, x: i32, y: i32, z: i32) -> voxel::Voxel {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        let world = &self.world;
-        let chunks = self
-            .columns
-            .entry(col)
-            .or_insert_with(|| world.generate_column(col.0, col.1).chunks);
+        let chunks = load(&self.world, &mut self.columns, &mut self.currents, col);
         let cy = y.div_euclid(CHUNK);
         match chunks.iter().find(|(c, _)| *c == cy) {
             Some((_, chunk)) => chunk.get(
@@ -479,11 +499,7 @@ impl WorldVoxels {
 impl Voxels for WorldVoxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        let world = &self.world;
-        let chunks = self
-            .columns
-            .entry(col)
-            .or_insert_with(|| world.generate_column(col.0, col.1).chunks);
+        let chunks = load(&self.world, &mut self.columns, &mut self.currents, col);
         let cy = y.div_euclid(CHUNK);
         match chunks.iter().find(|(c, _)| *c == cy) {
             Some((_, chunk)) => {
@@ -492,12 +508,24 @@ impl Voxels for WorldVoxels {
                     y.rem_euclid(CHUNK) as usize + 1,
                     z.rem_euclid(CHUNK) as usize + 1,
                 );
-                world.materials().get(v).kind
+                self.world.materials().get(v).kind
             }
             // Columns hold every chunk from just under the ground to the top of
             // anything on it: outside that range it is rock below and air above.
             None if chunks.first().is_some_and(|(lowest, _)| cy < *lowest) => Kind::Solid,
             None => Kind::Air,
+        }
+    }
+
+    fn current(&mut self, x: i32, z: i32) -> Vec2 {
+        let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        load(&self.world, &mut self.columns, &mut self.currents, col);
+        match self.currents.get(&col) {
+            Some(c) if !c.is_empty() => {
+                let c = c[(x.rem_euclid(CHUNK) as usize + 1) * PAD + z.rem_euclid(CHUNK) as usize + 1];
+                Vec2::new(c.x, c.z)
+            }
+            _ => Vec2::ZERO,
         }
     }
 }
