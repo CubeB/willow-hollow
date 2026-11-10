@@ -6,7 +6,12 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Vec3};
 use voxel::Kind;
-use worldgen::{Cascade, biome::Biome, noise, scale::OLD_VOXEL as U};
+use worldgen::{
+    Cascade,
+    biome::Biome,
+    noise,
+    scale::{OLD_VOXEL as U, VOXELS_PER_METRE},
+};
 
 use crate::player::Voxels;
 
@@ -58,6 +63,8 @@ enum PKind {
     Spray,
     Mist,
     Leaf,
+    /// A fallen leaf floating on water, carried along by any current.
+    Afloat,
     Firefly,
     Mote,
     Butterfly,
@@ -204,7 +211,8 @@ impl Particles {
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
                 let side = Vec3::new(-c.dir.z, 0.0, c.dir.x) * self.range(-0.5, 0.5) * U;
-                let speed = 1.2 + drop * 0.35;
+                // A fast river throws its spray further out over the drop.
+                let speed = 1.2 + drop * 0.35 + c.speed * VOXELS_PER_METRE / U;
                 let particle = Particle {
                     kind: PKind::Spray,
                     pos: c.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.1 * U as f64, 0.0),
@@ -447,15 +455,51 @@ impl Particles {
                             p.life = p.age + 30.0;
                         }
                         Kind::Water => {
-                            // Only still water holds a leaf: it floats on the top voxel.
-                            p.settled = true;
-                            p.pos = next;
-                            if voxels.kind(below.x, below.y + 1, below.z) != Kind::Water {
-                                p.pos.y = below.y as f64 + 0.9;
+                            // It floats on the top voxel of the water, and goes where that takes it.
+                            let mut top = below.y;
+                            while top < below.y + 8 && voxels.kind(below.x, top + 1, below.z) == Kind::Water {
+                                top += 1;
                             }
+                            p.kind = PKind::Afloat;
+                            p.pos = DVec3::new(next.x, top as f64 + 0.9, next.z);
+                            p.vel = Vec3::ZERO;
                             p.life = p.age + 20.0;
                         }
                         _ => p.pos = next,
+                    }
+                }
+                PKind::Afloat => {
+                    // Carried at the speed of the current (metres a second, here in old
+                    // voxels a second), with a breath of wind; on still water that is all.
+                    let at = p.pos.floor().as_ivec3();
+                    let flow = voxels.current(at.x, at.z) * (VOXELS_PER_METRE / U);
+                    let target = Vec3::new(flow.x, 0.0, flow.y) + Vec3::new(wind.x, 0.0, wind.z) * 0.04;
+                    p.vel += (target - p.vel) * (1.0 - (-1.5 * dt).exp());
+                    // It turns slowly as it goes, more the faster the water.
+                    p.phase += p.vel.length() * 0.25 * dt;
+                    let next = p.pos + (p.vel * U * dt).as_dvec3();
+                    let to = next.floor().as_ivec3();
+                    if (to.x, to.z) == (at.x, at.z) {
+                        p.pos = next;
+                        continue;
+                    }
+                    // Into the next column only where the water there carries it on: at the
+                    // same level, or down the step of a cascade. Against a bank it slides
+                    // along whichever way is open, or waits there.
+                    let tries = [(to.x, to.z), (to.x, at.z), (at.x, to.z)];
+                    let open = tries.into_iter().filter(|&c| c != (at.x, at.z)).find_map(|(x, z)| water_top(voxels, x, at.y, z).map(|y| (x, z, y)));
+                    match open {
+                        Some((x, z, y)) => {
+                            if x == at.x {
+                                p.vel.x = 0.0;
+                            }
+                            if z == at.z {
+                                p.vel.z = 0.0;
+                            }
+                            let keep = |v: f64, c: i32, a: i32| if c == a { v.clamp(a as f64 + 0.01, a as f64 + 0.99) } else { v };
+                            p.pos = DVec3::new(keep(next.x, x, at.x), y as f64 + 0.9, keep(next.z, z, at.z));
+                        }
+                        None => p.vel = Vec3::ZERO,
                     }
                 }
                 PKind::Firefly => {
@@ -571,6 +615,17 @@ impl Particles {
 fn near_fade(pos: DVec3, camera: DVec3) -> f32 {
     let metres = (pos - camera).length() as f32 / worldgen::scale::VOXELS_PER_METRE;
     ((metres - 2.0) / 4.0).clamp(0.0, 1.0)
+}
+
+/// The top water voxel of column `(x, z)` for something floating in from a neighbour
+/// whose top water voxel is `y`: the same level, or lower down a step. `None` where the
+/// way is blocked by ground, or by water standing higher.
+fn water_top(voxels: &mut impl Voxels, x: i32, y: i32, z: i32) -> Option<i32> {
+    match voxels.kind(x, y, z) {
+        Kind::Water => (voxels.kind(x, y + 1, z) != Kind::Water).then_some(y),
+        Kind::Air => (1..=8).map(|d| y - d).find(|&y| voxels.kind(x, y, z) != Kind::Air).filter(|&y| voxels.kind(x, y, z) == Kind::Water),
+        _ => None,
+    }
 }
 
 /// Top of the ground at the column under `from`, searching downward.

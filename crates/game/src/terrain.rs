@@ -14,7 +14,7 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk},
+    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk, mesh_chunk_with_currents},
 };
 use worldgen::{Cascade, World, scale::m, world::GameWorld};
 
@@ -530,7 +530,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         .chunks
         .iter()
         .map(|(cy, chunk)| {
-            let mut mesh = mesh_chunk(chunk, world.materials());
+            let mut mesh = mesh_chunk_with_currents(chunk, world.materials(), &output.currents);
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);

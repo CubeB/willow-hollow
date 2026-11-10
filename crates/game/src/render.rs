@@ -644,7 +644,7 @@ impl Renderer {
             layout: Some(&water_layout),
             vertex: wgpu::VertexState {
                 module: &terrain_module,
-                entry_point: Some("vs"),
+                entry_point: Some("vs_water"),
                 compilation_options: Default::default(),
                 buffers: &terrain_buffers,
             },

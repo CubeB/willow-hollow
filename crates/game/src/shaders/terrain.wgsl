@@ -19,6 +19,9 @@ struct VOut {
     @location(5) @interpolate(flat) origin: vec3<i32>,
     @location(6) @interpolate(flat) flags: u32,
     @location(7) @interpolate(flat) band: vec2<f32>,
+    // Water only: the current, metres per second along x and z, and how much of a river
+    // (rather than a lake or the sea) the water is, 0..1. Zero for everything else.
+    @location(8) current: vec3<f32>,
 };
 
 // True if this ring of terrain has given way to another at this distance. Each pixel is
@@ -141,19 +144,123 @@ fn shade(in: VOut) -> vec4<f32> {
 
 @group(1) @binding(0) var scene_depth: texture_depth_2d;
 
-fn ripple_height(p: vec2<f32>, t: f32) -> f32 {
-    let q1 = p + vec2<f32>(t * 0.35, t * 0.22);
-    let q2 = p * 1.9 - vec2<f32>(t * 0.27, -t * 0.31);
+// Fastest current a water vertex carries, metres per second (MAX_CURRENT in mesh.rs).
+const MAX_CURRENT: f32 = 2.0;
+// Seconds the pattern on running water is carried downstream before it starts afresh.
+const FLOW_CYCLE: f32 = 1.6;
+
+// The current a water vertex carries in `a` bits 23..=31 (see mesh.rs): direction in 32
+// steps from +X toward +Z, speed in 8 steps spaced as (step / 7)^1.5, and a river bit.
+// Returns metres per second along x and z, and 1 for a river.
+fn water_current(a: u32) -> vec3<f32> {
+    let angle = f32((a >> 23u) & 31u) * (6.2831853 / 32.0);
+    let step = f32((a >> 28u) & 7u) / 7.0;
+    let speed = MAX_CURRENT * step * sqrt(step);
+    return vec3<f32>(cos(angle) * speed, sin(angle) * speed, f32(a >> 31u));
+}
+
+// The water's own vertex shader. Water faces carry their current where other faces keep
+// quarter-voxel fractions and corner bits, and never sway or go with the season.
+@vertex
+fn vs_water(in: VIn) -> VOut {
+    var out: VOut;
+    let local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
+    out.face = (in.a >> 18u) & 7u;
+    out.ao = f32((in.a >> 21u) & 3u) / 3.0;
+    out.flags = in.b >> 24u;
+    out.local = local;
+    out.band = in.band;
+    out.current = water_current(in.a);
+    var rel = local * in.scale + in.offset;
+    if (out.face == 2u) {
+        // Water surfaces sit a little below the top of their voxel.
+        rel.y -= 0.125;
+    }
+    out.rel = rel;
+    out.clip = G.view_proj * vec4<f32>(rel, 1.0);
+    let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
+    out.color = srgb_to_linear(rgb / 255.0);
+    out.origin = in.origin / i32(in.scale);
+    return out;
+}
+
+// Still water: two faint sets of ripples drifting slowly across each other, so the
+// surface shivers without going anywhere.
+fn still_height(p: vec2<f32>, t: f32) -> f32 {
+    let q1 = p + vec2<f32>(t * 0.12, t * 0.05);
+    let q2 = p * 1.9 - vec2<f32>(t * 0.09, -t * 0.14);
     return vnoise(q1) * 0.6 + vnoise(q2) * 0.4;
 }
 
-// Small moving ripples on the water surface, as a normal in world space.
-fn ripple_normal(world_xz: vec2<f32>, t: f32) -> vec3<f32> {
+// How far the pattern on running water has been carried in one of the two phases of
+// the flow (`phase` 0 or 0.5), metres. Carried for ever it would smear wherever the
+// current turns or changes speed, so each phase starts afresh every cycle, somewhere
+// new in the pattern so it never visibly repeats, while the other is at its strongest.
+fn flow_shift(flow: vec2<f32>, t: f32, phase: f32) -> vec2<f32> {
+    let c = t / FLOW_CYCLE + phase;
+    let jump = fract(floor(c) * vec2<f32>(0.618, 0.382) + phase) * vec2<f32>(37.0, 23.0);
+    return jump - flow * (fract(c) * FLOW_CYCLE);
+}
+
+// How much the second phase shows: none while it starts afresh, all while the first does.
+fn flow_blend(t: f32) -> f32 {
+    return abs(fract(t / FLOW_CYCLE) * 2.0 - 1.0);
+}
+
+// Running water: finer ripples, carried downstream with the current.
+fn running_height(p: vec2<f32>, flow: vec2<f32>, t: f32) -> f32 {
+    let q0 = p + flow_shift(flow, t, 0.0);
+    let q1 = p + flow_shift(flow, t, 0.5);
+    let a = vnoise(q0 * 1.3) * 0.6 + vnoise(q0 * 2.7 + vec2<f32>(9.1, 4.7)) * 0.4;
+    let b = vnoise(q1 * 1.3) * 0.6 + vnoise(q1 * 2.7 + vec2<f32>(9.1, 4.7)) * 0.4;
+    return mix(a, b, flow_blend(t));
+}
+
+// Height of the ripples at `p` (metres) on water running at `flow` (metres per second).
+fn ripple_height(p: vec2<f32>, flow: vec2<f32>, t: f32) -> f32 {
+    let run = smoothstep(0.03, 0.3, length(flow));
+    var h = 0.0;
+    if (run < 1.0) {
+        // Calm: lower than the ripples on a current.
+        h += still_height(p, t) * (1.0 - run) * 0.6;
+    }
+    if (run > 0.0) {
+        h += running_height(p, flow, t) * run;
+    }
+    return h;
+}
+
+// Small moving ripples on the water surface, as a normal in world space. Faster water
+// is rougher.
+fn ripple_normal(world_xz: vec2<f32>, flow: vec2<f32>, t: f32) -> vec3<f32> {
     let p = world_xz / VOXELS_PER_METRE;
     let d = 0.08;
-    let dx = ripple_height(p + vec2<f32>(d, 0.0), t) - ripple_height(p - vec2<f32>(d, 0.0), t);
-    let dz = ripple_height(p + vec2<f32>(0.0, d), t) - ripple_height(p - vec2<f32>(0.0, d), t);
-    return normalize(vec3<f32>(-dx * 1.4, 1.0, -dz * 1.4));
+    let dx = ripple_height(p + vec2<f32>(d, 0.0), flow, t) - ripple_height(p - vec2<f32>(d, 0.0), flow, t);
+    let dz = ripple_height(p + vec2<f32>(0.0, d), flow, t) - ripple_height(p - vec2<f32>(0.0, d), flow, t);
+    let rough = 1.4 * (1.0 + 0.3 * length(flow));
+    return normalize(vec3<f32>(-dx * rough, 1.0, -dz * rough));
+}
+
+// Foam on fast water, 0..1: streaks drawn out along the current and carried with it.
+// The noise is smeared downstream by averaging it along the flow, which needs no turning
+// of the pattern to the current's direction.
+fn foam_streaks(world_xz: vec2<f32>, flow: vec2<f32>, t: f32) -> f32 {
+    let speed = length(flow);
+    if (speed < 0.7) {
+        return 0.0;
+    }
+    let p = world_xz / VOXELS_PER_METRE;
+    let along = flow / speed * 0.75;
+    let q0 = (p + flow_shift(flow, t, 0.0)) * 2.5;
+    let q1 = (p + flow_shift(flow, t, 0.5)) * 2.5;
+    var a = 0.0;
+    var b = 0.0;
+    for (var k = 0; k < 4; k++) {
+        a += vnoise(q0 - along * f32(k));
+        b += vnoise(q1 - along * f32(k));
+    }
+    let streak = mix(a, b, flow_blend(t)) * 0.25;
+    return smoothstep(0.6, 0.78, streak) * smoothstep(0.7, 1.6, speed);
 }
 
 @fragment
@@ -179,7 +286,8 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Ripples are far finer than a pixel out in the coarser rings, and would only
         // sparkle there.
         let calm = smoothstep(80.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
-        let n = normalize(mix(ripple_normal(world_xz, t), vec3<f32>(0.0, 1.0, 0.0), calm));
+        let flow = in.current.xy;
+        let n = normalize(mix(ripple_normal(world_xz, flow, t), vec3<f32>(0.0, 1.0, 0.0), calm));
         let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
         let reflected = sky_color(reflect(view, n));
         // Clear and bright-bedded in the shallows, deep blue-green further out.
@@ -192,6 +300,13 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Sun glitter.
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
         color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face) * (1.0 - calm);
+        // Foam streaks on fast water.
+        let foam = foam_streaks(world_xz, flow, t) * 0.6 * (1.0 - calm);
+        if (foam > 0.0) {
+            let up = vec3<f32>(0.0, 1.0, 0.0);
+            color = mix(color, vec3<f32>(0.85) * (G.sun_color.rgb * 0.6 * max(G.sun_dir.y, 0.0) + ambient(up)), foam);
+            alpha = mix(alpha, 0.95, foam);
+        }
         // Further out, water looks the way the far view paints it: opaque, with no bed
         // showing through to mark the rings.
         let far = smoothstep(150.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
@@ -201,7 +316,11 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
         alpha = mix(alpha, 1.0, far);
         // In deep cold the surface is ice: pale, opaque and still.
-        let ice = ice_amount(world_xz);
+        var ice = ice_amount(world_xz);
+        // Running water freezes later than still water, and less: ice creeps out from
+        // the slow water by the banks, and the fast middle of a river stays open.
+        let swift = length(flow) / MAX_CURRENT;
+        ice *= mix(1.0, smoothstep(0.55 + 0.35 * swift, 1.0, G.season.z) * (1.0 - 0.6 * swift), in.current.z);
         if (ice > 0.0) {
             let sheet = vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(n_face));
             color = mix(color, sheet, ice);

@@ -12,6 +12,11 @@ use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 ///        single leaf voxels and plant boxes, so the voxel is `floor(position) - bits`)
 /// `b`: r | g << 8 | b << 16 | flags << 24 (flags include a 3-bit plant kind << 29)
 ///
+/// Water faces (those with [`flags::WATER`](crate::flags::WATER)) have no fractions or
+/// corner bits, so `a` bits 23..=31 hold the current instead (see [`pack_current`]):
+/// direction << 23 (5 bits) | speed << 28 (3 bits) | river << 31. `b` is laid out as for
+/// any face, with plant kind 0. All nine bits are zero on still water.
+///
 /// Positions are chunk-local, 0..=32. Face index: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq)]
@@ -53,10 +58,76 @@ impl ChunkMesh {
     }
 }
 
+/// How the water in one column runs.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Current {
+    /// Velocity across the ground, metres per second along x and along z.
+    pub x: f32,
+    pub z: f32,
+    /// Part of a river, which runs even where it is slow, rather than a lake or the sea.
+    pub river: bool,
+}
+
+/// Fastest current a water vertex can carry, metres per second. The water shader keeps
+/// the same number.
+pub const MAX_CURRENT: f32 = 2.0;
+/// First bit of the current in a water vertex's `a`.
+pub const CURRENT_SHIFT: u32 = 23;
+/// Directions a current is rounded to, a full turn from +X toward +Z.
+const CURRENT_DIRECTIONS: f32 = 32.0;
+/// Highest speed step: speeds are 0..=7, spaced as `MAX_CURRENT * (step / 7)^1.5`, so
+/// slow brooks, whose ripples are watched closest, get the finer steps.
+const CURRENT_STEPS: f32 = 7.0;
+
+/// Packs a current (metres per second along x and z) into the bits of a water vertex's
+/// `a` that it occupies: 23..=27 direction, 28..=30 speed, 31 river.
+pub fn pack_current(x: f32, z: f32, river: bool) -> u32 {
+    let speed = (x.hypot(z) / MAX_CURRENT).min(1.0);
+    let step = (speed.powf(1.0 / 1.5) * CURRENT_STEPS).round() as u32;
+    let dir = if step == 0 {
+        0
+    } else {
+        ((z.atan2(x) / std::f32::consts::TAU * CURRENT_DIRECTIONS).round() as i32).rem_euclid(CURRENT_DIRECTIONS as i32) as u32
+    };
+    (dir | step << 5 | (river as u32) << 8) << CURRENT_SHIFT
+}
+
+/// The current a water vertex carries, as the shader reads it.
+pub fn unpack_current(a: u32) -> Current {
+    let bits = a >> CURRENT_SHIFT;
+    let angle = (bits & 31) as f32 / CURRENT_DIRECTIONS * std::f32::consts::TAU;
+    let step = ((bits >> 5) & 7) as f32 / CURRENT_STEPS;
+    let speed = MAX_CURRENT * step * step.sqrt();
+    Current {
+        x: angle.cos() * speed,
+        z: angle.sin() * speed,
+        river: (bits >> 8) & 1 != 0,
+    }
+}
+
+/// The current at one corner of a water face: the mean of the four columns around it, so
+/// faces that share the corner agree and the current varies smoothly over the surface.
+/// Dry columns count as still, which slows the water along its banks. `x` and `z` are
+/// chunk-local corner coordinates, 0..=32.
+fn corner_current(currents: &[Current], x: usize, z: usize) -> u32 {
+    let (mut vx, mut vz, mut rivers) = (0.0, 0.0, 0);
+    // The corner at local x lies between local voxels x - 1 and x: padded x and x + 1.
+    for px in x..=x + 1 {
+        for pz in z..=z + 1 {
+            let c = currents[px * PAD + pz];
+            vx += c.x;
+            vz += c.z;
+            rivers += c.river as u32;
+        }
+    }
+    pack_current(vx * 0.25, vz * 0.25, rivers >= 2)
+}
+
 const N: usize = CHUNK as usize;
 
 /// A visible face awaiting merging. Zero means "no face"; equal non-zero keys can merge.
-/// bit 0: present, bit 1: water, bit 2: mergeable (uniform AO),
+/// bit 0: present, bit 1: water, bit 2: mergeable (uniform AO), bit 3: water surface
+/// beside a river, which carries the current at each corner (and so never merges),
 /// bits 8..32: colour, 32..40: flags, 40..48: four 2-bit AO values.
 type FaceKey = u64;
 
@@ -66,7 +137,16 @@ thread_local! {
     static FACE_MASK: std::cell::RefCell<Vec<FaceKey>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Meshes a chunk whose water is all still.
 pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
+    mesh_chunk_with_currents(chunk, mats, &[])
+}
+
+/// Meshes a chunk, giving its water surface the current in each column. `currents` is
+/// indexed `x * PAD + z` in padded coordinates, like the voxels, or empty if all the
+/// water is still.
+pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents: &[Current]) -> ChunkMesh {
+    assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
     const SOLID: u8 = Kind::Solid as u8;
     const WATER: u8 = Kind::Water as u8;
     /// Bits of the interior voxels (padded y 1..=N) in a column mask.
@@ -193,6 +273,14 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         used_cols[slice] |= 1 << u;
                     }
 
+                    // The surface on and beside a river is meshed a voxel at a time, so each
+                    // corner can carry the current where it stands and the flow turns
+                    // smoothly from voxel to voxel. Merged faces never touch a river
+                    // column, so their corners are still, as the averages beside them are.
+                    let running = face == 2
+                        && water_faces != 0
+                        && !currents.is_empty()
+                        && (x - 1..=x + 1).any(|i| (z - 1..=z + 1).any(|j| currents[i * PAD + j].river));
                     while water_faces != 0 {
                         let y = water_faces.trailing_zeros() as usize;
                         water_faces &= water_faces - 1;
@@ -200,9 +288,13 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         let m = mats.get(voxels[PaddedChunk::idx(x, y, z)]);
                         let fl = flags::WATER
                             | ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK);
-                        // Water has no AO and always merges.
-                        let key =
-                            1 | 2 | 4 | color_bits(m.color) << 8 | (fl as u64) << 32 | 0xFF << 40;
+                        // Water has no AO and, unless it is running, always merges.
+                        let key = 1
+                            | 2
+                            | (if running { 8 } else { 4 })
+                            | color_bits(m.color) << 8
+                            | (fl as u64) << 32
+                            | 0xFF << 40;
                         let (slice, u, v) = (p[n_axis] - 1, p[u_axis] - 1, p[v_axis] - 1);
                         mask[(slice * N + v) * N + u] = key;
                         used_rows[slice] |= 1 << v;
@@ -247,7 +339,7 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
                         for dv in 0..h {
                             mask[(v + dv) * N + u..(v + dv) * N + u + w].fill(0);
                         }
-                        emit_quad(&mut mesh, key, face, [n_axis, u_axis, v_axis], s, u, v, w, h);
+                        emit_quad(&mut mesh, key, face, [n_axis, u_axis, v_axis], s, u, v, w, h, currents);
                         u += w;
                     }
                 }
@@ -332,6 +424,7 @@ fn emit_quad(
     v: usize,
     w: usize,
     h: usize,
+    currents: &[Current],
 ) {
     let [n_axis, u_axis, v_axis] = axes;
     let positive = face.is_multiple_of(2);
@@ -356,8 +449,10 @@ fn emit_quad(
             corner |= ((corners[i].0 > u) as u32) << u_axis;
             corner |= ((corners[i].1 > v) as u32) << v_axis;
         }
+        // Running water keeps its current where other faces keep fractions and corners.
+        let current = if key & 8 != 0 { corner_current(currents, p[0] as usize, p[2] as usize) } else { 0 };
         Vertex {
-            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao(i) << 21 | corner << 29,
+            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao(i) << 21 | corner << 29 | current,
             b,
         }
     };
@@ -609,6 +704,79 @@ mod tests {
         // The lake bed under water is still drawn (it is visible through the water).
         assert_eq!(mesh.opaque.len(), 4);
         assert_eq!((mesh.water[0].b >> 24) as u8 & flags::WATER, flags::WATER);
+    }
+
+    #[test]
+    fn currents_survive_packing() {
+        assert_eq!(pack_current(0.0, 0.0, false), 0, "still water carries no bits");
+        assert_eq!(unpack_current(pack_current(0.0, 0.0, true)), Current { x: 0.0, z: 0.0, river: true });
+        for (x, z) in [(1.0, 0.0), (0.0, -0.5), (-1.3, 0.7), (0.3, 0.2), (1.5, -1.5), (-0.15, -0.25)] {
+            let c = unpack_current(pack_current(x, z, true));
+            assert!(c.river);
+            let speed = f32::hypot(x, z).min(MAX_CURRENT);
+            let back = c.x.hypot(c.z);
+            assert!((back - speed).abs() < 0.2 * speed.max(0.5), "speed {speed} came back as {back}");
+            let turn = (c.z.atan2(c.x) - z.atan2(x)).rem_euclid(std::f32::consts::TAU);
+            let turn = turn.min(std::f32::consts::TAU - turn);
+            assert!(turn <= std::f32::consts::PI / 32.0 + 1e-4, "({x}, {z}) turned {turn} rad");
+        }
+        let bits = pack_current(-2.0, 1.0, true);
+        assert_eq!(bits & ((1 << CURRENT_SHIFT) - 1), 0, "only bits 23..=31 are used");
+    }
+
+    /// A lake 6 voxels deep with a river running +X along z = 10..=12 (padded).
+    fn river_chunk() -> (Materials, PaddedChunk, Vec<Current>) {
+        let (m, stone, water) = mats();
+        let mut c = PaddedChunk::new();
+        let mut currents = vec![Current::default(); PAD * PAD];
+        for x in 0..PAD {
+            for z in 0..PAD {
+                let col = c.column_mut(x, z);
+                col[..5].fill(stone);
+                col[5..11].fill(water);
+                if (10..=12).contains(&z) {
+                    currents[x * PAD + z] = Current { x: 1.2, z: 0.0, river: true };
+                }
+            }
+        }
+        (m, c, currents)
+    }
+
+    #[test]
+    fn still_water_merges_and_carries_no_current() {
+        let (m, c, _) = river_chunk();
+        let still = vec![Current::default(); PAD * PAD];
+        for mesh in [mesh_chunk(&c, &m), mesh_chunk_with_currents(&c, &m, &still)] {
+            assert_eq!(mesh.water.len(), 4);
+            assert!(mesh.water.iter().all(|v| v.a >> CURRENT_SHIFT == 0));
+        }
+    }
+
+    #[test]
+    fn river_surface_carries_its_current_smoothly() {
+        let (m, c, currents) = river_chunk();
+        let mesh = mesh_chunk_with_currents(&c, &m, &currents);
+        // Padded z 9..=13 lie beside or on the river: 5 rows of 32 single voxels. The
+        // rest of the lake merges into a quad either side.
+        assert_eq!(mesh.water.len() / 4, 5 * 32 + 2);
+        let mut at: std::collections::HashMap<[u32; 3], u32> = Default::default();
+        for v in &mesh.water {
+            let bits = v.a >> CURRENT_SHIFT;
+            assert_eq!(*at.entry(pos(v)).or_insert(bits), bits, "faces disagree at corner {:?}", pos(v));
+            let cur = unpack_current(v.a);
+            // Local z is padded z - 1. Corners at local z 10 and 11 sit wholly in the river.
+            match pos(v)[2] {
+                10 | 11 => {
+                    assert!(cur.river);
+                    assert!((cur.x - 1.2).abs() < 0.2 && cur.z.abs() < 1e-3, "{cur:?}");
+                }
+                9 | 12 => {
+                    assert!(cur.river, "half river, half lake counts as river");
+                    assert!(cur.x > 0.3 && cur.x < 0.9, "the bank side runs slower: {cur:?}");
+                }
+                _ => assert_eq!(cur, Current::default()),
+            }
+        }
     }
 
     #[test]

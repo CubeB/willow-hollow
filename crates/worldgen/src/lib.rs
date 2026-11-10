@@ -13,7 +13,10 @@ pub mod trails;
 pub mod world;
 
 use glam::Vec3;
-use voxel::{Materials, PaddedChunk, mesh::PlantBox};
+use voxel::{
+    Materials, PaddedChunk,
+    mesh::{Current, PlantBox},
+};
 
 /// A place where flowing water drops to a lower level: the lip of a fall or the step
 /// of a cascade. Spray and sound come from here.
@@ -25,6 +28,8 @@ pub struct Cascade {
     pub dir: Vec3,
     /// Height of the drop in voxels.
     pub drop: f32,
+    /// How fast the river runs over the lip, metres per second (0 for still water).
+    pub speed: f32,
 }
 
 /// Everything generated for one chunk column.
@@ -32,6 +37,9 @@ pub struct ColumnOutput {
     /// `(chunk y, voxels)`, lowest first with none skipped.
     pub chunks: Vec<(i32, PaddedChunk)>,
     pub cascades: Vec<Cascade>,
+    /// The current in each column, indexed `x * PAD + z` in padded coordinates like the
+    /// chunks' voxels, or empty if no water here runs.
+    pub currents: Vec<Current>,
     /// Small plants standing on the columns inside this chunk column.
     pub plants: Vec<PlantBox>,
 }

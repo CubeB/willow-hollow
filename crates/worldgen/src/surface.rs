@@ -11,6 +11,7 @@ use glam::{Vec2, vec2};
 
 mod cliff;
 mod coast;
+mod current;
 mod ravine;
 
 use crate::{
