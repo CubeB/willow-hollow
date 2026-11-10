@@ -4,12 +4,16 @@ mod camera;
 mod env;
 mod farview;
 mod gfx;
+mod impostors;
+mod lod;
 mod overlay;
 mod particles;
 mod player;
 mod profile;
 mod render;
+mod season;
 mod settings;
+mod weather;
 mod terrain;
 mod vehicles;
 
@@ -43,6 +47,7 @@ use camera::{Camera, FlyController};
 use env::Environment;
 use farview::FarView;
 use gfx::{Gpu, WindowSurface};
+use impostors::Impostors;
 use overlay::Overlay;
 use particles::{Particles, Surroundings};
 use player::{Controls, Mode, Player, WorldVoxels};
@@ -64,6 +69,10 @@ struct Options {
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
+    /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
+    date: Option<f32>,
+    /// Weather to hold for this run (clear, overcast, rain, snow, storm, fog).
+    weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
     fresh: bool,
     /// Render one frame to this PNG without opening a window, then exit.
@@ -85,6 +94,8 @@ impl Default for Options {
             fly: false,
             look: (35.0, -18.0),
             time: None,
+            date: None,
+            weather: None,
             fresh: false,
             screenshot: None,
             audio: true,
@@ -105,6 +116,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --fly                 start in free-fly mode (F toggles in game)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
+  --season S            spring, summer, autumn or winter
+  --date F              time of year, 0-1 from the spring equinox
+  --weather W           hold the weather: clear, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
@@ -153,6 +167,15 @@ fn parse_args() -> Result<Options> {
                 o.look = (v[0], v[1]);
             }
             "--time" => o.time = Some(value()?.parse()?),
+            "--date" => o.date = Some(value()?.parse::<f32>()?.rem_euclid(1.0)),
+            "--weather" => {
+                let name = value()?;
+                o.weather = Some(weather::Forced::named(&name).ok_or_else(|| anyhow::anyhow!("unknown weather {name}"))?);
+            }
+            "--season" => {
+                let name = value()?;
+                o.date = Some(season::named(&name).ok_or_else(|| anyhow::anyhow!("unknown season {name}"))?);
+            }
             "--radius" => o.overrides.radius = Some(value()?.parse::<i32>()?.clamp(1, 64)),
             "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
@@ -218,6 +241,21 @@ const BOARD_REACH: f64 = m64(4.8);
 
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
+type Leaves = Vec<(DVec3, [f32; 3], particles::LeafShape)>;
+
+/// Which shape of leaf a tree's foliage sheds; plants and vines shed none.
+fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
+    use particles::LeafShape::*;
+    use worldgen::materials as mat;
+    Some(match v {
+        mat::NEEDLES | mat::NEEDLES_REDWOOD => Needle,
+        mat::LEAVES_WILLOW | mat::LEAVES_ACACIA | mat::LEAVES_PALM => Slip,
+        mat::LEAVES_MAPLE | mat::LEAVES_MAPLE_RED => Autumn,
+        mat::LEAVES_CHERRY => Petal,
+        mat::LEAVES_OAK | mat::LEAVES_BIRCH | mat::LEAVES_JUNGLE | mat::LEAVES_BAOBAB => Broad,
+        _ => return None,
+    })
+}
 
 /// Samples voxels around the camera for leaves (to shed) and flowers (for butterflies),
 /// and reads the biome. Cheap enough to do every couple of seconds.
@@ -226,7 +264,7 @@ fn scan_surroundings(
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
-) -> (worldgen::biome::Biome, Spots, Spots) {
+) -> (worldgen::biome::Biome, Leaves, Spots) {
     use worldgen::materials as mat;
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;
@@ -249,7 +287,9 @@ fn scan_surroundings(
             let v = voxels.voxel(x, y, z);
             let kind = mats.get(v).kind;
             if kind == voxel::Kind::Foliage && mats.get(below).kind == voxel::Kind::Air {
-                leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color)));
+                if let Some(shape) = leaf_shape(v) {
+                    leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color), shape));
+                }
                 break;
             }
             if kind == voxel::Kind::Solid {
@@ -268,7 +308,7 @@ fn scan_surroundings(
     (biome, leaves, flowers)
 }
 
-type Scan = (worldgen::biome::Biome, Spots, Spots);
+type Scan = (worldgen::biome::Biome, Leaves, Spots);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -320,14 +360,18 @@ struct Running {
     renderer: Renderer,
     streamer: Streamer,
     far: FarView,
+    impostors: Impostors,
     env: Environment,
     particles: Particles,
     /// Leaf and flower voxels near the player, refreshed now and then.
-    leaves: Vec<(DVec3, [f32; 3])>,
+    leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
+    /// How warm the biome underfoot is, eased as the player crosses into another.
+    warmth: f32,
+    weather: weather::Weather,
     audio: Option<Audio>,
     /// The settings in force.
     settings: Settings,
@@ -444,6 +488,7 @@ impl Running {
         }
         let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
         let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
+        let date = opts.date.or(progress.map(|p| p.date)).unwrap_or(season::DEFAULT_DATE);
         Ok(Self {
             window,
             overlay,
@@ -454,14 +499,17 @@ impl Running {
             player,
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
+            impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
-            env: Environment::at_time(time),
+            env: Environment::at(time, date),
             particles: Particles::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
+            warmth: season::warmth(worldgen::biome::Biome::Grassland),
+            weather: weather::Weather::new(opts.weather),
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
             saved,
@@ -565,6 +613,7 @@ impl Running {
             yaw: self.camera.yaw,
             pitch: self.camera.pitch,
             time: self.env.time,
+            date: self.env.date,
             travel: match (flying, self.player.mode) {
                 (true, _) => Travel::Flying,
                 (false, Mode::Boat) => Travel::Sailing,
@@ -726,13 +775,18 @@ impl Running {
         self.cpu.lap(0);
         self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
         self.far.update(&self.gpu, self.camera.pos);
+        self.impostors.update(&self.gpu, self.camera.pos);
         self.cpu.lap(1);
 
         // The day turns.
-        if self.settings.day_minutes > 0.0 {
-            self.env = Environment::at_time(self.env.time + dt * 24.0 / (self.settings.day_minutes * 60.0));
+        let days = if self.settings.day_minutes > 0.0 { dt / (self.settings.day_minutes * 60.0) } else { 0.0 };
+        if days > 0.0 {
+            let date = season::advance(self.env.date, days, self.settings.year_days);
+            self.env = Environment::at(self.env.time + days * 24.0, date);
         }
         self.save_timer -= dt;
+        self.weather.update(dt, days, self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
+        self.warmth += (season::warmth(self.biome) - self.warmth) * (1.0 - (-0.4 * dt).exp());
 
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
@@ -755,6 +809,10 @@ impl Running {
             leaves: &self.leaves,
             flowers: &self.flowers,
             player_entered_water: entered_water,
+            leaf_fall: season::leaf_fall(self.env.date),
+            rain: self.weather.now.rain,
+            snow: self.weather.now.snow,
+            storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
         };
         self.particles.update(dt, &surroundings, &mut self.voxels);
@@ -780,14 +838,18 @@ impl Running {
         self.cpu.lap(3);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        let mut lit = self.env.clone();
+        self.weather.apply(&mut lit);
         let scene = render::Scene {
             camera: &self.camera,
-            env: &self.env,
+            env: &lit,
             terrain: &self.streamer,
             far: &self.far,
+            impostors: &self.impostors,
             particles: self.particles.instances(),
             props: &self.props,
             wind: self.particles.wind.lagged * OLD_VOXEL,
+            ground: season::Ground::at(self.env.date, self.warmth, self.weather.snowpack, self.weather.wet),
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
         self.cpu.lap(4);
@@ -814,6 +876,7 @@ impl Running {
             _ => None,
         };
         let mut time = self.env.time;
+        let mut date = self.env.date;
         let mut settings = self.settings;
         let mut choice = overlay::MenuChoice::default();
         let held = Some(self.streamer.radius()).filter(|r| *r < settings.radius);
@@ -873,14 +936,15 @@ impl Running {
                         }
                         ui.label(&cpu_line);
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
+                        ui.add(egui::Slider::new(&mut date, 0.0..=1.0).text("time of year"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
                     });
             });
-        if time != self.env.time {
-            self.env = Environment::at_time(time);
+        if time != self.env.time || date != self.env.date {
+            self.env = Environment::at(time, date);
         }
         if choice.resume {
             self.set_menu(false);
@@ -1020,13 +1084,15 @@ impl ApplicationHandler for App {
                         log::info!("{}", timer.summary());
                     }
                     log::info!(
-                        "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles",
+                        "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles, {} far tree boxes, arena {} MiB",
                         r.frame,
                         r.frame_ms,
                         1000.0 / r.frame_ms,
                         s.chunks,
                         d.quads_drawn as f64 / 1e6,
-                        d.far_tiles
+                        d.far_tiles,
+                        d.impostor_boxes,
+                        s.arena_bytes >> 20
                     );
                     el.exit();
                 }
@@ -1076,8 +1142,12 @@ fn main() -> Result<()> {
         let camera = make_camera(&opts, &world, None);
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
+        let mut impostors = Impostors::new(&gpu, world.clone());
         let t = Instant::now();
-        let env = Environment::at_time(opts.time.unwrap_or(10.0));
+        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
+        // Screenshots are clear unless a weather is asked for.
+        let weather = weather::Weather::new(opts.weather);
+        weather.apply(&mut env);
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
@@ -1099,6 +1169,10 @@ fn main() -> Result<()> {
                 leaves: &leaves,
                 flowers: &flowers,
                 player_entered_water: None,
+                leaf_fall: season::leaf_fall(env.date),
+                rain: weather.now.rain,
+                snow: weather.now.snow,
+                storm: weather.now.storm,
                 time: step as f64 / 60.0,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
@@ -1111,9 +1185,11 @@ fn main() -> Result<()> {
             &env,
             &mut streamer,
             &mut far,
+            &mut impostors,
             particles.instances(),
             &props,
             particles.wind.lagged * OLD_VOXEL,
+            season::Ground::at(env.date, season::warmth(biome), weather.snowpack, weather.wet),
         )?;
         let s = streamer.stats;
         log::info!(

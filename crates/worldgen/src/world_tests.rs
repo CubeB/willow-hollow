@@ -67,6 +67,35 @@ fn neighbouring_chunks_agree_on_their_shared_border() {
 }
 
 #[test]
+fn ground_is_continuous_across_a_range_border() {
+    // Find a seed and border where a range crosses, then walk the voxels either side.
+    let found = (0u32..64).find_map(|seed| {
+        (-6..6).find_map(|mx| {
+            let field = crate::structures::Field::new(seed, mx, 0);
+            (1..16)
+                .find(|k| field.land(1.0, -1.0 + *k as f32 / 8.0).is_some_and(|l| l > 0.3))
+                .map(|k| (seed, mx, k))
+        })
+    });
+    let (seed, mx, k) = found.expect("no border-crossing range in the seeds scanned");
+    let w = GameWorld::with_config(seed, SimConfig { size: 256 });
+    let border_x = (mx + 1) * MACRO_SIZE;
+    let z0 = (k * MACRO_SIZE) / 16;
+    let mut largest = 0.0f32;
+    let mut land = 0;
+    for z in (z0 - 3000..z0 + 3000).step_by(40) {
+        let (a, b) = (w.column(border_x - 1, z), w.column(border_x, z));
+        if a.ground > 0.0 {
+            land += 1;
+        }
+        largest = largest.max((a.ground - b.ground).abs());
+    }
+    assert!(land > 0, "no land at the sampled border");
+    // Neighbouring columns differ by normal fine terrain at most, never a cell-wide step.
+    assert!(largest < 6.0, "step of {largest} voxels across the border");
+}
+
+#[test]
 fn water_is_held_in_by_its_banks() {
     // Wherever a column holds water, each neighbour must either hold water too (a lower
     // level there is a step in the river: a cascade) or have ground reaching the

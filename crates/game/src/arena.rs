@@ -3,14 +3,11 @@
 
 use std::collections::BTreeMap;
 
-use voxel::mesh::Vertex;
-
 use crate::gfx::Gpu;
 
-const QUAD_BYTES: u64 = 4 * size_of::<Vertex>() as u64;
 const INITIAL_BYTES: u64 = 64 << 20;
 
-/// Where one mesh lives in the arena.
+/// Where one mesh lives in the arena, in the arena's units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeshSpan {
     start: u32,
@@ -20,6 +17,11 @@ pub struct MeshSpan {
 impl MeshSpan {
     pub fn first_vertex(&self) -> u32 {
         self.start * 4
+    }
+
+    /// The first unit, for arenas that hold something other than quads.
+    pub fn first(&self) -> u32 {
+        self.start
     }
 }
 
@@ -71,42 +73,48 @@ impl FreeList {
 pub struct VertexArena {
     buffer: wgpu::Buffer,
     free: FreeList,
-    max_quads: u32,
+    max_units: u32,
+    /// Bytes in one allocation unit: a quad of chunk vertices, say.
+    unit: u64,
+    label: &'static str,
 }
 
-fn create(gpu: &Gpu, quads: u32) -> wgpu::Buffer {
+fn create(gpu: &Gpu, label: &str, bytes: u64) -> wgpu::Buffer {
     gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("chunk arena"),
-        size: quads as u64 * QUAD_BYTES,
+        label: Some(label),
+        size: bytes,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     })
 }
 
 /// Like [`create`], but reports running out of GPU memory instead of treating it as fatal.
-fn try_create(gpu: &Gpu, quads: u32) -> Option<wgpu::Buffer> {
+fn try_create(gpu: &Gpu, label: &str, bytes: u64) -> Option<wgpu::Buffer> {
     let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let buffer = create(gpu, quads);
+    let buffer = create(gpu, label, bytes);
     pollster::block_on(scope.pop()).is_none().then_some(buffer)
 }
 
 impl VertexArena {
     /// `expected_bytes` is how much is likely to be needed. Reserving it now avoids
     /// stopping to copy everything into a larger buffer while the world loads.
-    pub fn new(gpu: &Gpu, expected_bytes: u64) -> Self {
+    /// `unit` is the size in bytes of what is allocated.
+    pub fn new(gpu: &Gpu, label: &'static str, expected_bytes: u64, unit: u64) -> Self {
         // Vertex numbers are u32, so four billion vertices is the ceiling regardless.
-        let max_quads = (gpu.device.limits().max_buffer_size / QUAD_BYTES).min(u32::MAX as u64 / 4) as u32;
-        let smallest = ((INITIAL_BYTES / QUAD_BYTES) as u32).min(max_quads);
-        let hoped = ((expected_bytes.max(INITIAL_BYTES) / QUAD_BYTES).min(max_quads as u64)) as u32;
+        let max_units = (gpu.device.limits().max_buffer_size / unit).min(u32::MAX as u64 / 4) as u32;
+        let smallest = ((INITIAL_BYTES / unit) as u32).min(max_units);
+        let hoped = ((expected_bytes.max(INITIAL_BYTES) / unit).min(max_units as u64)) as u32;
         // If the GPU can't spare that much at once, grow into it as usual.
-        let (buffer, quads) = match try_create(gpu, hoped) {
+        let (buffer, units) = match try_create(gpu, label, hoped as u64 * unit) {
             Some(buffer) => (buffer, hoped),
-            None => (create(gpu, smallest), smallest),
+            None => (create(gpu, label, smallest as u64 * unit), smallest),
         };
         Self {
             buffer,
-            free: FreeList::new(quads),
-            max_quads,
+            free: FreeList::new(units),
+            max_units,
+            unit,
+            label,
         }
     }
 
@@ -115,12 +123,12 @@ impl VertexArena {
     }
 
     pub fn capacity_bytes(&self) -> u64 {
-        self.free.capacity as u64 * QUAD_BYTES
+        self.free.capacity as u64 * self.unit
     }
 
-    /// Stores a mesh. None if the arena is full and the GPU cannot hold a larger one.
-    pub fn add(&mut self, gpu: &Gpu, verts: &[Vertex]) -> Option<MeshSpan> {
-        let quads = verts.len() as u32 / 4;
+    /// Stores some items. None if the arena is full and the GPU cannot hold a larger one.
+    pub fn add<T: bytemuck::Pod>(&mut self, gpu: &Gpu, items: &[T]) -> Option<MeshSpan> {
+        let quads = (size_of_val(items) as u64 / self.unit) as u32;
         let start = loop {
             if let Some(start) = self.free.alloc(quads) {
                 break start;
@@ -130,7 +138,7 @@ impl VertexArena {
             }
         };
         gpu.queue
-            .write_buffer(&self.buffer, start as u64 * QUAD_BYTES, bytemuck::cast_slice(verts));
+            .write_buffer(&self.buffer, start as u64 * self.unit, bytemuck::cast_slice(items));
         Some(MeshSpan { start, quads })
     }
 
@@ -139,14 +147,14 @@ impl VertexArena {
     }
 
     fn grow(&mut self, gpu: &Gpu) -> bool {
-        let capacity = self.free.capacity.saturating_mul(2).min(self.max_quads);
+        let capacity = self.free.capacity.saturating_mul(2).min(self.max_units);
         if capacity == self.free.capacity {
             return false;
         }
         // The old and new buffers exist together during the copy, so the GPU has to hold both.
-        let Some(buffer) = try_create(gpu, capacity) else {
-            log::warn!("no GPU memory for a larger chunk arena, staying at {} MiB", self.capacity_bytes() >> 20);
-            self.max_quads = self.free.capacity;
+        let Some(buffer) = try_create(gpu, self.label, capacity as u64 * self.unit) else {
+            log::warn!("no GPU memory for a larger {}, staying at {} MiB", self.label, self.capacity_bytes() >> 20);
+            self.max_units = self.free.capacity;
             return false;
         };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -155,7 +163,7 @@ impl VertexArena {
         gpu.queue.submit([encoder.finish()]);
         self.buffer = buffer;
         self.free.grow(capacity);
-        log::info!("chunk arena grew to {} MiB", self.capacity_bytes() >> 20);
+        log::info!("{} grew to {} MiB", self.label, self.capacity_bytes() >> 20);
         true
     }
 }

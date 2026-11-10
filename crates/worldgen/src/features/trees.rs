@@ -5,7 +5,7 @@
 //! without any two neighbours being the same.
 
 use glam::{IVec3, Vec3};
-use voxel::Voxel;
+use voxel::{Kind, Materials, Voxel};
 
 use super::shape::{Rng, Shape, Template};
 use crate::materials as mat;
@@ -104,6 +104,69 @@ impl Species {
         }
         s.build()
     }
+}
+
+/// One box of a low-detail stand-in for a model, in the model's voxel coordinates.
+/// `hi` is exclusive.
+#[derive(Clone, Copy, Debug)]
+pub struct ImpostorBox {
+    pub lo: IVec3,
+    pub hi: IVec3,
+    pub voxel: Voxel,
+}
+
+/// A few boxes standing in for a finished model: its trunk, then its crown cut into
+/// layers. Worked out from the voxels themselves, so a change to how a species grows
+/// changes its stand-in too.
+pub fn impostor(t: &Template, mats: &Materials) -> Vec<ImpostorBox> {
+    /// Tallest a layer of the crown may be.
+    const LAYER: i32 = 14;
+    const MAX_LAYERS: i32 = 6;
+    let is_leaf = |v: Voxel| mats.get(v).kind == Kind::Foliage;
+    // The box around most of these voxels: stray tips would make it far too wide.
+    let boxed = |list: &[&(IVec3, Voxel)], lo_y: i32, hi_y: i32| -> Option<ImpostorBox> {
+        let mut xs: Vec<i32> = list.iter().map(|(p, _)| p.x).collect();
+        let mut zs: Vec<i32> = list.iter().map(|(p, _)| p.z).collect();
+        xs.sort_unstable();
+        zs.sort_unstable();
+        let trim = list.len() / 8;
+        let (first, last) = (*list.first()?, list.len() - 1 - trim);
+        let mut counts: Vec<(Voxel, u32)> = Vec::new();
+        for (_, v) in list {
+            match counts.iter_mut().find(|c| c.0 == *v) {
+                Some(c) => c.1 += 1,
+                None => counts.push((*v, 1)),
+            }
+        }
+        let voxel = counts.iter().max_by_key(|c| c.1).map_or(first.1, |c| c.0);
+        Some(ImpostorBox {
+            lo: IVec3::new(xs[trim], lo_y, zs[trim]),
+            hi: IVec3::new(xs[last] + 1, hi_y, zs[last] + 1),
+            voxel,
+        })
+    };
+    let leaves: Vec<&(IVec3, Voxel)> = t.voxels.iter().filter(|(_, v)| is_leaf(*v)).collect();
+    let wood: Vec<&(IVec3, Voxel)> = t.voxels.iter().filter(|(p, v)| !is_leaf(*v) && p.y >= 0).collect();
+    // What the layers are cut from: a crown, or the whole of a tree with no leaves.
+    let body = if leaves.is_empty() { &wood } else { &leaves };
+    let Some(bottom) = body.iter().map(|(p, _)| p.y).min() else {
+        return Vec::new();
+    };
+    let top = body.iter().map(|(p, _)| p.y).max().unwrap_or(bottom) + 1;
+
+    let mut boxes = Vec::new();
+    if !leaves.is_empty() && bottom > 0 {
+        let stem: Vec<_> = wood.iter().copied().filter(|(p, _)| p.y <= bottom).collect();
+        boxes.extend(boxed(&stem, 0, bottom));
+    }
+    let layers = ((top - bottom) / LAYER).clamp(1, MAX_LAYERS);
+    for k in 0..layers {
+        let lo_y = bottom + (top - bottom) * k / layers;
+        let hi_y = bottom + (top - bottom) * (k + 1) / layers;
+        let layer: Vec<_> = body.iter().copied().filter(|(p, _)| (lo_y..hi_y).contains(&p.y)).collect();
+        boxes.extend(boxed(&layer, lo_y, hi_y));
+    }
+    boxes
 }
 
 /// A straight-ish trunk rooted a little below ground (so it does not float on a

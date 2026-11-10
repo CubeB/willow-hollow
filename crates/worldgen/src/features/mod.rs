@@ -6,9 +6,11 @@
 //! work out which features overlap it by looking at the cells around it, so a tree
 //! spanning many chunks is stamped identically by each of them.
 
+pub mod aquatic;
 pub mod attach;
 pub mod landmarks;
 pub mod moss;
+pub mod pebbles;
 pub mod plants;
 pub mod shape;
 pub mod trees;

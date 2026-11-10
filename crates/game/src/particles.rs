@@ -29,6 +29,8 @@ pub struct Wind {
     pub vector: Vec3,
     /// The same, lagging a little behind: for things that respond slowly.
     pub lagged: Vec3,
+    /// How hard it blows beyond the usual, 0..1: a gale (see weather.rs).
+    pub storm: f32,
 }
 
 impl Wind {
@@ -36,6 +38,7 @@ impl Wind {
         Self {
             vector: Vec3::ZERO,
             lagged: Vec3::ZERO,
+            storm: 0.0,
         }
     }
 
@@ -45,7 +48,7 @@ impl Wind {
         let z = noise::perlin2(0x2e, t, 7.1) * 1.6;
         // Gusts on top of the drift.
         let gust = 0.5 + 0.5 * noise::perlin2(0x3f, time * 0.4, 1.0);
-        self.vector = Vec3::new(x, 0.0, z) * (0.8 + gust * 1.4);
+        self.vector = Vec3::new(x, 0.0, z) * (0.8 + gust * 1.4) * (1.0 + self.storm * (0.8 + gust * 1.2));
         self.lagged += (self.vector - self.lagged) * (1.0 - (-0.4 * dt).exp());
     }
 }
@@ -60,6 +63,44 @@ enum PKind {
     Butterfly,
     Bird,
     Droplet,
+    Rain,
+    Snow,
+}
+
+/// What a falling leaf looks like, by the tree it came from.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LeafShape {
+    /// Needle flecks under spruce and pine.
+    Needle,
+    /// Long slips under willow, acacia and palm.
+    Slip,
+    /// Broad leaves: oak, birch, jungle, baobab.
+    Broad,
+    /// Big autumn leaves; these fall in heavier numbers.
+    Autumn,
+    /// Cherry blossom petals.
+    Petal,
+}
+
+impl LeafShape {
+    /// Size (width, thickness, length) in old voxels, and how many extra falls it brings.
+    fn size(self) -> Vec3 {
+        match self {
+            LeafShape::Needle => Vec3::new(0.04, 0.03, 0.14),
+            LeafShape::Slip => Vec3::new(0.07, 0.04, 0.36),
+            LeafShape::Broad => Vec3::new(0.2, 0.06, 0.24),
+            LeafShape::Autumn => Vec3::new(0.26, 0.06, 0.28),
+            LeafShape::Petal => Vec3::new(0.1, 0.03, 0.1),
+        }
+    }
+    fn weight(self) -> f32 {
+        match self {
+            LeafShape::Needle => 0.5,
+            LeafShape::Slip => 0.8,
+            LeafShape::Broad | LeafShape::Petal => 1.0,
+            LeafShape::Autumn => 3.5,
+        }
+    }
 }
 
 struct Particle {
@@ -84,10 +125,16 @@ pub struct Surroundings<'a> {
     pub sun_elevation: f32,
     pub cascades: &'a [Cascade],
     /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
-    pub leaves: &'a [(DVec3, [f32; 3])],
+    pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
     /// Flower voxels near the player.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
+    /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
+    pub leaf_fall: f32,
+    /// Weather: rain and snow strength and how hard the wind blows beyond usual, 0..1.
+    pub rain: f32,
+    pub snow: f32,
+    pub storm: f32,
     pub time: f64,
 }
 
@@ -99,7 +146,10 @@ pub struct Particles {
     pub wind: Wind,
 }
 
-const MAX_PARTICLES: usize = 6000;
+const MAX_PARTICLES: usize = 8000;
+/// Rain and snow alive at once at full strength.
+const RAIN_COUNT: f32 = 2200.0;
+const SNOW_COUNT: f32 = 1500.0;
 
 impl Particles {
     pub fn new() -> Self {
@@ -134,6 +184,7 @@ impl Particles {
     }
 
     pub fn update(&mut self, dt: f32, s: &Surroundings, voxels: &mut impl Voxels) {
+        self.wind.storm = s.storm;
         self.wind.update(s.time, dt);
         let day = s.sun_elevation > 0.0;
         let dusk = s.sun_elevation < 0.08;
@@ -187,19 +238,47 @@ impl Particles {
 
         // Leaves let go in the wind.
         if !s.leaves.is_empty() {
-            let windiness = 0.3 + self.wind.vector.length() * 0.4;
-            let rate = 2.5 * windiness * (s.leaves.len() as f32 / 400.0).min(1.5);
+            let gust = self.wind.vector.length();
+            // Gusts shake leaves loose far faster than a steady breeze does.
+            let windiness = 0.3 + gust * 0.4 + (gust - 1.8).max(0.0) * 2.0;
+            // Autumn groves (maple and the like) shed much more.
+            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32
+                // Leaves hold on through summer, let go in autumn, and few are left by winter.
+                * (0.2 + 2.4 * s.leaf_fall);
+            let rate = 2.5 * windiness * weight * (s.leaves.len() as f32 / 400.0).min(1.5);
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
-                let (pos, color) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
+                let (pos, color, shape) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
                 let particle = Particle {
                     kind: PKind::Leaf,
                     pos: pos + DVec3::new(self.range(0.1, 0.9) as f64, -0.1, self.range(0.1, 0.9) as f64),
                     vel: Vec3::ZERO,
                     age: 0.0,
                     life: self.range(9.0, 14.0),
-                    size: Vec3::new(0.22, 0.08, 0.22),
+                    size: shape.size() * self.range(0.8, 1.2),
                     color,
+                    phase: self.range(0.0, std::f32::consts::TAU),
+                    settled: false,
+                };
+                self.spawn(particle);
+            }
+        }
+
+        // Rain and snow fall around the player, from a little above, and stop where they land.
+        let (wide, high) = (14.0 / 0.8, 14.0 / 0.8);
+        for (kind, strength, count, life) in [(PKind::Rain, s.rain, RAIN_COUNT, 1.7), (PKind::Snow, s.snow, SNOW_COUNT, 8.0)] {
+            let n = (strength * count / life * dt + self.unit()).floor() as u32;
+            for _ in 0..n {
+                let (dx, dz) = (self.range(-wide, wide), self.range(-wide, wide));
+                let rain = kind == PKind::Rain;
+                let particle = Particle {
+                    kind,
+                    pos: s.camera + DVec3::new(dx as f64 * U as f64, self.range(0.4, 1.0) as f64 * high as f64 * U as f64, dz as f64 * U as f64),
+                    vel: Vec3::new(0.0, if rain { -self.range(10.0, 12.5) } else { -self.range(1.0, 1.7) }, 0.0),
+                    age: 0.0,
+                    life: life * 1.5,
+                    size: if rain { Vec3::new(0.025, 0.4, 0.025) } else { Vec3::splat(self.range(0.04, 0.08)) },
+                    color: if rain { [0.72, 0.8, 0.9] } else { [0.95, 0.97, 1.0] },
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                 };
@@ -317,9 +396,28 @@ impl Particles {
         // --- Simulation -----------------------------------------------------------
         let wind = self.wind.vector;
         let t = s.time as f32;
+        let mut splashes: Vec<DVec3> = Vec::new();
         for p in &mut self.particles {
             p.age += dt;
             match p.kind {
+                PKind::Rain | PKind::Snow => {
+                    let rain = p.kind == PKind::Rain;
+                    // Wind slants the rain and swings the snow about.
+                    let sway = if rain { 0.0 } else { (t * 1.3 + p.phase).sin() * 0.5 };
+                    let drift = wind * if rain { 1.2 } else { 0.7 };
+                    p.vel.x += (drift.x + sway - p.vel.x) * (1.0 - (-2.0 * dt).exp());
+                    p.vel.z += (drift.z + sway * 0.6 - p.vel.z) * (1.0 - (-2.0 * dt).exp());
+                    p.pos += (p.vel * U * dt).as_dvec3();
+                    let at = p.pos.floor().as_ivec3();
+                    match voxels.kind(at.x, at.y, at.z) {
+                        Kind::Solid | Kind::Foliage => p.age = p.life,
+                        Kind::Water => {
+                            p.age = p.life;
+                            splashes.push(p.pos);
+                        }
+                        _ => {}
+                    }
+                }
                 PKind::Spray | PKind::Droplet => {
                     p.vel.y -= 9.0 * dt;
                     p.pos += (p.vel * U * dt).as_dvec3();
@@ -345,12 +443,17 @@ impl Particles {
                         Kind::Solid => {
                             p.settled = true;
                             p.pos.y = below.y as f64 + 1.02;
-                            p.life = p.age + 6.0;
+                            // Leaves gather where they land and lie a good while.
+                            p.life = p.age + 30.0;
                         }
                         Kind::Water => {
+                            // Only still water holds a leaf: it floats on the top voxel.
                             p.settled = true;
                             p.pos = next;
-                            p.life = p.age + 5.0;
+                            if voxels.kind(below.x, below.y + 1, below.z) != Kind::Water {
+                                p.pos.y = below.y as f64 + 0.9;
+                            }
+                            p.life = p.age + 20.0;
                         }
                         _ => p.pos = next,
                     }
@@ -389,6 +492,23 @@ impl Particles {
                 }
             }
         }
+        // A few of the drops that hit water throw up a speck.
+        for (i, at) in splashes.into_iter().enumerate() {
+            if i % 5 == 0 {
+                let particle = Particle {
+                    kind: PKind::Droplet,
+                    pos: at,
+                    vel: Vec3::new(self.range(-0.6, 0.6), self.range(1.0, 2.2), self.range(-0.6, 0.6)),
+                    age: 0.0,
+                    life: self.range(0.15, 0.3),
+                    size: Vec3::splat(0.04),
+                    color: [0.8, 0.9, 0.98],
+                    phase: 0.0,
+                    settled: false,
+                };
+                self.spawn(particle);
+            }
+        }
         self.particles.retain(|p| p.age < p.life);
 
         // --- Instances --------------------------------------------------------------
@@ -412,6 +532,12 @@ impl Particles {
                     alpha *= on;
                     glow = 18.0 * on;
                 }
+                PKind::Rain => {
+                    // Lit by the day, not by the sun: streaks must read in dull light and dark.
+                    alpha *= 0.35;
+                    glow = 0.25 + 0.9 * s.sun_elevation.clamp(0.0, 1.0);
+                }
+                PKind::Snow => glow = 0.35 + 1.1 * s.sun_elevation.clamp(0.0, 1.0),
                 PKind::Mote => {
                     glow = 1.4;
                     color = [1.0, 0.95, 0.75];
@@ -453,4 +579,15 @@ fn ground_below(voxels: &mut impl Voxels, from: DVec3, depth: i32) -> Option<DVe
         prev = k;
     }
     None
+}
+
+#[cfg(test)]
+mod leaf_tests {
+    use super::LeafShape::*;
+
+    #[test]
+    fn shapes_differ_and_autumn_falls_heavier() {
+        assert!(Needle.size().z < Broad.size().z && Slip.size().z > Broad.size().z);
+        assert!(Autumn.weight() > Broad.weight());
+    }
 }

@@ -33,8 +33,14 @@ const SINK: f32 = worldgen::scale::m(0.8);
 /// Narrowest river drawn in the distance, in voxels.
 const MIN_RIBBON_WIDTH: f32 = worldgen::scale::m(2.0);
 
-/// Vertex of the far surface. `flags`: 0 = land, 128 = standing water in the surface
-/// itself (lake, sea), 255 = river ribbon (drawn over the land it lies on).
+/// Forest height carried per step of a land vertex's `flags`, in voxels.
+const LIFT_UNIT: f32 = 0.75;
+/// Largest `flags` value land may use.
+const MAX_LIFT_FLAGS: f32 = 100.0;
+
+/// Vertex of the far surface. `flags`: below 128 = land, in steps of how high its forest
+/// stands; 128 = standing water in the surface itself (lake, sea); 255 = river ribbon
+/// (drawn over the land it lies on).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct FarVertex {
@@ -313,7 +319,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                     let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
-                    let (mut color, flags) = cell_color(c, &mats, idx, gx.hypot(gz));
+                    let (mut color, mut flags) = cell_color(c, &mats, idx, gx.hypot(gz));
                     if flags == 0 {
                         // Slight variation from cell to cell, standing in for the
                         // texture voxels have up close.
@@ -321,18 +327,23 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                         let f = 0.93 + worldgen::noise::unit(h) * 0.12;
                         color = color.map(|v| (v as f32 * f).min(255.0) as u8);
                     }
+                    let mut lift = 0.0;
                     let y = if flags == FLAG_WATER {
                         surface::pool_level(c.desc.seed, c.lake[idx]) as f32 - 0.125
                     } else {
                         // Forested land stands higher by about the height of its canopy.
-                        let lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
+                        lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
                             .filter(|_| c.temperature[idx] >= 0.13 && gx.hypot(gz) <= 1.6)
                             .map_or(0.0, |(_, cover, height)| cover * height * 0.6 * OLD_VOXEL);
-                        h(x, z) - SINK + lift
+                        h(x, z) - SINK
                     };
+                    if flags == 0 {
+                        // Carried to the shader, which raises it only beyond the tree models.
+                        flags = (lift / LIFT_UNIT).round().min(MAX_LIFT_FLAGS) as u8;
+                    }
                     let pos = Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     lo = lo.min(pos);
-                    hi = hi.max(pos);
+                    hi = hi.max(pos + Vec3::Y * lift);
                     let pack = |g: f32| ((g / 4.0).clamp(-1.0, 1.0) * 32767.0) as i16;
                     verts.push(FarVertex {
                         pos: pos.to_array(),

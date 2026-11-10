@@ -24,6 +24,13 @@ struct Globals {
     cascades: vec4<f32>,
     // xyz: wind vector in voxels per second.
     wind: vec4<f32>,
+    // Nearest glowing fireflies: camera-relative xyz, glow strength in w (0 = unused).
+    lights: array<vec4<f32>, 4>,
+    // x: date, 0..1 from the spring equinox (see season.wgsl). y: snow cover at sea level.
+    // z: ice on still water.
+    season: vec4<f32>,
+    // x: how wet the ground is (0..1).
+    weather: vec4<f32>,
 };
 
 struct Shadows {
@@ -124,6 +131,20 @@ fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     // Fog takes the colour of the sky at the horizon in that direction.
     let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
     return mix(color, sky_color(dir), amount);
+}
+
+// Warm light from nearby fireflies, falling off over about eight metres.
+fn local_lights(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i++) {
+        let l = G.lights[i];
+        let d = l.xyz - rel;
+        let dist = length(d) / VOXELS_PER_METRE;
+        let wrap = 0.35 + 0.65 * max(dot(n, d / max(length(d), 0.001)), 0.0);
+        let reach = clamp(1.0 - dist / 8.0, 0.0, 1.0);
+        sum += vec3<f32>(0.85, 1.0, 0.35) * (l.w * 0.045) * wrap * reach * reach / (1.0 + dist * dist * 0.6);
+    }
+    return sum;
 }
 
 fn ambient(n: vec3<f32>) -> vec3<f32> {

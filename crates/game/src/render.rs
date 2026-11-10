@@ -17,8 +17,9 @@ use crate::{
     farview::{FarVertex, FarView},
     particles::ParticleInstance,
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
+    impostors::{self, BoxInstance, Impostors},
     profile::GpuTimer,
-    terrain::{PLANT_REACH, Streamer},
+    terrain::{LEVELS, PLANT_REACH, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -54,6 +55,12 @@ struct Globals {
     mist: [f32; 4],
     cascades: [f32; 4],
     wind: [f32; 4],
+    /// Nearest glowing particles (fireflies): camera-relative xyz, glow in w.
+    lights: [[f32; 4]; 4],
+    /// x: the date, 0..1 from the spring equinox. y: snow cover. z: ice on water.
+    season: [f32; 4],
+    /// x: how wet the ground is.
+    weather: [f32; 4],
 }
 
 #[repr(C)]
@@ -67,6 +74,7 @@ struct Shadows {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CascadeUniform {
     light_vp: [[f32; 4]; 4],
+    season: [f32; 4],
 }
 
 /// What one cascade's shadow map was last drawn from.
@@ -77,6 +85,19 @@ struct CascadeView {
     texel: f32,
     camera: DVec3,
     fwd: Vec3,
+}
+
+/// The few brightest-and-nearest glowing particles, which light the ground around them.
+fn nearest_glows(particles: &[ParticleInstance]) -> [[f32; 4]; 4] {
+    let mut best = [([0.0f32; 4], f32::MAX); 4];
+    for p in particles.iter().filter(|p| p.glow > 6.0) {
+        let d = Vec3::from(p.pos).length_squared();
+        if d < best[3].1 {
+            best[3] = ([p.pos[0], p.pos[1], p.pos[2], p.glow], d);
+            best.sort_by(|a, b| a.1.total_cmp(&b.1));
+        }
+    }
+    best.map(|b| b.0)
 }
 
 /// Whether cascade `i` takes its turn this frame. The far ones cover so much that they
@@ -97,6 +118,18 @@ struct Instance {
     offset: [f32; 3],
     /// Origin in world voxels (for stable per-voxel hashing).
     origin: [i32; 3],
+    /// World voxels per cell of its mesh.
+    scale: f32,
+    /// The range of horizontal distances this chunk's ring is drawn in.
+    band: [f32; 2],
+}
+
+/// The camera's position for the far trees' whole-voxel placement.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ImpostorCamera {
+    voxel: [i32; 4],
+    frac: [f32; 4],
 }
 
 /// Most cubes of solid moving models drawn in one frame.
@@ -108,10 +141,13 @@ pub struct Scene<'a> {
     pub env: &'a Environment,
     pub terrain: &'a Streamer,
     pub far: &'a FarView,
+    pub impostors: &'a Impostors,
     pub particles: &'a [ParticleInstance],
     /// Solid moving models (boats, the glider), drawn with the opaque scene.
     pub props: &'a [ParticleInstance],
     pub wind: Vec3,
+    /// Snow, ice and wetness on the ground.
+    pub ground: crate::season::Ground,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -120,6 +156,7 @@ pub struct DrawStats {
     pub chunks_culled: u32,
     pub quads_drawn: u64,
     pub far_tiles: u32,
+    pub impostor_boxes: u32,
     pub shadow_draws: [u32; CASCADES],
 }
 
@@ -160,8 +197,8 @@ fn draw_chunks(pass: &mut wgpu::RenderPass, indirect: Option<&wgpu::Buffer>, dra
     match indirect {
         Some(buffer) => pass.multi_draw_indexed_indirect(buffer, (list.start * size_of::<ChunkDraw>()) as u64, list.len() as u32),
         None => {
-            for [indices, _, _, base, instance] in &draws[list] {
-                pass.draw_indexed(0..*indices, *base as i32, *instance..*instance + 1);
+            for [indices, count, _, base, instance] in &draws[list] {
+                pass.draw_indexed(0..*indices, *base as i32, *instance..*instance + *count);
             }
         }
     }
@@ -222,6 +259,10 @@ pub struct Renderer {
     opaque_inside: wgpu::RenderPipeline,
     water: wgpu::RenderPipeline,
     far: wgpu::RenderPipeline,
+    impostor: wgpu::RenderPipeline,
+    impostor_cube: wgpu::Buffer,
+    impostor_camera: wgpu::Buffer,
+    impostor_bind: wgpu::BindGroup,
     shadow: wgpu::RenderPipeline,
     bright: wgpu::RenderPipeline,
     blur_h: wgpu::RenderPipeline,
@@ -516,9 +557,9 @@ impl Renderer {
             cache: None,
         });
 
-        let terrain_module = shader(device, "terrain", format!("{common}\n{}", include_str!("shaders/terrain.wgsl")));
+        let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
-        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3];
+        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2];
         let terrain_buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<Vertex>() as u64,
@@ -601,7 +642,7 @@ impl Renderer {
             cache: None,
         });
 
-        let shadow_module = shader(device, "shadow", include_str!("shaders/shadow.wgsl").to_string());
+        let shadow_module = shader(device, "shadow", format!("{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/shadow.wgsl")));
         let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow"),
             layout: Some(&shadow_layout),
@@ -668,6 +709,89 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // Far trees: instanced boxes, the box itself as four corners per side.
+        let impostor_camera = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("impostor camera"),
+            size: size_of::<ImpostorCamera>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let impostor_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("impostor camera"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::VERTEX)],
+        });
+        let impostor_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("impostor camera"),
+            layout: &impostor_layout_bg,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: impostor_camera.as_entire_binding(),
+            }],
+        });
+        let impostor_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("impostor"),
+            bind_group_layouts: &[Some(&scene_layout_bg), Some(&impostor_layout_bg)],
+            immediate_size: 0,
+        });
+        let impostor_module = shader(device, "impostor", format!("{common}\n{}", include_str!("shaders/impostor.wgsl")));
+        let impostor_box_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        let impostor_instance_attrs = wgpu::vertex_attr_array![2 => Sint32x3, 3 => Uint8x4, 4 => Unorm8x4];
+        let impostor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("impostor"),
+            layout: Some(&impostor_layout),
+            vertex: wgpu::VertexState {
+                module: &impostor_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &impostor_box_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<BoxInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &impostor_instance_attrs,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &impostor_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sides: [(Vec3, Vec3, Vec3); 6] = [
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+            (Vec3::Y, Vec3::Z, Vec3::X),
+            (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+            (Vec3::NEG_Z, Vec3::Y, Vec3::X),
+        ];
+        let mut box_corners: Vec<[f32; 6]> = Vec::with_capacity(24);
+        for (n, u, v) in sides {
+            for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let p = Vec3::splat(0.5) + (n + u * su + v * sv) * 0.5;
+                box_corners.push([p.x, p.y, p.z, n.x, n.y, n.z]);
+            }
+        }
+        let impostor_cube = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("impostor box"),
+            contents: bytemuck::cast_slice(&box_corners),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let sea_color = worldgen::materials::build().get(worldgen::materials::WATER).color;
         let sea_vertex = |x: f32, z: f32| FarVertex {
             pos: [x, -0.125, z],
@@ -882,6 +1006,10 @@ impl Renderer {
             opaque_inside,
             water,
             far,
+            impostor,
+            impostor_cube,
+            impostor_camera,
+            impostor_bind,
             shadow,
             bright,
             blur_h,
@@ -1009,8 +1137,9 @@ impl Renderer {
     pub fn render(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, scene: &Scene) {
         let Scene { camera, env, far, .. } = *scene;
         let device = &gpu.device;
-        // Horizontal distance out to which voxel terrain is fully loaded.
-        let voxel_radius = scene.terrain.complete_radius();
+        // Horizontal distances out to which each ring of voxel terrain is fully loaded.
+        let bands = scene.terrain.bands();
+        let voxel_radius = bands[LEVELS - 1];
         let aspect = self.width as f32 / self.height as f32;
         let view_proj = camera.view_proj(aspect);
         let tan = (camera.fov_y * 0.5).tan();
@@ -1045,7 +1174,7 @@ impl Renderer {
                 gpu.queue.write_buffer(
                     &self.cascade_binds[i].0,
                     0,
-                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d() }),
+                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d(), season: [env.date, 0.0, 0.0, 0.0] }),
                 );
             }
             // A map drawn earlier is still right: it is fixed in the world, so only the
@@ -1069,7 +1198,8 @@ impl Renderer {
             sky_zenith: v4(env.sky_zenith, 0.0),
             sky_horizon: v4(env.sky_horizon, 0.0),
             fog: [env.fog_density, voxel_radius, env.clouds, time * m(4.8)],
-            cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, 0.0],
+            // w: how far the tree models reach, for the far view's forest height.
+            cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, impostors::REACH],
             mist: [env.mist, m(28.0), m(-12.0), 0.0],
             cascades: [
                 CASCADE_ENDS[0],
@@ -1078,6 +1208,9 @@ impl Renderer {
                 CLOUD_HEIGHT - camera.pos.y as f32,
             ],
             wind: v4(scene.wind, 0.0),
+            lights: nearest_glows(scene.particles),
+            season: [env.date, scene.ground.snow, scene.ground.frozen, 0.0],
+            weather: [scene.ground.wet, 0.0, 0.0, 0.0],
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1097,7 +1230,7 @@ impl Renderer {
         let far_casters = if env.sun_dir.y > HIGH_SUN { [false, false, true, false, false, false] } else { toward_sun };
         // How far a shadow can reach across the ground, for finding what can cast into view.
         let sweep = -env.sun_dir * (m(120.0) / env.sun_dir.y.clamp(0.15, 1.0));
-        let size = CHUNK as f32;
+        let chunk_size = CHUNK as f32;
         let mut instances: Vec<Instance> = Vec::new();
         let mut opaque: Vec<ChunkDraw> = Vec::new();
         let mut opaque_edge: Vec<ChunkDraw> = Vec::new();
@@ -1106,9 +1239,20 @@ impl Renderer {
         let mut stats = DrawStats::default();
         let mut max_quads = 0;
         for chunk in scene.terrain.chunks() {
-            let origin = chunk.pos * CHUNK;
+            let scale = 1 << chunk.level;
+            let band = [if chunk.level == 0 { 0.0 } else { bands[chunk.level as usize - 1] }, bands[chunk.level as usize]];
+            let size = chunk_size * scale as f32;
+            let origin = chunk.pos * CHUNK * scale;
             let offset = (origin.as_dvec3() - camera.pos).as_vec3();
             let far_corner = offset + Vec3::splat(size);
+            // How far across the ground the chunk spans from the camera.
+            let nearest = Vec2::new(offset.x.max(-far_corner.x).max(0.0), offset.z.max(-far_corner.z).max(0.0)).length();
+            let reach = Vec2::new(offset.x.abs().max(far_corner.x.abs()), offset.z.abs().max(far_corner.z.abs())).length();
+            // A ring draws only between its two circles.
+            if band[0] >= band[1] || reach < band[0] || nearest >= band[1] {
+                stats.chunks_culled += 1;
+                continue;
+            }
             let visible = frustum.intersects_box(offset, far_corner);
             let center = offset + Vec3::splat(size * 0.5);
             // Each cascade only draws what falls inside its own box of light, and only
@@ -1134,6 +1278,8 @@ impl Renderer {
             instances.push(Instance {
                 offset: offset.to_array(),
                 origin: origin.to_array(),
+                scale: scale as f32,
+                band,
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
@@ -1147,9 +1293,9 @@ impl Renderer {
                     }
                 }
                 if visible {
-                    // Chunks entirely inside the voxel radius never need trimming to it.
-                    let reach = Vec2::new(offset.x.abs().max(far_corner.x.abs()), offset.z.abs().max(far_corner.z.abs())).length();
-                    let list = if reach + m(1.0) < voxel_radius { &mut opaque } else { &mut opaque_edge };
+                    // Chunks entirely inside their ring never need trimming to it.
+                    let inside = reach + m(1.0) < band[1] && nearest >= band[0];
+                    let list = if inside { &mut opaque } else { &mut opaque_edge };
                     push_faces(list, mesh, terrain, seen, index);
                     if near {
                         push_faces(list, mesh, plants, seen, index);
@@ -1176,6 +1322,8 @@ impl Renderer {
             instances.push(Instance {
                 offset: offset.to_array(),
                 origin: [0; 3],
+                scale: 1.0,
+                band: [0.0; 2],
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -1191,8 +1339,23 @@ impl Renderer {
         instances.push(Instance {
             offset: [0.0, -camera.pos.y as f32, 0.0],
             origin: [0; 3],
+            scale: 1.0,
+            band: [0.0; 2],
         });
         stats.far_tiles = far_tiles.len() as u32;
+
+        // Far trees, a square of them at a time.
+        let mut impostor_draws: Vec<ChunkDraw> = Vec::new();
+        for tile in scene.impostors.tiles() {
+            let lo = (tile.lo.as_dvec3() - camera.pos).as_vec3();
+            let hi = (tile.hi.as_dvec3() - camera.pos).as_vec3();
+            let reach = Vec2::new(lo.x.abs().max(hi.x.abs()), lo.z.abs().max(hi.z.abs())).length();
+            // Squares wholly inside the voxel terrain are left to it.
+            if reach + m(40.0) >= voxel_radius && frustum.intersects_box(lo, hi) {
+                impostor_draws.push([36, tile.span.quads, 0, 0, tile.span.first()]);
+                stats.impostor_boxes += tile.span.quads;
+            }
+        }
 
         // Translucent water blends correctly only when drawn far to near.
         water.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
@@ -1201,7 +1364,7 @@ impl Renderer {
         // Nearest first, so that hidden surfaces are rejected instead of shaded.
         let distance_of = |d: &ChunkDraw| {
             let [x, y, z] = instances[d[4] as usize].offset;
-            (Vec3::new(x, y, z) + Vec3::splat(size * 0.5)).length_squared()
+            (Vec3::new(x, y, z) + Vec3::splat(chunk_size * 0.5)).length_squared()
         };
         opaque.sort_by_cached_key(|d| distance_of(d) as u32);
         self.stats = stats;
@@ -1217,6 +1380,7 @@ impl Renderer {
         let opaque_list = append(&mut opaque.iter().copied());
         let edge_list = append(&mut opaque_edge.iter().copied());
         let water_list = append(&mut water.iter().map(|w| w.0));
+        let impostor_list = append(&mut impostor_draws.iter().copied());
         if draws.len() > self.indirect_capacity {
             self.indirect_capacity = draws.len().next_power_of_two();
             self.indirect = indirect_buffer(device, self.indirect_capacity);
@@ -1234,6 +1398,16 @@ impl Renderer {
             self.quad_indices = quad_index_buffer(device, self.quad_capacity);
         }
         gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        let whole = camera.pos.floor();
+        let (voxel, frac) = (whole.as_ivec3(), (camera.pos - whole).as_vec3());
+        gpu.queue.write_buffer(
+            &self.impostor_camera,
+            0,
+            bytemuck::bytes_of(&ImpostorCamera {
+                voxel: [voxel.x, voxel.y, voxel.z, 0],
+                frac: [frac.x, frac.y, frac.z, 0.0],
+            }),
+        );
 
         if let Some(t) = &self.timer {
             t.mark(encoder, 0);
@@ -1333,6 +1507,16 @@ impl Renderer {
             }
             pass.set_vertex_buffer(0, self.sea.slice(..));
             pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
+
+            // Far trees stand on the far view, drawn with it.
+            if !impostor_list.is_empty() {
+                pass.set_pipeline(&self.impostor);
+                pass.set_bind_group(1, &self.impostor_bind, &[]);
+                pass.set_vertex_buffer(0, self.impostor_cube.slice(..));
+                pass.set_vertex_buffer(1, scene.impostors.buffer().slice(..));
+                draw_chunks(&mut pass, indirect, &draws, impostor_list.clone());
+                pass.set_vertex_buffer(1, self.instances.slice(..));
+            }
             if let Some(t) = &self.timer {
                 t.mark_in_pass(&mut pass, 5);
             }
@@ -1484,15 +1668,18 @@ pub fn screenshot(
     env: &Environment,
     streamer: &mut Streamer,
     far: &mut FarView,
+    impostors: &mut Impostors,
     particles: &[ParticleInstance],
     props: &[ParticleInstance],
     wind: Vec3,
+    ground: crate::season::Ground,
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = Renderer::new(gpu, format, width, height);
     streamer.wait_idle(gpu, camera.pos);
     far.wait_ready(gpu, camera.pos);
+    impostors.wait_idle(gpu, camera.pos);
 
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("screenshot"),
@@ -1524,9 +1711,11 @@ pub fn screenshot(
         env,
         terrain: streamer,
         far,
+        impostors,
         particles,
         props,
         wind,
+        ground,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(
@@ -1563,14 +1752,16 @@ pub fn screenshot(
     }
     image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8)?;
     log::info!(
-        "screenshot {} ({} chunks drawn, {} quads, shadow draws {:?}, multi-draw {}, arena {} MiB, meshes {} MiB)",
+        "screenshot {} ({} chunks drawn, {} quads, shadow draws {:?}, multi-draw {}, arena {} MiB, meshes {} MiB, far trees {}/{} boxes)",
         path.display(),
         renderer.stats.chunks_drawn,
         renderer.stats.quads_drawn,
         renderer.stats.shadow_draws,
         renderer.multi_draw,
         streamer.stats.arena_bytes >> 20,
-        streamer.stats.mesh_bytes >> 20
+        streamer.stats.mesh_bytes >> 20,
+        renderer.stats.impostor_boxes,
+        impostors.boxes
     );
     Ok(())
 }

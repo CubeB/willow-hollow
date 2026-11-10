@@ -14,6 +14,7 @@ use glam::DVec3;
 
 pub const RADIUS: RangeInclusive<i32> = 2..=64;
 pub const DAY_MINUTES: RangeInclusive<f32> = 0.0..=120.0;
+pub const YEAR_DAYS: RangeInclusive<f32> = crate::season::YEAR_DAYS;
 pub const FOV: RangeInclusive<f32> = 50.0..=110.0;
 pub const SENSITIVITY: RangeInclusive<f32> = 0.2..=3.0;
 pub const VOLUME: RangeInclusive<f32> = 0.0..=1.0;
@@ -28,6 +29,8 @@ pub struct Settings {
     pub radius: i32,
     /// Real minutes per in-game day; 0 freezes the time of day.
     pub day_minutes: f32,
+    /// Game days in a year.
+    pub year_days: f32,
     /// Vertical field of view in degrees.
     pub fov: f32,
     /// Multiplies the mouse look speed.
@@ -46,6 +49,7 @@ impl Default for Settings {
             seed: 1,
             radius: 24,
             day_minutes: 40.0,
+            year_days: crate::season::DEFAULT_YEAR_DAYS,
             fov: 70.0,
             sensitivity: 1.0,
             volume: 0.75,
@@ -63,6 +67,7 @@ impl Settings {
         let _ = writeln!(t, "seed = {}", self.seed);
         let _ = writeln!(t, "radius = {}", self.radius);
         let _ = writeln!(t, "day_minutes = {}", self.day_minutes);
+        let _ = writeln!(t, "year_days = {}", self.year_days);
         let _ = writeln!(t, "fov = {}", self.fov);
         let _ = writeln!(t, "sensitivity = {}", self.sensitivity);
         let _ = writeln!(t, "volume = {}", self.volume);
@@ -84,6 +89,7 @@ impl Settings {
             seed: f.get("seed").unwrap_or(d.seed),
             radius: f.get::<i32>("radius").map_or(d.radius, |r| r.clamp(*RADIUS.start(), *RADIUS.end())),
             day_minutes: f.ranged("day_minutes", d.day_minutes, DAY_MINUTES),
+            year_days: f.ranged("year_days", d.year_days, YEAR_DAYS),
             fov: f.ranged("fov", d.fov, FOV),
             sensitivity: f.ranged("sensitivity", d.sensitivity, SENSITIVITY),
             volume: f.ranged("volume", d.volume, VOLUME),
@@ -154,6 +160,8 @@ pub struct Progress {
     pub pitch: f32,
     /// Hour of the day.
     pub time: f32,
+    /// Time of year, 0 to 1 from the spring equinox.
+    pub date: f32,
     pub travel: Travel,
     /// Which way the boat points, in radians.
     pub heading: f32,
@@ -167,8 +175,8 @@ impl Progress {
             Travel::Sailing => "sailing",
         };
         format!(
-            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ntravel = {travel}\nheading = {}\n",
-            self.pos.x, self.pos.y, self.pos.z, self.yaw, self.pitch, self.time, self.heading
+            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\ntravel = {travel}\nheading = {}\n",
+            self.pos.x, self.pos.y, self.pos.z, self.yaw, self.pitch, self.time, self.date, self.heading
         )
     }
 
@@ -185,6 +193,7 @@ impl Progress {
             yaw: f.finite("yaw")? as f32,
             pitch: f.finite("pitch")? as f32,
             time: f.finite("time").map_or(10.0, |t| t.rem_euclid(24.0) as f32),
+            date: f.finite("date").map_or(crate::season::DEFAULT_DATE, |d| d.rem_euclid(1.0) as f32),
             travel,
             heading: f.finite("heading").unwrap_or(0.0) as f32,
         })
@@ -285,6 +294,7 @@ mod tests {
             yaw: 1.25,
             pitch: -0.3,
             time: 17.5,
+            date: 0.62,
             travel: Travel::Sailing,
             heading: 2.5,
         }
@@ -296,6 +306,7 @@ mod tests {
             seed: 77,
             radius: 40,
             day_minutes: 0.0,
+            year_days: 60.0,
             fov: 90.0,
             sensitivity: 1.5,
             volume: 0.25,

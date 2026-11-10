@@ -2,6 +2,7 @@ use glam::Vec3;
 use worldgen::scale::VOXELS_PER_METRE;
 
 /// Lighting and sky state for a moment in the day. All colours are linear.
+#[derive(Clone)]
 pub struct Environment {
     /// Hours, 0..24.
     pub time: f32,
@@ -18,6 +19,8 @@ pub struct Environment {
     pub clouds: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
+    /// Time of year, 0 to 1 from the spring equinox.
+    pub date: f32,
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -26,11 +29,14 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 }
 
 impl Environment {
-    pub fn at_time(hours: f32) -> Self {
+    /// The environment at an hour of the day and a time of year (0..1).
+    pub fn at(hours: f32, date: f32) -> Self {
         let time = hours.rem_euclid(24.0);
+        // The sun stands higher and rides the sky longer in summer, lower and shorter in winter.
+        let decl = crate::season::declination(date);
         // Sun rises at 6, peaks at 12, sets at 18, on a tilted arc.
         let angle = (time - 6.0) / 12.0 * std::f32::consts::PI;
-        let sun = Vec3::new(angle.cos() * 0.85, angle.sin(), 0.42).normalize();
+        let sun = Vec3::new(angle.cos() * 0.85, angle.sin() + 0.3 * decl, 0.42 - 0.25 * decl).normalize();
         let elev = sun.y;
 
         let day = smoothstep(-0.02, 0.35, elev);
@@ -52,13 +58,13 @@ impl Environment {
         } else {
             // Moonlight from the opposite side of the sky.
             let moon = Vec3::new(-sun.x, (-sun.y).max(0.15), -sun.z).normalize();
-            (moon, Vec3::new(0.45, 0.55, 0.80) * 0.16 * smoothstep(-0.06, -0.2, elev))
+            (moon, Vec3::new(0.45, 0.55, 0.80) * 0.21 * smoothstep(-0.06, -0.2, elev))
         };
 
         // Eye adaptation: a high sun puts far more light on the ground than a low one, so
         // expose down toward midday. Every light source is one of these three colours,
         // so scaling them here exposes the whole scene.
-        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0));
+        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0)) * (1.0 + 1.1 * smoothstep(-0.02, -0.22, elev));
         // Mist gathers in the valleys around dawn, and a little at dusk.
         let dawn = smoothstep(3.5, 6.0, time) * smoothstep(9.5, 7.0, time);
         let dusk = smoothstep(17.0, 18.5, time) * smoothstep(21.0, 19.5, time);
@@ -75,6 +81,7 @@ impl Environment {
             mist,
             clouds: 0.45,
             sun_elevation: elev,
+            date,
         }
     }
 }
