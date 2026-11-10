@@ -271,7 +271,11 @@ impl World for GameWorld {
                 }
                 // The border columns belong to neighbouring chunk columns.
                 if (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
+                    let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
+                    if plants.len() == grown {
+                        features::pebbles::scatter(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
+                    }
                 }
                 skins.push(skin);
             }

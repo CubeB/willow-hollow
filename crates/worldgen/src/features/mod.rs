@@ -7,6 +7,7 @@
 //! spanning many chunks is stamped identically by each of them.
 
 pub mod landmarks;
+pub mod pebbles;
 pub mod plants;
 pub mod shape;
 pub mod trees;
