@@ -306,6 +306,44 @@ fn lakes_are_flat_and_hold_water() {
 }
 
 #[test]
+fn every_archetype_occurs_and_shapes_its_land() {
+    use crate::macro_layout::Archetype;
+    let mut seen = std::collections::HashSet::new();
+    let (mut long, mut volcano) = (None, None);
+    for mz in -12..12 {
+        for mx in -12..12 {
+            let d = cell_desc(4, mx, mz);
+            if d.kind == CellKind::Ocean {
+                continue;
+            }
+            seen.insert(d.archetype);
+            match d.archetype {
+                Archetype::Elongated if d.aspect > 2.2 => long = Some(d),
+                Archetype::Volcanic => volcano = Some(d),
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(seen.len(), 9, "only {seen:?}");
+
+    // A long continent is much longer one way than the other.
+    let c = generate(long.expect("no long continent"), SimConfig { size: 128 });
+    let (c0, s0) = (c.desc.angle.cos(), c.desc.angle.sin());
+    let (mut along, mut across) = (0.0f32, 0.0f32);
+    for i in (0..128 * 128).filter(|&i| !c.ocean[i]) {
+        let (x, z) = ((i % 128) as f32 - 64.0, (i / 128) as f32 - 64.0);
+        along += (x * c0 + z * s0).powi(2);
+        across += (z * c0 - x * s0).powi(2);
+    }
+    assert!(along > 2.0 * across, "not elongated: {along} vs {across}");
+
+    // Volcanic islands rise to cones clad in ash.
+    let c = generate(volcano.expect("no volcanic islands"), SimConfig { size: 128 });
+    let ash = c.biome.iter().filter(|&&b| b == Biome::Volcanic as u8).count();
+    assert!(ash > 20, "only {ash} volcanic cells");
+}
+
+#[test]
 fn dunes_heap_sand_without_damming_water() {
     // A hot, dry continent with a dune sea in it.
     let c = generate(cell_desc(1, -3, -3), SimConfig { size: 256 });

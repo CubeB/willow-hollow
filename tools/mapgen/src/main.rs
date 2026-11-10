@@ -547,8 +547,8 @@ fn main() -> Result<()> {
     }
     let desc = cell_desc(o.seed, o.cell.0, o.cell.1);
     println!(
-        "seed {} cell {:?}: {:?}, ruggedness {:.2}, temperature {:.2}, wetness {:.2}",
-        o.seed, o.cell, desc.kind, desc.ruggedness, desc.temperature, desc.wetness
+        "seed {} cell {:?}: {:?} {:?}, ruggedness {:.2}, temperature {:.2}, wetness {:.2}",
+        o.seed, o.cell, desc.kind, desc.archetype, desc.ruggedness, desc.temperature, desc.wetness
     );
     let t = Instant::now();
     let mut c = continent::generate(desc, SimConfig { size: o.size });
