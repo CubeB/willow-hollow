@@ -1,4 +1,5 @@
 mod arena;
+mod audio;
 mod camera;
 mod env;
 mod farview;
@@ -13,6 +14,7 @@ mod vehicles;
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, bail};
+use audio::{Audio, Ground};
 use glam::DVec3;
 use winit::{
     application::ApplicationHandler,
@@ -53,6 +55,7 @@ struct Options {
     radius: i32,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
+    audio: bool,
     size: (u32, u32),
     /// Real minutes per in-game day; 0 freezes the time of day.
     day_minutes: f32,
@@ -72,6 +75,7 @@ impl Default for Options {
             time: 10.0,
             radius: (m(307.2) / voxel::CHUNK as f32).round() as i32,
             screenshot: None,
+            audio: true,
             size: (1280, 720),
             day_minutes: 40.0,
             frames: None,
@@ -89,6 +93,7 @@ usage: game [options]
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24 (default 10)
   --radius N            chunk load radius (default: about 300 m)
+  --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --size WxH            screenshot size (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time (default 40)
@@ -132,6 +137,7 @@ fn parse_args() -> Result<Options> {
             }
             "--time" => o.time = value()?.parse()?,
             "--radius" => o.radius = value()?.parse::<i32>()?.clamp(1, 64),
+            "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
             "--size" => {
                 let v = list::<u32>(&value()?, 'x', 2)?;
@@ -245,6 +251,12 @@ struct Running {
     flowers: Vec<(DVec3, [f32; 3])>,
     scan_timer: f32,
     biome: worldgen::biome::Biome,
+    audio: Option<Audio>,
+    volume: f32,
+    /// Distance walked since the last footstep.
+    stride: f32,
+    last_fall_speed: f32,
+    was_grounded: bool,
     day_minutes: f32,
     was_swimming: bool,
     fleet: Fleet,
@@ -276,6 +288,10 @@ struct Running {
     frame: u64,
     frame_ms: f32,
 }
+
+/// Distance between footsteps.
+const STRIDE: f32 = m(1.7);
+const START_VOLUME: f32 = 0.75;
 
 struct App {
     opts: Options,
@@ -315,6 +331,11 @@ impl Running {
             flowers: Vec::new(),
             scan_timer: 0.0,
             biome: worldgen::biome::Biome::Grassland,
+            audio: if opts.audio { Audio::start(START_VOLUME) } else { None },
+            volume: START_VOLUME,
+            stride: 0.0,
+            last_fall_speed: 0.0,
+            was_grounded: false,
             day_minutes: opts.day_minutes,
             was_swimming: false,
             fleet: Fleet::new(world.clone()),
@@ -420,6 +441,29 @@ impl Running {
         }
     }
 
+    /// Plays a footstep each stride, and a heavier one on landing.
+    fn update_footsteps(&mut self, dt: f32) {
+        let Some(audio) = &self.audio else { return };
+        let on_foot = self.walking && self.player.mode == Mode::Walk && !self.player.swimming;
+        let grounded = on_foot && self.player.on_ground;
+        if grounded {
+            let (x, y, z) = (self.player.pos.x.floor() as i32, self.player.pos.y.floor() as i32, self.player.pos.z.floor() as i32);
+            let feet_in_water = self.world.materials().get(self.voxels.voxel(x, y, z)).kind == voxel::Kind::Water;
+            let ground = if feet_in_water { Ground::Shallows } else { audio::ground_of(self.voxels.voxel(x, y - 1, z)) };
+            if !self.was_grounded && self.last_fall_speed < -m(6.0) {
+                audio.step(ground, (-self.last_fall_speed / m(16.0)).min(1.0));
+                self.stride = 0.0;
+            }
+            self.stride += glam::Vec2::new(self.player.vel.x, self.player.vel.z).length() * dt;
+            if self.stride >= STRIDE {
+                self.stride -= STRIDE;
+                audio.step(ground, 0.7);
+            }
+        }
+        self.was_grounded = grounded;
+        self.last_fall_speed = self.player.vel.y;
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.surface.resize(&self.gpu, width, height);
         self.renderer.resize(&self.gpu, width, height);
@@ -492,6 +536,7 @@ impl Running {
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
         };
         self.particles.update(dt, &surroundings, &mut self.voxels);
+        self.update_footsteps(dt);
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
         self.props.clear();
@@ -544,6 +589,7 @@ impl Running {
         };
         let mut time = self.env.time;
         let mut radius = self.streamer.radius();
+        let mut volume = self.volume;
         let (show_debug, grabbed) = (self.show_debug, self.grabbed);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
@@ -595,6 +641,7 @@ impl Running {
                         ));
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.add(egui::Slider::new(&mut radius, 2..=(32.0 * OLD_VOXEL) as i32).text("load radius"));
+                        ui.add(egui::Slider::new(&mut volume, 0.0..=1.0).text("volume"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Click or Tab to look, Esc to free the mouse. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel");
@@ -605,6 +652,12 @@ impl Running {
             self.env = Environment::at_time(time);
         }
         self.streamer.set_radius(radius);
+        if volume != self.volume {
+            self.volume = volume;
+            if let Some(audio) = &self.audio {
+                audio.set_volume(volume);
+            }
+        }
 
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();

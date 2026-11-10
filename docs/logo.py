@@ -4,6 +4,7 @@ usage: python docs/logo.py OUT_DIR
 """
 import math
 import os
+import random
 import sys
 
 from PIL import Image, ImageDraw, ImageFont
@@ -14,17 +15,23 @@ W, H = 1600, 640
 FONTS = "C:/Windows/Fonts/"
 
 # Palette: deep moss for the words, sage and willow greens for leaves, pale water.
-INK = (46, 74, 58)
-SAGE = (120, 158, 112)
+INK = (40, 68, 54)
+TAGLINE = (88, 122, 94)
+BARK = (86, 112, 78)
+STEM = (120, 158, 112)
 WILLOW = (156, 190, 120)
+WILLOW_PALE = (186, 208, 142)
 LEAF_DARK = (92, 134, 92)
-WATER = (122, 170, 186)
-WATER_LIGHT = (176, 208, 214)
-CARD_TOP = (242, 246, 236)
-CARD_BOTTOM = (226, 236, 222)
+WATER = (112, 162, 180)
+WATER_LIGHT = (168, 204, 212)
+CARD_TOP = (243, 247, 237)
+CARD_BOTTOM = (224, 235, 221)
+
+# Where the letters are, so that the strands can frame them without touching.
+TITLE_LEFT, TITLE_RIGHT, TITLE_TOP = 200, 1400, 236
 
 
-def bezier(p0, p1, p2, p3, n=120):
+def bezier(p0, p1, p2, p3, n=160):
     pts = []
     for i in range(n + 1):
         t = i / n
@@ -35,8 +42,20 @@ def bezier(p0, p1, p2, p3, n=120):
     return pts
 
 
-def draw_curve(d, pts, color, width):
-    d.line([(x * S, y * S) for x, y in pts], fill=color, width=int(width * S), joint="curve")
+def taper(d, pts, start, end, color):
+    # A line whose width runs from `start` to `end`, drawn as one outline.
+    left, right = [], []
+    last = len(pts) - 1
+    for i, (x, y) in enumerate(pts):
+        ax, ay = pts[max(i - 1, 0)]
+        bx, by = pts[min(i + 1, last)]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy) or 1.0
+        half = (start + (end - start) * i / last) / 2
+        nx, ny = -dy / length * half, dx / length * half
+        left.append(((x + nx) * S, (y + ny) * S))
+        right.append(((x - nx) * S, (y - ny) * S))
+    d.polygon(left + right[::-1], fill=color)
 
 
 def leaf(d, x, y, size, angle, color):
@@ -48,29 +67,110 @@ def leaf(d, x, y, size, angle, color):
     d.polygon(corners, fill=color)
 
 
-def strand(d, x0, y0, length, lean, phase, thickness=2.2):
-    # A drooping willow strand: starts at the branch, falls and curls slightly.
+def strand(d, rng, x0, y0, length, lean):
+    # A drooping willow strand: falls from the branch and curls out toward the tip.
     p0 = (x0, y0)
-    p1 = (x0 + lean * 0.3, y0 + length * 0.35)
-    p2 = (x0 + lean * 0.9, y0 + length * 0.75)
-    p3 = (x0 + lean * 1.1, y0 + length)
+    p1 = (x0 + lean * 0.1, y0 + length * 0.4)
+    p2 = (x0 + lean * 0.55, y0 + length * 0.75)
+    p3 = (x0 + lean, y0 + length)
     pts = bezier(p0, p1, p2, p3)
-    draw_curve(d, pts, SAGE, thickness)
+    taper(d, pts, 2.6, 0.9, STEM)
     # Leaves along the strand, alternating sides, smaller toward the tip.
-    for i in range(6, len(pts) - 4, 9):
-        x, y = pts[i]
-        t = i / len(pts)
-        side = 1 if (i // 9 + phase) % 2 == 0 else -1
-        size = 6.5 * (1.0 - 0.45 * t)
-        angle = math.radians(35 * side + 20 * t)
-        color = WILLOW if (i // 9 + phase) % 3 else LEAF_DARK
-        leaf(d, x + side * 5, y, size, angle, color)
+    count = max(5, round(length / 15))
+    side = rng.choice((-1, 1))
+    for k in range(1, count + 1):
+        t = k / count
+        x, y = pts[int(t * (len(pts) - 1))]
+        size = (7.6 - 3.8 * t) * rng.uniform(0.88, 1.12)
+        angle = math.radians(45 + 26 * side + rng.uniform(-12, 12))
+        color = rng.choice((WILLOW, WILLOW, WILLOW_PALE, LEAF_DARK, LEAF_DARK))
+        reach = size * 0.9 + 1.0
+        leaf(d, x + side * reach, y, size, angle, color)
+        side = -side
+
+
+def draw_willow(d):
+    rng = random.Random(11)
+    # One long bough arching from off the left edge across the words, thinning to a tip.
+    bough = bezier((-30, 132), (400, 8), (1120, 20), (1536, 118))
+    taper(d, bough, 15, 2.0, BARK)
+
+    # Strands are long beside the title and short above it, leaving a hollow for the words.
+    for k in range(21):
+        t = 0.08 + 0.87 * (k + rng.uniform(-0.3, 0.3)) / 20
+        x, y = bough[int(t * (len(bough) - 1))]
+        beside = x < TITLE_LEFT - 34 or x > TITLE_RIGHT + 34
+        if beside:
+            length = rng.uniform(250, 340)
+            lean = (-1 if x < W / 2 else 1) * rng.uniform(4, 22)
+        else:
+            # Clear of the tops of the letters, whatever the bough's height here.
+            edge = abs(x - W / 2) / (W / 2)
+            length = min(TITLE_TOP - y - 12, 78 + 88 * edge + rng.uniform(-14, 22))
+            lean = rng.uniform(-13, 13)
+        strand(d, rng, x, y, length, lean)
+
+
+def draw_title(d):
+    font = None
+    for regular in ("georgia.ttf", "cambria.ttc"):
+        try:
+            font = ImageFont.truetype(FONTS + regular, int(168 * S))
+            break
+        except OSError:
+            continue
+    text = "Willow Hollow"
+    spacing = 5 * S
+    # Measured through the whole string so that kerning (the W and i) survives spacing.
+    start = (W * S - d.textlength(text, font=font) - spacing * (len(text) - 1)) / 2
+    for i, ch in enumerate(text):
+        x = start + d.textlength(text[: i + 1], font=font) - d.textlength(ch, font=font) + spacing * i
+        d.text((x, 372 * S), ch, font=font, fill=INK, anchor="ls")
+
+
+def draw_water(d):
+    # Rings spreading on a still pool from where one leaf has landed, thinning at the ends.
+    cx, cy = 800, 446
+    for k, (rx, ry, width, color) in enumerate(
+        [(92, 13, 3.2, WATER), (232, 27, 2.8, WATER_LIGHT), (396, 41, 2.8, WATER), (566, 54, 2.2, WATER_LIGHT)]
+    ):
+        # Only the near side of each ring, like water seen at a low angle.
+        n = 120
+        sweep = math.radians(70 - k * 4)
+        pts = []
+        for i in range(n + 1):
+            a = math.pi / 2 + sweep * (2 * i / n - 1)
+            pts.append((cx + rx * math.cos(a), cy + ry * math.sin(a)))
+        half = n // 2
+        taper(d, pts[half::-1], width, 0.6, color)
+        taper(d, pts[half:], width, 0.6, color)
+    leaf(d, cx, cy - 4, 8.5, math.radians(62), WILLOW)
+
+
+def draw_tagline(d):
+    try:
+        small = ImageFont.truetype(FONTS + "georgiai.ttf", int(38 * S))
+    except OSError:
+        small = ImageFont.truetype(FONTS + "cambriai.ttf", int(38 * S))
+    tag = "a quiet world of rivers"
+    spacing = 1.6 * S
+    x = (W * S - d.textlength(tag, font=small) - spacing * (len(tag) - 1)) / 2
+    for i, ch in enumerate(tag):
+        offset = d.textlength(tag[: i + 1], font=small) - d.textlength(ch, font=small) + spacing * i
+        d.text((x + offset, 572 * S), ch, font=small, fill=TAGLINE, anchor="ls")
 
 
 def render(transparent):
     img = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    art = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(art)
+    draw_willow(d)
+    draw_title(d)
+    draw_water(d)
+    draw_tagline(d)
 
+    mask = Image.new("L", (W * S, H * S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, W * S - 1, H * S - 1], radius=48 * S, fill=255)
     if not transparent:
         # Soft vertical gradient card with rounded corners.
         card = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
@@ -79,50 +179,9 @@ def render(transparent):
             t = y / (H * S)
             col = tuple(int(a + (b - a) * t) for a, b in zip(CARD_TOP, CARD_BOTTOM)) + (255,)
             cd.line([(0, y), (W * S, y)], fill=col)
-        mask = Image.new("L", (W * S, H * S), 0)
-        ImageDraw.Draw(mask).rounded_rectangle([0, 0, W * S - 1, H * S - 1], radius=48 * S, fill=255)
         img.paste(card, (0, 0), mask)
-        d = ImageDraw.Draw(img)
-
-    # The branch: one long bough arcing in from the upper left over the words.
-    bough = bezier((60, 95), (420, 20), (900, 60), (1240, 150))
-    draw_curve(d, bough, SAGE, 5.5)
-    draw_curve(d, bezier((60, 95), (420, 20), (900, 60), (1240, 150)), LEAF_DARK, 2.0)
-    # Strands hanging from the bough, longer toward the middle.
-    # They stop clear of the letters, which sit lower.
-    for k, t in enumerate([0.1, 0.19, 0.3, 0.41, 0.52, 0.63, 0.74, 0.86]):
-        i = int(t * (len(bough) - 1))
-        x, y = bough[i]
-        length = 72 + 72 * math.sin(t * math.pi) + (18 if k % 3 == 0 else 0)
-        lean = (-1 if k % 2 else 1) * (16 + 14 * math.sin(k * 1.3))
-        strand(d, x, y, length, lean, k)
-
-    # The words.
-    try:
-        font = ImageFont.truetype(FONTS + "georgia.ttf", int(168 * S))
-        small = ImageFont.truetype(FONTS + "georgiai.ttf", int(40 * S))
-    except OSError:
-        font = ImageFont.truetype(FONTS + "cambria.ttc", int(168 * S))
-        small = ImageFont.truetype(FONTS + "cambriai.ttf", int(40 * S))
-    text = "Willow Hollow"
-    # Measure to centre, with gentle letter spacing applied by drawing per character.
-    spacing = 6 * S
-    widths = [d.textlength(ch, font=font) for ch in text]
-    total = sum(widths) + spacing * (len(text) - 1)
-    x = (W * S - total) / 2
-    baseline_y = 372 * S
-    for ch, w in zip(text, widths):
-        d.text((x, baseline_y), ch, font=font, fill=INK, anchor="ls")
-        x += w + spacing
-
-    # Ripples beneath: three soft arcs, like rings spreading on a still pool.
-    for k, (cx, span, y) in enumerate([(800, 520, 430), (800, 360, 456), (800, 200, 480)]):
-        pts = bezier((cx - span, y), (cx - span * 0.5, y + 16), (cx + span * 0.5, y + 16), (cx + span, y))
-        draw_curve(d, pts, WATER if k != 1 else WATER_LIGHT, 4.0 - k * 0.6)
-
-    tag = "a quiet world of rivers"
-    tw = d.textlength(tag, font=small)
-    d.text(((W * S - tw) / 2, 538 * S), tag, font=small, fill=SAGE)
+    # The bough runs off the edge, so the art is clipped to the card's shape too.
+    img.paste(art, (0, 0), Image.composite(art.getchannel("A"), Image.new("L", art.size, 0), mask))
 
     return img.resize((W, H), Image.LANCZOS)
 
