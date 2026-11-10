@@ -105,6 +105,11 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         // Coarse cells skip the strata bands; plain stone reads the same at this distance.
         Cover::Cliff => (mat::STONE, mat::STONE),
         Cover::Scree => (mat::SCREE, mat::SCREE),
+        Cover::Shingle => (mat::GRAVEL, mat::GRAVEL),
+        Cover::Boulders => (mat::STONE, mat::STONE),
+        Cover::Shelf => (mat::ROCK_DARK, mat::STONE),
+        Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
+        Cover::Dune => (mat::SAND, mat::SAND),
         Cover::Trail => (
             match col.biome {
                 Biome::Desert | Biome::Savanna => mat::PATH_SAND,
