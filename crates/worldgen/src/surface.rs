@@ -13,6 +13,8 @@ mod cliff;
 mod coast;
 mod ravine;
 
+pub use cliff::strata_tilt;
+
 use crate::{
     biome::Biome,
     continent::{Continent, NO_LAKE},
@@ -777,6 +779,7 @@ struct Fall {
     /// Height of the drop, in voxels.
     height: f32,
     salt: u32,
+    seed: u32,
 }
 
 impl Fall {
@@ -800,6 +803,7 @@ impl Fall {
             level: level * OLD_VOXEL,
             height,
             salt: hash2(world_seed ^ 0xfa12, i as i32, 3),
+            seed: world_seed,
         })
     }
 
@@ -816,6 +820,7 @@ impl Fall {
             ledge: 0.0,
             split: 0.5,
             salt: self.salt,
+            seed: self.seed,
         };
         face.cut(strength, slope.max(0.35), wx, wz, ground)
     }
