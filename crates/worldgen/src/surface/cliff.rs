@@ -79,7 +79,13 @@ fn band(seed: u32, n: i32, wx: f64, wz: f64) -> Band {
 
 /// Applies any cliff to a column whose natural ground is `ground` (voxels) and whose
 /// simulated slope is `slope` (voxels per voxel), changing `ground` in place.
-pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part {
+///
+/// `guard` is given the natural height of the bottom of the band the face gathers
+/// its drop from, and returns how strongly (0 to 1) a face may stand there. It keeps
+/// faces off valley floors: below a face the ground is lowered as far as that height,
+/// which beside a river would dig the valley out below the water. It is only called
+/// for the few columns a face could touch.
+pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32, guard: impl FnOnce(f32) -> f32) -> Part {
     // Gentle and low ground is the overwhelming majority: skip it first.
     if slope < STEEP || *ground < m(8.0) {
         return Part::None;
@@ -109,13 +115,17 @@ pub fn apply(seed: u32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part 
     if strength <= 0.0 {
         return Part::None;
     }
+    let strength = strength.min(guard(base));
+    if strength <= 0.0 {
+        return Part::None;
+    }
     let ledge = if b.ledge > 0.0 {
         // The ledge widens and pinches out along the face.
         b.ledge * smoothstep(-0.1, 0.3, perlin2(b.salt ^ 0x1ed9, wx / m64(28.0), wz / m64(28.0)))
     } else {
         0.0
     };
-    let face = Face { x, lo, hi, height: b.height, ledge, split: b.split, salt: b.salt };
+    let face = Face { x, lo, hi, height: b.height, ledge, split: b.split, salt: b.salt, seed };
     face.cut(strength, slope, wx, wz, ground)
 }
 
@@ -133,6 +143,18 @@ pub struct Face {
     /// Fraction of the face below the ledge.
     pub split: f32,
     pub salt: u32,
+    /// World seed, which places the rock layers the shelves follow.
+    pub seed: u32,
+}
+
+/// Thickness of one rock layer in a cliff, in voxels: the strata the chunk fill paints
+/// on faces, which `materials::strata` bands in the same steps.
+const STRATA: f32 = 4.0;
+
+/// How far the rock layers are shifted up or down at world position `(wx, wz)`, in
+/// voxels, so they dip gently from place to place instead of lying dead level.
+pub fn strata_tilt(seed: u32, wx: f64, wz: f64) -> f32 {
+    perlin2(seed ^ 0xc11d, wx / m64(70.0), wz / m64(70.0)) * m(2.4)
 }
 
 impl Face {
@@ -144,23 +166,59 @@ impl Face {
     /// the aprons keep a reduced natural slope and the lip is crisp.
     pub fn cut(&self, strength: f32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> Part {
         let (lo, hi) = (self.lo, self.hi);
-        let h = self.height * strength;
+        let ridge = |salt: u32, scale: f32| 1.0 - perlin2(self.salt ^ salt, wx / scale as f64, wz / scale as f64).abs();
+        // The top edge rises and falls along the face: taller buttresses, lower
+        // stretches, and notches where water has cut down from the lip. A face is only
+        // a few voxels across, so any pattern in plan view reads as vertical on it.
+        let along = (1.0 + 0.34 * perlin2(self.salt ^ 0x7e11, wx / m64(30.0), wz / m64(30.0))).clamp(0.5, 1.25);
+        let notch = smoothstep(0.86, 0.97, ridge(0x7e12, m(13.0)));
+        let h = self.height * strength * along * (1.0 - 0.45 * notch);
         let ledge = self.ledge * strength;
         // A ragged face: buttresses and bays a few metres across, and single columns
         // standing proud. Moving the height at which the face stands moves it sideways;
         // `rough` is how far, in voxels across the slope.
-        let rough = perlin2(self.salt ^ 0xb077, wx / m64(14.0), wz / m64(14.0)) * m(4.5)
+        let mut rough = perlin2(self.salt ^ 0xb077, wx / m64(14.0), wz / m64(14.0)) * m(4.5)
             + perlin2(self.salt ^ 0xb078, wx / m64(4.5), wz / m64(4.5)) * m(1.5)
             + (unit(hash2(self.salt, wx as i32, wz as i32)) - 0.5) * m(0.6);
+        // Blocky pillars standing out from the face and recesses between them, where the
+        // rock has split along its joints.
+        let joint = hash2(self.salt ^ 0x7e14, (wx / m64(2.0)).floor() as i32, (wz / m64(2.0)).floor() as i32);
+        rough += match unit(joint) {
+            u if u < 0.12 => m(1.2),
+            u if u < 0.22 => -m(1.0),
+            _ => 0.0,
+        };
+        // Water erosion: gullies behind each notch, and narrow runnels and cracks down
+        // the face, all set back into the rock.
+        let runnel = smoothstep(0.82, 0.97, ridge(0x7e13, m(3.4)));
+        rough -= notch * m(2.4) + runnel * m(1.0);
         let x = self.x + rough * slope * strength;
         // Distance from the face across the slope, in voxels: about the natural height
         // difference divided by the slope.
         let across = x / slope;
+        let mut shelf = false;
         let lift = if x < 0.0 {
             let t = ((x - lo) / -lo).max(0.0);
             // Fallen stone leans against the bottom of the face at about 35 degrees.
             let talus = (h * 0.22 + across * 0.7).max(0.0);
-            -h * 0.5 * t + talus
+            let mut lift = -h * 0.5 * t + talus;
+            // Shelves: runs of rock a voxel or two deep standing out from the face, their
+            // tops on a bedding plane, so the face is banded by ledges along its strata.
+            if across > -m(0.9) && h > m(4.0) && notch < 0.3 {
+                let run = perlin2(self.salt ^ 0x7e15, wx / m64(9.0), wz / m64(9.0));
+                if run > 0.12 {
+                    let up = 0.55 + 0.25 * perlin2(self.salt ^ 0x7e16, wx / m64(24.0), wz / m64(24.0));
+                    // Natural height of the face here, which stands half way up it.
+                    let at = *ground - x;
+                    let tilt = strata_tilt(self.seed, wx, wz);
+                    let bed = ((at + h * (up - 0.5) + tilt) / STRATA).floor() * STRATA - tilt - 0.5;
+                    if bed - *ground > lift {
+                        lift = bed - *ground;
+                        shelf = true;
+                    }
+                }
+            }
+            lift
         } else if x < ledge {
             -h * 0.5 + h * self.split - 0.8 * x
         } else {
@@ -171,11 +229,16 @@ impl Face {
 
         if h < m(1.6) {
             Part::None
-        } else if x >= 0.0 && (x < ledge || across < 2.5 || (x - ledge) / slope < 2.5) {
+        } else if shelf || (x >= 0.0 && (x < ledge || across < 2.5 || (x - ledge) / slope < 2.5)) {
             Part::Face(h)
         } else if x < 0.0 && x > lo * 0.6 {
-            // Most stone lies close under the face, on and below the talus.
+            // Most stone lies close under the face, on and below the talus, with blocks
+            // fallen from it lying about.
             let near = 1.0 - x / (lo * 0.6);
+            let block = hash2(self.salt ^ 0x7e17, (wx / 3.0).floor() as i32, (wz / 3.0).floor() as i32);
+            if unit(block) < 0.08 * near && h > m(3.0) {
+                *ground += m(0.6) + m(0.8) * unit(block.rotate_left(11));
+            }
             Part::Foot((0.4 + 0.6 * near) * smoothstep(m(2.0), m(6.0), h))
         } else {
             Part::None

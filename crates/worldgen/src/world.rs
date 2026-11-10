@@ -20,7 +20,7 @@ use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
     scale::{BLOCK, m, m64},
-    surface::{Column, Cover, Sampler, node},
+    surface::{self, Column, Cover, Sampler, node},
     trails,
 };
 
@@ -177,6 +177,19 @@ pub struct Spawn {
     pub z: i32,
     /// Degrees; 0 looks along +X.
     pub yaw: f32,
+}
+
+/// The darker, weathered form of a cliff rock, for the streaks water leaves down a face.
+fn stained(rock: Voxel) -> Voxel {
+    match rock {
+        mat::STONE | mat::ROCK_BROWN => mat::ROCK_DARK,
+        mat::ROCK_PALE => mat::STONE,
+        mat::ROCK_DARK => mat::SLATE,
+        mat::SANDSTONE => mat::SANDSTONE_DARK,
+        mat::SANDSTONE_RED => mat::RED_ROCK_DARK,
+        mat::SANDSTONE_DARK => mat::ROCK_BROWN,
+        other => other,
+    }
 }
 
 /// Picks the voxel for the top of a column and for the layers just beneath it.
@@ -428,16 +441,31 @@ impl GameWorld {
                     let (surface, under) = skins[px * PAD + pz];
                     let top = col.top();
                     let water_top = col.water_surface().map_or(i32::MIN, |k| k - 1);
+                    let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
                     let rock = (col.cover == Cover::Cliff).then(|| {
-                        let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
-                        perlin2(self.seed ^ 0xc11d, wx / m64(70.0), wz / m64(70.0)) * m(2.4)
+                        let (fx, fz) = (wx as f64, wz as f64);
+                        let tilt = surface::strata_tilt(self.seed, fx, fz);
+                        // Weathering streaks hang down from the lip where water runs
+                        // over it: narrow in plan, so long and vertical on the face.
+                        let streak = perlin2(self.seed ^ 0x57b1, fx / m64(2.2), fz / m64(2.2));
+                        let run = (perlin2(self.seed ^ 0x57b2, fx / m64(9.0), fz / m64(9.0)) * 0.5 + 0.5).clamp(0.0, 1.0);
+                        let stain = if streak > 0.22 { m(2.0) + m(14.0) * run } else { 0.0 };
+                        (tilt, stain)
                     });
                     // Layer edges are ragged: some voxels take the layer above or below.
-                    let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
-                    let rock_at = |y: i32, tilt: f32| {
+                    let rock_at = |y: i32, (tilt, stain): (f32, f32)| {
                         let h = hash3(self.seed ^ 0x57a9, wx, y, wz);
                         let jitter = if unit(h) < 0.3 { (h % 3) as i32 - 1 } else { 0 };
-                        mat::strata(self.seed, col.biome, y + jitter * 2, tilt)
+                        let mut ly = y + jitter * 2;
+                        // Some layers carry a thin bed of other rock in their upper half,
+                        // so the strata are not all one thickness.
+                        let s = ly as f32 + tilt;
+                        let band = (s / 4.0).floor() as i32;
+                        if s - band as f32 * 4.0 >= 2.0 && unit(hash3(self.seed ^ 0x57b0, band, 5, 0)) < 0.28 {
+                            ly += 4 * 37;
+                        }
+                        let rock = mat::strata(self.seed, col.biome, ly, tilt);
+                        if (top - y) as f32 >= stain { rock } else { stained(rock) }
                     };
                     for (py, v) in chunk.column_mut(px, pz).iter_mut().enumerate() {
                         let y = base + py as i32;
@@ -445,14 +473,14 @@ impl GameWorld {
                             if y <= water_top { mat::WATER } else { AIR }
                         } else if y == top {
                             match rock {
-                                Some(tilt) if surface == mat::STONE => rock_at(y, tilt),
+                                Some(r) if surface == mat::STONE => rock_at(y, r),
                                 _ => surface,
                             }
-                        } else if let Some(tilt) = rock
+                        } else if let Some(r) = rock
                             && under == mat::STONE
                         {
                             // All the way down: a face can be far taller than the soil.
-                            rock_at(y, tilt)
+                            rock_at(y, r)
                         } else if y >= top - 3 * BLOCK {
                             under
                         } else {

@@ -57,8 +57,11 @@ pub fn gorge_reach(depth: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 pub fn gorge_wall(seed: u32, wx: f64, wz: f64, sd: f32, hw: f32, bank: f32, level: f32, depth: f32, natural: f32) -> (f32, Part) {
     // The floor beside the water widens and narrows, and the wall is ragged.
+    // Narrow runnels, where water coming off the land has cut back into the walls.
+    let runnel = smoothstep(0.84, 0.97, 1.0 - perlin2(seed ^ 0x6029, wx / m64(3.0), wz / m64(3.0)).abs());
     let rough = perlin2(seed ^ 0x6027, wx / m64(7.0), wz / m64(7.0)) * m(1.2)
-        + (unit(hash2(seed ^ 0x6028, wx as i32, wz as i32)) - 0.5) * m(0.4);
+        + (unit(hash2(seed ^ 0x6028, wx as i32, wz as i32)) - 0.5) * m(0.4)
+        + runnel * m(0.8);
     let wall = (m(1.0) + hw * 0.25 + rough).max(m(0.6));
     if sd < wall {
         // Boulders lie scattered on the gravel, away from the water's edge.
@@ -78,8 +81,9 @@ pub fn gorge_wall(seed: u32, wx: f64, wz: f64, sd: f32, hw: f32, bank: f32, leve
 }
 
 /// Cuts any dry fault ravine into a column whose ground is `ground`, scaled by `fade`
-/// (0 to 1, used to keep ravines away from rivers).
-pub fn dry(seed: u32, wx: f64, wz: f64, fade: f32, ground: &mut f32) -> Part {
+/// (0 to 1, used to keep ravines away from rivers). `fade` is only called on the few
+/// columns near a fault line, since finding the nearest river is not cheap.
+pub fn dry(seed: u32, wx: f64, wz: f64, fade: impl FnOnce() -> f32, ground: &mut f32) -> Part {
     const LINE: f64 = m64(700.0);
     // Faults run along the zero lines of one broad noise field.
     let n = perlin2(seed ^ 0xfa17, wx / LINE, wz / LINE);
@@ -87,7 +91,11 @@ pub fn dry(seed: u32, wx: f64, wz: f64, fade: f32, ground: &mut f32) -> Part {
         return Part::None;
     }
     // Only some stretches of each line open up.
-    let open = smoothstep(0.32, 0.45, perlin2(seed ^ 0xfa18, wx / m64(400.0), wz / m64(400.0))) * fade;
+    let open = smoothstep(0.32, 0.45, perlin2(seed ^ 0xfa18, wx / m64(400.0), wz / m64(400.0)));
+    if open <= 0.0 {
+        return Part::None;
+    }
+    let open = open * fade();
     if open <= 0.0 {
         return Part::None;
     }

@@ -13,6 +13,8 @@ mod cliff;
 mod coast;
 mod ravine;
 
+pub use cliff::strata_tilt;
+
 use crate::{
     biome::Biome,
     continent::{Continent, NO_LAKE},
@@ -32,6 +34,12 @@ const MIN_HALF_WIDTH: f32 = m(0.6);
 const SINUOSITY_CELLS: f32 = 4.0;
 /// Taken from the distance to a trail's centreline to give the distance to its edge.
 const TRAIL_CLEARANCE: f32 = m(1.2);
+/// Distance from a river channel within which cliffs, waterfalls and fault ravines
+/// take the river into account, so none of them can dig a valley floor out beside it.
+const RIVER_GUARD: f32 = m(80.0);
+/// Distance from a river channel within which a cliff's foot must stand clear above
+/// the water (fading out over the second half).
+const CLIFF_GUARD: f32 = m(48.0);
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -142,19 +150,26 @@ impl Piece {
         }
     }
 
-    /// Distance from `p` to the curve, and the curve parameter (0..1) of the nearest point.
-    fn nearest(&self, p: Vec2) -> (f32, f32) {
-        let (mut best, mut best_t) = (f32::MAX, 0.0);
+    /// Distance from `p` to the curve, the curve parameter (0..1) of the nearest point,
+    /// and that point.
+    fn nearest(&self, p: Vec2) -> (f32, f32, Vec2) {
+        let (mut best, mut best_t, mut best_q) = (f32::MAX, 0.0, self.pts[0]);
         for k in 0..SEGS {
             let (a, b) = (self.pts[k], self.pts[k + 1]);
             let ab = b - a;
             let s = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-            let d = (p - (a + ab * s)).length_squared();
+            let q = a + ab * s;
+            let d = (p - q).length_squared();
             if d < best {
-                (best, best_t) = (d, (k as f32 + s) / SEGS as f32);
+                (best, best_t, best_q) = (d, (k as f32 + s) / SEGS as f32, q);
             }
         }
-        (best.sqrt(), best_t)
+        (best.sqrt(), best_t, best_q)
+    }
+
+    /// Whether `p` is within `margin` of the area the piece can touch.
+    fn near(&self, p: Vec2, margin: f32) -> bool {
+        p.x >= self.lo.x - margin && p.x <= self.hi.x + margin && p.y >= self.lo.y - margin && p.y <= self.hi.y + margin
     }
 
     /// Channel half-width at curve parameter `t` (0..1).
@@ -246,8 +261,8 @@ impl<'a> Sampler<'a> {
         let cs = c.cell_size();
         let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q)) * OLD_VOXEL;
         // A piece lies within a cell of its node, so gather nodes that close plus the
-        // farthest a river can reach.
-        let margin = reach(widest * 0.5) + cs * (3.0 + SINUOSITY_CELLS * 1.5);
+        // farthest a river can reach, or be looked for by the cliffs and ravines beside it.
+        let margin = reach(widest * 0.5) + cs * (3.0 + SINUOSITY_CELLS * 1.5) + RIVER_GUARD;
         let cell = |v: f32| ((v / cs).floor() as i32).clamp(1, c.size as i32 - 2) as usize;
         let (x0, x1) = (cell(lx0 as f32 - margin), cell((lx0 + span) as f32 + margin));
         let (z0, z1) = (cell(lz0 as f32 - margin), cell((lz0 + span) as f32 + margin));
@@ -284,7 +299,10 @@ impl<'a> Sampler<'a> {
                 p.hi += r;
             }
         }
-        pieces.retain(|p| p.lo.x <= hi.x && p.hi.x >= lo.x && p.lo.y <= hi.y && p.hi.y >= lo.y);
+        // Keep the pieces whose banks reach the area, and those far enough off for the
+        // cliffs and ravines in it to need to know where the water is.
+        let (glo, ghi) = (lo - RIVER_GUARD, hi + RIVER_GUARD);
+        pieces.retain(|p| p.lo.x <= ghi.x && p.hi.x >= glo.x && p.lo.y <= ghi.y && p.hi.y >= glo.y);
         falls.retain(|f| {
             let r = Vec2::splat(f.radius);
             let (a, b) = (f.pos - r, f.pos + r);
@@ -331,25 +349,44 @@ impl<'a> Sampler<'a> {
         let wz = (c.desc.mz as i64 * MACRO_SIZE as i64 + lz as i64) as f64;
         let seed = self.world_seed;
 
-        let (base, slope) = bicubic_slope(c, fx, fz);
-        let base = base * OLD_VOXEL;
-        // Fine relief the simulation grid cannot hold. Faded out at the waterline so
-        // shores stay clean.
-        let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08)
-            + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
-            + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
-        let mut ground = base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0);
+        let (mut ground, slope) = natural_ground(c, seed, fx, fz, wx, wz);
         let mut water: Option<i32> = None;
         let mut cover = Cover::Land;
+        // The nearest river within RIVER_GUARD, looked up only by the rare columns a
+        // cliff or ravine touches.
+        let beside_cell = std::cell::OnceCell::new();
+        let beside = || *beside_cell.get_or_init(|| self.river_beside(p));
         if lake == NO_LAKE && !near_sea {
             let slope = slope * OLD_VOXEL / cs;
-            let mut part = cliff::apply(seed, slope, wx, wz, &mut ground);
+            let natural = ground;
+            // A cliff's face stands on the valley side, its foot clear above the river.
+            let mut part = cliff::apply(seed, slope, wx, wz, &mut ground, |base| match beside() {
+                Some((sd, level)) => {
+                    let far = smoothstep(CLIFF_GUARD * 0.5, CLIFF_GUARD, sd);
+                    far.max(smoothstep(level + m(2.0), level + m(6.0), base))
+                }
+                None => 1.0,
+            });
             for f in &self.falls {
                 let d = (p - f.pos).length();
                 if d < f.radius {
                     let fall = f.cut(d, slope, wx, wz, &mut ground);
                     if part == cliff::Part::None {
                         part = fall;
+                    }
+                }
+            }
+            // Whatever the cliffs and falls did, the ground beside a river is not cut
+            // below its water: the valley floor stays a floor. Further out the limit
+            // falls away at 45 degrees, so it never makes a step of its own.
+            if ground < natural
+                && let Some((sd, level)) = beside()
+            {
+                let floor = level + m(1.0) - (sd - CLIFF_GUARD * 0.5).max(0.0);
+                if ground < floor {
+                    ground = floor.min(natural);
+                    if !matches!(part, cliff::Part::Face(_)) {
+                        part = cliff::Part::None;
                     }
                 }
             }
@@ -369,13 +406,14 @@ impl<'a> Sampler<'a> {
         // The river whose channel edge is nearest.
         // (signed distance to the channel edge, half-width, water level there, water
         // level a couple of voxels upstream, extra depth of a plunge pool, gorge depth,
-        // how far a mouth has shoaled towards the sea floor)
-        let mut nearest: Option<(f32, f32, f32, f32, f32, f32, f32)> = None;
+        // how far a mouth has shoaled towards the sea floor, nearest point on the
+        // centreline)
+        let mut nearest: Option<(f32, f32, f32, f32, f32, f32, f32, Vec2)> = None;
         for piece in &self.pieces {
-            if p.x < piece.lo.x || p.x > piece.hi.x || p.y < piece.lo.y || p.y > piece.hi.y {
+            if !piece.near(p, 0.0) {
                 continue;
             }
-            let (dist, t) = piece.nearest(p);
+            let (dist, t, q) = piece.nearest(p);
             let hw = piece.half_width(t);
             let sd = dist - hw;
             if nearest.is_none_or(|n| sd < n.0) {
@@ -389,10 +427,21 @@ impl<'a> Sampler<'a> {
                 // Out at sea a river mouth shoals to the sea floor rather than ending in a
                 // deep rounded hole.
                 let seaward = if piece.nodes[1] == piece.nodes[2] { smoothstep(0.2, 0.95, t) } else { 0.0 };
-                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool, piece.gorge_depth(t), seaward));
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool, piece.gorge_depth(t), seaward, q));
             }
         }
-        if let Some((sd, hw, level, upstream_level, pool, gorge, seaward)) = nearest {
+        if let Some((sd, hw, level, upstream_level, pool, mut gorge, seaward, centre)) = nearest {
+            if gorge > 0.0 && sd >= 0.0 {
+                // A gorge is a river cut down into high ground, so its walls stand no
+                // higher than the land at the edge of its reach. Where the valley is
+                // broad and low the gorge dies away instead of raising embankments
+                // either side of the water.
+                let away = (p - centre).normalize_or_zero();
+                let q = p + away * (ravine::gorge_reach(gorge) - sd).max(0.0);
+                let (gx, gz) = ((q.x / cs - 0.5).clamp(0.0, max), (q.y / cs - 0.5).clamp(0.0, max));
+                let (outer, _) = natural_ground(c, seed, gx, gz, wx + (q.x - p.x) as f64, wz + (q.y - p.y) as f64);
+                gorge = gorge.min(outer - level * OLD_VOXEL).max(0.0);
+            }
             river = sd;
             let k = pool_level(c.desc.seed, level);
             if sd < 0.0 {
@@ -453,9 +502,10 @@ impl<'a> Sampler<'a> {
             }
         }
 
-        // Dry fault ravines, kept well clear of water.
+        // Dry fault ravines, kept well clear of water. `river` is only known within a
+        // few metres of a channel, so the distance comes from the wider search.
         if lake == NO_LAKE && !near_sea && matches!(cover, Cover::Land | Cover::Cliff | Cover::Scree) {
-            let fade = if river == f32::MAX { 1.0 } else { smoothstep(m(40.0), m(80.0), river) };
+            let fade = || beside().map_or(1.0, |(sd, _)| smoothstep(RIVER_GUARD * 0.5, RIVER_GUARD, sd));
             match ravine::dry(seed, wx, wz, fade, &mut ground) {
                 cliff::Part::Face(_) => cover = Cover::Cliff,
                 cliff::Part::Foot(_) => cover = Cover::Scree,
@@ -499,6 +549,23 @@ impl<'a> Sampler<'a> {
             river,
             clear,
         }
+    }
+
+    /// The river channel whose edge is nearest `p`, if one is within `RIVER_GUARD`:
+    /// the distance to its edge, and its smooth water level there in voxels.
+    fn river_beside(&self, p: Vec2) -> Option<(f32, f32)> {
+        let mut best: Option<(f32, f32)> = None;
+        for piece in &self.pieces {
+            if !piece.near(p, RIVER_GUARD) {
+                continue;
+            }
+            let (dist, t, _) = piece.nearest(p);
+            let sd = dist - piece.half_width(t);
+            if sd < RIVER_GUARD && best.is_none_or(|b| sd < b.0) {
+                best = Some((sd, piece.level(t) * OLD_VOXEL));
+            }
+        }
+        best
     }
 
     /// Levels the ground under landmarks and along trails. Returns the distance to the
@@ -712,6 +779,7 @@ struct Fall {
     /// Height of the drop, in voxels.
     height: f32,
     salt: u32,
+    seed: u32,
 }
 
 impl Fall {
@@ -735,6 +803,7 @@ impl Fall {
             level: level * OLD_VOXEL,
             height,
             salt: hash2(world_seed ^ 0xfa12, i as i32, 3),
+            seed: world_seed,
         })
     }
 
@@ -751,6 +820,7 @@ impl Fall {
             ledge: 0.0,
             split: 0.5,
             salt: self.salt,
+            seed: self.seed,
         };
         face.cut(strength, slope.max(0.35), wx, wz, ground)
     }
@@ -810,6 +880,20 @@ fn sinuosity(c: &Continent, i: usize, size: f32) -> Vec2 {
     side * wave * SINUOSITY_CELLS * size * (c.size as f32 / 1024.0)
 }
 
+
+/// Ground height in voxels before rivers, cliffs or trails touch it, at position
+/// `(fx, fz)` in the cell-centre grid and world voxel `(wx, wz)`; and the simulated
+/// slope there in height units per cell.
+fn natural_ground(c: &Continent, seed: u32, fx: f32, fz: f32, wx: f64, wz: f64) -> (f32, f32) {
+    let (base, slope) = bicubic_slope(c, fx, fz);
+    let base = base * OLD_VOXEL;
+    // Fine relief the simulation grid cannot hold. Faded out at the waterline so
+    // shores stay clean.
+    let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08)
+        + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
+        + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
+    (base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0), slope)
+}
 
 /// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid,
 /// with the steepness of that smooth surface (height units per cell). The slope comes
@@ -1043,7 +1127,7 @@ mod tests {
                     continue;
                 }
                 let mut g = c.height[i] * OLD_VOXEL;
-                if ravine::dry(7, x as f64, z as f64, 1.0, &mut g) == cliff::Part::Foot(1.0) {
+                if ravine::dry(7, x as f64, z as f64, || 1.0, &mut g) == cliff::Part::Foot(1.0) {
                     dry.push((x, z));
                 }
             }
@@ -1100,6 +1184,118 @@ mod tests {
                 eprintln!("  face {:.0} m at {},{}  drop toward {},{}  look yaw {yaw:.0}", f.0 / m(1.0), f.1, f.2, f.3, f.4);
                 if picked.len() == 12 {
                     break;
+                }
+            }
+        }
+    }
+
+    /// Samples the land just beyond the banks of every `step`th river node, out to
+    /// 20 m from the channel, and measures how far each column has been dug below
+    /// both its natural height and the river's water: the valley floor carved out
+    /// beside the water. Returns (the deepest as (depth, x, z, cover), samples dug
+    /// deeper than 2 m, samples). With `unguarded`, also collects the samples that
+    /// cliffs and fault ravines would dig that deep if they ignored the river, as
+    /// they used to.
+    fn bank_cuts(seed: u32, step: usize, mut unguarded: Option<&mut Vec<(f32, i32, i32, Cover)>>) -> (Vec<(f32, i32, i32, Cover)>, usize, usize) {
+        let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let (mut worst, mut deep, mut total) = (Vec::new(), 0, 0);
+        for i in (0..c.size * c.size).step_by(step) {
+            if c.ocean[i] || c.lake[i] != NO_LAKE || c.discharge[i] < MIN_RIVER_Q {
+                continue;
+            }
+            let r = c.rcv[i] as usize;
+            if r == i || c.ocean[r] || c.lake[r] != NO_LAKE {
+                continue;
+            }
+            // Smooth water level between the two nodes, in voxels; the lower one, so a
+            // drop between them does not count as digging.
+            let level = river_level(&c, i).min(river_level(&c, r)) * OLD_VOXEL;
+            if level < m(4.0) {
+                continue;
+            }
+            let (a, b) = (node(&c, i), node(&c, r));
+            let mid = (a + b) * 0.5;
+            let Some(dir) = (b - a).try_normalize() else { continue };
+            let side = vec2(-dir.y, dir.x);
+            let hw = Continent::river_width(c.discharge[i]) * OLD_VOXEL * 0.5;
+            let s = Sampler::new(&c, seed, mid.x as i32 - 96, mid.y as i32 - 96, 192);
+            for sign in [-1.0f32, 1.0] {
+                for k in 0..10 {
+                    let sd = bank_width(hw) + m(1.0) + k as f32 * m(2.0);
+                    if sd > m(20.0) {
+                        break;
+                    }
+                    let q = mid + side * sign * (hw + sd);
+                    let (lx, lz) = (q.x as i32, q.y as i32);
+                    let col = s.column(lx, lz);
+                    // Only the land beside this river: not another channel's banks, a
+                    // lake, or a trail cut into the slope.
+                    if col.river < sd - m(1.0) || col.water_surface().is_some() || col.clear < m(6.0) {
+                        continue;
+                    }
+                    let (fx, fz) = ((lx as f32 + 0.5) / cs - 0.5, (lz as f32 + 0.5) / cs - 0.5);
+                    let (natural, slope) = natural_ground(&c, seed, fx, fz, lx as f64, lz as f64);
+                    let dug = natural.min(level) - col.ground;
+                    total += 1;
+                    if dug > m(2.0) {
+                        deep += 1;
+                        worst.push((dug, lx, lz, col.cover));
+                    }
+                    if let Some(unguarded) = unguarded.as_mut() {
+                        // What cliffs and fault ravines that ignore the river would do here.
+                        let mut g = natural;
+                        let mut part = cliff::apply(seed, slope * OLD_VOXEL / cs, lx as f64, lz as f64, &mut g, |_| 1.0);
+                        if let cliff::Part::Face(_) | cliff::Part::Foot(_) = ravine::dry(seed, lx as f64, lz as f64, || 1.0, &mut g) {
+                            part = cliff::Part::Foot(1.0);
+                        }
+                        let dug = natural.min(level) - g;
+                        if dug > m(2.0) {
+                            let cover = if part == cliff::Part::None { Cover::Land } else { Cover::Cliff };
+                            unguarded.push((dug, lx, lz, cover));
+                        }
+                    }
+                }
+            }
+        }
+        worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+        (worst, deep, total)
+    }
+
+    #[test]
+    fn ground_beside_rivers_is_not_dug_below_the_water() {
+        let (worst, deep, total) = bank_cuts(7, 5, None);
+        eprintln!("{deep} of {total} samples beside rivers dug over 2 m below the water; worst {:?}", worst.first());
+        assert!(total > 2000, "too few samples: {total}");
+        // Cliffs, falls, gorges and ravines all leave the valley floor alone. A few
+        // samples land where two rivers' banks meet, or on a trail's shoulder.
+        assert!(deep * 500 <= total, "{deep} of {total} dug below the river: {:?}", &worst[..worst.len().min(8)]);
+        assert!(worst.first().is_none_or(|w| w.0 < m(6.0)), "dug {:?}", worst.first());
+    }
+
+    /// Prints the deepest cuts beside rivers:
+    /// `cargo test --release -p worldgen bank_cut_survey -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bank_cut_survey() {
+        for seed in [1, 3, 7] {
+            let mut unguarded = Vec::new();
+            let (worst, deep, total) = bank_cuts(seed, 2, Some(&mut unguarded));
+            unguarded.sort_by(|a, b| b.0.total_cmp(&a.0));
+            eprintln!(
+                "seed {seed}: {deep} of {total} samples beside rivers dug over 2 m below the water ({} if cliffs and ravines ignored the river)",
+                unguarded.len()
+            );
+            for (name, list) in [("now", &worst), ("unguarded", &unguarded)] {
+                let mut picked: Vec<(f32, i32, i32, Cover)> = Vec::new();
+                for w in list {
+                    if picked.iter().all(|p| ((p.1 - w.1) as f32).hypot((p.2 - w.2) as f32) > m(200.0)) {
+                        picked.push(*w);
+                        eprintln!("  {name}: dug {:.1} m at {},{} ({:?})", w.0 / m(1.0), w.1, w.2, w.3);
+                        if picked.len() == 8 {
+                            break;
+                        }
+                    }
                 }
             }
         }
