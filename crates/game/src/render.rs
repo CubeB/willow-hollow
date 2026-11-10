@@ -1785,5 +1785,23 @@ pub fn screenshot(
         renderer.stats.impostor_boxes,
         impostors.boxes
     );
+    // Headless frame timing without a window: VOXEL_TIME_FRAMES=N renders the same
+    // view N more times, waiting for the GPU after each, and logs how long they took.
+    if let Some(n) = std::env::var("VOXEL_TIME_FRAMES").ok().and_then(|s| s.parse::<usize>().ok()) {
+        let mut times = Vec::with_capacity(n);
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground };
+            renderer.render(gpu, &mut encoder, &view, &scene);
+            gpu.queue.submit([encoder.finish()]);
+            gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
+            times.push(t.elapsed().as_secs_f32() * 1000.0);
+        }
+        times.sort_by(f32::total_cmp);
+        if !times.is_empty() {
+            log::info!("headless frames: median {:.2} ms, p95 {:.2} ms over {n}", times[n / 2], times[n * 95 / 100]);
+        }
+    }
     Ok(())
 }

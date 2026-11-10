@@ -143,8 +143,8 @@ palette! {
     LICHEN_YELLOW     = (176, 176,  84), Foliage, 2;
     LICHEN_GREY       = (156, 164, 142), Foliage, 2;
     // Climbers: ivy, Virginia creeper, flowering vines and lianas.
-    IVY_STEM          = (122, 116,  70), Foliage, 2;
-    IVY_WOOD          = (124, 106,  76), Foliage, 2;
+    IVY_STEM          = (100,  92,  64), Foliage, 2;
+    IVY_WOOD          = (126, 116, 100), Foliage, 2;
     IVY_LEAF_DARK     = ( 48, 110,  52), Foliage, 3;
     IVY_LEAF          = ( 72, 136,  58), Foliage, 3;
     IVY_LEAF_PALE     = (136, 180,  80), Foliage, 3;
@@ -157,7 +157,10 @@ palette! {
     CREEPER_LEAF_RED  = (186,  60,  46), Foliage, 3;
     VINE_LEAF         = ( 72, 128,  58), Foliage, 3;
     VINE_FLOWER       = (232, 142, 170), Foliage, 2;
-    LIANA_STEM        = (116, 100,  66), Foliage, 2;
+    LIANA_STEM        = ( 96,  82,  62), Foliage, 2;
+    // Dark streaks in old climber wood, where the stems twist round each other.
+    IVY_WOOD_DARK     = ( 98,  88,  78), Foliage, 2;
+    LIANA_WOOD        = ( 78,  66,  52), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
