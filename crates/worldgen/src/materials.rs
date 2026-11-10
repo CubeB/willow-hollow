@@ -131,6 +131,33 @@ palette! {
     ROCK_BROWN     = (112, 102,  94), Solid, 2;
     SANDSTONE_RED  = (188, 112,  78), Solid, 2;
     SCREE          = (140, 134, 128), Solid, 3;
+    // Moss and lichen: fine pieces on trunks, stone and shaded ground.
+    MOSS_CUSHION      = ( 74, 118,  52), Foliage, 3;
+    MOSS_CUSHION_LIT  = (110, 152,  66), Foliage, 3;
+    MOSS_CUSHION_DEEP = ( 58,  98,  52), Foliage, 3;
+    MOSS_CARPET       = ( 92, 132,  56), Foliage, 3;
+    MOSS_CARPET_LIT   = (124, 158,  70), Foliage, 3;
+    MOSS_CARPET_DEEP  = ( 68, 110,  48), Foliage, 3;
+    MOSS_SHAG         = ( 84, 112,  58), Foliage, 3;
+    MOSS_SHAG_TIP     = (132, 154,  84), Foliage, 3;
+    LICHEN_YELLOW     = (176, 176,  84), Foliage, 2;
+    LICHEN_GREY       = (156, 164, 142), Foliage, 2;
+    // Climbers: ivy, Virginia creeper, flowering vines and lianas.
+    IVY_STEM          = (122, 116,  70), Foliage, 2;
+    IVY_WOOD          = (124, 106,  76), Foliage, 2;
+    IVY_LEAF_DARK     = ( 48, 110,  52), Foliage, 3;
+    IVY_LEAF          = ( 72, 136,  58), Foliage, 3;
+    IVY_LEAF_PALE     = (136, 180,  80), Foliage, 3;
+    IVY_LEAF_RED      = (176,  74,  52), Foliage, 3;
+    IVY_FLOWER        = (206, 208, 120), Foliage, 2;
+    IVY_BERRY_GREEN   = (110, 134,  74), Foliage, 1;
+    IVY_BERRY         = ( 40,  40,  66), Foliage, 1;
+    CREEPER_LEAF_DARK = ( 60, 104,  48), Foliage, 3;
+    CREEPER_LEAF      = ( 92, 132,  54), Foliage, 3;
+    CREEPER_LEAF_RED  = (186,  60,  46), Foliage, 3;
+    VINE_LEAF         = ( 72, 128,  58), Foliage, 3;
+    VINE_FLOWER       = (232, 142, 170), Foliage, 2;
+    LIANA_STEM        = (116, 100,  66), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -186,8 +213,13 @@ pub fn ground_cover(biome: Biome) -> Voxel {
 /// material belongs in one of these lists, or the seasons will leave it alone.
 fn classify(m: &mut Materials) {
     use voxel::plant as pk;
-    let kinds: [(&[Voxel], u8); 7] = [
+    // Moss and lichen are left out: they keep their colour all year.
+    let kinds: [(&[Voxel], u8); 9] = [
         (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
+        // Virginia creeper turns and drops like a broadleaf tree.
+        (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED], pk::DECIDUOUS),
+        // Ivy is evergreen; vines and lianas keep their leaves.
+        (&[IVY_LEAF_DARK, IVY_LEAF, IVY_LEAF_PALE, IVY_LEAF_RED, VINE_LEAF], pk::VINE),
         (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB], pk::EVERGREEN),
         (&[LEAVES_MAPLE, LEAVES_MAPLE_RED], pk::AUTUMN),
         (
@@ -201,7 +233,7 @@ fn classify(m: &mut Materials) {
             pk::GROUND,
         ),
         (
-            &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN],
+            &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN, VINE_FLOWER],
             pk::FLOWER,
         ),
         (&[VINE], pk::VINE),
