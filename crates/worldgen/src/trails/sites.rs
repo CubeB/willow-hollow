@@ -7,11 +7,12 @@ use crate::{
     continent::{Continent, NO_LAKE},
     features::landmarks::Landmark,
     noise::{hash2, unit},
+    scale::m,
     surface::MIN_RIVER_Q,
 };
 
 /// Fewest voxels between any two landmarks.
-const MIN_GAP: f32 = 900.0;
+const MIN_GAP: f32 = m(720.0);
 /// Square kilometres of land per landmark.
 const LAND_PER_SITE: f32 = 5.0;
 
@@ -61,7 +62,8 @@ pub fn land_components(c: &Continent) -> Vec<u32> {
 pub fn candidates(c: &Continent, comp: &[u32]) -> Vec<(Landmark, usize, Vec<usize>)> {
     let n = c.size as i32;
     let scale = (n as f32 / 1024.0).max(0.25);
-    let cs = c.cell_size();
+    // Every height and score below is in simulation units.
+    let cs = c.sim_cell_size();
     let stride = (n / 256).max(1) as usize;
     let at = |x: i32, z: i32| (z.clamp(0, n - 1) * n + x.clamp(0, n - 1)) as usize;
     let h = |x: i32, z: i32| c.height[at(x, z)];

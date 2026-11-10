@@ -6,7 +6,7 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Vec3};
 use voxel::Kind;
-use worldgen::{Cascade, biome::Biome, noise};
+use worldgen::{Cascade, biome::Biome, noise, scale::OLD_VOXEL as U};
 
 use crate::player::Voxels;
 
@@ -142,18 +142,22 @@ impl Particles {
         // Falls: spray thrown off the lip, mist rising from the plunge.
         for c in s.cascades {
             let dist = (c.pos.as_dvec3() - s.camera).length() as f32;
-            if dist > 140.0 {
+            if dist > 140.0 * U {
                 continue;
             }
-            let rate = (c.drop.min(6.0) * 2.5 + 1.0) * (1.0 - dist / 150.0);
+            // Rates and speeds were tuned against the drop in old voxels.
+            let drop = c.drop / U;
+            let near = 1.0 - dist / (150.0 * U);
+            // Finer voxels mean more lips along the same waterfall.
+            let rate = (drop.min(6.0) * 2.5 + 1.0) * near / U;
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
-                let side = Vec3::new(-c.dir.z, 0.0, c.dir.x) * self.range(-0.5, 0.5);
-                let speed = 1.2 + c.drop * 0.35;
+                let side = Vec3::new(-c.dir.z, 0.0, c.dir.x) * self.range(-0.5, 0.5) * U;
+                let speed = 1.2 + drop * 0.35;
                 let particle = Particle {
                     kind: PKind::Spray,
-                    pos: c.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.1, 0.0),
-                    vel: c.dir * (speed * self.range(0.6, 1.2)) + Vec3::Y * self.range(0.8, 1.6 + c.drop * 0.4)
+                    pos: c.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.1 * U as f64, 0.0),
+                    vel: c.dir * (speed * self.range(0.6, 1.2)) + Vec3::Y * self.range(0.8, 1.6 + drop * 0.4)
                         + Vec3::new(self.range(-0.4, 0.4), 0.0, self.range(-0.4, 0.4)),
                     age: 0.0,
                     life: self.range(0.7, 1.4),
@@ -164,11 +168,11 @@ impl Particles {
                 };
                 self.spawn(particle);
             }
-            if c.drop >= 3.0 && self.unit() < dt * c.drop * 0.6 * (1.0 - dist / 150.0) {
-                let foot = c.pos + c.dir * (1.5 + c.drop * 0.3) - Vec3::Y * c.drop;
+            if drop >= 3.0 && self.unit() < dt * drop * 0.6 * near / U {
+                let foot = c.pos + c.dir * (1.5 + drop * 0.3) * U - Vec3::Y * c.drop;
                 let particle = Particle {
                     kind: PKind::Mist,
-                    pos: foot.as_dvec3() + DVec3::new(self.range(-1.5, 1.5) as f64, 0.3, self.range(-1.5, 1.5) as f64),
+                    pos: foot.as_dvec3() + (Vec3::new(self.range(-1.5, 1.5), 0.3, self.range(-1.5, 1.5)) * U).as_dvec3(),
                     vel: Vec3::new(self.range(-0.3, 0.3), self.range(0.5, 1.1), self.range(-0.3, 0.3)),
                     age: 0.0,
                     life: self.range(2.0, 3.5),
@@ -209,11 +213,11 @@ impl Particles {
             Biome::Deciduous | Biome::Grassland | Biome::OldGrowth | Biome::Woodland | Biome::Rainforest
         );
         if dusk && firefly_country && self.count(PKind::Firefly) < 120 && self.unit() < dt * 7.0 {
-            let (x, z) = (self.range(-26.0, 26.0), self.range(-26.0, 26.0));
-            if let Some(ground) = ground_below(voxels, s.camera + DVec3::new(x as f64, 12.0, z as f64), 40) {
+            let (x, z) = (self.range(-26.0, 26.0) * U, self.range(-26.0, 26.0) * U);
+            if let Some(ground) = ground_below(voxels, s.camera + DVec3::new(x as f64, (12.0 * U) as f64, z as f64), (40.0 * U) as i32) {
                 let particle = Particle {
                     kind: PKind::Firefly,
-                    pos: ground + DVec3::new(0.0, self.range(0.8, 3.0) as f64, 0.0),
+                    pos: ground + DVec3::new(0.0, (self.range(0.8, 3.0) * U) as f64, 0.0),
                     vel: Vec3::ZERO,
                     age: 0.0,
                     life: self.range(14.0, 26.0),
@@ -228,11 +232,11 @@ impl Particles {
 
         // Pollen and dust catching the daylight.
         if day && self.count(PKind::Mote) < 160 && self.unit() < dt * 6.0 {
-            let (x, z) = (self.range(-14.0, 14.0), self.range(-14.0, 14.0));
-            if let Some(ground) = ground_below(voxels, s.camera + DVec3::new(x as f64, 10.0, z as f64), 30) {
+            let (x, z) = (self.range(-14.0, 14.0) * U, self.range(-14.0, 14.0) * U);
+            if let Some(ground) = ground_below(voxels, s.camera + DVec3::new(x as f64, (10.0 * U) as f64, z as f64), (30.0 * U) as i32) {
                 let particle = Particle {
                     kind: PKind::Mote,
-                    pos: ground + DVec3::new(0.0, self.range(0.4, 5.0) as f64, 0.0),
+                    pos: ground + DVec3::new(0.0, (self.range(0.4, 5.0) * U) as f64, 0.0),
                     vel: Vec3::ZERO,
                     age: 0.0,
                     life: self.range(5.0, 9.0),
@@ -250,7 +254,7 @@ impl Particles {
             let (pos, color) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
             let particle = Particle {
                 kind: PKind::Butterfly,
-                pos: pos + DVec3::new(0.5, 1.2, 0.5),
+                pos: pos + DVec3::new(0.5, (1.2 * U) as f64, 0.5),
                 vel: Vec3::ZERO,
                 age: 0.0,
                 life: self.range(18.0, 30.0),
@@ -268,7 +272,7 @@ impl Particles {
             self.bird_timer = self.range(35.0, 80.0);
             let heading = self.range(0.0, std::f32::consts::TAU);
             let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
-            let start = s.camera - (dir * 220.0).as_dvec3() + DVec3::new(0.0, self.range(45.0, 90.0) as f64, 0.0);
+            let start = s.camera - (dir * 220.0 * U).as_dvec3() + DVec3::new(0.0, (self.range(45.0, 90.0) * U) as f64, 0.0);
             let n = 5 + (self.unit() * 5.0) as i32;
             for i in 0..n {
                 // A V: alternate sides, each bird further back and out.
@@ -277,7 +281,7 @@ impl Particles {
                 let offset = -dir * (k * 2.2) + Vec3::new(-dir.z, 0.0, dir.x) * (k * 1.6 * side);
                 let particle = Particle {
                     kind: PKind::Bird,
-                    pos: start + offset.as_dvec3(),
+                    pos: start + (offset * U).as_dvec3(),
                     vel: dir * 9.0,
                     age: 0.0,
                     life: 55.0,
@@ -318,12 +322,12 @@ impl Particles {
             match p.kind {
                 PKind::Spray | PKind::Droplet => {
                     p.vel.y -= 9.0 * dt;
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                 }
                 PKind::Mist => {
                     p.vel += (wind * 0.3 - p.vel * 0.5) * dt;
                     p.vel.y = p.vel.y.max(0.3);
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                     p.size += Vec3::splat(0.25 * dt);
                 }
                 PKind::Leaf => {
@@ -335,7 +339,7 @@ impl Particles {
                     let sway = (t * 2.2 + p.phase).sin() * 0.8;
                     let drift = wind * 0.6;
                     p.vel += (Vec3::new(drift.x + sway, fall, drift.z + sway * 0.5) - p.vel) * (1.0 - (-3.0 * dt).exp());
-                    let next = p.pos + (p.vel * dt).as_dvec3();
+                    let next = p.pos + (p.vel * U * dt).as_dvec3();
                     let below = next.floor().as_ivec3();
                     match voxels.kind(below.x, below.y, below.z) {
                         Kind::Solid => {
@@ -364,23 +368,23 @@ impl Particles {
                         noise::perlin2(16, t as f64 * 1.8 + p.phase as f64, 6.0),
                     );
                     p.vel = n1 * 1.2 + n2 * 0.5;
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                 }
                 PKind::Mote => {
                     let sway = Vec3::new((t * 0.7 + p.phase).sin(), (t * 0.9 + p.phase * 1.3).cos() * 0.6, (t * 0.8 + p.phase * 0.7).cos());
                     p.vel = wind * 0.35 + sway * 0.25;
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                 }
                 PKind::Butterfly => {
                     let wander = Vec3::new((t * 0.6 + p.phase).sin(), 0.0, (t * 0.5 + p.phase * 1.7).cos()) * 1.1;
                     let bob = (t * 7.0 + p.phase).sin() * 0.9;
                     p.vel += (Vec3::new(wander.x, bob + 0.1, wander.z) - p.vel) * (1.0 - (-4.0 * dt).exp());
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                     // Wings: the body flattens and widens as it flaps.
                     p.size.x = 0.18 + 0.2 * ((t * 14.0 + p.phase).sin()).abs();
                 }
                 PKind::Bird => {
-                    p.pos += (p.vel * dt).as_dvec3();
+                    p.pos += (p.vel * U * dt).as_dvec3();
                     p.size.x = 0.3 + 0.5 * ((t * 6.0 + p.phase).sin()).abs();
                 }
             }
@@ -417,7 +421,7 @@ impl Particles {
             self.instances.push(ParticleInstance {
                 pos: (p.pos - s.camera).as_vec3().to_array(),
                 yaw: p.phase,
-                size: p.size.to_array(),
+                size: (p.size * U).to_array(),
                 glow,
                 color: [color[0], color[1], color[2], alpha],
             });

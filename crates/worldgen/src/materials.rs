@@ -104,6 +104,23 @@ palette! {
     CHARCOAL       = ( 52,  48,  48), Solid, 1;
     LANTERN        = (255, 198, 112), Solid, 0, glow;
     EMBER          = (255, 122,  46), Solid, 1, glow;
+    // Small plants: walked through, like leaves.
+    TUFT           = (104, 160,  66), Foliage, 3;
+    TUFT_MEADOW    = (146, 184,  84), Foliage, 3;
+    TUFT_LUSH      = ( 60, 142,  62), Foliage, 3;
+    TUFT_DRY       = (172, 160,  98), Foliage, 3;
+    BLOOM_RED      = (222,  70,  64), Foliage, 2;
+    BLOOM_YELLOW   = (244, 214,  80), Foliage, 2;
+    BLOOM_WHITE    = (244, 244, 234), Foliage, 1;
+    BLOOM_PURPLE   = (170, 110, 204), Foliage, 2;
+    BLOOM_BLUE     = (108, 140, 230), Foliage, 2;
+    BLOOM_PINK     = (242, 160, 198), Foliage, 2;
+    REED           = (120, 148,  72), Foliage, 3;
+    REED_HEAD      = (112,  84,  54), Foliage, 2;
+    MUSHROOM_STEM  = (226, 216, 196), Foliage, 1;
+    MUSHROOM_RED   = (196,  56,  48), Foliage, 2;
+    MUSHROOM_TAN   = (178, 142, 100), Foliage, 2;
+    LILY           = ( 70, 138,  64), Foliage, 2;
 }
 
 /// The ground cover a biome grows.

@@ -7,7 +7,7 @@ use std::{
 
 use glam::{IVec3, Vec3};
 
-use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel};
+use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel, mesh::CELLS};
 
 use crate::{
     Cascade, ColumnOutput, World,
@@ -16,6 +16,7 @@ use crate::{
     macro_layout::{MACRO_SIZE, cell_desc, cell_of},
     materials as mat,
     noise::{hash3, perlin2, unit},
+    scale::{BLOCK, m, m64},
     surface::{Column, Cover, Sampler, node},
     trails,
 };
@@ -137,7 +138,7 @@ impl GameWorld {
         let river = node(&c, cell);
         let sampler_at = |x: i32, z: i32| Sampler::new(&c, self.seed, x, z, 1).column(x, z);
         for ring in 0..40 {
-            let dist = 8.0 + ring as f32 * 1.5;
+            let dist = m(6.4) + ring as f32 * m(1.2);
             for step in 0..16 {
                 let angle = step as f32 / 16.0 * std::f32::consts::TAU;
                 let (x, z) = (
@@ -246,6 +247,7 @@ impl World for GameWorld {
 
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
+        let mut plants = Vec::new();
         for px in 0..PAD {
             for pz in 0..PAD {
                 let top = columns[px * PAD + pz].top();
@@ -258,13 +260,18 @@ impl World for GameWorld {
                 let steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
-                let patch = perlin2(self.seed ^ 0x9a7c, wx / 9.0, wz / 9.0) * 0.5 + 0.5;
+                let patch = perlin2(self.seed ^ 0x9a7c, wx / m64(7.2), wz / m64(7.2)) * 0.5 + 0.5;
                 let col = &columns[px * PAD + pz];
-                let mut skin = surface_materials(col, steep, roll, patch);
+                let skin = surface_materials(col, steep, roll, patch);
+                let mut growing = skin.0;
                 if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
                     && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
                 {
-                    skin.0 = f;
+                    growing = f;
+                }
+                // The border columns belong to neighbouring chunk columns.
+                if (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
+                    features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                 }
                 skins.push(skin);
             }
@@ -293,7 +300,7 @@ impl World for GameWorld {
         for p in &placements {
             let t = lib.get(p.species, p.variant);
             hi = hi.max(p.pos.y + t.top);
-            lo = lo.min(p.pos.y - 4);
+            lo = lo.min(p.pos.y - 4 * BLOCK);
         }
         // Landmarks, bridges and lanterns, whose voxels are continent-local.
         let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));
@@ -302,6 +309,7 @@ impl World for GameWorld {
             hi = hi.max(s.hi.y);
             lo = lo.min(s.lo.y);
         }
+        hi = plants.iter().fold(hi, |top, p| top.max((p.lo[1]).div_euclid(CELLS)));
 
         // Only chunks that can hold a visible face: from just under the lowest ground
         // to the highest ground or water or tree top.
@@ -323,7 +331,7 @@ impl World for GameWorld {
                             if y <= water_top { mat::WATER } else { AIR }
                         } else if y == top {
                             surface
-                        } else if y >= top - 3 {
+                        } else if y >= top - 3 * BLOCK {
                             under
                         } else {
                             mat::STONE
@@ -401,6 +409,7 @@ impl World for GameWorld {
         ColumnOutput {
             chunks: out,
             cascades,
+            plants,
         }
     }
 }

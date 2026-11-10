@@ -14,23 +14,22 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{ChunkMesh, Vertex, mesh_chunk},
+    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk},
 };
-use wgpu::util::DeviceExt;
 use worldgen::{Cascade, World};
 
-use crate::gfx::Gpu;
-
-pub struct MeshBuf {
-    pub buffer: wgpu::Buffer,
-    pub quads: u32,
-}
+use crate::{
+    arena::{MeshSpan, VertexArena},
+    gfx::Gpu,
+};
 
 pub struct GpuChunk {
     /// Chunk coordinates (world voxel position / 32).
     pub pos: IVec3,
-    pub opaque: Option<MeshBuf>,
-    pub water: Option<MeshBuf>,
+    pub opaque: Option<MeshSpan>,
+    pub water: Option<MeshSpan>,
+    /// Where each face direction starts within `opaque`, in quads.
+    pub faces: [u32; 13],
 }
 
 type Col = (i32, i32);
@@ -50,6 +49,7 @@ pub struct Stats {
     pub chunks: usize,
     pub quads: u64,
     pub mesh_bytes: u64,
+    pub arena_bytes: u64,
     pub queued: usize,
     pub in_flight: usize,
     /// Smoothed per-column times on a worker thread.
@@ -79,6 +79,7 @@ pub struct Streamer {
     tx: Sender<ColumnResult>,
     rx: Receiver<ColumnResult>,
     columns: HashMap<Col, Vec<GpuChunk>>,
+    arena: VertexArena,
     /// Cascade lips in each loaded column, for spray and sound.
     cascades: HashMap<Col, Vec<Cascade>>,
     pending: HashSet<Col>,
@@ -94,7 +95,7 @@ pub struct Streamer {
 const UNLOAD_SLACK: i32 = 2;
 
 impl Streamer {
-    pub fn new(world: Arc<dyn World>, radius: i32) -> Self {
+    pub fn new(gpu: &Gpu, world: Arc<dyn World>, radius: i32) -> Self {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
@@ -112,6 +113,7 @@ impl Streamer {
             tx,
             rx,
             columns: HashMap::new(),
+            arena: VertexArena::new(gpu),
             cascades: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
@@ -164,6 +166,11 @@ impl Streamer {
         self.columns.values().flatten()
     }
 
+    /// The buffer every chunk's vertices live in.
+    pub fn vertices(&self) -> &wgpu::Buffer {
+        self.arena.buffer()
+    }
+
     /// Cascade lips within `radius` voxels of `pos` (horizontally), from loaded columns.
     pub fn cascades_near(&self, pos: DVec3, radius: f32) -> impl Iterator<Item = &Cascade> {
         let r = (radius / CHUNK as f32).ceil() as i32 + 1;
@@ -212,7 +219,9 @@ impl Streamer {
                         .into_iter()
                         .map(|(cy, mesh)| self.upload(gpu, IVec3::new(result.col.0, cy, result.col.1), mesh))
                         .collect();
-                    self.columns.insert(result.col, chunks);
+                    if let Some(old) = self.columns.insert(result.col, chunks) {
+                        release(&mut self.arena, &old);
+                    }
                     if !result.cascades.is_empty() {
                         self.cascades.insert(result.col, result.cascades);
                     }
@@ -225,6 +234,7 @@ impl Streamer {
         self.stats.columns = self.columns.len();
         self.stats.queued = self.wanted.len();
         self.stats.in_flight = self.pending.len();
+        self.stats.arena_bytes = self.arena.capacity_bytes();
     }
 
     /// Blocks until everything in range is loaded (used for screenshots).
@@ -246,7 +256,14 @@ impl Streamer {
             dx * dx + dz * dz
         };
         let before = self.columns.len();
-        self.columns.retain(|c, _| dist2(c) <= unload * unload);
+        let arena = &mut self.arena;
+        self.columns.retain(|c, chunks| {
+            let keep = dist2(c) <= unload * unload;
+            if !keep {
+                release(arena, chunks);
+            }
+            keep
+        });
         self.cascades.retain(|c, _| dist2(c) <= unload * unload);
         if self.columns.len() != before {
             self.recount();
@@ -268,28 +285,20 @@ impl Streamer {
     }
 
     fn upload(&mut self, gpu: &Gpu, pos: IVec3, mesh: ChunkMesh) -> GpuChunk {
-        let mut make = |verts: &[Vertex], label: &str| -> Option<MeshBuf> {
+        let mut make = |verts: &[Vertex]| -> Option<MeshSpan> {
             if verts.is_empty() {
                 return None;
             }
-            let bytes: &[u8] = bytemuck::cast_slice(verts);
-            self.stats.quads += verts.len() as u64 / 4;
-            self.stats.mesh_bytes += bytes.len() as u64;
-            Some(MeshBuf {
-                buffer: gpu
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some(label),
-                        contents: bytes,
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                quads: verts.len() as u32 / 4,
-            })
+            let span = self.arena.add(gpu, verts)?;
+            self.stats.quads += span.quads as u64;
+            self.stats.mesh_bytes += size_of_val(verts) as u64;
+            Some(span)
         };
-        let opaque = make(&mesh.opaque, "chunk opaque");
-        let water = make(&mesh.water, "chunk water");
+        let opaque = make(&mesh.opaque);
+        let water = make(&mesh.water);
+        let faces = mesh.faces;
         self.stats.chunks += 1;
-        GpuChunk { pos, opaque, water }
+        GpuChunk { pos, opaque, water, faces }
     }
 
     fn recount(&mut self) {
@@ -302,6 +311,12 @@ impl Streamer {
         self.stats.chunks = chunks;
         self.stats.quads = quads;
         self.stats.mesh_bytes = quads * 4 * size_of::<Vertex>() as u64;
+    }
+}
+
+fn release(arena: &mut VertexArena, chunks: &[GpuChunk]) {
+    for span in chunks.iter().flat_map(|c| c.opaque.iter().chain(&c.water)) {
+        arena.remove(*span);
     }
 }
 
@@ -321,7 +336,13 @@ fn build_column(world: &dyn World, focus: &Focus, col: Col) -> ColumnResult {
     let chunks = output
         .chunks
         .iter()
-        .map(|(cy, chunk)| (*cy, mesh_chunk(chunk, world.materials())))
+        .map(|(cy, chunk)| {
+            let mut mesh = mesh_chunk(chunk, world.materials());
+            let origin = [col.0 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.1 * CHUNK * CELLS];
+            let inside = output.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
+            add_plants(&mut mesh, inside, origin, world.materials());
+            (*cy, mesh)
+        })
         .filter(|(_, mesh)| !mesh.is_empty())
         .collect();
     let t2 = Instant::now();

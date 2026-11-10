@@ -11,7 +11,7 @@ pub mod shape;
 
 use crate::{
     biome::Biome,
-    macro_layout::{CellDesc, MACRO_SIZE},
+    macro_layout::{CellDesc, MACRO_SIZE, SIM_SPAN},
     noise::{hash2, unit},
 };
 use flow::Flow;
@@ -36,7 +36,9 @@ pub struct Continent {
     pub desc: CellDesc,
     /// Cells per side.
     pub size: usize,
-    /// Terrain surface in voxels; sea level is 0. Under a lake this is the lake bed.
+    /// Terrain surface in simulation units (0.8 m each); sea level is 0. Under a lake
+    /// this is the lake bed. Heights, lakes and river widths stay in these units here
+    /// and are converted to voxels by the surface sampler.
     pub height: Vec<f32>,
     /// Lake surface level where a cell holds standing water, else [`NO_LAKE`].
     pub lake: Vec<f32>,
@@ -68,14 +70,19 @@ impl Continent {
         MACRO_SIZE as f32 / self.size as f32
     }
 
-    /// River width in voxels for a given discharge.
+    /// Simulation units per grid cell.
+    pub fn sim_cell_size(&self) -> f32 {
+        SIM_SPAN / self.size as f32
+    }
+
+    /// River width in simulation units for a given discharge.
     pub fn river_width(discharge: f32) -> f32 {
         0.45 * discharge.powf(0.36)
     }
 }
 
 // --- Simulation parameters -------------------------------------------------------------
-// Lengths are voxels. Only the products K*dt and U*dt matter to the implicit scheme.
+// Lengths are simulation units. Only the products K*dt and U*dt matter to the implicit scheme.
 
 /// Erodibility x timestep.
 const K_DT: f32 = 12.0;
@@ -91,7 +98,7 @@ const VALLEY_Q: f32 = 400.0;
 
 struct Level {
     w: usize,
-    /// Voxels per cell.
+    /// Simulation units per cell.
     dx: f32,
     land: Vec<f32>,
     ocean: Vec<bool>,
@@ -104,7 +111,7 @@ impl Level {
         let n = w * w;
         let mut l = Level {
             w,
-            dx: MACRO_SIZE as f32 / w as f32,
+            dx: SIM_SPAN / w as f32,
             land: vec![0.0; n],
             ocean: vec![false; n],
             uplift: vec![0.0; n],

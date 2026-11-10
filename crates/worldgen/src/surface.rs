@@ -14,6 +14,7 @@ use crate::{
     continent::{Continent, NO_LAKE},
     macro_layout::MACRO_SIZE,
     noise::{fbm2, hash2, perlin2, unit},
+    scale::{BLOCK, OLD_VOXEL, m, m64},
     trails::{Pad, TrailPoint},
 };
 
@@ -22,9 +23,9 @@ pub const MIN_RIVER_Q: f32 = 24.0;
 /// Line segments each river curve is flattened into for distance queries.
 const SEGS: usize = 6;
 /// Narrowest channel half-width, so the thinnest brooks are still unbroken water.
-const MIN_HALF_WIDTH: f32 = 0.75;
+const MIN_HALF_WIDTH: f32 = m(0.6);
 /// Taken from the distance to a trail's centreline to give the distance to its edge.
-const TRAIL_CLEARANCE: f32 = 1.5;
+const TRAIL_CLEARANCE: f32 = m(1.2);
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -84,7 +85,7 @@ pub struct Piece {
     /// Channel width at the start and end.
     w0: f32,
     w1: f32,
-    /// Water level at the start, the middle and the end.
+    /// Water level at the start, the middle and the end, in simulation units.
     l0: f32,
     l1: f32,
     l2: f32,
@@ -152,13 +153,13 @@ impl Piece {
 
 /// How far from the channel edge a river's banks are reshaped.
 fn bank_width(half_width: f32) -> f32 {
-    3.0 + 2.0 * half_width
+    m(2.4) + 2.0 * half_width
 }
 
 /// Farthest from its centreline a river touches the terrain.
 fn reach(half_width: f32) -> f32 {
     let hw = half_width.max(MIN_HALF_WIDTH);
-    hw + bank_width(hw) + 1.0
+    hw + bank_width(hw) + m(0.8)
 }
 
 /// Quantises a river's water level into flat pools separated by drops.
@@ -168,7 +169,8 @@ fn reach(half_width: f32) -> f32 {
 /// function of the level alone, the result still never rises downstream. On a gentle
 /// river the allowed levels are far apart along its length, giving long still pools
 /// and the odd weir; on a steep one they come quickly, giving cascades. Missing levels
-/// become taller falls, more often at altitude.
+/// become taller falls, more often at altitude. Takes simulation units and returns
+/// voxels, so pools keep the same height however fine the voxels are.
 pub fn pool_level(seed: u32, level: f32) -> i32 {
     let mut k = level.floor() as i32;
     while k > 0 {
@@ -182,7 +184,7 @@ pub fn pool_level(seed: u32, level: f32) -> i32 {
         }
         k -= 1;
     }
-    k.max(0)
+    k.max(0) * BLOCK
 }
 
 /// Samples the surface for the voxel columns of one chunk (or any small area).
@@ -199,7 +201,7 @@ impl<'a> Sampler<'a> {
     /// `(lx0, lz0)` and `span` voxels wide.
     pub fn new(c: &'a Continent, world_seed: u32, lx0: i32, lz0: i32, span: i32) -> Self {
         let cs = c.cell_size();
-        let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q));
+        let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q)) * OLD_VOXEL;
         // A piece lies within a cell of its node, so gather nodes that close plus the
         // farthest a river can reach.
         let margin = reach(widest * 0.5) + cs * 1.5;
@@ -257,13 +259,13 @@ impl<'a> Sampler<'a> {
         let wz = (c.desc.mz as i64 * MACRO_SIZE as i64 + lz as i64) as f64;
         let seed = self.world_seed;
 
-        let base = bicubic(c, fx, fz);
+        let base = bicubic(c, fx, fz) * OLD_VOXEL;
         // Fine relief the simulation grid cannot hold. Faded out at the waterline so
         // shores stay clean.
-        let detail = fbm2(seed ^ 0xd1, wx / 56.0, wz / 56.0, 3, 2.0, 0.5) * 2.6
-            + perlin2(seed ^ 0xd2, wx / 17.0, wz / 17.0) * 1.0
-            + perlin2(seed ^ 0xd3, wx / 7.0, wz / 7.0) * 0.55;
-        let mut ground = base + detail * ((base - 0.5).abs() / 4.0).clamp(0.12, 1.0);
+        let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08)
+            + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
+            + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
+        let mut ground = base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0);
         let mut water: Option<i32> = None;
         let mut cover = Cover::Land;
         let mut river = f32::MAX;
@@ -285,7 +287,7 @@ impl<'a> Sampler<'a> {
             let hw = piece.half_width(t);
             let sd = dist - hw;
             if nearest.is_none_or(|n| sd < n.0) {
-                let upstream = (t - 2.0 / piece.length).max(0.0);
+                let upstream = (t - m(1.6) / piece.length).max(0.0);
                 nearest = Some((sd, hw, piece.level(t), piece.level(upstream)));
             }
         }
@@ -294,7 +296,7 @@ impl<'a> Sampler<'a> {
             let k = pool_level(c.desc.seed, level);
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
-                let depth = (0.6 + 0.44 * hw).clamp(1.0, 7.0);
+                let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6));
                 let across = 1.0 + sd / hw; // 0 at the centre, 1 at the edge
                 let bed = k as f32 - 1.01 - depth * (1.0 - across * across);
                 ground = if submerged { ground.min(bed) } else { bed };
@@ -308,7 +310,7 @@ impl<'a> Sampler<'a> {
                 // couple of voxels, so the upper pool cannot spill around the lip.
                 let bank = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
                 ground = bank + (ground - bank) * smoothstep(0.0, bank_width(hw), sd);
-                if sd < 1.6 {
+                if sd < m(1.28) {
                     cover = Cover::Bank;
                 }
             }
@@ -327,7 +329,7 @@ impl<'a> Sampler<'a> {
             if cover == Cover::Land {
                 cover = Cover::SeaFloor;
             }
-        } else if near_sea && ground < 3.0 && cover == Cover::Land {
+        } else if near_sea && ground < m(2.4) && cover == Cover::Land {
             cover = Cover::Beach;
         }
 
@@ -336,7 +338,7 @@ impl<'a> Sampler<'a> {
         // Biome from the nearest cell, with the lookup position wobbled so borders
         // interlock and dither instead of following the grid.
         let wobble = |s: u32| {
-            perlin2(seed ^ s, wx / 44.0, wz / 44.0) * 0.55
+            perlin2(seed ^ s, wx / m64(35.2), wz / m64(35.2)) * 0.55
                 + (unit(hash2(seed ^ s, lx, lz)) - 0.5) * 0.16
         };
         let bx = ((p.x / cs + wobble(0xb1)) as i32).clamp(0, c.size as i32 - 1) as usize;
@@ -376,10 +378,10 @@ impl<'a> Sampler<'a> {
         }
         let top = ground.floor() as i32;
         let dry = water.is_none_or(|k| top >= k - 1);
-        let guard = if river == f32::MAX { 1.0 } else { smoothstep(2.0, 6.0, river) };
+        let guard = if river == f32::MAX { 1.0 } else { smoothstep(m(1.6), m(4.8), river) };
         let mut clear = f32::MAX;
 
-        // Trail points lie one voxel apart, so the nearest point is close enough to the
+        // Trail points lie 0.8 m apart, so the nearest point is close enough to the
         // nearest point on the curve.
         let mut any = f32::MAX;
         let mut paved: Option<(f32, &TrailPoint)> = None;
@@ -399,11 +401,11 @@ impl<'a> Sampler<'a> {
         {
             let d = d2.sqrt();
             let rise = (t.y - *ground).abs();
-            let shoulder = (rise * 1.3).clamp(2.0, 8.0);
+            let shoulder = (rise * 1.3).clamp(m(1.6), m(6.4));
             if d < t.half_width + shoulder {
                 let w = (1.0 - smoothstep(t.half_width, t.half_width + shoulder, d)) * guard;
                 *ground += (t.y - *ground) * w;
-                let ragged = (unit(hash2(self.world_seed ^ 0x7a11, lx, lz)) - 0.5) * 0.9;
+                let ragged = (unit(hash2(self.world_seed ^ 0x7a11, lx, lz)) - 0.5) * m(0.72);
                 if d < t.half_width + ragged && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Beach | Cover::Bank) {
                     *cover = Cover::Trail;
                 }
@@ -414,8 +416,8 @@ impl<'a> Sampler<'a> {
         for pad in &self.pads {
             let d = (p - vec2(pad.x, pad.z)).length() - pad.radius;
             clear = clear.min(d);
-            if dry && d < 6.0 {
-                let w = (1.0 - smoothstep(0.0, 6.0, d)) * guard;
+            if dry && d < m(4.8) {
+                let w = (1.0 - smoothstep(0.0, m(4.8), d)) * guard;
                 *ground += (pad.y - *ground) * w;
             }
         }
@@ -444,7 +446,8 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     let r = c.rcv[i] as usize;
     let (pi, pr) = (node(c, i), node(c, r));
     let exit = (pi + pr) * 0.5;
-    let (wi, li) = (Continent::river_width(c.discharge[i]), c.water_level[i]);
+    let width = |j: usize| Continent::river_width(c.discharge[j]) * OLD_VOXEL;
+    let (wi, li) = (width(i), c.water_level[i]);
     // Sea level is 0; the last piece of a river runs down to it.
     let lr = if c.ocean[r] { 0.0 } else { c.water_level[r] };
     let exit_level = (li + lr) * 0.5;
@@ -461,7 +464,7 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
                     (pd + pi) * 0.5,
                     pi,
                     exit,
-                    (Continent::river_width(c.discharge[d]), wi),
+                    (width(d), wi),
                     ((c.water_level[d] + li) * 0.5, li, exit_level),
                 ));
             }

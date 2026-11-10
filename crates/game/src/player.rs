@@ -4,49 +4,52 @@ use std::{collections::HashMap, sync::Arc};
 
 use glam::{DVec3, Vec3};
 use voxel::{CHUNK, Kind, PaddedChunk};
-use worldgen::{World, world::GameWorld};
+use worldgen::{
+    World,
+    scale::{m, m64},
+    world::GameWorld,
+};
 
 /// Answers "what is at this voxel?" for collision.
 pub trait Voxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind;
 }
 
-/// Character size in voxels. Roughly Cube World's proportions: a little over two
-/// terrain voxels tall.
-pub const HEIGHT: f64 = 2.2;
-pub const EYE_HEIGHT: f64 = 1.9;
-const HALF_WIDTH: f64 = 0.32;
+/// Character size.
+pub const HEIGHT: f64 = m64(1.76);
+pub const EYE_HEIGHT: f64 = m64(1.52);
+const HALF_WIDTH: f64 = m64(0.256);
 
-const WALK_SPEED: f32 = 5.2;
-const SPRINT_SPEED: f32 = 8.6;
-const SWIM_SPEED: f32 = 3.4;
-const JUMP_SPEED: f32 = 8.8;
-const GRAVITY: f32 = 27.0;
+const WALK_SPEED: f32 = m(4.16);
+const SPRINT_SPEED: f32 = m(6.88);
+const SWIM_SPEED: f32 = m(2.72);
+const JUMP_SPEED: f32 = m(7.04);
+const GRAVITY: f32 = m(21.6);
 /// Ledges up to this high are walked up without jumping.
-const STEP: f64 = 1.0;
+const STEP: f64 = m64(0.8);
 /// Out of water a swimmer can haul up a taller bank.
-const CLIMB_OUT: f64 = 2.0;
+const CLIMB_OUT: f64 = m64(1.6);
 const SKIN: f64 = 1e-4;
 
 /// Airspeed the glider settles at when flown level.
-const GLIDE_TRIM: f32 = 13.0;
+const GLIDE_TRIM: f32 = m(10.4);
 /// Sink rate at trim: with [`GLIDE_TRIM`] this is about 8 voxels forward per voxel down.
-const GLIDE_SINK: f32 = 1.6;
+const GLIDE_SINK: f32 = m(1.28);
 /// How strongly diving gains speed and climbing loses it.
-const GLIDE_GRAVITY: f32 = 14.0;
+const GLIDE_GRAVITY: f32 = m(11.2);
 const GLIDE_DRAG: f32 = 0.55;
-const GLIDE_MIN_SPEED: f32 = 5.0;
-const GLIDE_MAX_SPEED: f32 = 34.0;
+const GLIDE_MIN_SPEED: f32 = m(4.0);
+const GLIDE_MAX_SPEED: f32 = m(27.2);
 /// Steepest the glider follows the view, down and up, in radians.
 const GLIDE_DIVE: f32 = 0.85;
 const GLIDE_CLIMB: f32 = 0.30;
 
-const BOAT_SPEED: f32 = 9.0;
-const BOAT_FAST: f32 = 22.0;
+const BOAT_SPEED: f32 = m(7.2);
+const BOAT_FAST: f32 = m(17.6);
 /// From the middle of the hull to the bow, for running aground.
-const BOAT_REACH: f64 = 1.6;
+const BOAT_REACH: f64 = m64(1.28);
 /// Sitting in a boat, the eye is this far above the water.
-const BOAT_EYE: f64 = 1.5;
+const BOAT_EYE: f64 = m64(1.2);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -106,7 +109,7 @@ impl Player {
 
     pub fn eye(&self) -> DVec3 {
         if self.mode == Mode::Boat {
-            let rock = (self.swell * 1.1).sin() as f64 * 0.06;
+            let rock = (self.swell * 1.1).sin() as f64 * m64(0.048);
             return self.pos + DVec3::new(0.0, BOAT_EYE + rock, 0.0);
         }
         self.pos + DVec3::new(0.0, EYE_HEIGHT - self.step_lag as f64, 0.0)
@@ -128,16 +131,16 @@ impl Player {
         let boat = (self.pos, self.heading);
         self.mode = Mode::Walk;
         self.vel = Vec3::ZERO;
-        for radius in [1.5f64, 2.5, 3.5, 4.5] {
+        let body = HEIGHT.ceil() as i32;
+        let (below, above) = (m(1.6).round() as i32, m(2.4).round() as i32);
+        for radius in [m64(1.2), m64(2.0), m64(2.8), m64(3.6)] {
             for k in 0..16 {
                 let a = k as f64 / 16.0 * std::f64::consts::TAU;
                 let spot = DVec3::new(self.pos.x + a.cos() * radius, 0.0, self.pos.z + a.sin() * radius);
                 let (x, z) = (spot.x.floor() as i32, spot.z.floor() as i32);
                 let base = self.pos.y.round() as i32;
-                for y in (base - 2..=base + 3).rev() {
-                    let clear = |dy: i32, v: &mut dyn FnMut(i32) -> Kind| v(dy) == Kind::Air;
-                    let mut kind = |dy: i32| v.kind(x, y + dy, z);
-                    if kind(-1) == Kind::Solid && clear(0, &mut kind) && clear(1, &mut kind) && clear(2, &mut kind) {
+                for y in (base - below..=base + above).rev() {
+                    if v.kind(x, y - 1, z) == Kind::Solid && (0..body).all(|dy| v.kind(x, y + dy, z) == Kind::Air) {
                         self.pos = DVec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
                         return boat;
                     }
@@ -156,7 +159,7 @@ impl Player {
         while v.kind(x, top, z) == Kind::Water && top < around.round() as i32 + 64 {
             top += 1;
         }
-        for y in (top - 30..=top).rev() {
+        for y in (top - m(24.0) as i32..=top).rev() {
             match v.kind(x, y, z) {
                 Kind::Water => return Some(y as f64 + 1.0),
                 Kind::Solid => return None,
@@ -192,7 +195,7 @@ impl Player {
             let mut bow = next;
             bow[axis] += delta.signum() * BOAT_REACH;
             // Water can be followed down any drop, but only up a low step.
-            if Self::water_plane(v, bow, plane).is_some_and(|w| w <= plane + 1.01) {
+            if Self::water_plane(v, bow, plane).is_some_and(|w| w <= plane + m64(0.8) + 0.01) {
                 self.pos = next;
             } else {
                 self.vel[axis] = 0.0;
@@ -282,7 +285,7 @@ impl Player {
             moved[axis] += delta;
             if !Self::blocked(lifted, v) && !Self::blocked(moved, v) {
                 self.pos = moved;
-                self.step_lag = (self.step_lag + rise as f32).min(1.5);
+                self.step_lag = (self.step_lag + rise as f32).min(m(1.2));
                 if self.swimming {
                     self.vel.y = self.vel.y.max(0.0);
                 }
@@ -299,7 +302,7 @@ impl Player {
             return;
         }
         // Chest-deep in water means swimming.
-        let chest = (self.pos + DVec3::new(0.0, 1.2, 0.0)).floor().as_ivec3();
+        let chest = (self.pos + DVec3::new(0.0, m64(0.96), 0.0)).floor().as_ivec3();
         self.swimming = v.kind(chest.x, chest.y, chest.z) == Kind::Water;
         let head = (self.pos + DVec3::new(0.0, EYE_HEIGHT, 0.0)).floor().as_ivec3();
         let head_under = v.kind(head.x, head.y, head.z) == Kind::Water;
@@ -347,18 +350,18 @@ impl Player {
         } else if self.swimming {
             // Float with the head just clear of the surface; Space swims upward.
             let target = if controls.jump {
-                3.6
+                m(2.88)
             } else if head_under {
-                1.2
+                m(0.96)
             } else {
-                -1.0
+                m(-0.8)
             };
             self.vel.y += (target - self.vel.y) * (1.0 - (-5.0 * dt).exp());
         } else {
             if controls.jump && self.on_ground {
                 self.vel.y = JUMP_SPEED;
             }
-            self.vel.y = (self.vel.y - GRAVITY * dt).max(-60.0);
+            self.vel.y = (self.vel.y - GRAVITY * dt).max(m(-48.0));
         }
 
         // Small sub-steps so fast movement cannot pass through a one-voxel wall.
@@ -465,6 +468,7 @@ impl Voxels for WorldVoxels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use worldgen::scale::BLOCK;
 
     /// A test world described by a function.
     struct Fake<F: Fn(i32, i32, i32) -> Kind>(F);
@@ -516,9 +520,9 @@ mod tests {
     }
 
     #[test]
-    fn steps_up_one_voxel_but_not_two() {
+    fn steps_up_a_block_but_not_a_taller_ledge() {
         // Floor rises by `rise` voxels at x >= 5.
-        for (rise, should_climb) in [(1, true), (2, false)] {
+        for (rise, should_climb) in [(BLOCK, true), (BLOCK + 1, false)] {
             let mut world = Fake(move |x, y, _| {
                 let top = if x >= 5 { 10 + rise } else { 10 };
                 if y < top { Kind::Solid } else { Kind::Air }
@@ -527,7 +531,7 @@ mod tests {
             run(&mut p, &mut world, forward(), 3.0);
             if should_climb {
                 assert!(p.pos.x > 8.0, "did not climb a {rise}-voxel step");
-                assert!((p.pos.y - 11.0).abs() < 1e-2);
+                assert!((p.pos.y - (10 + rise) as f64).abs() < 1e-2);
             } else {
                 assert!(p.pos.x < 5.0, "walked through a {rise}-voxel wall");
                 assert!((p.pos.y - 10.0).abs() < 1e-2);
@@ -536,14 +540,14 @@ mod tests {
     }
 
     #[test]
-    fn jumping_clears_a_two_voxel_wall_only_with_a_jump() {
+    fn jumping_clears_a_one_block_wall() {
         let mut world = Fake(|x, y, _| {
-            let top = if x >= 5 { 11 } else { 10 };
+            let top = if x >= 5 { 10 + BLOCK } else { 10 };
             if y < top { Kind::Solid } else { Kind::Air }
         });
-        // Jump height is v^2 / 2g: enough for one voxel, not two.
-        let height = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY);
-        assert!(height > 1.1 && height < 2.0, "jump height {height}");
+        // Jump height is v^2 / 2g: enough for one 0.8 m block, not two.
+        let height = JUMP_SPEED * JUMP_SPEED / (2.0 * GRAVITY) / m(0.8);
+        assert!(height > 1.1 && height < 2.0, "jump height {height} blocks");
         let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
         let jump = Controls {
             jump: true,
@@ -670,9 +674,10 @@ mod tests {
 
     #[test]
     fn a_boat_follows_a_river_down_a_step_but_not_up_a_cliff() {
-        // Upper pool (plane 12) for x < 20, lower pool (plane 10) after, a wall at x = 40.
-        let world_fn = |x: i32, y: i32, _: i32| {
-            let plane = if x < 20 { 12 } else { 10 };
+        // Upper pool two blocks up for x < 20, lower pool (plane 10) after, a wall at x = 40.
+        let upper = 10 + 2 * BLOCK;
+        let world_fn = move |x: i32, y: i32, _: i32| {
+            let plane = if x < 20 { upper } else { 10 };
             if x >= 40 || y < 3 {
                 Kind::Solid
             } else if y < plane {
@@ -683,13 +688,13 @@ mod tests {
         };
         let mut world = Fake(world_fn);
         let mut p = Player::new(DVec3::ZERO);
-        p.board(DVec3::new(0.5, 12.0, 0.5), 0.0);
+        p.board(DVec3::new(0.5, upper as f64, 0.5), 0.0);
         run(&mut p, &mut world, forward(), 12.0);
         assert!(p.pos.x > 22.0, "stuck above the step at {}", p.pos.x);
         assert!((p.pos.y - 10.0).abs() < 0.3, "riding at {}", p.pos.y);
         let back = Controls { wish: -Vec3::X, ..Default::default() };
         run(&mut p, &mut world, back, 12.0);
-        assert!(p.pos.x > 18.0, "went up a two-voxel step to {}", p.pos.x);
+        assert!(p.pos.x > 18.0, "went up a two-block step to {}", p.pos.x);
     }
 
     #[test]

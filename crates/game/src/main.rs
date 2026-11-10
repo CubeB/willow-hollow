@@ -1,3 +1,4 @@
+mod arena;
 mod camera;
 mod env;
 mod farview;
@@ -20,7 +21,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{CursorGrabMode, Window, WindowId},
 };
-use worldgen::{World, world::GameWorld};
+use worldgen::{
+    World,
+    scale::{OLD_VOXEL, m, m64},
+    world::GameWorld,
+};
 
 use camera::{Camera, FlyController};
 use env::Environment;
@@ -65,7 +70,7 @@ impl Default for Options {
             fly: false,
             look: (35.0, -18.0),
             time: 10.0,
-            radius: 12,
+            radius: (m(307.2) / voxel::CHUNK as f32).round() as i32,
             screenshot: None,
             size: (1280, 720),
             day_minutes: 40.0,
@@ -83,7 +88,7 @@ usage: game [options]
   --fly                 start in free-fly mode (F toggles in game)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24 (default 10)
-  --radius N            chunk load radius (default 12)
+  --radius N            chunk load radius (default: about 300 m)
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --size WxH            screenshot size (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time (default 40)
@@ -171,7 +176,7 @@ fn make_camera(opts: &Options, world: &GameWorld) -> Camera {
 }
 
 /// How close a boat must be to climb aboard.
-const BOARD_REACH: f64 = 6.0;
+const BOARD_REACH: f64 = m64(4.8);
 
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
@@ -191,15 +196,18 @@ fn scan_surroundings(
     let mats = world.materials();
     let to_linear = |c: [u8; 3]| c.map(|v| (v as f32 / 255.0).powf(2.2));
     let mut rng = salt.wrapping_mul(0x9e37_79b9) ^ (cx as u32).wrapping_mul(31) ^ (cz as u32).wrapping_mul(17) | 1;
+    let half = (30.0 * OLD_VOXEL) as i32;
+    let span = 2 * half as u32 + 1;
+    let (under, above) = ((12.0 * OLD_VOXEL) as i32, (40.0 * OLD_VOXEL) as i32);
     for _ in 0..700 {
         rng ^= rng << 13;
         rng ^= rng >> 17;
         rng ^= rng << 5;
-        let x = cx + (rng % 61) as i32 - 30;
-        let z = cz + ((rng >> 8) % 61) as i32 - 30;
-        let top = camera.y as i32 + 40;
+        let x = cx + (rng % span) as i32 - half;
+        let z = cz + ((rng >> 8) % span) as i32 - half;
+        let top = camera.y as i32 + above;
         let mut below = voxel::AIR;
-        for y in ((camera.y as i32 - 12)..=top).rev() {
+        for y in ((camera.y as i32 - under)..=top).rev() {
             let v = voxels.voxel(x, y, z);
             let kind = mats.get(v).kind;
             if kind == voxel::Kind::Foliage && mats.get(below).kind == voxel::Kind::Air {
@@ -300,7 +308,7 @@ impl Running {
             player: Player::new(feet),
             voxels: WorldVoxels::new(world.clone()),
             far: FarView::new(&gpu, world.clone()),
-            streamer: Streamer::new(world.clone(), opts.radius),
+            streamer: Streamer::new(&gpu, world.clone(), opts.radius),
             env: Environment::at_time(opts.time),
             particles: Particles::new(),
             leaves: Vec::new(),
@@ -314,7 +322,7 @@ impl Running {
             deploy: false,
             last_yaw: 0.0,
             world,
-            fly: FlyController { speed: 20.0 },
+            fly: FlyController { speed: m(16.0) },
             keys: HashSet::new(),
             grabbed: false,
             want_grab: true,
@@ -470,9 +478,9 @@ impl Running {
             self.scan_surroundings();
         }
         let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
-            .then(|| self.player.pos + DVec3::new(0.0, 1.0, 0.0));
+            .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
-        let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, 150.0).copied().collect();
+        let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, m(120.0)).copied().collect();
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -510,7 +518,7 @@ impl Running {
             far: &self.far,
             particles: self.particles.instances(),
             props: &self.props,
-            wind: self.particles.wind.lagged,
+            wind: self.particles.wind.lagged * OLD_VOXEL,
         };
         self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
 
@@ -586,7 +594,7 @@ impl Running {
                             s.gen_ms, s.mesh_ms, s.queued, s.in_flight
                         ));
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
-                        ui.add(egui::Slider::new(&mut radius, 2..=32).text("load radius"));
+                        ui.add(egui::Slider::new(&mut radius, 2..=(32.0 * OLD_VOXEL) as i32).text("load radius"));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
                         ui.label("Click or Tab to look, Esc to free the mouse. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel");
@@ -728,14 +736,14 @@ fn main() -> Result<()> {
         let world = make_world(&opts);
         let camera = make_camera(&opts, &world);
         let mut far = FarView::new(&gpu, world.clone());
-        let mut streamer = Streamer::new(world.clone(), opts.radius);
+        let mut streamer = Streamer::new(&gpu, world.clone(), opts.radius);
         let t = Instant::now();
         let env = Environment::at_time(opts.time);
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
         let (biome, leaves, flowers) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
-        let cascades: Vec<_> = streamer.cascades_near(camera.pos, 150.0).copied().collect();
+        let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
         let mut fleet = Fleet::new(world.clone());
         fleet.refresh(camera.pos);
         let mut props = Vec::new();
@@ -766,7 +774,7 @@ fn main() -> Result<()> {
             &mut far,
             particles.instances(),
             &props,
-            particles.wind.lagged,
+            particles.wind.lagged * OLD_VOXEL,
         )?;
         let s = streamer.stats;
         log::info!(

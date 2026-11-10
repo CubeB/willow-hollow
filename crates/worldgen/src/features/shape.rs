@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use glam::{IVec3, Vec3};
 use voxel::Voxel;
 
-use crate::noise::{hash3, unit};
+use crate::{
+    noise::{hash3, unit},
+    scale::{BLOCK, OLD_VOXEL},
+};
 
 /// A small deterministic random stream for shaping one model.
 pub struct Rng(u32);
@@ -45,24 +48,66 @@ impl Rng {
 
 /// A voxel model under construction, in its own coordinates: the origin is where it
 /// meets the ground, +Y up.
-#[derive(Default)]
+///
+/// Models are laid out in 0.8 m blocks. [`Shape::set`] fills a whole block, while limbs
+/// and blobs are rasterised at full voxel resolution, so organic shapes get smoother as
+/// voxels get smaller.
 pub struct Shape {
     voxels: HashMap<IVec3, Voxel>,
+    /// Voxels per model unit.
+    unit: f32,
+    /// Whole voxels along a block's edge.
+    block: i32,
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Shape {
+    /// A model laid out in 0.8 m blocks.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            voxels: HashMap::new(),
+            unit: OLD_VOXEL,
+            block: BLOCK,
+        }
     }
 
-    /// Places a voxel, replacing whatever was there.
+    /// A model laid out directly in voxels.
+    pub fn raw() -> Self {
+        Self {
+            voxels: HashMap::new(),
+            unit: 1.0,
+            block: 1,
+        }
+    }
+
+    /// The voxels of the block at `p`.
+    fn block_voxels(&self, p: IVec3) -> impl Iterator<Item = IVec3> + use<> {
+        let b = self.block;
+        (0..b).flat_map(move |y| (0..b).flat_map(move |z| (0..b).map(move |x| p * b + IVec3::new(x, y, z))))
+    }
+
+    /// Places a block, replacing whatever was there.
     pub fn set(&mut self, p: IVec3, v: Voxel) {
-        self.voxels.insert(p, v);
+        for q in self.block_voxels(p) {
+            self.voxels.insert(q, v);
+        }
     }
 
-    /// Places a voxel only where the model is still empty.
+    /// Places a block only where the model is still empty.
     pub fn fill(&mut self, p: IVec3, v: Voxel) {
-        self.voxels.entry(p).or_insert(v);
+        for q in self.block_voxels(p) {
+            self.voxels.entry(q).or_insert(v);
+        }
+    }
+
+    /// Replaces a single voxel, addressed as [`Shape::snapshot`] reports it.
+    pub fn paint(&mut self, p: IVec3, v: Voxel) {
+        self.voxels.insert(p, v);
     }
 
     pub fn get(&self, p: IVec3) -> Option<Voxel> {
@@ -72,6 +117,7 @@ impl Shape {
     /// A tapered limb from `a` (radius `ra`) to `b` (radius `rb`): trunks, branches,
     /// roots. Replaces anything already there, so wood always wins over leaves.
     pub fn limb(&mut self, a: Vec3, b: Vec3, ra: f32, rb: f32, v: Voxel) {
+        let (a, b, ra, rb) = (a * self.unit, b * self.unit, ra * self.unit, rb * self.unit);
         let r = ra.max(rb) + 1.0;
         let lo = (a.min(b) - Vec3::splat(r)).floor().as_ivec3();
         let hi = (a.max(b) + Vec3::splat(r)).ceil().as_ivec3();
@@ -84,7 +130,7 @@ impl Shape {
                     let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
                     let radius = ra + (rb - ra) * t;
                     if (p - (a + ab * t)).length_squared() <= radius * radius {
-                        self.set(IVec3::new(x, y, z), v);
+                        self.voxels.insert(IVec3::new(x, y, z), v);
                     }
                 }
             }
@@ -95,6 +141,7 @@ impl Shape {
     /// it does not read as a geometric solid. `ragged` (0..1) is how deep the
     /// roughness bites. Only fills empty space.
     pub fn blob(&mut self, center: Vec3, radii: Vec3, v: Voxel, seed: u32, ragged: f32) {
+        let (center, radii) = (center * self.unit, radii * self.unit);
         let lo = (center - radii).floor().as_ivec3();
         let hi = (center + radii).ceil().as_ivec3();
         for y in lo.y..=hi.y {
@@ -104,7 +151,7 @@ impl Shape {
                     let d = ((p - center) / radii).length();
                     let edge = 1.0 - ragged * unit(hash3(seed, x, y, z));
                     if d <= edge {
-                        self.fill(IVec3::new(x, y, z), v);
+                        self.voxels.entry(IVec3::new(x, y, z)).or_insert(v);
                     }
                 }
             }
@@ -113,7 +160,7 @@ impl Shape {
 
     /// Strands hanging from the underside of everything made of `from`: willow
     /// curtains, jungle vines. Each exposed underside grows a strand with probability
-    /// `chance`, between `min` and `max` voxels long.
+    /// `chance`, between `min` and `max` blocks long.
     pub fn hang(&mut self, from: Voxel, strand: Voxel, rng: &mut Rng, chance: f32, len: (i32, i32)) {
         let mut tips: Vec<IVec3> = self
             .voxels
@@ -123,14 +170,16 @@ impl Shape {
             .collect();
         // HashMap order is arbitrary; sort so the same seed always gives the same tree.
         tips.sort_unstable_by_key(|p| (p.x, p.y, p.z));
+        // Finer voxels expose more undersides; the same number of strands should hang.
+        let chance = chance / (self.block * self.block) as f32;
         for tip in tips {
             if rng.unit() < chance {
-                for k in 1..=rng.int(len.0, len.1) {
+                for k in 1..=rng.int(len.0, len.1) * self.block {
                     let p = tip - IVec3::Y * k;
                     if p.y < 1 || self.voxels.contains_key(&p) {
                         break;
                     }
-                    self.set(p, strand);
+                    self.voxels.insert(p, strand);
                 }
             }
         }

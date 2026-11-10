@@ -4,10 +4,15 @@
 //! Land never touches a cell border, so every landmass is a bounded problem that can be
 //! simulated on its own, and cells can be generated lazily in any order.
 
-use crate::noise::{hash2, unit};
+use crate::{
+    noise::{hash2, unit},
+    scale::OLD_VOXEL,
+};
 
+/// Macro-cell edge length in simulation units (0.8 m each).
+pub const SIM_SPAN: f32 = 32_768.0;
 /// Macro-cell edge length in voxels.
-pub const MACRO_SIZE: i32 = 32_768;
+pub const MACRO_SIZE: i32 = (SIM_SPAN * OLD_VOXEL) as i32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CellKind {

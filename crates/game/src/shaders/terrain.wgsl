@@ -31,12 +31,13 @@ fn face_normal(face: u32) -> vec3<f32> {
 const FLAG_WATER: u32 = 1u;
 const FLAG_FOLIAGE: u32 = 8u;
 const FLAG_EMISSIVE: u32 = 16u;
-const NEAR: f32 = 0.1;
+const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 
 @vertex
 fn vs(in: VIn) -> VOut {
     var out: VOut;
-    var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
+    var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u))
+        + vec3<f32>(f32((in.a >> 23u) & 3u), f32((in.a >> 25u) & 3u), f32((in.a >> 27u) & 3u)) * 0.25;
     out.face = (in.a >> 18u) & 7u;
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
     out.flags = in.b >> 24u;
@@ -49,12 +50,13 @@ fn vs(in: VIn) -> VOut {
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
         // Leaves stir in the wind. The offset is a smooth function of world position,
         // so neighbouring leaf voxels move together and no gaps open between them.
-        let world = vec3<f32>(in.origin) + local;
+        let world = (vec3<f32>(in.origin) + local) / VOXELS_PER_METRE;
         let t = G.sun_dir.w;
-        let wave = sin(world.x * 0.35 + world.z * 0.27 + world.y * 0.2 + t * 1.7)
-            + 0.5 * sin(world.x * 0.9 - world.z * 0.6 + t * 2.9);
-        let strength = length(G.wind.xz) * 0.03;
-        rel += vec3<f32>(G.wind.x, 0.0, G.wind.z) * (0.02 + wave * strength) + vec3<f32>(0.0, wave * strength * 0.5, 0.0);
+        let wave = sin(world.x * 0.4375 + world.z * 0.3375 + world.y * 0.25 + t * 1.7)
+            + 0.5 * sin(world.x * 1.125 - world.z * 0.75 + t * 2.9);
+        let strength = length(G.wind.xz) / VOXELS_PER_METRE * 0.0375;
+        rel += vec3<f32>(G.wind.x, 0.0, G.wind.z) * (0.02 + wave * strength)
+            + vec3<f32>(0.0, wave * strength * 0.4 * VOXELS_PER_METRE, 0.0);
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
@@ -103,7 +105,7 @@ fn ripple_height(p: vec2<f32>, t: f32) -> f32 {
 
 // Small moving ripples on the water surface, as a normal in world space.
 fn ripple_normal(world_xz: vec2<f32>, t: f32) -> vec3<f32> {
-    let p = world_xz * 0.8;
+    let p = world_xz / VOXELS_PER_METRE;
     let d = 0.08;
     let dx = ripple_height(p + vec2<f32>(d, 0.0), t) - ripple_height(p - vec2<f32>(d, 0.0), t);
     let dz = ripple_height(p + vec2<f32>(0.0, d), t) - ripple_height(p - vec2<f32>(0.0, d), t);
@@ -136,20 +138,20 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Clear and bright-bedded in the shallows, deep blue-green further out.
         let shallow = in.color * 1.35;
         let deep = vec3<f32>(0.02, 0.09, 0.14);
-        let body = mix(shallow, deep, 1.0 - exp(-thickness * 0.16))
+        let body = mix(shallow, deep, 1.0 - exp(-thickness / VOXELS_PER_METRE * 0.2))
             * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(n_face));
         color = mix(body, reflected, fresnel);
-        alpha = mix(1.0 - exp(-thickness * 0.45), 1.0, fresnel);
+        alpha = mix(1.0 - exp(-thickness / VOXELS_PER_METRE * 0.5625), 1.0, fresnel);
         // Sun glitter.
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
         color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face);
     } else {
         // A vertical face of water is a fall or the step of a cascade: white and streaky,
         // the streaks running downward.
-        let world_y = in.rel.y + G.cam_wrapped.y;
-        let along = select(world_xz.x, world_xz.y, abs(n_face.x) > 0.5);
-        let streak = vnoise(vec2<f32>(along * 1.6, world_y * 0.35 + t * 6.0))
-            * vnoise(vec2<f32>(along * 3.1 + 9.0, world_y * 0.7 + t * 9.0));
+        let world_y = (in.rel.y + G.cam_wrapped.y) / VOXELS_PER_METRE;
+        let along = select(world_xz.x, world_xz.y, abs(n_face.x) > 0.5) / VOXELS_PER_METRE;
+        let streak = vnoise(vec2<f32>(along * 2.0, world_y * 0.4375 + t * 6.0))
+            * vnoise(vec2<f32>(along * 3.875 + 9.0, world_y * 0.875 + t * 9.0));
         let foam = smoothstep(0.12, 0.45, streak);
         let body = in.color * (G.sun_color.rgb * 0.4 + ambient(n_face));
         color = mix(body, vec3<f32>(0.85) * (G.sun_color.rgb * 0.6 + ambient(n_face)), foam * 0.85);

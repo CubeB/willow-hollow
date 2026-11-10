@@ -1,4 +1,5 @@
 use glam::Vec3;
+use worldgen::scale::VOXELS_PER_METRE;
 
 /// Lighting and sky state for a moment in the day. All colours are linear.
 pub struct Environment {
@@ -61,7 +62,7 @@ impl Environment {
         // Mist gathers in the valleys around dawn, and a little at dusk.
         let dawn = smoothstep(3.5, 6.0, time) * smoothstep(9.5, 7.0, time);
         let dusk = smoothstep(17.0, 18.5, time) * smoothstep(21.0, 19.5, time);
-        let mist = (dawn * 0.0035 + dusk * 0.0012) * exposure.min(1.0);
+        let mist = (dawn * 0.004375 + dusk * 0.0015) / VOXELS_PER_METRE * exposure.min(1.0);
 
         Self {
             time,
@@ -69,7 +70,7 @@ impl Environment {
             sun_color: sun_color * exposure,
             sky_zenith: zenith * exposure,
             sky_horizon: horizon * exposure,
-            fog_density: 0.00013,
+            fog_density: 0.0001625 / VOXELS_PER_METRE,
             daylight,
             mist,
             clouds: 0.45,

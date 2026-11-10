@@ -25,7 +25,7 @@ impl Camera {
             pitch: pitch_deg.to_radians(),
             roll: 0.0,
             fov_y: 70f32.to_radians(),
-            near: 0.1,
+            near: worldgen::scale::m(0.08),
         }
     }
 

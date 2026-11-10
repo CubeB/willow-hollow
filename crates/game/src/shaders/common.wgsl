@@ -75,7 +75,7 @@ fn fbm(p: vec2<f32>) -> f32 {
 
 // Cloud density (0..1) over a world xz position.
 fn cloud_density(world_xz: vec2<f32>) -> f32 {
-    let p = (world_xz + vec2<f32>(G.fog.w, G.fog.w * 0.35)) / 420.0;
+    let p = (world_xz + vec2<f32>(G.fog.w, G.fog.w * 0.35)) / (336.0 * VOXELS_PER_METRE);
     let n = fbm(p);
     return smoothstep(0.62 - G.fog.z * 0.42, 0.78 - G.fog.z * 0.2, n);
 }

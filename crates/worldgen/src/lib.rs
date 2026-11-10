@@ -6,12 +6,13 @@ pub mod features;
 pub mod macro_layout;
 pub mod materials;
 pub mod noise;
+pub mod scale;
 pub mod surface;
 pub mod trails;
 pub mod world;
 
 use glam::Vec3;
-use voxel::{Materials, PaddedChunk};
+use voxel::{Materials, PaddedChunk, mesh::PlantBox};
 
 /// A place where flowing water drops to a lower level: the lip of a fall or the step
 /// of a cascade. Spray and sound come from here.
@@ -30,6 +31,8 @@ pub struct ColumnOutput {
     /// `(chunk y, voxels)`, lowest first with none skipped.
     pub chunks: Vec<(i32, PaddedChunk)>,
     pub cascades: Vec<Cascade>,
+    /// Small plants standing on the columns inside this chunk column.
+    pub plants: Vec<PlantBox>,
 }
 
 /// A source of voxel terrain, generated one chunk column at a time.

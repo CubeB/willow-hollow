@@ -2,27 +2,35 @@
 //! terrain and water into an HDR target, then bloom and a tonemap pass to whatever the
 //! output is (window or screenshot texture).
 
+use std::ops::Range;
+
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 use voxel::{CHUNK, mesh::Vertex};
+use worldgen::scale::{VOXELS_PER_METRE, m};
 use wgpu::util::DeviceExt;
 
 use crate::{
+    arena::MeshSpan,
     camera::Camera,
     env::Environment,
     farview::{FarVertex, FarView},
     particles::ParticleInstance,
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
-    terrain::{MeshBuf, Streamer},
+    terrain::Streamer,
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const SHADOW_SIZE: u32 = 2048;
 const CASCADES: usize = 3;
 /// View-depth at which each shadow cascade ends.
-const CASCADE_ENDS: [f32; CASCADES] = [40.0, 160.0, 640.0];
+const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
 /// Height of the cloud layer above sea level.
-const CLOUD_HEIGHT: f32 = 300.0;
+const CLOUD_HEIGHT: f32 = m(240.0);
+/// How far from the camera small plants are drawn.
+const PLANT_REACH: f32 = m(100.0);
+/// How many of the shadow cascades, nearest first, include small plants.
+const PLANT_SHADOW_CASCADES: usize = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -86,6 +94,60 @@ pub struct DrawStats {
     pub chunks_culled: u32,
     pub quads_drawn: u64,
     pub far_tiles: u32,
+    pub shadow_draws: [u32; CASCADES],
+}
+
+/// A chunk draw as the GPU reads it from the indirect buffer: index count, instance
+/// count, first index, base vertex, first instance.
+type ChunkDraw = [u32; 5];
+
+fn chunk_draw(mesh: &MeshSpan, instance: u32) -> ChunkDraw {
+    [mesh.quads * 6, 1, 0, mesh.first_vertex(), instance]
+}
+
+/// Adds draws for the face directions marked in `show`, merging neighbouring directions
+/// into one draw.
+fn push_faces(list: &mut Vec<ChunkDraw>, mesh: &MeshSpan, faces: &[u32], show: [bool; 6], instance: u32) {
+    let mut f = 0;
+    while f < 6 {
+        if !show[f] {
+            f += 1;
+            continue;
+        }
+        let first = faces[f];
+        while f < 6 && show[f] {
+            f += 1;
+        }
+        let quads = faces[f] - first;
+        if quads > 0 {
+            list.push([quads * 6, 1, 0, mesh.first_vertex() + first * 4, instance]);
+        }
+    }
+}
+
+/// Issues part of this frame's chunk draws. `indirect` is None on GPUs that cannot set
+/// the first instance from an indirect buffer.
+fn draw_chunks(pass: &mut wgpu::RenderPass, indirect: Option<&wgpu::Buffer>, draws: &[ChunkDraw], list: Range<usize>) {
+    if list.is_empty() {
+        return;
+    }
+    match indirect {
+        Some(buffer) => pass.multi_draw_indexed_indirect(buffer, (list.start * size_of::<ChunkDraw>()) as u64, list.len() as u32),
+        None => {
+            for [indices, _, _, base, instance] in &draws[list] {
+                pass.draw_indexed(0..*indices, *base as i32, *instance..*instance + 1);
+            }
+        }
+    }
+}
+
+fn indirect_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("chunk draws"),
+        size: (capacity * size_of::<ChunkDraw>()) as u64,
+        usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 /// A texture used as a render target and later sampled.
@@ -149,6 +211,9 @@ pub struct Renderer {
     instance_capacity: usize,
     quad_indices: wgpu::Buffer,
     quad_capacity: u32,
+    indirect: wgpu::Buffer,
+    indirect_capacity: usize,
+    multi_draw: bool,
     pub stats: DrawStats,
     start: std::time::Instant,
 }
@@ -216,7 +281,8 @@ impl Renderer {
     /// `output_format` is the format of the texture the final image is written to.
     pub fn new(gpu: &Gpu, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         let device = &gpu.device;
-        let common = include_str!("shaders/common.wgsl");
+        // Shaders work in voxels but know how big one is.
+        let common = format!("const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\n{}", include_str!("shaders/common.wgsl"));
 
         // --- Uniforms and the scene bind group (globals, shadows) -----------------
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -555,7 +621,7 @@ impl Renderer {
             flags: crate::farview::FLAG_WATER,
             grad: [0, 0],
         };
-        const SEA_EXTENT: f32 = 400_000.0;
+        const SEA_EXTENT: f32 = m(320_000.0);
         let sea = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("sea"),
             contents: bytemuck::cast_slice(&[
@@ -777,6 +843,9 @@ impl Renderer {
             instance_capacity,
             quad_indices: quad_index_buffer(device, quad_capacity),
             quad_capacity,
+            indirect: indirect_buffer(device, 4096),
+            indirect_capacity: 4096,
+            multi_draw: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             stats: DrawStats::default(),
             start: std::time::Instant::now(),
         }
@@ -859,7 +928,7 @@ impl Renderer {
         let snapped = s * ((center.dot(s) / texel).floor() * texel) + u * ((center.dot(u) / texel).floor() * texel)
             + sun * center.dot(sun);
         // Casters well outside the slice (tall trees, hills toward the sun) still count.
-        let reach = radius + 400.0;
+        let reach = radius + m(320.0);
         let eye = snapped + sun * reach;
         let view = Mat4::from_cols(
             Vec4::new(s.x, u.x, sun.x, 0.0),
@@ -895,11 +964,13 @@ impl Renderer {
 
         // Shadow cascades.
         let mut light_vp = [[[0.0; 4]; 4]; CASCADES];
+        let mut light = Vec::with_capacity(CASCADES);
         let mut texels = [0.0; 4];
         let mut near = 0.1;
         for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
             let (m, texel) = Self::cascade_matrix(camera, aspect, env.sun_dir, near, far_end);
             light_vp[i] = m.to_cols_array_2d();
+            light.push(Frustum::new(m));
             texels[i] = texel;
             gpu.queue.write_buffer(
                 &self.cascade_binds[i].0,
@@ -923,9 +994,9 @@ impl Renderer {
             sun_color: v4(env.sun_color, env.daylight as u8 as f32),
             sky_zenith: v4(env.sky_zenith, 0.0),
             sky_horizon: v4(env.sky_horizon, 0.0),
-            fog: [env.fog_density, voxel_radius, env.clouds, time * 6.0],
+            fog: [env.fog_density, voxel_radius, env.clouds, time * m(4.8)],
             cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, 0.0],
-            mist: [env.mist, 35.0, -15.0, 0.0],
+            mist: [env.mist, m(28.0), m(-12.0), 0.0],
             cascades: [
                 CASCADE_ENDS[0],
                 CASCADE_ENDS[1],
@@ -938,21 +1009,42 @@ impl Renderer {
 
         // Visible chunks, with their camera-relative offsets computed in f64.
         let frustum = Frustum::new(view_proj);
+        // Only faces turned toward the sun can be the nearest thing it sees.
+        let toward_sun = [
+            env.sun_dir.x > -0.001,
+            env.sun_dir.x < 0.001,
+            env.sun_dir.y > -0.001,
+            env.sun_dir.y < 0.001,
+            env.sun_dir.z > -0.001,
+            env.sun_dir.z < 0.001,
+        ];
         let size = CHUNK as f32;
         let mut instances: Vec<Instance> = Vec::new();
-        let mut opaque: Vec<(&MeshBuf, u32)> = Vec::new();
-        let mut casters: Vec<(&MeshBuf, u32)> = Vec::new();
-        let mut water: Vec<(&MeshBuf, u32, f32)> = Vec::new();
+        let mut opaque: Vec<ChunkDraw> = Vec::new();
+        let mut casters: [Vec<ChunkDraw>; CASCADES] = Default::default();
+        let mut water: Vec<(ChunkDraw, f32)> = Vec::new();
         let mut stats = DrawStats::default();
         let mut max_quads = 0;
-        let shadow_reach = CASCADE_ENDS[CASCADES - 1] + 64.0;
         for chunk in scene.terrain.chunks() {
             let origin = chunk.pos * CHUNK;
             let offset = (origin.as_dvec3() - camera.pos).as_vec3();
-            let visible = frustum.intersects_box(offset, offset + Vec3::splat(size));
+            let far_corner = offset + Vec3::splat(size);
+            let visible = frustum.intersects_box(offset, far_corner);
             let center = offset + Vec3::splat(size * 0.5);
-            let casts = center.length() < shadow_reach && env.daylight;
-            if !visible && !casts {
+            // Each cascade only draws what falls inside its own box of light.
+            let casts: [bool; CASCADES] = std::array::from_fn(|i| env.daylight && light[i].intersects_box(offset, far_corner));
+            // Directions whose faces could be seen from the camera. Foliage sways, so
+            // leave a little slack.
+            let slack = m(1.0);
+            let seen = [
+                offset.x < slack,
+                far_corner.x > -slack,
+                offset.y < slack,
+                far_corner.y > -slack,
+                offset.z < slack,
+                far_corner.z > -slack,
+            ];
+            if !visible && !casts.contains(&true) {
                 stats.chunks_culled += 1;
                 continue;
             }
@@ -961,22 +1053,30 @@ impl Renderer {
                 offset: offset.to_array(),
                 origin: origin.to_array(),
             });
-            if let Some(m) = &chunk.opaque {
-                max_quads = max_quads.max(m.quads);
-                if casts {
-                    casters.push((m, index));
+            if let Some(mesh) = &chunk.opaque {
+                max_quads = max_quads.max(mesh.quads);
+                let (terrain, plants) = (&chunk.faces[..=6], &chunk.faces[6..]);
+                // Plants are too small to matter from further away.
+                let near = center.length() < PLANT_REACH;
+                for (i, (list, _)) in casters.iter_mut().zip(casts).enumerate().filter(|(_, (_, casts))| *casts) {
+                    push_faces(list, mesh, terrain, toward_sun, index);
+                    if near && i < PLANT_SHADOW_CASCADES {
+                        push_faces(list, mesh, plants, toward_sun, index);
+                    }
                 }
                 if visible {
-                    opaque.push((m, index));
-                    stats.quads_drawn += m.quads as u64;
+                    push_faces(&mut opaque, mesh, terrain, seen, index);
+                    if near {
+                        push_faces(&mut opaque, mesh, plants, seen, index);
+                    }
                 }
             }
             if visible {
                 stats.chunks_drawn += 1;
-                if let Some(m) = &chunk.water {
-                    water.push((m, index, center.length_squared()));
-                    stats.quads_drawn += m.quads as u64;
-                    max_quads = max_quads.max(m.quads);
+                if let Some(mesh) = &chunk.water {
+                    water.push((chunk_draw(mesh, index), center.length_squared()));
+                    stats.quads_drawn += mesh.quads as u64;
+                    max_quads = max_quads.max(mesh.quads);
                 }
             }
         }
@@ -1010,8 +1110,28 @@ impl Renderer {
         stats.far_tiles = far_tiles.len() as u32;
 
         // Translucent water blends correctly only when drawn far to near.
-        water.sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
+        water.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        stats.shadow_draws = std::array::from_fn(|i| casters[i].len() as u32);
+        stats.quads_drawn += opaque.iter().map(|d| d[0] as u64 / 6).sum::<u64>();
         self.stats = stats;
+
+        // All of this frame's chunk draws, in one buffer the passes take slices of.
+        let mut draws: Vec<ChunkDraw> = Vec::with_capacity(opaque.len() + water.len() + casters.iter().map(Vec::len).sum::<usize>());
+        let mut append = |list: &mut dyn Iterator<Item = ChunkDraw>| {
+            let start = draws.len();
+            draws.extend(list);
+            start..draws.len()
+        };
+        let shadow_lists: [Range<usize>; CASCADES] = std::array::from_fn(|i| append(&mut casters[i].iter().copied()));
+        let opaque_list = append(&mut opaque.iter().copied());
+        let water_list = append(&mut water.iter().map(|w| w.0));
+        if draws.len() > self.indirect_capacity {
+            self.indirect_capacity = draws.len().next_power_of_two();
+            self.indirect = indirect_buffer(device, self.indirect_capacity);
+        }
+        gpu.queue.write_buffer(&self.indirect, 0, bytemuck::cast_slice(&draws));
+        let indirect = self.multi_draw.then_some(&self.indirect);
+        let chunk_vertices = scene.terrain.vertices();
 
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
@@ -1040,15 +1160,13 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !casters.is_empty() {
+            if !shadow_lists[i].is_empty() {
                 pass.set_pipeline(&self.shadow);
                 pass.set_bind_group(0, &self.cascade_binds[i].1, &[]);
                 pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, chunk_vertices.slice(..));
                 pass.set_vertex_buffer(1, self.instances.slice(..));
-                for (mesh, index) in &casters {
-                    pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                    pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
-                }
+                draw_chunks(&mut pass, indirect, &draws, shadow_lists[i].clone());
             }
         }
 
@@ -1108,10 +1226,8 @@ impl Renderer {
             pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
 
             pass.set_pipeline(&self.opaque);
-            for (mesh, index) in &opaque {
-                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
-            }
+            pass.set_vertex_buffer(0, chunk_vertices.slice(..));
+            draw_chunks(&mut pass, indirect, &draws, opaque_list);
 
             if prop_count > 0 {
                 pass.set_pipeline(&self.props);
@@ -1126,7 +1242,7 @@ impl Renderer {
         if particle_count > 0 {
             gpu.queue.write_buffer(&self.particle_instances, 0, bytemuck::cast_slice(&scene.particles[..particle_count]));
         }
-        if !water.is_empty() || particle_count > 0 {
+        if !water_list.is_empty() || particle_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("water"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1152,11 +1268,9 @@ impl Renderer {
             pass.set_bind_group(0, &self.scene_bind, &[]);
             pass.set_bind_group(1, &self.depth_bind, &[]);
             pass.set_index_buffer(self.quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(0, chunk_vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
-            for (mesh, index, _) in &water {
-                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                pass.draw_indexed(0..mesh.quads * 6, 0, *index..*index + 1);
-            }
+            draw_chunks(&mut pass, indirect, &draws, water_list.clone());
             if particle_count > 0 {
                 pass.set_pipeline(&self.particles);
                 pass.set_bind_group(0, &self.scene_bind, &[]);
@@ -1313,10 +1427,14 @@ pub fn screenshot(
     }
     image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8)?;
     log::info!(
-        "screenshot {} ({} chunks drawn, {} quads)",
+        "screenshot {} ({} chunks drawn, {} quads, shadow draws {:?}, multi-draw {}, arena {} MiB, meshes {} MiB)",
         path.display(),
         renderer.stats.chunks_drawn,
-        renderer.stats.quads_drawn
+        renderer.stats.quads_drawn,
+        renderer.stats.shadow_draws,
+        renderer.multi_draw,
+        streamer.stats.arena_bytes >> 20,
+        streamer.stats.mesh_bytes >> 20
     );
     Ok(())
 }

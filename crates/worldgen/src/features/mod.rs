@@ -7,6 +7,7 @@
 //! spanning many chunks is stamped identically by each of them.
 
 pub mod landmarks;
+pub mod plants;
 pub mod shape;
 pub mod trees;
 
@@ -19,6 +20,7 @@ use crate::{
     biome::Biome,
     materials as mat,
     noise::{fbm2, hash3, unit},
+    scale::{BLOCK, m, m64},
     surface::{Column, Cover, Sampler},
 };
 use shape::{Template, rotate};
@@ -75,18 +77,18 @@ struct Layer {
 }
 
 const GIANTS: Layer = Layer {
-    cell: 48,
-    reach: 24,
+    cell: 48 * BLOCK,
+    reach: 24 * BLOCK,
     salt: 0x61a7,
 };
 const TREES: Layer = Layer {
-    cell: 11,
-    reach: 10,
+    cell: 11 * BLOCK,
+    reach: 10 * BLOCK,
     salt: 0x7ee5,
 };
 const SMALL: Layer = Layer {
-    cell: 6,
-    reach: 5,
+    cell: 6 * BLOCK,
+    reach: 5 * BLOCK,
     salt: 0x5a11,
 };
 
@@ -164,7 +166,8 @@ fn flora(biome: Biome) -> Flora {
     }
 }
 
-/// Canopy colour and relative cover of a biome's forest, for drawing it from afar.
+/// Canopy colour, relative cover and height in 0.8 m blocks of a biome's forest, for
+/// drawing it from afar.
 pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
     let fl = flora(biome);
     let (species, _) = fl.trees.iter().chain(fl.giants).max_by(|a, b| a.1.total_cmp(&b.1))?;
@@ -220,8 +223,8 @@ pub fn place(
                 let h = hash3(world_seed ^ layer.salt, cx, cz, 0);
                 let roll = |k: u32| unit(h.rotate_left(k * 5).wrapping_mul(0x2c1b_3c6d ^ k));
                 // Position within the cell, keeping a margin so neighbours do not touch.
-                let x = cx * layer.cell + 1 + (roll(1) * (layer.cell - 2) as f32) as i32;
-                let z = cz * layer.cell + 1 + (roll(2) * (layer.cell - 2) as f32) as i32;
+                let x = cx * layer.cell + BLOCK + (roll(1) * (layer.cell - 2 * BLOCK) as f32) as i32;
+                let z = cz * layer.cell + BLOCK + (roll(2) * (layer.cell - 2 * BLOCK) as f32) as i32;
                 let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
                 let col = sampler.column(lx, lz);
                 let Some(species) = choose(&col, &layer, roll(3), roll(4), x, z, world_seed) else {
@@ -231,7 +234,7 @@ pub fn place(
                 if layer.salt == GIANTS.salt {
                     giants.push(pos);
                 } else if layer.salt == TREES.salt
-                    && giants.iter().any(|g| (g.x - x).abs() < 6 && (g.z - z).abs() < 6)
+                    && giants.iter().any(|g| (g.x - x).abs() < 6 * BLOCK && (g.z - z).abs() < 6 * BLOCK)
                 {
                     continue;
                 }
@@ -258,9 +261,9 @@ pub fn place(
 fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: i32, z: i32, seed: u32) -> Option<Species> {
     // Trails and landmarks keep their surroundings clear; big trunks need more room.
     let room = match layer.salt {
-        s if s == GIANTS.salt => 8.0,
-        s if s == TREES.salt => 3.5,
-        _ => 1.5,
+        s if s == GIANTS.salt => m(6.4),
+        s if s == TREES.salt => m(2.8),
+        _ => m(1.2),
     };
     if col.clear < room {
         return None;
@@ -268,7 +271,7 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
     let fl = flora(col.biome);
     // Forests thin out and open into clearings on a slow noise, so they are not
     // uniform carpets.
-    let openness = fbm2(seed ^ 0xc1ea, x as f64 / 95.0, z as f64 / 95.0, 3, 2.0, 0.5);
+    let openness = fbm2(seed ^ 0xc1ea, x as f64 / m64(76.0), z as f64 / m64(76.0), 3, 2.0, 0.5);
     let clearing = ((openness + 0.35) / 0.5).clamp(0.0, 1.0);
     let (list, density): (&[(Species, f32)], f32) = match layer.salt {
         s if s == GIANTS.salt => (fl.giants, fl.giant_density * (0.5 + 0.5 * clearing)),
@@ -289,7 +292,7 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
     }
     // Riverbanks in temperate and warm country grow willows.
     if layer.salt == TREES.salt
-        && col.river < 9.0
+        && col.river < m(7.2)
         && col.temperature > 0.3
         && !matches!(col.biome, Biome::Desert | Biome::Savanna)
         && roll_density < 0.35
@@ -303,7 +306,7 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
     // Trees grow in groves of their own kind rather than evenly mixed: a slow noise
     // hands whole stretches of forest to one of the minority species.
     if layer.salt == TREES.salt && matches!(species, Species::Oak | Species::Birch | Species::Maple | Species::Cherry) {
-        let grove = fbm2(seed ^ 0x9e0f, x as f64 / 140.0, z as f64 / 140.0, 2, 2.0, 0.5);
+        let grove = fbm2(seed ^ 0x9e0f, x as f64 / m64(112.0), z as f64 / m64(112.0), 2, 2.0, 0.5);
         species = match col.biome {
             Biome::Deciduous | Biome::Woodland if grove > 0.38 => Species::Maple,
             Biome::Woodland if grove < -0.40 => Species::Cherry,
@@ -359,11 +362,11 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         _ => return None,
     };
     // A fast noise marks the drifts; a slow one chooses what grows in each.
-    let patch = fbm2(seed ^ 0xf10a, x as f64 / 34.0, z as f64 / 34.0, 2, 2.0, 0.5);
+    let patch = fbm2(seed ^ 0xf10a, x as f64 / m64(27.2), z as f64 / m64(27.2), 2, 2.0, 0.5);
     if patch < 0.22 {
         return None;
     }
-    let which = fbm2(seed ^ 0xf10b, x as f64 / 160.0, z as f64 / 160.0, 2, 2.0, 0.5) * 0.5 + 0.5;
+    let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
     let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
     (roll < density * edge).then(|| kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)])
 }

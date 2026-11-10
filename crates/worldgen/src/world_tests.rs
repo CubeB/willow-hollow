@@ -5,6 +5,7 @@ use crate::{
     continent::SimConfig,
     macro_layout::MACRO_SIZE,
     materials as mat,
+    scale::BLOCK,
     surface::{MIN_RIVER_Q, Sampler, node},
     world::GameWorld,
 };
@@ -30,8 +31,9 @@ fn river_chunks(w: &GameWorld, count: usize) -> Vec<(i32, i32)> {
         .step_by(step)
         .take(count)
         .map(|&i| {
-            // Rivers pass through their node, which is not the cell centre.
-            let p = node(&c, i);
+            // A river's curve bends around its nodes but always passes exactly halfway
+            // between one and the next.
+            let p = (node(&c, i) + node(&c, c.rcv[i] as usize)) * 0.5;
             (p.x as i32 / CHUNK, p.y as i32 / CHUNK)
         })
         .collect()
@@ -109,7 +111,7 @@ fn chunks_are_generated_only_where_there_is_a_surface() {
     let w = world();
     let (cx, cz) = river_chunks(&w, 4)[1];
     let chunks = w.generate_column(cx, cz).chunks;
-    assert!(!chunks.is_empty() && chunks.len() <= 8, "{} chunks", chunks.len());
+    assert!(!chunks.is_empty() && chunks.len() <= 8 * BLOCK as usize, "{} chunks", chunks.len());
     let has_water = chunks
         .iter()
         .any(|(_, chunk)| chunk.voxels().contains(&mat::WATER));
@@ -120,7 +122,7 @@ fn chunks_are_generated_only_where_there_is_a_surface() {
     }
     // Far out to sea: a single chunk holding the sea bed and surface.
     let sea = w.generate_column(2, MACRO_SIZE / CHUNK / 2).chunks;
-    assert!(sea.len() <= 4);
+    assert!(sea.len() <= 4 * BLOCK as usize);
     assert!(sea.iter().all(|(_, chunk)| chunk.voxels().contains(&mat::WATER)));
 }
 

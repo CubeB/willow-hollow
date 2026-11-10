@@ -6,12 +6,16 @@
 use std::{collections::HashSet, sync::Arc};
 
 use glam::{DVec3, Vec3};
-use worldgen::{macro_layout::MACRO_SIZE, world::GameWorld};
+use worldgen::{
+    macro_layout::MACRO_SIZE,
+    scale::{OLD_VOXEL, m64},
+    world::GameWorld,
+};
 
 use crate::particles::ParticleInstance;
 
 /// Farthest away boats are looked for and drawn.
-const VIEW: f64 = 450.0;
+const VIEW: f64 = m64(360.0);
 /// How often the moorings around the player are looked up, in seconds.
 const REFRESH: f32 = 1.0;
 
@@ -169,12 +173,12 @@ fn push_parts(parts: &[Part], origin: DVec3, heading: f32, cam: DVec3, out: &mut
     let (s, c) = heading.sin_cos();
     let base = (origin - cam).as_vec3();
     for (center, size, color) in parts {
-        let p = Vec3::from(*center);
+        let p = Vec3::from(*center) * OLD_VOXEL;
         let turned = Vec3::new(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
         out.push(ParticleInstance {
             pos: (base + turned).into(),
             yaw: heading,
-            size: *size,
+            size: (Vec3::from(*size) * OLD_VOXEL).into(),
             glow: 0.0,
             color: [color[0], color[1], color[2], 1.0],
         });
@@ -183,7 +187,7 @@ fn push_parts(parts: &[Part], origin: DVec3, heading: f32, cam: DVec3, out: &mut
 
 /// Draws a boat with its hull rocking gently on the water.
 pub fn draw_boat(pos: DVec3, heading: f32, time: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) {
-    let bob = (time * 1.1 + pos.x as f32 * 0.3).sin() * 0.05;
+    let bob = (time * 1.1 + pos.x as f32 * 0.3).sin() * 0.05 * OLD_VOXEL;
     push_parts(&BOAT, pos + DVec3::new(0.0, bob as f64, 0.0), heading, cam, out);
 }
 

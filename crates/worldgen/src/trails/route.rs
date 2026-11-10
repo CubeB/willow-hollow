@@ -8,6 +8,7 @@ use glam::{Vec2, vec2};
 use crate::{
     continent::{Continent, NO_LAKE},
     noise::perlin2,
+    scale::OLD_VOXEL,
     surface::MIN_RIVER_Q,
 };
 
@@ -16,6 +17,9 @@ const MAX_EXPANDED: u32 = 400_000;
 /// Walking along an existing trail costs this fraction of breaking new ground, which is
 /// what makes trails join up instead of running side by side.
 const REUSE: f32 = 0.35;
+/// Distance between neighbouring points on a finished trail, in voxels. Everything that
+/// counts along a trail counts these, so its meaning does not change with voxel size.
+const STEP: f32 = OLD_VOXEL;
 
 pub struct Router<'a> {
     c: &'a Continent,
@@ -65,7 +69,8 @@ impl<'a> Router<'a> {
     /// The cheapest path of cells from `a` to `b`, both included.
     pub fn search(&mut self, a: usize, b: usize) -> Option<Vec<u32>> {
         let n = self.c.size as i32;
-        let cs = self.c.cell_size();
+        // Heights and river widths are in simulation units, so distances must be too.
+        let cs = self.c.sim_cell_size();
         let goal = ((b as i32 % n) as f32, (b as i32 / n) as f32);
         let estimate = |i: usize| ((i as i32 % n) as f32 - goal.0).hypot((i as i32 / n) as f32 - goal.1) * cs;
         self.current += 1;
@@ -161,13 +166,13 @@ fn catmull(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Vec2 {
     (p1 * 2.0 + (p2 - p0) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3) * 0.5
 }
 
-/// Evenly spaced points, one voxel apart, along a smooth curve through `control`.
+/// Evenly spaced points, [`STEP`] apart, along a smooth curve through `control`.
 pub fn resample(control: &[Vec2]) -> Vec<Vec2> {
     let at = |k: isize| control[k.clamp(0, control.len() as isize - 1) as usize];
     let mut dense = Vec::new();
     for k in 0..control.len() as isize - 1 {
         let span = (at(k + 1) - at(k)).length();
-        let steps = (span * 2.0).ceil().max(1.0) as usize;
+        let steps = (span * 2.0 / STEP).ceil().max(1.0) as usize;
         for s in 0..steps {
             dense.push(catmull(at(k - 1), at(k), at(k + 1), at(k + 2), s as f32 / steps as f32));
         }
@@ -179,12 +184,12 @@ pub fn resample(control: &[Vec2]) -> Vec<Vec2> {
     for pair in dense.windows(2) {
         let (a, b) = (pair[0], pair[1]);
         let seg = (b - a).length();
-        let mut along = 1.0 - carried;
+        let mut along = STEP - carried;
         while along <= seg {
             out.push(a + (b - a) * (along / seg.max(1e-6)));
-            along += 1.0;
+            along += STEP;
         }
-        carried = (carried + seg).rem_euclid(1.0);
+        carried = (carried + seg).rem_euclid(STEP);
     }
     out
 }
@@ -213,7 +218,7 @@ pub fn smooth(c: &Continent, cells: &[u32], start: Vec2, end: Vec2, salt: u32) -
             let tangent = (out[(k + 1).min(len - 1)] - out[k - 1]).normalize_or_zero();
             let normal = vec2(-tangent.y, tangent.x);
             let fade = ((k.min(len - 1 - k)) as f32 / 40.0).min(1.0);
-            let wander = perlin2(c.desc.seed ^ salt, k as f64 / 70.0, salt as f64 * 0.37) * 5.0;
+            let wander = perlin2(c.desc.seed ^ salt, k as f64 / 70.0, salt as f64 * 0.37) * 5.0 * OLD_VOXEL;
             out[k] += normal * wander * fade;
         }
     }

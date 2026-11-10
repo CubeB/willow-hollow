@@ -18,14 +18,14 @@ use voxel::{CHUNK, Voxel};
 
 pub use build::build;
 
-use crate::features::landmarks::Landmark;
+use crate::{features::landmarks::Landmark, scale::m};
 
 /// Size of the tiles trail points are filed under, in voxels.
 const TILE: i32 = 64;
 /// Farthest from its centreline a trail or pad touches the ground.
-pub const REACH: f32 = 12.0;
+pub const REACH: f32 = m(9.6);
 
-/// One voxel-length step of a trail, in continent-local voxels.
+/// One 0.8 m step of a trail, in continent-local voxels.
 #[derive(Clone, Copy, Debug)]
 pub struct TrailPoint {
     pub x: f32,

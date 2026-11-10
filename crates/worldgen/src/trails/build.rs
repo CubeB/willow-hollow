@@ -18,22 +18,23 @@ use crate::{
         shape::{Rng, Shape, rotate},
     },
     noise::{hash2, unit},
+    scale::{BLOCK, OLD_VOXEL, m},
     surface::{Column, Cover, Sampler},
 };
 
 /// Paved half-width of a trail.
-const HALF_WIDTH: f32 = 1.5;
-/// Steepest a trail may rise, in voxels per voxel.
+const HALF_WIDTH: f32 = m(1.2);
+/// Steepest a trail may rise, as a slope.
 const MAX_SLOPE: f32 = 0.45;
-/// Longest water a trail will bridge.
+/// Longest water a trail will bridge, in trail steps.
 const MAX_SPAN: usize = 90;
 /// Longest link in the site graph.
-const MAX_LINK: f32 = 6000.0;
-/// Lanterns stand this far apart near landmarks, and much further apart elsewhere.
+const MAX_LINK: f32 = m(4800.0);
+/// Trail steps between lanterns near landmarks, and much further apart elsewhere.
 const LANTERN_NEAR: usize = 64;
 const LANTERN_FAR: usize = 170;
 /// How far from a landmark counts as near it.
-const NEAR_SITE: f32 = 300.0;
+const NEAR_SITE: f32 = m(240.0);
 
 /// Columns under a list of points. Reads the bare terrain: the network being built is
 /// not attached to the continent yet.
@@ -85,7 +86,7 @@ fn straighten(pts: &[Vec2], runs: &[(usize, usize)]) -> Vec<Vec2> {
         }
         out.extend_from_slice(&pts[at..a]);
         let (pa, pb) = (pts[a], pts[b]);
-        let len = (pb - pa).length().ceil().max(1.0) as usize;
+        let len = ((pb - pa).length() / OLD_VOXEL).ceil().max(1.0) as usize;
         out.extend((0..len).map(|k| pa + (pb - pa) * (k as f32 / len as f32)));
         at = b;
     }
@@ -102,15 +103,20 @@ fn deck_voxel(p: Vec2, side: Vec2, offset: f32, y: i32) -> IVec3 {
 /// Stones across a narrow stream, proud of the water, with a flush ford between them so
 /// walking across never leaves you stuck.
 fn stepping_stones(pal: &Palette, rng: &mut Rng, pts: &[Vec2], cols: &[Column], run: (usize, usize)) -> Vec<(IVec3, Voxel)> {
-    let mut s = Shape::new();
+    let mut s = Shape::raw();
     let dir = (pts[run.1] - pts[run.0]).normalize_or_zero();
     let side = vec2(-dir.y, dir.x);
     for i in run.0..=run.1 {
         let Some(k) = cols[i].water_surface() else { continue };
         let proud = (i - run.0) % 3 != 2;
-        for offset in [-0.5f32, 0.5] {
-            for y in cols[i].top() + 1..=k + proud as i32 - 1 {
-                s.set(deck_voxel(pts[i], side, offset, y), pal.block(rng));
+        for along in 0..BLOCK {
+            let p = pts[i] + dir * along as f32;
+            let mut offset = -0.5 * OLD_VOXEL;
+            while offset <= 0.5 * OLD_VOXEL {
+                for y in cols[i].top() + 1..=k + proud as i32 * BLOCK - 1 {
+                    s.set(deck_voxel(p, side, offset, y), pal.block(rng));
+                }
+                offset += 1.0;
             }
         }
     }
@@ -130,13 +136,13 @@ fn bridge(
 ) -> (Vec<(IVec3, Voxel)>, (usize, usize)) {
     let (s0, e0) = run;
     let kmax = (s0..=e0).filter_map(|i| cols[i].water_surface()).max().unwrap_or(0);
-    let deck = kmax + if kind == CrossingKind::Arch { 2 } else { 1 };
-    let half = if kind == CrossingKind::Arch { 2i32 } else { 1 };
+    let deck = kmax + BLOCK * if kind == CrossingKind::Arch { 2 } else { 1 };
+    let half = BLOCK * if kind == CrossingKind::Arch { 2i32 } else { 1 };
     let span = (e0 - s0 + 1) as f32;
     let dir = (pts[e0.min(pts.len() - 1)] - pts[s0]).normalize_or_zero();
     let side = vec2(-dir.y, dir.x);
 
-    // Ramps run down each side at one voxel in two until they meet the ground.
+    // Ramps run down each side at one in two until they meet the ground.
     let ramp = |from: usize, step: isize| -> (usize, Vec<i32>) {
         let (mut i, mut ys) = (from, Vec::new());
         for k in 1..=16 {
@@ -144,7 +150,7 @@ fn bridge(
             if next < 0 || next as usize >= pts.len() {
                 break;
             }
-            let y = deck - (k as i32 + 1) / 2;
+            let y = deck - (k as i32 * BLOCK + 1) / 2;
             i = next as usize;
             let ground = cols[i].top();
             if is_wet(&cols[i]) || y > ground {
@@ -159,7 +165,7 @@ fn bridge(
     let (foot_b, down) = ramp(e0, 1);
 
     // Height of the deck at each sample, with a gentle hump on the bigger bridges.
-    let rise = if kind == CrossingKind::Arch { (span / 10.0).clamp(1.0, 4.0) } else { 0.0 };
+    let rise = if kind == CrossingKind::Arch { (span / 10.0).clamp(1.0, 4.0) * OLD_VOXEL } else { 0.0 };
     let mut samples: Vec<(usize, i32)> = Vec::new();
     for (k, &y) in up.iter().enumerate().rev() {
         samples.push((s0 - (k + 1), y));
@@ -172,7 +178,7 @@ fn bridge(
         samples.push((e0 + k + 1, y));
     }
 
-    let mut s = Shape::new();
+    let mut s = Shape::raw();
     let surface = |rng: &mut Rng| match kind {
         CrossingKind::Arch => pal.block(rng),
         CrossingKind::Log => pal.wood,
@@ -184,8 +190,10 @@ fn bridge(
         let wet = is_wet(col);
         let over_water = (s0..=e0).contains(&i);
         // Half-steps along and across so a diagonal deck has no holes.
-        for along in [0.0f32, 0.5] {
+        let mut along = 0.0f32;
+        while along < OLD_VOXEL {
             let p = pts[i] + dir * along;
+            along += 0.5;
             let mut offset = -(half as f32);
             while offset <= half as f32 {
                 let q = deck_voxel(p, side, offset, y);
@@ -199,19 +207,23 @@ fn bridge(
                 offset += 0.5;
             }
         }
-        let edge = half as f32 + 1.0;
+        let edge = (half + BLOCK) as f32;
         match kind {
             CrossingKind::Arch => {
                 for sign in [-1.0, 1.0] {
-                    s.set(deck_voxel(pts[i], side, sign * edge, y), pal.block(rng));
-                    s.set(deck_voxel(pts[i], side, sign * edge, y + 1), pal.block(rng));
+                    for along in 0..BLOCK {
+                        let p = pts[i] + dir * along as f32;
+                        for h in 0..2 * BLOCK {
+                            s.set(deck_voxel(p, side, sign * edge, y + h), pal.block(rng));
+                        }
+                    }
                 }
             }
             _ => {
                 if n >= last_rail + 3 {
                     last_rail = n;
                     for sign in [-1.0, 1.0] {
-                        for h in 0..=1 {
+                        for h in 0..2 * BLOCK {
                             s.set(deck_voxel(pts[i], side, sign * edge, y + h), pal.wood);
                         }
                     }
@@ -220,10 +232,10 @@ fn bridge(
         }
         // Piers go down to the bed.
         if over_water && (i - s0) % 6 == 3 {
-            let width = half as f32 + if kind == CrossingKind::Arch { 1.0 } else { 0.0 };
+            let width = half as f32 + if kind == CrossingKind::Arch { OLD_VOXEL } else { 0.0 };
             let mut offset = -width;
             while offset <= width {
-                for yy in col.top() - 1..y {
+                for yy in col.top() - BLOCK..y {
                     s.set(deck_voxel(pts[i], side, offset, yy), if kind == CrossingKind::Arch { pal.block(rng) } else { pal.wood });
                 }
                 offset += 0.5;
@@ -246,14 +258,14 @@ fn settle(c: &Continent, seed: u32, kind: Landmark, cell: usize) -> Option<(i32,
         let rim = [(0, 0), (r, 0), (-r, 0), (0, r), (0, -r), (r * 2 / 3, r * 2 / 3), (-r * 2 / 3, r * 2 / 3), (r * 2 / 3, -r * 2 / 3), (-r * 2 / 3, -r * 2 / 3)];
         for (dx, dz) in rim {
             let col = sampler.column(x + dx, z + dz);
-            if is_wet(&col) || col.river < 6.0 || !matches!(col.cover, Cover::Land | Cover::Beach) {
+            if is_wet(&col) || col.river < m(4.8) || !matches!(col.cover, Cover::Land | Cover::Beach) {
                 return None;
             }
             lo = lo.min(col.ground);
             hi = hi.max(col.ground);
             sum += col.ground;
         }
-        (hi - lo <= 7.0).then_some(sum / rim.len() as f32)
+        (hi - lo <= m(5.6)).then_some(sum / rim.len() as f32)
     };
     for ring in 0..12 {
         let reach = ring as f32 * cs * 0.25;
@@ -284,7 +296,7 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
     let (cx, cz) = (((cell % n) as f32 + 0.5) * cs, ((cell / n) as f32 + 0.5) * cs);
     let reach = (cs * 4.0) as i32;
     let mut best: Option<Shore> = None;
-    for offset in [0, 12, -12, 24, -24] {
+    for offset in [0, 12, -12, 24, -24].map(|o| o * BLOCK) {
         for (turns, (dx, dz)) in [(1i32, 0i32), (0, 1), (-1, 0), (0, -1)].into_iter().enumerate() {
             let (sx, sz) = (dz * offset + cx as i32, dx * offset + cz as i32);
             let (lo_x, lo_z) = (sx.min(sx + dx * reach) - 1, sz.min(sz + dz * reach) - 1);
@@ -302,7 +314,7 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
                         }
                         level = k;
                         run += 1;
-                        if run >= 22 {
+                        if run >= 22 * BLOCK {
                             break;
                         }
                     }
@@ -312,15 +324,15 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
                 }
             }
             if let Some(d) = last_dry
-                && run >= 14
-                && best.as_ref().is_none_or(|b| run > b.length + 2)
+                && run >= 14 * BLOCK
+                && best.as_ref().is_none_or(|b| run > b.length + 2 * BLOCK)
             {
                 best = Some(Shore {
                     x: sx + dx * d,
                     z: sz + dz * d,
                     level,
                     turns: turns as u32,
-                    length: run - 2,
+                    length: run - 2 * BLOCK,
                 });
             }
         }
@@ -410,9 +422,9 @@ fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mu
         y,
     });
     let origin = IVec3::new(shore.x, shore.level + 1, shore.z);
-    let pier = landmarks::build(Landmark::Landing, &palette, site_seed, shore.length);
+    let pier = landmarks::build(Landmark::Landing, &palette, site_seed, shore.length / BLOCK);
     net.add_stamp(absolute(pier, origin, shore.turns));
-    let along = rotate(IVec3::new(shore.length - 3, 0, 4), shore.turns);
+    let along = rotate(IVec3::new(shore.length - 3 * BLOCK, 0, 4 * BLOCK), shore.turns);
     let heading = shore.turns as f32 * std::f32::consts::FRAC_PI_2;
     Some(Site {
         kind: Landmark::Landing,
@@ -459,6 +471,7 @@ fn links(sites_at: &[(f32, f32, u32)]) -> Vec<(usize, usize, f32)> {
 /// slope never exceeds what is comfortable to walk.
 fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
     const WINDOW: usize = 12;
+    let max_step = MAX_SLOPE * OLD_VOXEL;
     let n = cols.len();
     let mut smoothed = Vec::with_capacity(n);
     for i in 0..n {
@@ -473,16 +486,16 @@ fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
         smoothed.push(if count > 0 { sum / count as f32 } else { cols[i].ground });
     }
     for i in 1..n {
-        smoothed[i] = smoothed[i].clamp(smoothed[i - 1] - MAX_SLOPE, smoothed[i - 1] + MAX_SLOPE);
+        smoothed[i] = smoothed[i].clamp(smoothed[i - 1] - max_step, smoothed[i - 1] + max_step);
     }
     for i in (0..n.saturating_sub(1)).rev() {
-        smoothed[i] = smoothed[i].clamp(smoothed[i + 1] - MAX_SLOPE, smoothed[i + 1] + MAX_SLOPE);
+        smoothed[i] = smoothed[i].clamp(smoothed[i + 1] - max_step, smoothed[i + 1] + max_step);
     }
     // Pinned points (landmarks, bridge feet) draw the profile to them within reach.
     for &(at, y) in pins {
         let reach = 64usize;
         for i in at.saturating_sub(reach)..(at + reach + 1).min(n) {
-            let room = i.abs_diff(at) as f32 * MAX_SLOPE;
+            let room = i.abs_diff(at) as f32 * max_step;
             smoothed[i] = smoothed[i].clamp(y - room, y + room);
         }
     }
@@ -535,7 +548,7 @@ impl Layer<'_> {
                 .filter_map(|i| cols[i].water_surface().map(|k| k - cols[i].top()))
                 .max()
                 .unwrap_or(0);
-            let kind = if span <= 5 && depth <= 3 {
+            let kind = if span <= 5 && depth <= 3 * BLOCK {
                 CrossingKind::Stones
             } else if span <= 16 {
                 if rng.unit() < 0.5 { CrossingKind::Log } else { CrossingKind::Plank }
@@ -597,9 +610,9 @@ impl Layer<'_> {
             }
             let tangent = (pts[i + 4] - pts[i - 4]).normalize_or_zero();
             let normal = vec2(-tangent.y, tangent.x);
-            let q = pts[i] + normal * side * (HALF_WIDTH + 1.5);
+            let q = pts[i] + normal * side * (HALF_WIDTH + m(1.2));
             let col = cols[i];
-            if is_wet(&col) || col.river < 3.0 {
+            if is_wet(&col) || col.river < m(2.4) {
                 continue;
             }
             let (x, z) = (q.x.floor() as i32, q.y.floor() as i32);
@@ -714,21 +727,21 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     // Signposts where trails meet.
     let mut junction_cells = std::collections::HashSet::new();
     for j in net.junctions.clone() {
-        if !junction_cells.insert(((j.x / 8.0) as i32, (j.y / 8.0) as i32)) {
+        if !junction_cells.insert(((j.x / m(6.4)) as i32, (j.y / m(6.4)) as i32)) {
             continue;
         }
         let near: Vec<f32> = lines
             .values()
             .filter_map(|line| {
-                let k = line.iter().position(|p| p.distance_squared(j) < 400.0 && p.distance_squared(j) > 49.0)?;
+                let k = line.iter().position(|p| p.distance_squared(j) < m(16.0).powi(2) && p.distance_squared(j) > m(5.6).powi(2))?;
                 let d = line[k] - j;
                 Some(d.y.atan2(d.x))
             })
             .collect();
-        let x = (j.x + 3.0) as i32;
-        let z = (j.y + 3.0) as i32;
+        let x = (j.x + m(2.4)) as i32;
+        let z = (j.y + m(2.4)) as i32;
         let col = Sampler::new(c, world_seed, x, z, 1).column(x, z);
-        if is_wet(&col) || col.river < 3.0 {
+        if is_wet(&col) || col.river < m(2.4) {
             continue;
         }
         let (trail_y, _) = net

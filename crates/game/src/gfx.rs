@@ -40,6 +40,13 @@ async fn request(
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("device"),
+            // Lets the renderer submit chunk lists as multi-draws where available.
+            required_features: adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE,
+            // The chunk arena is one buffer, and can outgrow the 256 MiB default.
+            required_limits: wgpu::Limits {
+                max_buffer_size: adapter.limits().max_buffer_size,
+                ..Default::default()
+            },
             ..Default::default()
         })
         .await

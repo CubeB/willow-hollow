@@ -17,6 +17,7 @@ use worldgen::{
     biome::Biome,
     continent::{Continent, NO_LAKE},
     macro_layout::MACRO_SIZE,
+    scale::OLD_VOXEL,
     materials as mat,
     surface::{self, Piece},
     world::GameWorld,
@@ -28,9 +29,9 @@ use crate::gfx::Gpu;
 const TILE: usize = 64;
 /// The far surface sits this far below the true height so that, where it meets voxel
 /// terrain, it tucks under rather than standing proud of it.
-const SINK: f32 = 1.0;
+const SINK: f32 = worldgen::scale::m(0.8);
 /// Narrowest river drawn in the distance, in voxels.
-const MIN_RIBBON_WIDTH: f32 = 2.5;
+const MIN_RIBBON_WIDTH: f32 = worldgen::scale::m(2.0);
 
 /// Vertex of the far surface. `flags`: 0 = land, 128 = standing water in the surface
 /// itself (lake, sea), 255 = river ribbon (drawn over the land it lies on).
@@ -310,7 +311,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                     let x = (tx * TILE + i * stride).min(size - 1);
                     let z = (tz * TILE + j * stride).min(size - 1);
                     let idx = z * size + x;
-                    let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)];
+                    let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
                     let (mut color, flags) = cell_color(c, &mats, idx, gx.hypot(gz));
@@ -327,8 +328,8 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                         // Forested land stands higher by about the height of its canopy.
                         let lift = worldgen::features::canopy(Biome::from_u8(c.biome[idx]), &mats)
                             .filter(|_| c.temperature[idx] >= 0.13 && gx.hypot(gz) <= 1.6)
-                            .map_or(0.0, |(_, cover, height)| cover * height * 0.6);
-                        c.height[idx] - SINK + lift
+                            .map_or(0.0, |(_, cover, height)| cover * height * 0.6 * OLD_VOXEL);
+                        h(x, z) - SINK + lift
                     };
                     let pos = Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     lo = lo.min(pos);
@@ -351,7 +352,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
     let water = mats.get(mat::WATER).color;
     let mut pieces: Vec<Piece> = Vec::new();
     for i in 0..size * size {
-        if c.ocean[i] || Continent::river_width(c.discharge[i]) < MIN_RIBBON_WIDTH {
+        if c.ocean[i] || Continent::river_width(c.discharge[i]) * OLD_VOXEL < MIN_RIBBON_WIDTH {
             continue;
         }
         pieces.clear();
@@ -365,7 +366,7 @@ fn build_cell(c: &Continent, cell: (i32, i32), stride: usize) -> CellMesh {
                 let side = glam::vec2(-dir.y, dir.x);
                 let (ta, tb) = (k as f32 / segs as f32, (k + 2).min(segs) as f32 / segs as f32);
                 let corner = |p: glam::Vec2, t: f32, sign: f32| {
-                    let q = p + side * (piece.half_width(t).max(1.25) * sign);
+                    let q = p + side * (piece.half_width(t).max(worldgen::scale::m(1.0)) * sign);
                     let y = surface::pool_level(c.desc.seed, piece.level(t)) as f32 - 0.125;
                     FarVertex {
                         pos: [q.x, y, q.y],

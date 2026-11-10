@@ -210,7 +210,7 @@ fn render_relief(c: &Continent, view: View, px: u32, layer: Layer) -> RgbImage {
             }
             let r = c.rcv[i] as usize;
             let (rx, rz) = ((r % c.size) as f32 + 0.5, (r / c.size) as f32 + 0.5);
-            let width_px = Continent::river_width(q) / cell / scale;
+            let width_px = Continent::river_width(q) / c.sim_cell_size() / scale;
             // Thin streams are drawn fainter rather than thinner than a pixel.
             let alpha = (width_px / 0.6).clamp(0.25, 1.0);
             let radius = (width_px * 0.5).max(0.5);
@@ -291,7 +291,7 @@ fn print_stats(c: &Continent) {
     println!(
         "  land {:.0}% of cell, {:.0} km2   height mean {mean_h:.0}, median {:.0}, p90 {:.0}, p99 {:.0}, max {max_h:.0}",
         land.len() as f32 / n as f32 * 100.0,
-        land.len() as f32 * c.cell_size() * c.cell_size() / 1e6,
+        land.len() as f32 * c.sim_cell_size() * c.sim_cell_size() / 1e6,
         pct(0.5),
         pct(0.9),
         pct(0.99),

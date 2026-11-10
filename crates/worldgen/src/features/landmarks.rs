@@ -11,7 +11,7 @@ use glam::IVec3;
 use voxel::{AIR, Voxel};
 
 use super::shape::{Rng, Shape};
-use crate::{biome::Biome, materials as mat};
+use crate::{biome::Biome, materials as mat, scale::m};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Landmark {
@@ -42,11 +42,11 @@ impl Landmark {
     /// Radius of the ground levelled for this landmark.
     pub fn radius(self) -> f32 {
         match self {
-            Landmark::Shrine | Landmark::Cairn => 5.0,
-            Landmark::Lookout | Landmark::Camp | Landmark::Arch => 8.0,
-            Landmark::Hut => 9.0,
-            Landmark::Ruins | Landmark::Stones => 13.0,
-            Landmark::Landing => 4.0,
+            Landmark::Shrine | Landmark::Cairn => m(4.0),
+            Landmark::Lookout | Landmark::Camp | Landmark::Arch => m(6.4),
+            Landmark::Hut => m(7.2),
+            Landmark::Ruins | Landmark::Stones => m(10.4),
+            Landmark::Landing => m(3.2),
         }
     }
 
@@ -630,7 +630,13 @@ mod tests {
     fn lookout_stairs_can_be_climbed() {
         let palette = Palette::of(Biome::Grassland);
         for seed in 0..12 {
-            let model: HashMap<IVec3, Voxel> = build(Landmark::Lookout, &palette, seed, 0).into_iter().collect();
+            // Blocks, addressed by one corner voxel each.
+            let unit = IVec3::splat(crate::scale::BLOCK);
+            let model: HashMap<IVec3, Voxel> = build(Landmark::Lookout, &palette, seed, 0)
+                .into_iter()
+                .filter(|(p, _)| p.rem_euclid(unit) == IVec3::ZERO)
+                .map(|(p, v)| (p.div_euclid(unit), v))
+                .collect();
             let solid = |p: IVec3| model.get(&p).is_some_and(|&v| v != AIR);
             let height = (0..40).rev().find(|&y| model.get(&v(0, y, 0)) == Some(&mat::LANTERN)).unwrap() - 1;
             let tread = |step: i32| {

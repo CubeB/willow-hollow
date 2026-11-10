@@ -30,7 +30,7 @@ fn vs(in: VIn) -> VOut {
         // toward the eye along the view ray leaves it in the same place on screen but
         // lets it win the depth test against the ground just around it.
         let dist = length(rel);
-        depth_pos = rel * (1.0 - min(12.0, dist * 0.05) / max(dist, 1.0));
+        depth_pos = rel * (1.0 - min(9.6 * VOXELS_PER_METRE, dist * 0.05) / max(dist, 1.0));
     }
     out.clip = G.view_proj * vec4<f32>(depth_pos, 1.0);
     out.color = srgb_to_linear(in.color.rgb);

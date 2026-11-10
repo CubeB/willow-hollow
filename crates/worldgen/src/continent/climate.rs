@@ -1,6 +1,6 @@
 //! Rainfall and temperature over a continent grid.
 
-use crate::macro_layout::{CellDesc, MACRO_SIZE};
+use crate::macro_layout::{CellDesc, SIM_SPAN};
 
 /// Rainfall relative to the continent's average (which is `desc.wetness`).
 ///
@@ -10,7 +10,7 @@ use crate::macro_layout::{CellDesc, MACRO_SIZE};
 /// a rain shadow, which in turn makes windward rivers larger.
 pub fn rainfall(w: usize, height: &[f32], ocean: &[bool], desc: &CellDesc) -> Vec<f32> {
     let n = w * w;
-    let dx = MACRO_SIZE as f32 / w as f32;
+    let dx = SIM_SPAN / w as f32;
     let (wind_x, wind_z) = (desc.wind.cos(), desc.wind.sin());
     // Air parcels step this many cells per update; scaled so behaviour is the same at
     // every grid resolution.

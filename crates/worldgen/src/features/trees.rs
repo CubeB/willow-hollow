@@ -415,7 +415,7 @@ fn boulder(s: &mut Shape, rng: &mut Rng, mossy: bool) {
             .collect();
         for p in tops {
             if rng.unit() < 0.7 {
-                s.set(p, mat::MOSS);
+                s.paint(p, mat::MOSS);
             }
         }
     }
@@ -440,7 +440,7 @@ fn fallen_log(s: &mut Shape, rng: &mut Rng) {
             .collect();
         for p in tops {
             if rng.unit() < 0.45 {
-                s.set(p, mat::MOSS);
+                s.paint(p, mat::MOSS);
             }
         }
     }
