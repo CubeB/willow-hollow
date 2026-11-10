@@ -10,6 +10,8 @@
 use glam::{Vec2, vec2};
 
 mod cliff;
+mod coast;
+mod ravine;
 
 use crate::{
     biome::Biome,
@@ -100,6 +102,11 @@ pub struct Piece {
     /// Water level just upstream of the start: higher than `l0` where the piece starts
     /// at the foot of a waterfall.
     lip: f32,
+    /// Network nodes the piece starts beside, passes and ends beside.
+    nodes: [usize; 3],
+    /// Depth of the gorge the river runs in at the start, middle and end, in voxels
+    /// (0 for none). Filled in by the sampler, which knows the world seed.
+    gorge: [f32; 3],
     /// Length of the curve in voxels.
     length: f32,
     /// Bounding box grown by the farthest the piece can influence terrain.
@@ -108,7 +115,7 @@ pub struct Piece {
 }
 
 impl Piece {
-    fn new(p0: Vec2, p1: Vec2, p2: Vec2, widths: (f32, f32), levels: (f32, f32, f32), lip: f32) -> Self {
+    fn new(p0: Vec2, p1: Vec2, p2: Vec2, widths: (f32, f32), levels: (f32, f32, f32), lip: f32, nodes: [usize; 3]) -> Self {
         let mut pts = [Vec2::ZERO; SEGS + 1];
         let (mut lo, mut hi) = (Vec2::MAX, Vec2::MIN);
         for (k, pt) in pts.iter_mut().enumerate() {
@@ -128,6 +135,8 @@ impl Piece {
             l1: levels.1,
             l2: levels.2,
             lip: lip.max(levels.0),
+            nodes,
+            gorge: [0.0; 3],
             lo: lo - reach,
             hi: hi + reach,
         }
@@ -167,6 +176,12 @@ impl Piece {
     fn level_above(&self, t: f32, back: f32) -> f32 {
         let u = t - back / self.length;
         if u < 0.0 { self.lip } else { self.level(u) }
+    }
+
+    /// Depth of the gorge at curve parameter `t`, in voxels.
+    fn gorge_depth(&self, t: f32) -> f32 {
+        let [a, b, c] = self.gorge;
+        if t < 0.5 { a + (b - a) * (t * 2.0) } else { b + (c - b) * (t * 2.0 - 1.0) }
     }
 
     /// Height of the waterfall at the start of the piece, in simulation units.
@@ -218,6 +233,8 @@ pub struct Sampler<'a> {
     pieces: Vec<Piece>,
     /// Waterfalls whose cliff can reach the area.
     falls: Vec<Fall>,
+    /// River deltas that can reach the area.
+    deltas: Vec<coast::Delta>,
     trail_points: Vec<TrailPoint>,
     pads: Vec<Pad>,
 }
@@ -236,6 +253,7 @@ impl<'a> Sampler<'a> {
         let (z0, z1) = (cell(lz0 as f32 - margin), cell((lz0 + span) as f32 + margin));
 
         let mut falls = Vec::new();
+        let mut deltas = Vec::new();
         let mut pieces = Vec::new();
         for z in z0..=z1 {
             for x in x0..=x1 {
@@ -243,12 +261,29 @@ impl<'a> Sampler<'a> {
                 if let Some(f) = Fall::at(c, world_seed, z * c.size + x) {
                     falls.push(f);
                 }
+                if let Some(d) = coast::Delta::at(c, world_seed, z * c.size + x) {
+                    deltas.push(d);
+                }
             }
         }
         let (lo, hi) = (
             vec2(lx0 as f32, lz0 as f32),
             vec2((lx0 + span) as f32, (lz0 + span) as f32),
         );
+        // Gorges: their walls and rims reach further from the river than its banks.
+        let mut depths = std::collections::HashMap::new();
+        for p in &mut pieces {
+            let mut depth = |j: usize| *depths.entry(j).or_insert_with(|| ravine::gorge_depth(c, world_seed, j));
+            let (a, m, b) = (depth(p.nodes[0]), depth(p.nodes[1]), depth(p.nodes[2]));
+            // The ends are shared with the neighbouring pieces, so depth is continuous.
+            p.gorge = [(a + m) * 0.5, m, (m + b) * 0.5];
+            let deepest = p.gorge.iter().copied().fold(0.0, f32::max);
+            if deepest > 0.0 {
+                let r = Vec2::splat(ravine::gorge_reach(deepest));
+                p.lo -= r;
+                p.hi += r;
+            }
+        }
         pieces.retain(|p| p.lo.x <= hi.x && p.hi.x >= lo.x && p.lo.y <= hi.y && p.hi.y >= lo.y);
         falls.retain(|f| {
             let r = Vec2::splat(f.radius);
@@ -261,6 +296,7 @@ impl<'a> Sampler<'a> {
             world_seed,
             pieces,
             falls,
+            deltas,
             trail_points,
             pads,
         }
@@ -332,8 +368,9 @@ impl<'a> Sampler<'a> {
 
         // The river whose channel edge is nearest.
         // (signed distance to the channel edge, half-width, water level there, water
-        // level a couple of voxels upstream, extra depth of a plunge pool)
-        let mut nearest: Option<(f32, f32, f32, f32, f32)> = None;
+        // level a couple of voxels upstream, extra depth of a plunge pool, gorge depth,
+        // how far a mouth has shoaled towards the sea floor)
+        let mut nearest: Option<(f32, f32, f32, f32, f32, f32, f32)> = None;
         for piece in &self.pieces {
             if p.x < piece.lo.x || p.x > piece.hi.x || p.y < piece.lo.y || p.y > piece.hi.y {
                 continue;
@@ -349,31 +386,80 @@ impl<'a> Sampler<'a> {
                 } else {
                     0.0
                 };
-                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool));
+                // Out at sea a river mouth shoals to the sea floor rather than ending in a
+                // deep rounded hole.
+                let seaward = if piece.nodes[1] == piece.nodes[2] { smoothstep(0.2, 0.95, t) } else { 0.0 };
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool, piece.gorge_depth(t), seaward));
             }
         }
-        if let Some((sd, hw, level, upstream_level, pool)) = nearest {
+        if let Some((sd, hw, level, upstream_level, pool, gorge, seaward)) = nearest {
             river = sd;
             let k = pool_level(c.desc.seed, level);
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
                 let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6)) + pool;
                 let across = 1.0 + sd / hw; // 0 at the centre, 1 at the edge
-                let bed = k as f32 - 1.01 - depth * (1.0 - across * across);
+                let mut bed = k as f32 - 1.01 - depth * (1.0 - across * across);
+                bed += (ground.min(k as f32 - 1.6) - bed).max(0.0) * seaward;
+                cover = Cover::RiverBed;
+                if k == 0 {
+                    // A tidal reach: a sandy bed, with bars in the wider channels.
+                    cover = Cover::SeaFloor;
+                    if hw > m(2.5) && !submerged {
+                        bed = coast::sand_bar(seed, wx, wz, across, bed);
+                        if bed >= -1.0 {
+                            cover = Cover::Beach;
+                        }
+                    }
+                }
                 ground = if submerged { ground.min(bed) } else { bed };
                 water = Some(k);
-                cover = Cover::RiverBed;
-            } else if !submerged && sd < bank_width(hw) {
+            } else if !submerged && (sd < bank_width(hw) || (gorge > 0.0 && sd < ravine::gorge_reach(gorge))) {
                 // Banks meet the water flush with its surface, then rise (or fall) to
                 // the surrounding terrain. Where the land is lower than the river this
                 // builds the levee that keeps the water in.
                 // Beside a drop the bank holds the level of the pool above it for a
                 // couple of voxels, so the upper pool cannot spill around the lip.
                 let bank = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
+                let natural = ground;
                 ground = bank + (ground - bank) * smoothstep(0.0, bank_width(hw), sd);
-                if sd < m(1.28) {
+                if sd < m(1.28) && seaward < 0.3 {
                     cover = Cover::Bank;
                 }
+                if gorge > 0.0 {
+                    // In a gorge the banks are a strip of gravel and boulders under
+                    // sheer walls.
+                    let (g, part) = ravine::gorge_wall(seed, wx, wz, sd, hw, bank, level * OLD_VOXEL, gorge, natural);
+                    let w = smoothstep(m(1.5), m(5.0), gorge);
+                    ground += (g - ground) * w;
+                    if w > 0.5 {
+                        match part {
+                            cliff::Part::Face(_) => cover = Cover::Cliff,
+                            cliff::Part::Foot(_) => cover = Cover::Scree,
+                            cliff::Part::None if cover == Cover::Cliff || cover == Cover::Scree => cover = Cover::Land,
+                            cliff::Part::None => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deltas build out into the sea in front of big slow rivers.
+        if near_sea && cover != Cover::RiverBed && cover != Cover::SeaFloor {
+            for d in &self.deltas {
+                if let Some(flat) = d.shape(p, wx, wz, &mut ground) {
+                    cover = flat;
+                }
+            }
+        }
+
+        // Dry fault ravines, kept well clear of water.
+        if lake == NO_LAKE && !near_sea && matches!(cover, Cover::Land | Cover::Cliff | Cover::Scree) {
+            let fade = if river == f32::MAX { 1.0 } else { smoothstep(m(40.0), m(80.0), river) };
+            match ravine::dry(seed, wx, wz, fade, &mut ground) {
+                cliff::Part::Face(_) => cover = Cover::Cliff,
+                cliff::Part::Foot(_) => cover = Cover::Scree,
+                cliff::Part::None => {}
             }
         }
 
@@ -507,10 +593,10 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     let r = c.rcv[i] as usize;
     let (pi, pr) = (node(c, i), node(c, r));
     let exit = (pi + pr) * 0.5;
-    let width = |j: usize| Continent::river_width(c.discharge[j]) * OLD_VOXEL;
-    let (wi, li) = (width(i), c.water_level[i]);
+    let width = |j: usize| Continent::river_width(c.discharge[j]) * OLD_VOXEL * funnel(c, j, c.discharge[j]);
+    let (wi, li) = (width(i), river_level(c, i));
     // Sea level is 0; the last piece of a river runs down to it.
-    let lr = if c.ocean[r] { 0.0 } else { c.water_level[r] };
+    let lr = river_level(c, r);
     // Above a waterfall the pool holds its level right to the lip.
     let exit_level = if fall_drop(c, i) > 0.0 { li } else { (li + lr) * 0.5 };
 
@@ -523,9 +609,9 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
                 fed = true;
                 let pd = node(c, d);
                 // Below a waterfall the pool starts at the foot of the fall.
-                let ld = c.water_level[d];
+                let ld = river_level(c, d);
                 let (start, lip) = if fall_drop(c, d) > 0.0 { (li, ld) } else { ((ld + li) * 0.5, (ld + li) * 0.5) };
-                out.push(Piece::new((pd + pi) * 0.5, pi, exit, (width(d), wi), (start, li, exit_level), lip));
+                out.push(Piece::new((pd + pi) * 0.5, pi, exit, (width(d), wi), (start, li, exit_level), lip, [d, i, r]));
             }
         }
     }
@@ -538,19 +624,51 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             (0.0, wi),
             (li, (li + exit_level) * 0.5, exit_level),
             li,
+            [i, i, r],
         ));
     }
     if c.ocean[r] {
-        // A mouth: carry the channel on into the sea, widening as it goes.
+        // A mouth: carry the channel on into the sea, opening out as it goes.
+        let open = Continent::river_width(c.discharge[i]) * OLD_VOXEL * funnel(c, r, c.discharge[i]);
         out.push(Piece::new(
             exit,
             (exit + pr) * 0.5,
             pr,
-            (wi, wi * 1.25),
+            (wi, open * 1.3),
             (exit_level, exit_level * 0.5, 0.0),
             exit_level,
+            [i, r, r],
         ));
     }
+}
+
+/// Simulated level at which the sea's rise and fall reaches up a river: below it the
+/// river is tidal, and its water stands at sea level.
+const TIDAL: f32 = 2.0;
+
+/// The water level a river keeps at node `j`, in simulation units. Near the coast the
+/// simulated level eases down to sea level, so a river meets the sea flush rather than
+/// over a lip. The mapping only ever lowers levels and never reverses their order, so
+/// rivers still never flow uphill.
+pub(crate) fn river_level(c: &Continent, j: usize) -> f32 {
+    if c.ocean[j] {
+        return 0.0;
+    }
+    let l = c.water_level[j];
+    if l < TIDAL {
+        0.0
+    } else if l < 2.0 * TIDAL {
+        (l - TIDAL) * 2.0
+    } else {
+        l
+    }
+}
+
+/// How much wider than usual a river carrying `discharge` is at node `j`: big rivers
+/// open into a funnel-shaped estuary over the last few metres of their fall.
+fn funnel(c: &Continent, j: usize, discharge: f32) -> f32 {
+    let low = 1.0 - smoothstep(0.0, 8.0, river_level(c, j));
+    1.0 + 1.8 * low * smoothstep(150.0, 1500.0, discharge)
 }
 
 /// Smallest drop, in simulation units, that a river can make as one waterfall.
@@ -602,8 +720,8 @@ impl Fall {
             return None;
         }
         let r = c.rcv[i] as usize;
-        let top = pool_level(c.desc.seed, c.water_level[i]);
-        let bottom = pool_level(c.desc.seed, c.water_level[r]);
+        let top = pool_level(c.desc.seed, river_level(c, i));
+        let bottom = pool_level(c.desc.seed, river_level(c, r));
         let height = (top - bottom) as f32;
         if height < m(3.0) {
             return None;
@@ -839,8 +957,8 @@ mod tests {
         assert!(cliffed * 2 < steep.len(), "cliffs cover most steep ground: {cliffed}");
         assert!(scree > 100, "no scree at the foot of cliffs: {scree}");
         let gentle: Vec<(f32, (i32, i32))> = sites.iter().rev().take(300).map(|s| (s.0, count(s.1))).filter(|g| g.1 != (0, 0)).collect();
-        // A waterfall can cut its own lip through gentle ground, but nothing else does.
-        assert!(gentle.len() <= 3, "cliffs or scree on gentle ground: {gentle:?}");
+        // Waterfalls and fault ravines cut through gentle ground, but only here and there.
+        assert!(gentle.len() <= 15, "cliffs or scree on gentle ground: {gentle:?}");
     }
 
     /// Prints how much of the land and of the steep land is cliff, and where the most
@@ -905,6 +1023,32 @@ mod tests {
         for t in tiles.iter().take(8) {
             eprintln!("  tile {},{}: {}", t.1, t.2, t.0);
         }
+        // Gorges: river nodes with one, and dry ravine floors.
+        let mut gorges: Vec<(f32, usize)> = (0..c.size * c.size)
+            .map(|i| (ravine::gorge_depth(&c, 7, i), i))
+            .filter(|g| g.0 > m(4.0))
+            .collect();
+        gorges.sort_by(|a, b| b.0.total_cmp(&a.0));
+        eprintln!("{} gorge nodes deeper than 4 m", gorges.len());
+        for &(d, i) in gorges.iter().step_by((gorges.len() / 8).max(1)).take(8) {
+            let (a, b) = (node(&c, i), node(&c, c.rcv[i] as usize));
+            let dir = (b - a).normalize();
+            eprintln!("  gorge {:.0} m at {:.0},{:.0}  downstream {:.2},{:.2}  q {:.0}", d / m(1.0), a.x, a.y, dir.x, dir.y, c.discharge[i]);
+        }
+        let mut dry = Vec::new();
+        for z in (0..MACRO_SIZE).step_by(64) {
+            for x in (0..MACRO_SIZE).step_by(64) {
+                let i = (z / 64) as usize * c.size + (x / 64) as usize;
+                if c.ocean[i] || c.lake[i] != NO_LAKE {
+                    continue;
+                }
+                let mut g = c.height[i] * OLD_VOXEL;
+                if ravine::dry(7, x as f64, z as f64, 1.0, &mut g) == cliff::Part::Foot(1.0) {
+                    dry.push((x, z));
+                }
+            }
+        }
+        eprintln!("{} dry ravine floor samples: {:?}", dry.len(), dry.iter().step_by((dry.len() / 8).max(1)).collect::<Vec<_>>());
         // Trails that run into a cliff (the trail is levelled through it).
         let mut c = c;
         c.trails = crate::trails::build(&c, 7);
