@@ -8,6 +8,7 @@
 
 pub mod aquatic;
 pub mod attach;
+pub mod cave;
 pub mod climber;
 pub mod landmarks;
 pub mod moss;

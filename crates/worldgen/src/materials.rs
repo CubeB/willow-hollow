@@ -207,6 +207,37 @@ palette! {
     CLAY              = (170, 100,  68), Solid, 1;
     GLASS_GREEN       = ( 62, 116,  90), Solid, 0;
     SACKCLOTH         = (180, 160, 120), Solid, 2;
+    // Caves (features::cave): calcite flowstone, and every rock a cave shows in three
+    // steps darker, for the light falling away from the entrance. The renderer has no
+    // sky occlusion, so the dark is in the colour.
+    FLOWSTONE         = (206, 192, 164), Solid, 2;
+    CAVE1_STONE       = ( 95,  95,  93), Solid, 2;
+    CAVE1_ROCK_DARK   = ( 71,  70,  73), Solid, 2;
+    CAVE1_ROCK_PALE   = (127, 123, 114), Solid, 2;
+    CAVE1_ROCK_BROWN  = ( 83,  75,  70), Solid, 2;
+    CAVE1_SANDSTONE   = (151, 126,  90), Solid, 2;
+    CAVE1_SANDSTONE_RED= (139,  83,  58), Solid, 2;
+    CAVE1_SANDSTONE_DARK= (124,  98,  68), Solid, 2;
+    CAVE1_GRAVEL      = (108, 104,  98), Solid, 2;
+    CAVE1_FLOWSTONE   = (152, 142, 121), Solid, 2;
+    CAVE2_STONE       = ( 70,  70,  69), Solid, 2;
+    CAVE2_ROCK_DARK   = ( 53,  52,  54), Solid, 2;
+    CAVE2_ROCK_PALE   = ( 95,  91,  85), Solid, 2;
+    CAVE2_ROCK_BROWN  = ( 62,  56,  52), Solid, 2;
+    CAVE2_SANDSTONE   = (112,  94,  67), Solid, 2;
+    CAVE2_SANDSTONE_RED= (103,  62,  43), Solid, 2;
+    CAVE2_SANDSTONE_DARK= ( 92,  73,  51), Solid, 2;
+    CAVE2_GRAVEL      = ( 80,  77,  73), Solid, 2;
+    CAVE2_FLOWSTONE   = (113, 106,  90), Solid, 2;
+    CAVE3_STONE       = ( 51,  51,  50), Solid, 2;
+    CAVE3_ROCK_DARK   = ( 38,  38,  39), Solid, 2;
+    CAVE3_ROCK_PALE   = ( 69,  66,  62), Solid, 2;
+    CAVE3_ROCK_BROWN  = ( 45,  41,  38), Solid, 2;
+    CAVE3_SANDSTONE   = ( 82,  68,  49), Solid, 2;
+    CAVE3_SANDSTONE_RED= ( 75,  45,  31), Solid, 2;
+    CAVE3_SANDSTONE_DARK= ( 67,  53,  37), Solid, 2;
+    CAVE3_GRAVEL      = ( 58,  56,  53), Solid, 2;
+    CAVE3_FLOWSTONE   = ( 82,  77,  66), Solid, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -297,6 +328,27 @@ pub fn subsoil(cover: Voxel) -> Voxel {
         MANGROVE_MUD | BOG_MOSS => MUD,
         _ => DIRT,
     }
+}
+
+/// The rock `v` as it looks `tier` steps (0 to 3) into the dark of a cave: itself at
+/// the entrance, then the darker forms of the nearest strata rock.
+pub fn cave_rock(v: Voxel, tier: u8) -> Voxel {
+    if tier == 0 {
+        return v;
+    }
+    let k = match v {
+        ROCK_DARK | SLATE | BASALT => 1,
+        ROCK_PALE => 2,
+        ROCK_BROWN => 3,
+        SANDSTONE => 4,
+        SANDSTONE_RED | RED_ROCK | RED_ROCK_DARK => 5,
+        SANDSTONE_DARK => 6,
+        GRAVEL | SCREE => 7,
+        FLOWSTONE => 8,
+        _ => 0,
+    };
+    // The tiers are registered in order, nine rocks to a tier.
+    CAVE1_STONE + (tier.min(3) as Voxel - 1) * 9 + k
 }
 
 /// Tells the seasons what each plant material is (see `voxel::plant`). A new plant
