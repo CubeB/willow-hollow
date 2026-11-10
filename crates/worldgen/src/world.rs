@@ -7,7 +7,10 @@ use std::{
 
 use glam::{IVec3, Vec3};
 
-use voxel::{AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel, mesh::CELLS};
+use voxel::{
+    AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel,
+    mesh::{CELLS, PlantBox},
+};
 
 use crate::{
     Cascade, ColumnOutput, World,
@@ -32,6 +35,8 @@ pub struct GameWorld {
     /// Simulated macro-cells. Each slot is filled once, by whichever thread asks first;
     /// others asking for the same cell wait for it rather than simulating it again.
     continents: Mutex<HashMap<(i32, i32), Slot>>,
+    /// Climbing plants grown lately, shared by the chunk columns they span.
+    climbers: features::climber::PlantCache,
 }
 
 impl GameWorld {
@@ -46,6 +51,7 @@ impl GameWorld {
             config,
             library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
+            climbers: Default::default(),
         }
     }
 
@@ -217,12 +223,94 @@ fn trail_material(col: &Column, roll: f32, patch: f32) -> Voxel {
     if roll * 0.6 + patch * 0.4 < mix { other } else { main }
 }
 
+/// Sees each whole climbing plant a chunk column grows, before it is cut to the column.
+pub(crate) type Inspect<'a> = dyn FnMut(&features::climber::Root, &features::attach::Raster) + 'a;
+
+/// What growing climbers on a chunk column needs to know about it.
+struct ClimberRun<'a> {
+    voxels: &'a features::attach::ColumnVoxels<'a>,
+    continent: &'a Continent,
+    chunk: (i32, i32),
+    local: (i32, i32),
+    macro_origin: (i32, i32),
+    columns: &'a [Column],
+    wx0: i32,
+    wz0: i32,
+}
+
+impl GameWorld {
+    /// Ivy and its relatives for one chunk column. Climbers can start beyond the column
+    /// and read the world up to their own reach from there, so this looks further out
+    /// than the column does. Adds the air voxels they fill to `taken`.
+    fn grow_climbers(&self, run: &ClimberRun, plants: &mut Vec<PlantBox>, taken: &mut HashSet<IVec3>, inspect: &mut Inspect) {
+        use features::climber::{self, MARGIN, REACH};
+        if !run.columns.iter().any(|c| climber::place_chance(c) > 0.0) {
+            return;
+        }
+        let lib = self.library();
+        let (lx0, lz0) = run.local;
+        // Features up to MAX_REACH from anything a plant might touch.
+        let margin = MARGIN + features::MAX_REACH + 1;
+        let sampler = Sampler::new(run.continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
+        let placements = features::place(self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        // Landmarks anywhere a plant here could reach, visited once each and applied in
+        // a fixed order, so overlaps resolve the same way every time.
+        let (mcx, mcz) = (run.macro_origin.0.div_euclid(CHUNK), run.macro_origin.1.div_euclid(CHUNK));
+        let (local_cx, local_cz) = (run.chunk.0 - mcx, run.chunk.1 - mcz);
+        let reach_chunks = (MARGIN + PAD as i32).div_euclid(CHUNK) + 1;
+        let mut found: Vec<&crate::trails::Stamp> = Vec::new();
+        for dz in -reach_chunks..=reach_chunks {
+            for dx in -reach_chunks..=reach_chunks {
+                for s in run.continent.trails.stamps_at(local_cx + dx, local_cz + dz) {
+                    if !found.iter().any(|&f| std::ptr::eq(f, s)) {
+                        found.push(s);
+                    }
+                }
+            }
+        }
+        found.sort_unstable_by_key(|s| (s.lo.y, s.lo.x, s.lo.z, s.hi.y, s.hi.x, s.hi.z, s.voxels.len()));
+        let origin = IVec3::new(run.macro_origin.0, 0, run.macro_origin.1);
+        let mut stamped: HashMap<IVec3, Voxel> = HashMap::new();
+        for s in &found {
+            stamped.extend(s.voxels.iter().map(|&(p, v)| (p + origin, v)));
+        }
+        let world = climber::Surroundings::new(lib, &self.materials, &placements, &sampler, run.macro_origin, &stamped);
+        let (mox, moz) = run.macro_origin;
+        let edge = REACH + 2;
+        let finder = climber::RootFinder {
+            world: &world,
+            mats: &self.materials,
+            seed: self.seed,
+            // Only roots whose whole plant stays inside this macro-cell, where every
+            // column reading it sees the same continent.
+            x0: (run.wx0 - REACH).max(mox + edge),
+            z0: (run.wz0 - REACH).max(moz + edge),
+            x1: (run.wx0 + PAD as i32 + REACH).min(mox + MACRO_SIZE - edge),
+            z1: (run.wz0 + PAD as i32 + REACH).min(moz + MACRO_SIZE - edge),
+        };
+        let mut roots = Vec::new();
+        finder.trees(&mut roots);
+        finder.stamps(found.iter().map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        finder.ground(&mut roots);
+        let before = plants.len();
+        climber::grow_column(roots, run.chunk, run.voxels, &world, &self.materials, self.seed, &self.climbers, plants, inspect);
+        taken.extend(plants[before..].iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))));
+    }
+}
+
 impl World for GameWorld {
     fn materials(&self) -> &Materials {
         &self.materials
     }
 
     fn generate_column(&self, cx: i32, cz: i32) -> ColumnOutput {
+        self.generate_column_with(cx, cz, &mut |_, _| {})
+    }
+}
+
+impl GameWorld {
+    /// [`World::generate_column`], showing `inspect` every climbing plant whole.
+    pub(crate) fn generate_column_with(&self, cx: i32, cz: i32, inspect: &mut Inspect) -> ColumnOutput {
         // A chunk never straddles macro-cells. Its one-voxel border reaches into the
         // uniform deep sea between them, or onto a range held to the same height on
         // both sides of the border (see `continent::border`).
@@ -416,7 +504,22 @@ impl World for GameWorld {
         }
         // Now the world's shape is final, things can grow on it.
         let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
-        let standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
+        let mut standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
+        self.grow_climbers(
+            &ClimberRun {
+                voxels: &voxels,
+                continent: &continent,
+                chunk: (cx, cz),
+                local: (lx0, lz0),
+                macro_origin: (mx * MACRO_SIZE, mz * MACRO_SIZE),
+                columns: &columns,
+                wx0,
+                wz0,
+            },
+            &mut plants,
+            &mut standing,
+            inspect,
+        );
         let soil = features::moss::Soil {
             columns: &columns,
             x0: wx0,
@@ -430,5 +533,49 @@ impl World for GameWorld {
             cascades,
             plants,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::continent::SimConfig;
+
+    #[test]
+    fn every_column_grows_a_climbing_plant_the_same_way() {
+        // A plant near a chunk border is grown by each column it reaches, each reading
+        // the world through its own wider window. They must all grow it identically, or
+        // stems would break off at the border.
+        let w = GameWorld::with_config(5, SimConfig { size: 256 });
+        let centre = MACRO_SIZE / CHUNK / 2;
+        let mut seen: HashMap<IVec3, Vec<(IVec3, Voxel)>> = HashMap::new();
+        let mut shared = 0;
+        'search: for cz in (centre - 200..centre + 200).step_by(5) {
+            for cx in (centre - 200..centre + 200).step_by(5) {
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let mut grown = Vec::new();
+                    // Each column grows its plants itself, not from the shared cache.
+                    w.climbers.clear();
+                    w.generate_column_with(cx + dx, cz + dz, &mut |root, raster| grown.push((root.cell, raster.cells())));
+                    for (root, cells) in grown {
+                        match seen.get(&root) {
+                            Some(before) => {
+                                assert_eq!(before, &cells, "plant at {root} grew differently seen from column {},{}", cx + dx, cz + dz);
+                                shared += 1;
+                            }
+                            None => {
+                                seen.insert(root, cells);
+                            }
+                        }
+                    }
+                }
+                if shared >= 12 {
+                    break 'search;
+                }
+            }
+        }
+        assert!(shared >= 3, "only {shared} plants were seen from two columns");
     }
 }

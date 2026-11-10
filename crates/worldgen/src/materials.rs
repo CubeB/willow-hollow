@@ -136,6 +136,22 @@ palette! {
     MOSS_SHAG_TIP     = (132, 154,  84), Foliage, 3;
     LICHEN_YELLOW     = (176, 176,  84), Foliage, 2;
     LICHEN_GREY       = (156, 164, 142), Foliage, 2;
+    // Climbers: ivy, Virginia creeper, flowering vines and lianas.
+    IVY_STEM          = (122, 116,  70), Foliage, 2;
+    IVY_WOOD          = (124, 106,  76), Foliage, 2;
+    IVY_LEAF_DARK     = ( 48, 110,  52), Foliage, 3;
+    IVY_LEAF          = ( 72, 136,  58), Foliage, 3;
+    IVY_LEAF_PALE     = (136, 180,  80), Foliage, 3;
+    IVY_LEAF_RED      = (176,  74,  52), Foliage, 3;
+    IVY_FLOWER        = (206, 208, 120), Foliage, 2;
+    IVY_BERRY_GREEN   = (110, 134,  74), Foliage, 1;
+    IVY_BERRY         = ( 40,  40,  66), Foliage, 1;
+    CREEPER_LEAF_DARK = ( 60, 104,  48), Foliage, 3;
+    CREEPER_LEAF      = ( 92, 132,  54), Foliage, 3;
+    CREEPER_LEAF_RED  = (186,  60,  46), Foliage, 3;
+    VINE_LEAF         = ( 72, 128,  58), Foliage, 3;
+    VINE_FLOWER       = (232, 142, 170), Foliage, 2;
+    LIANA_STEM        = (116, 100,  66), Foliage, 2;
 }
 
 /// The ground cover a biome grows.

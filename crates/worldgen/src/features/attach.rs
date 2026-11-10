@@ -28,6 +28,41 @@ use voxel::{
     mesh::{CELLS, PlantBox},
 };
 
+/// Every kind of surface growth, in one place, for mapping to a plant id once plant
+/// vertices carry one. Until then the kind is only implied by the material.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SurfaceKind {
+    CushionMoss,
+    CarpetMoss,
+    ShaggyMoss,
+    Lichen,
+    /// Climber stems, berries and flowers are shared by ivy and its relatives, so these
+    /// count as ivy; only their leaves tell the species apart.
+    Ivy,
+    VirginiaCreeper,
+    FloweringVine,
+    Liana,
+}
+
+impl SurfaceKind {
+    /// The kind a surface-growth material belongs to, or `None` for anything else.
+    pub fn of(voxel: Voxel) -> Option<Self> {
+        use crate::materials as m;
+        Some(match voxel {
+            m::MOSS_CUSHION | m::MOSS_CUSHION_LIT | m::MOSS_CUSHION_DEEP => Self::CushionMoss,
+            m::MOSS_CARPET | m::MOSS_CARPET_LIT | m::MOSS_CARPET_DEEP => Self::CarpetMoss,
+            m::MOSS_SHAG | m::MOSS_SHAG_TIP => Self::ShaggyMoss,
+            m::LICHEN_YELLOW | m::LICHEN_GREY => Self::Lichen,
+            m::IVY_STEM | m::IVY_WOOD | m::IVY_LEAF_DARK | m::IVY_LEAF | m::IVY_LEAF_PALE | m::IVY_LEAF_RED => Self::Ivy,
+            m::IVY_FLOWER | m::IVY_BERRY_GREEN | m::IVY_BERRY => Self::Ivy,
+            m::CREEPER_LEAF_DARK | m::CREEPER_LEAF | m::CREEPER_LEAF_RED => Self::VirginiaCreeper,
+            m::VINE_LEAF | m::VINE_FLOWER => Self::FloweringVine,
+            m::LIANA_STEM => Self::Liana,
+            _ => return None,
+        })
+    }
+}
+
 /// Read access to generated voxels in world coordinates.
 pub trait Voxels {
     fn voxel(&self, p: IVec3) -> Voxel;
@@ -223,6 +258,7 @@ pub struct FacePlot<'a> {
 impl FacePlot<'_> {
     /// Fills the cells `u0..u1`, `v0..v1`, `d0..d1`, leaving any already taken. Anything
     /// outside the voxel is ignored. Swaying is decided when the raster is finished.
+    #[allow(clippy::too_many_arguments)]
     pub fn fill(&mut self, u0: i32, u1: i32, v0: i32, v1: i32, d0: i32, d1: i32, voxel: Voxel) {
         for d in d0.max(0)..d1.min(CELLS) {
             for v in v0.max(0)..v1.min(CELLS) {
@@ -287,6 +323,21 @@ impl Raster {
         self.grids.get(&at).is_some_and(|g| g[grid_index(cell - at * CELLS)] != AIR)
     }
 
+    /// Every plant cell and what it holds, in a fixed order.
+    pub fn cells(&self) -> Vec<(IVec3, Voxel)> {
+        let mut out = Vec::new();
+        for (&at, grid) in &self.grids {
+            for (i, &v) in grid.iter().enumerate() {
+                if v != AIR {
+                    let i = i as i32;
+                    out.push((at * CELLS + IVec3::new(i % CELLS, i / (CELLS * CELLS), (i / CELLS) % CELLS), v));
+                }
+            }
+        }
+        out.sort_unstable_by_key(|(p, _)| (p.y, p.x, p.z));
+        out
+    }
+
     /// Air voxels (in world voxel coordinates) holding any plant cell.
     pub fn voxels(&self) -> impl Iterator<Item = IVec3> + '_ {
         self.grids.keys().copied()
@@ -296,6 +347,35 @@ impl Raster {
     /// plant grown once for many columns is clipped to each.
     pub fn keep_column(&mut self, cx: i32, cz: i32) {
         self.grids.retain(|at, _| at.x.div_euclid(CHUNK) == cx && at.z.div_euclid(CHUNK) == cz);
+    }
+
+    /// A copy of the cells in chunk column `(cx, cz)` only.
+    pub fn column_copy(&self, cx: i32, cz: i32) -> Raster {
+        let grids = self.grids.iter().filter(|(at, _)| at.x.div_euclid(CHUNK) == cx && at.z.div_euclid(CHUNK) == cz);
+        Raster { grids: grids.map(|(&at, g)| (at, *g)).collect() }
+    }
+
+    /// Adds a copy of another raster's cells, keeping any cell this one already has.
+    pub fn absorb_clone(&mut self, other: &Raster) {
+        for (&at, grid) in &other.grids {
+            self.grids.entry(at).or_insert(*grid);
+        }
+    }
+
+    /// Adds another raster's cells, keeping any cell this one already has.
+    pub fn absorb(&mut self, other: Raster) {
+        let mut keys: Vec<IVec3> = other.grids.keys().copied().collect();
+        keys.sort_unstable_by_key(|p| (p.y, p.x, p.z));
+        for at in keys {
+            let incoming = other.grids[&at];
+            for (i, &v) in incoming.iter().enumerate() {
+                if v != AIR {
+                    let i = i as i32;
+                    let local = IVec3::new(i % CELLS, i / (CELLS * CELLS), (i / CELLS) % CELLS);
+                    self.set(at * CELLS + local, v);
+                }
+            }
+        }
     }
 
     /// Drops every cell in voxels `keep` rejects.
