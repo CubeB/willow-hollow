@@ -375,14 +375,33 @@ impl<'a> Sampler<'a> {
         if lake == NO_LAKE && !near_sea {
             let slope = slope * OLD_VOXEL / cs;
             let natural = ground;
-            // A cliff's face stands on the valley side, its foot clear above the river.
-            let mut part = cliff::apply(seed, slope, wx, wz, &mut ground, |base| match beside() {
-                Some((sd, level)) => {
-                    let far = smoothstep(CLIFF_GUARD * 0.5, CLIFF_GUARD, sd);
-                    far.max(smoothstep(level + m(2.0), level + m(6.0), base))
-                }
-                None => 1.0,
+            // A large fault step stands as a sheer face over its talus, in place of the
+            // grid's ramp. Beside a river it eases back to the ramp the river was routed
+            // over, so the step neither dams the channel nor drops the bank into it.
+            let scarp = c.scarp(lx, lz).and_then(|s| {
+                let guard = beside().map_or(1.0, |(sd, _)| smoothstep(CLIFF_GUARD * 0.5, CLIFF_GUARD, sd));
+                (guard > 0.0).then_some((s, guard))
             });
+            // A cliff's face stands on the valley side, its foot clear above the river.
+            let mut part = match scarp {
+                Some((s, guard)) => {
+                    ground += s.lift * guard;
+                    if s.face && guard > 0.5 {
+                        cliff::Part::Face(1.0)
+                    } else if unit(hash2(seed ^ 0x5ca3, lx >> 1, lz >> 1)) < s.scree * guard {
+                        cliff::Part::Foot(1.0)
+                    } else {
+                        cliff::Part::None
+                    }
+                }
+                None => cliff::apply(seed, slope, wx, wz, &mut ground, |base| match beside() {
+                    Some((sd, level)) => {
+                        let far = smoothstep(CLIFF_GUARD * 0.5, CLIFF_GUARD, sd);
+                        far.max(smoothstep(level + m(2.0), level + m(6.0), base))
+                    }
+                    None => 1.0,
+                }),
+            };
             for f in &self.falls {
                 let d = (p - f.pos).length();
                 if d < f.radius {

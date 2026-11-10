@@ -20,8 +20,6 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
 pub(super) struct Pin {
     pub i: u32,
     pub weight: f32,
-    /// Weight of the final blend toward `target`, once the simulation is done.
-    pub blend: f32,
     pub target: f32,
 }
 
@@ -47,8 +45,8 @@ pub(super) fn pins(level: &Level, shape: &Shape) -> Vec<Pin> {
             }
             // Shared with the neighbours on the border itself, so the held height is too.
             let u = shape.uplift(px, pz, shape.land(px, pz));
-            if let Some((target, weight, blend)) = shape.field.border_pin(px, pz, edge, u, fine) {
-                out.push(Pin { i: (z * w + x) as u32, weight, blend, target });
+            if let Some((target, weight)) = shape.field.border_pin(px, pz, edge, u, fine) {
+                out.push(Pin { i: (z * w + x) as u32, weight, target });
             }
         }
     }

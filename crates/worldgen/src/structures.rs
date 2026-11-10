@@ -550,19 +550,15 @@ impl Field {
         Some(BorderProfile { height: (crest + tilt).max(0.5), detail, land })
     }
 
-    /// How land is held near a border: `(target height, weight while simulating, weight
-    /// of the final blend)` if the position is on a range spine inside the border band.
-    /// `edge` is the max-norm distance from the cell centre. `None` elsewhere.
-    ///
-    /// Holding alone leaves a narrow crest, because erosion keeps cutting the held cells
-    /// down and pulls the true profile in toward the border; the final blend, applied
-    /// once the simulation is over, spreads the transition across the whole band.
+    /// How land is held near a border: `(target height, weight while simulating)` if the
+    /// position is on a range spine inside the border band. `edge` is the max-norm
+    /// distance from the cell centre. `None` elsewhere.
     ///
     /// `uplift` is the largest uplift rate of the cells meeting at this point, which
     /// every one of them computes alike. Height under erosion grows with uplift, so it
     /// sets how high the held land stands: as high as the higher side would be, so
     /// neither side's own mountains face a hollow at the border.
-    pub fn border_pin(&self, px: f32, pz: f32, edge: f32, uplift: f32, fine: f64) -> Option<(f32, f32, f32)> {
+    pub fn border_pin(&self, px: f32, pz: f32, edge: f32, uplift: f32, fine: f64) -> Option<(f32, f32)> {
         let b = 1.0 - edge;
         if b >= BORDER_BAND {
             return None;
@@ -570,8 +566,7 @@ impl Field {
         let p = self.border_profile(px, pz, edge, uplift, fine)?;
         let hard = BORDER_BAND * 0.05;
         let weight = if b < hard { 1.0 } else { (1.0 - (b - hard) / (BORDER_BAND - hard)).powf(2.5) };
-        let blend = 1.0 - smoothstep(0.0, BORDER_BAND, b);
-        Some(((p.height + p.detail).max(0.5), weight, blend))
+        Some(((p.height + p.detail).max(0.5), weight))
     }
 
     /// How strongly a position is held to the border profile (0 inland, 1 at a border),
