@@ -618,7 +618,7 @@ impl Layer<'_> {
             let (x, z) = (q.x.floor() as i32, q.y.floor() as i32);
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
-            net.add_stamp(absolute(landmarks::trail_lantern(&self.palette_at(&col), height), IVec3::new(x, y, z), 0));
+            net.add_stamp(absolute(landmarks::trail_lantern(&self.palette_at(&col), height, hash2(salt, x, z)), IVec3::new(x, y, z), 0));
             since = 0;
             side = -side;
         }

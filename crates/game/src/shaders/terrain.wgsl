@@ -123,7 +123,7 @@ fn shade(in: VOut) -> vec4<f32> {
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
     base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x);
-    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u);
+    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, fract(in.local.y));
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);

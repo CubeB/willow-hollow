@@ -236,7 +236,13 @@ fn classify(m: &mut Materials) {
             &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN, VINE_FLOWER],
             pk::FLOWER,
         ),
-        (&[VINE], pk::VINE),
+        (
+            &[
+                VINE, BARK_OAK, BARK_BIRCH, BARK_PINE, BARK_REDWOOD, BARK_JUNGLE, BARK_PALM, BARK_WILLOW, BARK_ACACIA, BARK_BAOBAB,
+                WOOD_DEAD, PLANK, PLANK_PALE, PLANK_DARK, PLANK_RED, IVY_STEM, IVY_WOOD, LIANA_STEM,
+            ],
+            pk::VINE,
+        ),
     ];
     for (voxels, kind) in kinds {
         for &v in voxels {

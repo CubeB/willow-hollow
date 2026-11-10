@@ -53,6 +53,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let n = in.normal;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
     let light = G.sun_color.rgb * ndl * 0.85 + ambient(n);
-    let base = ground_weather(in.color, n, in.rel, 0.5, true, false);
+    let base = ground_weather(in.color, n, in.rel, 0.5, true, false, true, 0.0);
     return vec4<f32>(apply_fog(base * light, in.rel), 1.0);
 }

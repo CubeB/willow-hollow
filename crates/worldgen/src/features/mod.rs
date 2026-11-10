@@ -11,6 +11,7 @@ pub mod attach;
 pub mod climber;
 pub mod landmarks;
 pub mod moss;
+pub mod parts;
 pub mod pebbles;
 pub mod plants;
 pub mod shape;
