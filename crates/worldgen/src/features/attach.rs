@@ -53,11 +53,11 @@ impl SurfaceKind {
             m::MOSS_CARPET | m::MOSS_CARPET_LIT | m::MOSS_CARPET_DEEP => Self::CarpetMoss,
             m::MOSS_SHAG | m::MOSS_SHAG_TIP => Self::ShaggyMoss,
             m::LICHEN_YELLOW | m::LICHEN_GREY => Self::Lichen,
-            m::IVY_STEM | m::IVY_WOOD | m::IVY_LEAF_DARK | m::IVY_LEAF | m::IVY_LEAF_PALE | m::IVY_LEAF_RED => Self::Ivy,
+            m::IVY_STEM | m::IVY_WOOD | m::IVY_WOOD_DARK | m::IVY_LEAF_DARK | m::IVY_LEAF | m::IVY_LEAF_PALE | m::IVY_LEAF_RED => Self::Ivy,
             m::IVY_FLOWER | m::IVY_BERRY_GREEN | m::IVY_BERRY => Self::Ivy,
             m::CREEPER_LEAF_DARK | m::CREEPER_LEAF | m::CREEPER_LEAF_RED => Self::VirginiaCreeper,
             m::VINE_LEAF | m::VINE_FLOWER => Self::FloweringVine,
-            m::LIANA_STEM => Self::Liana,
+            m::LIANA_STEM | m::LIANA_WOOD => Self::Liana,
             _ => return None,
         })
     }

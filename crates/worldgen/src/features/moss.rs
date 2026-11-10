@@ -306,22 +306,38 @@ fn carpet(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: V
     }
 }
 
-/// A soft mound, or two small ones side by side.
+/// Low, uneven mounds: a few overlapping humps of different sizes, each column of cells
+/// its own height, so neighbouring faces never line up into one even block.
 fn cushion(plot: &mut FacePlot, rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) {
-    let dome = |plot: &mut FacePlot, u: i32, v: i32, wide: bool| {
-        let (r0, r1) = if wide { (2, 1) } else { (1, 0) };
-        plot.fill(u - r0, u + r0, v - r1, v + r1 + 1, 0, 1, main);
-        plot.fill(u - r1, u + r1 + 1, v - r0, v + r0, 0, 1, main);
-        plot.fill(u - r1, u + r1 + 1, v - r1, v + r1 + 1, 1, 2, main);
-    };
-    if strength > 0.6 && rng.unit() < 0.6 {
-        // One broad mound with a lit crown.
-        dome(plot, 2, 2, true);
-        plot.fill(1, 3, 1, 3, 2, 3, tip);
-    } else {
-        dome(plot, rng.int(1, 2), rng.int(1, 2), false);
-        if strength > 0.4 {
-            dome(plot, rng.int(1, 3), rng.int(1, 3), false);
+    let mut height = [[0i32; 4]; 4];
+    let mounds = 1 + (strength > 0.45) as i32 + (rng.unit() < 0.35) as i32;
+    for _ in 0..mounds {
+        let (cu, cv) = (rng.range(-0.5, 3.5), rng.range(-0.5, 3.5));
+        let r = rng.range(1.1, 2.4);
+        let peak = rng.range(0.8, 1.4 + 1.2 * strength);
+        for (v, row) in height.iter_mut().enumerate() {
+            for (u, h) in row.iter_mut().enumerate() {
+                let d2 = (u as f32 - cu).powi(2) + (v as f32 - cv).powi(2);
+                let here = peak * (1.0 - d2 / (r * r)) + rng.range(-0.35, 0.35);
+                *h = (*h).max(here.round() as i32);
+            }
+        }
+    }
+    let top = height.iter().flatten().copied().max().unwrap_or(0);
+    for (v, row) in height.iter().enumerate() {
+        for (u, &h) in row.iter().enumerate() {
+            let h = h.min(3);
+            if h <= 0 {
+                continue;
+            }
+            let (u, v) = (u as i32, v as i32);
+            // The crowns of the taller humps catch the light.
+            if h >= 2 && h == top.min(3) && rng.unit() < 0.6 {
+                plot.fill(u, u + 1, v, v + 1, 0, h - 1, main);
+                plot.fill(u, u + 1, v, v + 1, h - 1, h, tip);
+            } else {
+                plot.fill(u, u + 1, v, v + 1, 0, h, main);
+            }
         }
     }
 }

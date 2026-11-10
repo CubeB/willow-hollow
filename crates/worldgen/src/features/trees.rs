@@ -318,11 +318,11 @@ fn jungle(s: &mut Shape, rng: &mut Rng) {
     }
     let r = rng.range(4.5, 6.0);
     s.blob(top + Vec3::Y * 1.5, Vec3::new(r, r * 0.45, r), mat::LEAVES_JUNGLE, rng.next_u32(), 0.4);
-    s.hang(mat::LEAVES_JUNGLE, mat::VINE, rng, 0.08, (3, 9));
+    // Its lianas are grown as fine climbers (features::climber), not voxels.
 }
 
 fn kapok(s: &mut Shape, rng: &mut Rng) {
-    // Rainforest giant with buttress roots, an emergent crown, and hanging lianas.
+    // Rainforest giant with buttress roots, an emergent crown and wide limbs.
     let h = rng.range(46.0, 68.0);
     let r0 = rng.range(2.2, 3.0);
     let axis = Vec3::new(0.5, 0.0, 0.5);
@@ -345,7 +345,7 @@ fn kapok(s: &mut Shape, rng: &mut Rng) {
     }
     let r = rng.range(6.0, 8.0);
     s.blob(axis + Vec3::Y * (h + 1.5), Vec3::new(r, 3.0, r), mat::LEAVES_JUNGLE, rng.next_u32(), 0.4);
-    s.hang(mat::LEAVES_JUNGLE, mat::VINE, rng, 0.05, (6, 22));
+    // Its lianas are grown as fine climbers (features::climber), not voxels.
 }
 
 fn acacia(s: &mut Shape, rng: &mut Rng) {
@@ -496,18 +496,7 @@ fn fallen_log(s: &mut Shape, rng: &mut Rng) {
     if r > 1.1 && rng.unit() < 0.5 {
         s.limb(a + dir * 1.5, b - dir * 1.5, r * 0.45, r * 0.4, voxel::AIR);
     }
-    if rng.unit() < 0.6 {
-        let tops: Vec<IVec3> = s
-            .snapshot()
-            .into_iter()
-            .filter(|p| s.get(*p + IVec3::Y).is_none() && s.get(*p) != Some(voxel::AIR))
-            .collect();
-        for p in tops {
-            if rng.unit() < 0.45 {
-                s.paint(p, mat::MOSS);
-            }
-        }
-    }
+    // Moss on logs is grown as fine pieces (features::moss), not painted voxels.
     s.drop_air();
 }
 

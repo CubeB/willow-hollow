@@ -68,8 +68,9 @@ impl Span {
 pub struct Climber {
     pub name: &'static str,
     pub stem: Voxel,
-    /// Stem material where it has thickened into wood.
+    /// Stem material where it has thickened into wood, and the darker streaks in it.
     pub wood: Voxel,
+    pub streak: Voxel,
     /// Leaves: dark and glossy, ordinary, pale new growth.
     pub leaves: [Voxel; 3],
     /// A share of leaves turned to this colour, if any.
@@ -100,6 +101,8 @@ pub struct Climber {
     pub leaf_gap: u32,
     /// Share of possible leaves actually placed.
     pub leaf_density: f32,
+    /// Leaves bunched in clusters along the stem rather than spread evenly.
+    pub clusters: bool,
     /// Boxes at most for one plant.
     pub box_budget: usize,
 }
@@ -108,6 +111,7 @@ pub const IVY: Climber = Climber {
     name: "common ivy",
     stem: mat::IVY_STEM,
     wood: mat::IVY_WOOD,
+    streak: mat::IVY_WOOD_DARK,
     leaves: [mat::IVY_LEAF_DARK, mat::IVY_LEAF, mat::IVY_LEAF_PALE],
     autumn: Some((mat::IVY_LEAF_RED, 0.03)),
     flowers: Some((mat::IVY_FLOWER, Span(0.72, 0.92))),
@@ -124,6 +128,7 @@ pub const IVY: Climber = Climber {
     max_generations: 4,
     leaf_gap: 2,
     leaf_density: 0.9,
+    clusters: false,
     box_budget: 900,
 };
 
@@ -131,6 +136,7 @@ pub const VIRGINIA_CREEPER: Climber = Climber {
     name: "virginia creeper",
     stem: mat::IVY_STEM,
     wood: mat::IVY_WOOD,
+    streak: mat::IVY_WOOD_DARK,
     leaves: [mat::CREEPER_LEAF_DARK, mat::CREEPER_LEAF, mat::CREEPER_LEAF_RED],
     autumn: Some((mat::CREEPER_LEAF_RED, 0.6)),
     flowers: None,
@@ -147,6 +153,7 @@ pub const VIRGINIA_CREEPER: Climber = Climber {
     max_generations: 4,
     leaf_gap: 4,
     leaf_density: 0.7,
+    clusters: false,
     box_budget: 700,
 };
 
@@ -155,6 +162,7 @@ pub const FLOWERING_VINE: Climber = Climber {
     name: "flowering vine",
     stem: mat::IVY_STEM,
     wood: mat::IVY_WOOD,
+    streak: mat::IVY_WOOD_DARK,
     leaves: [mat::VINE_LEAF, mat::VINE_LEAF, mat::IVY_LEAF_PALE],
     autumn: None,
     flowers: Some((mat::VINE_FLOWER, Span(0.25, 0.85))),
@@ -171,6 +179,7 @@ pub const FLOWERING_VINE: Climber = Climber {
     max_generations: 3,
     leaf_gap: 3,
     leaf_density: 0.6,
+    clusters: false,
     box_budget: 450,
 };
 
@@ -179,7 +188,8 @@ pub const FLOWERING_VINE: Climber = Climber {
 pub const LIANA: Climber = Climber {
     name: "liana",
     stem: mat::LIANA_STEM,
-    wood: mat::LIANA_STEM,
+    wood: mat::LIANA_WOOD,
+    streak: mat::LIANA_WOOD,
     leaves: [mat::VINE_LEAF, mat::IVY_LEAF, mat::VINE_LEAF],
     autumn: None,
     flowers: None,
@@ -194,9 +204,10 @@ pub const LIANA: Climber = Climber {
     max_height: 0,
     branch_rate: 0.015,
     max_generations: 2,
-    leaf_gap: 5,
-    leaf_density: 0.5,
-    box_budget: 220,
+    leaf_gap: 1,
+    leaf_density: 0.9,
+    clusters: true,
+    box_budget: 320,
 };
 
 /// A low creeper sprawling over fallen logs and boulders on a wet forest floor: hardly
@@ -205,6 +216,7 @@ pub const TRAILING_CREEPER: Climber = Climber {
     name: "trailing creeper",
     stem: mat::IVY_STEM,
     wood: mat::IVY_WOOD,
+    streak: mat::IVY_WOOD_DARK,
     leaves: [mat::CREEPER_LEAF_DARK, mat::VINE_LEAF, mat::IVY_LEAF_PALE],
     autumn: None,
     flowers: None,
@@ -221,6 +233,7 @@ pub const TRAILING_CREEPER: Climber = Climber {
     max_generations: 3,
     leaf_gap: 2,
     leaf_density: 0.85,
+    clusters: false,
     box_budget: 400,
 };
 
@@ -514,19 +527,43 @@ fn thickness(load: u32, total: u32, age: f32) -> i32 {
 pub fn raster_stems(params: &Climber, root: &Root, skel: &Skeleton, world: &impl Voxels, mats: &Materials, raster: &mut Raster) {
     let mut sense = Sensing { world, mats, cache: HashMap::new() };
     let total = skel.nodes.first().map_or(1, |n| n.load);
+    let phase = unit(root.seed) * std::f32::consts::TAU;
     for node in &skel.nodes {
-        let t = thickness(node.load, total, root.age);
+        let mut t = thickness(node.load, total, root.age);
+        // Hanging cords stay thin.
+        if params.hanging {
+            t = t.min(2);
+        }
         let wood = t >= 2;
-        let voxel = if wood { params.wood } else { params.stem };
-        // Thicken outward from the surface, and to one side.
         let out = if node.out == IVec3::ZERO { IVec3::Z } else { node.out };
         let side = perpendicular(out, node.dir);
-        for a in 0..t {
-            for b in 0..t {
-                let cell = node.cell + out * a + side * b;
-                if sense.air(cell) {
-                    raster.set(cell, voxel);
+        // Old wood is several stems twisted together: it pinches and swells, and the
+        // rope drifts from side to side around the line it grew along.
+        let along = (node.cell.y + node.cell.x + node.cell.z) as f32;
+        let (mut width, mut shift) = (t, 0);
+        if t >= 3 {
+            width = t - ((along * 0.31 + phase).sin() > 0.55) as i32;
+            shift = ((along * 0.17 + phase).sin() * 1.3).round() as i32;
+        }
+        for a in 0..width {
+            for b in 0..width {
+                // Round off the outer corners of a thick rope.
+                if width >= 3 && a >= 1 && (b == 0 || b == width - 1) && (a + b) % 2 == 0 {
+                    continue;
                 }
+                let cell = node.cell + out * a + side * (b + shift);
+                if !sense.air(cell) {
+                    continue;
+                }
+                let voxel = if !wood {
+                    params.stem
+                } else if (a + b + node.cell.y.div_euclid(2)).rem_euclid(3) == 0 {
+                    // Strands spiralling round the rope.
+                    params.streak
+                } else {
+                    params.wood
+                };
+                raster.set(cell, voxel);
             }
         }
     }
@@ -572,6 +609,10 @@ pub fn raster_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &imp
         // Bare wood at the base of old plants, and bare tips where it is still growing.
         let t = thickness(node.load, longest, root.age);
         if !(i as u32).is_multiple_of(params.leaf_gap) || node.load < 2 {
+            continue;
+        }
+        // In clusters: a few nodes in leaf, then a bare stretch of cord.
+        if params.clusters && !hash3(root.seed, i as i32 / 6, 0, 0).is_multiple_of(2) {
             continue;
         }
         if (t >= 3 && rng.unit() < 0.85) || (t == 2 && rng.unit() < 0.4) {
@@ -743,11 +784,30 @@ pub struct Surroundings<'a> {
     pub stamps: &'a HashMap<IVec3, Voxel>,
     /// Columns already read: reading one is the slow part of a voxel query.
     columns: RefCell<HashMap<(i32, i32), Column>>,
+    /// Which placements can reach each square of [`BUCKET`] voxels, in placement order,
+    /// with the heights they span.
+    buckets: Buckets,
 }
+
+/// Placement indices with the heights they span, by square.
+type Buckets = HashMap<(i32, i32), Vec<(u32, i32, i32)>>;
+
+/// Side of the squares placements are filed under for voxel lookups.
+const BUCKET: i32 = 8;
 
 impl<'a> Surroundings<'a> {
     pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a HashMap<IVec3, Voxel>) -> Self {
-        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default() }
+        let mut buckets = Buckets::new();
+        for (i, p) in placements.iter().enumerate() {
+            let reach = lib.get(p.species, p.variant).reach;
+            let (lo, hi) = (p.bottom(), p.top(lib));
+            for bz in (p.pos.z - reach).div_euclid(BUCKET)..=(p.pos.z + reach).div_euclid(BUCKET) {
+                for bx in (p.pos.x - reach).div_euclid(BUCKET)..=(p.pos.x + reach).div_euclid(BUCKET) {
+                    buckets.entry((bx, bz)).or_default().push((i as u32, lo, hi));
+                }
+            }
+        }
+        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default(), buckets }
     }
 
     fn column(&self, x: i32, z: i32) -> Column {
@@ -762,8 +822,12 @@ impl Voxels for Surroundings<'_> {
             return v;
         }
         let mut leaf = None;
-        for placement in self.placements {
-            if let Some(v) = super::model_voxel(self.lib, placement, p) {
+        let near = self.buckets.get(&(p.x.div_euclid(BUCKET), p.z.div_euclid(BUCKET)));
+        for &(i, lo, hi) in near.map_or(&[][..], |v| v.as_slice()) {
+            if p.y < lo || p.y > hi {
+                continue;
+            }
+            if let Some(v) = super::model_voxel(self.lib, &self.placements[i as usize], p) {
                 if self.mats.get(v).kind == Kind::Solid {
                     return v;
                 }
@@ -849,7 +913,8 @@ pub fn canopy_roots(placement: &Placement, lib: &Library, world: &impl Voxels, m
     let mut rng = Rng::new(h);
     let reach = lib.get(placement.species, placement.variant).reach.clamp(3, REACH - 2);
     let top = placement.top(lib);
-    for k in 0..4u32 {
+    let tries = if placement.species == Species::Kapok { 7u32 } else { 4 };
+    for k in 0..tries {
         if rng.unit() >= chance * 0.6 {
             continue;
         }
