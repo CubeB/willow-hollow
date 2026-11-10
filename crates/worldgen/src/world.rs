@@ -195,6 +195,8 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Cliff if steepness < 0.9 && roll < 0.55 => (cover, mat::STONE),
         Cover::Cliff => (mat::STONE, mat::STONE),
         Cover::Scree => (if roll < 0.8 { mat::SCREE } else { mat::GRAVEL }, mat::SCREE),
+        // Banks and flats at sea level are tidal mud, with a little sand.
+        Cover::Bank if col.ground < m(1.0) => (if roll < 0.8 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),
         Cover::Bank if roll < 0.42 => (mat::MUD, mat::DIRT),
         Cover::Bank | Cover::Land => {
