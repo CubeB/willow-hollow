@@ -110,8 +110,9 @@ fn ground_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, h: f32, foliage: b
 // covered, the same all over it, and a voxel with anything above it is never capped.
 // `centre` is the voxel's middle and `rel` the point shaded, camera-relative; `fine` is
 // where the point lies across the voxel's top, 0..1 each way; `h` and `h2` are the
-// voxel's randoms; `edge` is the height up a side face within its voxel.
-fn block_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, centre: vec3<f32>, fine: vec2<f32>, h: f32, h2: f32, foliage: bool, emissive: bool, wood: bool, sky: bool, edge: f32, snow: vec4<f32>) -> vec3<f32> {
+// voxel's randoms; `edge` is the height up a side face within its voxel. `far` (see
+// `distant` in terrain.wgsl) takes a side toward the colour of the voxel's top.
+fn block_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, centre: vec3<f32>, fine: vec2<f32>, h: f32, h2: f32, foliage: bool, emissive: bool, wood: bool, sky: bool, edge: f32, snow: vec4<f32>, far: f32) -> vec3<f32> {
     var o = c * (1.0 - 0.3 * G.weather.x);
     if (emissive) {
         return o;
@@ -133,10 +134,11 @@ fn block_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, centre: vec3<f32>, 
             return mix(o, SNOW_COLOUR * 0.6, quarters * 0.03);
         }
         let cold_amount = smoothstep(0.05, 0.5, depth) * select(0.6, 0.35, foliage);
+        let top = mix(o, SNOW_COLOUR * (0.9 + 0.1 * h), quarters * 0.25);
         let cold = o * vec3<f32>(0.72, 0.64, 0.58) + vec3<f32>(0.02, 0.018, 0.02);
         o = mix(o, cold, cold_amount);
         let lip = select(0.0, 0.8, edge > 1.0 - 0.06 * quarters) * step(0.5, quarters);
-        return mix(o, SNOW_COLOUR * 0.8, lip);
+        return mix(mix(o, SNOW_COLOUR * 0.8, lip), top, far * 0.6);
     }
     if (quarters <= 0.0) {
         return o;
@@ -150,15 +152,15 @@ fn block_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, centre: vec3<f32>, 
     }
     let rank = f32((turn + u32(h2 * 4.0)) % 4u);
     let covered = select(0.0, 1.0, rank < quarters);
-    let far = smoothstep(40.0 * VOXELS_PER_METRE, 90.0 * VOXELS_PER_METRE, length(rel));
-    let amount = mix(covered, quarters * 0.25, far) * select(1.0, 0.9, foliage);
+    let blend = smoothstep(40.0 * VOXELS_PER_METRE, 90.0 * VOXELS_PER_METRE, length(rel));
+    let amount = mix(covered, quarters * 0.25, max(blend, far)) * select(1.0, 0.9, foliage);
     return mix(o, SNOW_COLOUR * (0.9 + 0.1 * h), amount);
 }
 
 // Small plants lost in deep snow: most tufts are buried, the rest are capped by the snow
 // colour on their tops.
-fn plant_buried(rel: vec3<f32>, h: f32, snow: vec4<f32>) -> bool {
-    let alt_m = (G.cam_wrapped.y + rel.y) / VOXELS_PER_METRE;
+// `alt_m` is the height of the plant's voxel, metres; `snow` its ground's row of G.snow.
+fn plant_buried(alt_m: f32, h: f32, snow: vec4<f32>) -> bool {
     return h < smoothstep(0.25, 0.9, snow_depth(alt_m, snow)) * 0.85;
 }
 

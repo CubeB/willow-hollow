@@ -109,15 +109,21 @@ fn vs(in: VIn) -> VOut {
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
     // Plants that are gone this season (fallen leaves, dead flowers, tufts under snow) are
     // dropped here: every corner of the face names the same voxel, so the whole face goes.
+    // Everything the choice rests on must come from that voxel alone, never from where the
+    // corner itself is, or a face could lose some corners and not others and be torn into
+    // a sliver reaching across the screen.
     let kind = (in.b >> 29u) & 7u;
     if (kind != 0u && kind != PLANT_EVERGREEN && kind < 6u) {
-        var vox = in.origin / i32(in.scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
+        let cell = vec3<i32>(floor(local)) - vertex_corner(in.a);
+        var vox = in.origin / i32(in.scale) + cell;
+        let alt_m = f32(vox.y) * in.scale / VOXELS_PER_METRE;
         if (kind >= PLANT_GRASS) {
             vox.y = 0;
         }
         var gone = season_gone(G.season.x, kind, vox, tag);
         if (kind == PLANT_GRASS && !gone) {
-            gone = plant_buried(rel, season_hash(vox + vec3<i32>(5, 0, 9)), out.snow);
+            let snow = grid_snow(in.grid0, in.grid1, (vec2<f32>(cell.xz) + 0.5) / 32.0);
+            gone = plant_buried(alt_m, season_hash(vox + vec3<i32>(5, 0, 9)), snow);
         }
         if (gone) {
             out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
@@ -145,8 +151,20 @@ fn fs_inside(in: VOut) -> @location(0) vec4<f32> {
     return shade(in);
 }
 
+// How far a voxel has shrunk toward a pixel, 0 while it is a few pixels across, 1 once it
+// is about one. Out there the grid of tops and sides is finer than the pixels and would
+// shimmer in bands (moire) as the view moves, so faces are drawn more alike: sides lit
+// and coloured more like the tops they stand under, as the far view draws a slope.
+// The screen height is not in the globals, so this takes 1080 lines.
+fn distant(rel: vec3<f32>, scale: f32) -> f32 {
+    let tan_half = length(G.cam_up.xyz) / max(length(G.cam_fwd.xyz), 1e-6);
+    let pixel = length(rel) * 2.0 * tan_half / 1080.0;
+    return 1.0 - smoothstep(1.2, 4.0, scale / max(pixel, 1e-6));
+}
+
 fn shade(in: VOut) -> vec4<f32> {
     let n = face_normal(in.face);
+    let far = distant(in.rel, in.scale);
     // The voxel this fragment belongs to: step half a voxel inward from the face.
     let voxel = vec3<i32>(floor(in.local - n * 0.5)) + in.origin;
     let jitter = f32((in.flags >> 1u) & 3u);
@@ -161,12 +179,17 @@ fn shade(in: VOut) -> vec4<f32> {
     let cell = floor(in.local - n * 0.5);
     let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
     let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
-    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow);
+    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
 
-    let ao = in.ao * in.ao * 0.75 + 0.25;
-    let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
-    let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(0.7, 1.0, in.ao);
-    var light = direct + ambient(n) * ao + local_lights(in.rel, n) * ao;
+    let ao = mix(in.ao * in.ao * 0.75 + 0.25, 0.85, far);
+    // Far sides are lit partly as the slope they make up, which faces up more.
+    var lit_n = n;
+    if (far > 0.0 && abs(n.y) < 0.5) {
+        lit_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), far * 0.65));
+    }
+    let ndl = max(dot(lit_n, G.sun_dir.xyz), 0.0);
+    let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
         light += vec3<f32>(mix(14.0, 1.2, G.sun_color.w));

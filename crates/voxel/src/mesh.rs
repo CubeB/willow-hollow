@@ -324,9 +324,10 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         if !roofed && roof[x][z] >> (y + 1) == 0 {
                             fl |= flags::SKY;
                         }
-                        // Leaves that fall one by one stay one voxel each, so the shader can tell
-                        // which voxel every corner of a face belongs to.
-                        let single = m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN;
+                        // Leaves that fall one by one, and any other plant the shader may drop a
+                        // voxel at a time, stay one voxel each, so the shader can tell which
+                        // voxel every corner of a face belongs to.
+                        let single = droppable(m.plant);
                         let key = 1
                             | (uniform && !single) as u64 * 4
                             | leaf_color_bits(m.color, m.plant) << 8
@@ -424,21 +425,16 @@ fn droppable(kind: u8) -> bool {
 
 /// A plant box cut at voxel boundaries, so that every corner of every face names the
 /// same voxel. Otherwise the shader could drop some corners of a face and not others,
-/// and the face would be torn into a long sliver toward the middle of the screen. Grass
-/// is decided by column alone, so it is only cut across x and z.
+/// and the face would be torn into a long sliver toward the middle of the screen.
 fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<PlantBox>) {
     let kind = mats.get(b.voxel).plant;
     if !droppable(kind) {
         out.push(*b);
         return;
     }
-    let axes = if kind == plant::GRASS { [true, false, true] } else { [true; 3] };
     let start = out.len();
     out.push(*b);
     for axis in 0..3 {
-        if !axes[axis] {
-            continue;
-        }
         let mut k = start;
         while k < out.len() {
             let p = out[k];
@@ -619,11 +615,11 @@ fn emit_quad(
         p[n_axis] = n as u32;
         p[u_axis] = corners[i].0 as u32;
         p[v_axis] = corners[i].1 as u32;
-        // A single leaf voxel says which side of it each corner is on, so the shader can
-        // name the voxel from any corner.
+        // A single leaf (or other droppable plant) voxel says which side of it each corner
+        // is on, so the shader can name the voxel from any corner.
         let kind = ((key >> 32) as u8 & flags::PLANT_MASK) >> flags::PLANT_SHIFT;
         let mut corner = 0u32;
-        if kind == plant::DECIDUOUS || kind == plant::AUTUMN {
+        if key & 2 == 0 && droppable(kind) {
             corner |= ((p[n_axis] as usize > s) as u32) << n_axis;
             corner |= ((corners[i].0 > u) as u32) << u_axis;
             corner |= ((corners[i].1 > v) as u32) << v_axis;
@@ -779,14 +775,11 @@ mod tests {
         add_plants(&mut mesh, boxes.iter(), chunk, &m);
         assert!(!mesh.opaque.is_empty());
         for quad in mesh.opaque.chunks_exact(4) {
-            let kind = (quad[0].b >> 29) as u8 & 7;
             let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
             for v in &named {
                 assert_eq!(v[0], named[0][0], "{named:?}");
                 assert_eq!(v[2], named[0][2], "{named:?}");
-                if kind == plant::FLOWER {
-                    assert_eq!(v[1], named[0][1], "{named:?}");
-                }
+                assert_eq!(v[1], named[0][1], "{named:?}");
             }
         }
         // A stone box is never cut.
