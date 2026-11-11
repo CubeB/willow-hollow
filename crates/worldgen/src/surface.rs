@@ -836,12 +836,22 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
         ));
     }
     if c.ocean[r] {
-        // A mouth: carry the channel on into the sea, opening out as it goes.
+        // A mouth: carry the channel on into the sea, opening out as it goes, until the
+        // sea is deep enough that no flat or bar in front of the coast can close it off.
         let open = Continent::river_width(c.discharge[i]) * OLD_VOXEL * funnel(c, r, c.discharge[i]);
+        let cs = c.cell_size();
+        let ahead = (pr - exit).normalize_or_zero() * cs;
+        let mut end = pr;
+        for _ in 0..MOUTH_CELLS {
+            if grid_height(c, end / cs) < -MOUTH_DEPTH {
+                break;
+            }
+            end += ahead;
+        }
         out.push(Piece::new(
             exit,
-            (exit + pr) * 0.5,
-            pr,
+            (exit + end) * 0.5,
+            end,
             (wi, open * 1.3),
             (exit_level, exit_level * 0.5, 0.0),
             exit_level,
@@ -849,6 +859,11 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
         ));
     }
 }
+
+/// Furthest a river mouth's channel runs on past the first sea cell, in cells, and the
+/// depth of sea it runs out to, in simulation units.
+const MOUTH_CELLS: usize = 3;
+const MOUTH_DEPTH: f32 = 2.5;
 
 /// Simulated level at which the sea's rise and fall reaches up a river: below it the
 /// river is tidal, and its water stands at sea level.
@@ -872,11 +887,12 @@ pub(crate) fn river_level(c: &Continent, j: usize) -> f32 {
     }
 }
 
-/// How much wider than usual a river carrying `discharge` is at node `j`: big rivers
-/// open into a funnel-shaped estuary over the last few metres of their fall.
+/// How much wider than usual a river carrying `discharge` is at node `j`: rivers open
+/// into a funnel-shaped estuary as the land flattens out over the last few metres of
+/// their fall, the bigger rivers the more.
 fn funnel(c: &Continent, j: usize, discharge: f32) -> f32 {
-    let low = 1.0 - smoothstep(0.0, 8.0, river_level(c, j));
-    1.0 + 1.8 * low * smoothstep(150.0, 1500.0, discharge)
+    let low = 1.0 - smoothstep(0.0, 10.0, river_level(c, j));
+    1.0 + 2.2 * low * low.sqrt() * smoothstep(60.0, 1500.0, discharge)
 }
 
 /// Smallest drop, in simulation units, that a river can make as one waterfall.

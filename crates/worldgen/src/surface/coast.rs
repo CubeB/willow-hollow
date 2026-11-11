@@ -21,7 +21,7 @@ use crate::{
 use super::{Cover, MIN_RIVER_Q, funnel, node, sea_cliff, smoothstep};
 
 /// Smallest discharge that builds a delta.
-const DELTA_Q: f32 = 1500.0;
+const DELTA_Q: f32 = 400.0;
 
 /// A small delta: a fan of low mud flats built out into shallow sea in front of a big,
 /// slow river, split by a few distributary channels.
@@ -63,9 +63,12 @@ impl Delta {
         let v = p - self.pos;
         let d = v.length();
         let along = v.dot(self.dir);
-        if d > self.radius * 1.2 || along < 0.0 || *ground < -m(5.0) {
+        if d > self.radius * 1.2 || along < 0.0 || *ground < -m(6.0) {
             return None;
         }
+        // The fan is built on the shallows and slopes away where the sea deepens,
+        // rather than ending in a wall over deep water.
+        let shelf = smoothstep(-m(6.0), -m(2.5), *ground);
         let side = self.dir.perp_dot(v);
         let angle = side.atan2(along);
         // The fan's edge, lobed.
@@ -80,7 +83,7 @@ impl Delta {
         for (k, a0) in [0.0f32, -0.6, 0.55].into_iter().enumerate() {
             let wander = perlin2(self.salt ^ (k as u32 + 1), d as f64 / m64(35.0), k as f64 * 3.1) * 0.35;
             let lateral = (angle - a0 - wander).abs() * d;
-            let half = self.width * if k == 0 { 0.4 } else { 0.25 } * (1.0 - 0.4 * t);
+            let half = self.width * if k == 0 { 0.5 } else { 0.3 } * (1.0 - 0.4 * t);
             // Branches split off a little way out.
             let started = k == 0 || d > self.width * 1.5;
             if started && lateral < half {
@@ -91,7 +94,7 @@ impl Delta {
         }
         // Flats a little above the sea, fading into it at the fan's edge.
         let flat = m(0.3) + m(0.6) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.3);
-        let edge = smoothstep(0.82, 1.0, t);
+        let edge = smoothstep(0.82, 1.0, t).max(1.0 - shelf);
         *ground = ground.max(flat + (*ground - flat) * edge);
         Some(if edge > 0.3 { Cover::Beach } else { Cover::Bank })
     }
