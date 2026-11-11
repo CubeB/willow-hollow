@@ -171,7 +171,36 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 /// indexed `x * PAD + z` in padded coordinates, like the voxels, or empty if all the
 /// water is still.
 pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents: &[Current]) -> ChunkMesh {
+    mesh_chunk_under_sky(chunk, mats, currents, &[])
+}
+
+/// Marks each padded column (`x * PAD + z`) in `covered` that holds anything opaque or
+/// any water in this chunk, from its first interior voxel up. Meshing a column of chunks
+/// from the top down, what the chunks above have marked is what covers the next one.
+pub fn cover_columns(chunk: &PaddedChunk, mats: &Materials, covered: &mut [bool]) {
+    let voxels = chunk.voxels();
+    for (i, c) in covered.iter_mut().enumerate().take(PAD * PAD) {
+        if !*c {
+            *c = voxels[i * PAD + 1..(i + 1) * PAD].iter().any(|&v| roofs(mats, v));
+        }
+    }
+}
+
+/// Whether a voxel keeps snow off what is below it: anything but air, broadleaf leaves,
+/// which are down by the time snow lies, and wood (bare branches, a plank), which snow
+/// falls past.
+fn roofs(mats: &Materials, v: crate::Voxel) -> bool {
+    let m = mats.get(v);
+    m.kind != Kind::Air && !matches!(m.plant, plant::DECIDUOUS | plant::AUTUMN | plant::VINE)
+}
+
+/// [`mesh_chunk_with_currents`], knowing which columns have something above the chunk
+/// (`covered`, from [`cover_columns`] on the chunks above, or empty for none). Every
+/// opaque face of a voxel with nothing above it, open to the sky, carries
+/// [`flags::SKY`], which is where snow settles.
+pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool]) -> ChunkMesh {
     assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
+    assert!(covered.is_empty() || covered.len() == PAD * PAD, "one cover per padded column");
     const SOLID: u8 = Kind::Solid as u8;
     const WATER: u8 = Kind::Water as u8;
     /// Bits of the interior voxels (padded y 1..=N) in a column mask.
@@ -193,12 +222,18 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
     // The foliage among the solid bits. Foliage sways, so it must not hide the faces of
     // what it stands on, or the sway would open holes in the ground.
     let mut leafy = [[0u64; PAD]; PAD];
+    // What keeps the snow off the voxels under it (see `roofs`).
+    let mut roof = [[0u64; PAD]; PAD];
+    let roofing: Vec<bool> = (0..mats.len()).map(|i| roofs(mats, i as crate::Voxel)).collect();
     let voxels = chunk.voxels();
     for x in 0..PAD {
         for z in 0..PAD {
             let col = &voxels[(x * PAD + z) * PAD..][..PAD];
-            let (mut s, mut w, mut l) = (0u64, 0u64, 0u64);
+            let (mut s, mut w, mut l, mut r) = (0u64, 0u64, 0u64, 0u64);
             for (y, &v) in col.iter().enumerate() {
+                if roofing[v as usize] {
+                    r |= 1 << y;
+                }
                 match kind_of[v as usize] {
                     SOLID => {
                         s |= 1 << y;
@@ -213,6 +248,7 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
             solid[x][z] = s;
             water[x][z] = w;
             leafy[x][z] = l;
+            roof[x][z] = r;
         }
     }
     let is_solid = |p: [usize; 3]| ((solid[p[0]][p[2]] >> p[1]) & 1) as u32;
@@ -237,6 +273,7 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
                     if s == 0 && w == 0 {
                         continue;
                     }
+                    let roofed = !covered.is_empty() && covered[x * PAD + z];
                     // Solid and water masks of the neighbour each voxel's face looks at.
                     let (ns, nw, nl) = match face {
                         0 => (solid[x + 1][z], water[x + 1][z], leafy[x + 1][z]),
@@ -284,9 +321,13 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
                             fl |= flags::EMISSIVE;
                         }
                         fl |= m.plant << flags::PLANT_SHIFT;
-                        // Leaves that fall one by one stay one voxel each, so the shader can tell
-                        // which voxel every corner of a face belongs to.
-                        let single = m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN;
+                        if !roofed && roof[x][z] >> (y + 1) == 0 {
+                            fl |= flags::SKY;
+                        }
+                        // Leaves that fall one by one, and any other plant the shader may drop a
+                        // voxel at a time, stay one voxel each, so the shader can tell which
+                        // voxel every corner of a face belongs to.
+                        let single = droppable(m.plant);
                         let key = 1
                             | (uniform && !single) as u64 * 4
                             | leaf_color_bits(m.color, m.plant) << 8
@@ -375,15 +416,63 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
     mesh
 }
 
+/// Whether the shader may drop a plant of this kind one voxel at a time (season.wgsl's
+/// `season_gone`, and grass buried in snow), which it decides at each corner of a face
+/// from the voxel the corner names.
+fn droppable(kind: u8) -> bool {
+    matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::GRASS | plant::FLOWER)
+}
+
+/// A plant box cut at voxel boundaries, so that every corner of every face names the
+/// same voxel. Otherwise the shader could drop some corners of a face and not others,
+/// and the face would be torn into a long sliver toward the middle of the screen.
+fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<PlantBox>) {
+    let kind = mats.get(b.voxel).plant;
+    if !droppable(kind) {
+        out.push(*b);
+        return;
+    }
+    let start = out.len();
+    out.push(*b);
+    for axis in 0..3 {
+        let mut k = start;
+        while k < out.len() {
+            let p = out[k];
+            // The first voxel boundary strictly inside the box.
+            let cut = (p.lo[axis].div_euclid(CELLS) + 1) * CELLS;
+            if cut < p.hi[axis] {
+                let (mut a, mut c) = (p, p);
+                a.hi[axis] = cut;
+                c.lo[axis] = cut;
+                // Each piece keeps the skin insets of the faces it still has.
+                a.thin &= !(1 << (2 * axis));
+                c.thin &= !(1 << (2 * axis + 1));
+                out[k] = a;
+                out.push(c);
+            } else {
+                k += 1;
+            }
+        }
+    }
+}
+
 /// Appends plants to a chunk's mesh. `origin` is the chunk's corner in world cells, and
-/// every box must start inside the chunk.
-pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a PlantBox> + Clone, origin: [i32; 3], mats: &Materials) {
+/// every box must start inside the chunk; any box reaching outside what a vertex can
+/// hold is left out.
+pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a PlantBox>, origin: [i32; 3], mats: &Materials) {
+    let reach = 63 * CELLS;
+    let mut cut = Vec::new();
+    for b in boxes {
+        if (0..3).all(|a| b.lo[a] >= origin[a] && b.hi[a] <= origin[a] + reach && b.lo[a] < b.hi[a]) {
+            split_at_voxels(b, mats, &mut cut);
+        }
+    }
     for face in 0..6usize {
         mesh.faces[6 + face] = (mesh.opaque.len() / 4) as u32;
         let n_axis = face / 2;
         let positive = face.is_multiple_of(2);
         let (u_axis, v_axis) = ((n_axis + 1) % 3, (n_axis + 2) % 3);
-        for b in boxes.clone() {
+        for b in &cut {
             // Undersides are never seen from where a person stands, except a skin on a
             // ceiling, which is nothing but its underside.
             if face == 3 && b.thin & 1 << 3 == 0 {
@@ -428,7 +517,9 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                 // Darker where a rooted stem meets the ground.
                 let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
                 let sways = if at_top { b.sway_hi } else { b.sway_lo };
+                // Plants are taken to stand in the open, where snow settles on them.
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
+                    | flags::SKY
                     | if sways { flags::FOLIAGE } else { 0 }
                     | m.plant << flags::PLANT_SHIFT;
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
@@ -524,11 +615,11 @@ fn emit_quad(
         p[n_axis] = n as u32;
         p[u_axis] = corners[i].0 as u32;
         p[v_axis] = corners[i].1 as u32;
-        // A single leaf voxel says which side of it each corner is on, so the shader can
-        // name the voxel from any corner.
+        // A single leaf (or other droppable plant) voxel says which side of it each corner
+        // is on, so the shader can name the voxel from any corner.
         let kind = ((key >> 32) as u8 & flags::PLANT_MASK) >> flags::PLANT_SHIFT;
         let mut corner = 0u32;
-        if kind == plant::DECIDUOUS || kind == plant::AUTUMN {
+        if key & 2 == 0 && droppable(kind) {
             corner |= ((p[n_axis] as usize > s) as u32) << n_axis;
             corner |= ((corners[i].0 > u) as u32) << u_axis;
             corner |= ((corners[i].1 > v) as u32) << v_axis;
@@ -665,6 +756,37 @@ mod tests {
             let bit = ((v.a >> (29 + axis)) & 1) as i32;
             e[axis].div_euclid(8) - if q == 0 { bit } else { 0 }
         })
+    }
+
+    #[test]
+    fn every_corner_of_a_droppable_plant_face_names_one_voxel() {
+        let (mut m, _, _) = mats();
+        let flower = m.add(Material { color: [200, 60, 200], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::FLOWER });
+        let grass = m.add(Material { color: [60, 160, 60], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::GRASS });
+        let stone = m.add(Material { color: [100, 100, 100], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::NONE });
+        let chunk = [0, 0, 0];
+        // Boxes straddling voxel boundaries on every axis, and one reaching out of the chunk.
+        let boxes = [
+            PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: flower, sway_lo: false, sway_hi: true, thin: 0 },
+            PlantBox { lo: [7, 2, 2], hi: [10, 9, 5], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
+            PlantBox { lo: [-2, 2, 2], hi: [2, 3, 3], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
+        ];
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, boxes.iter(), chunk, &m);
+        assert!(!mesh.opaque.is_empty());
+        for quad in mesh.opaque.chunks_exact(4) {
+            let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
+            for v in &named {
+                assert_eq!(v[0], named[0][0], "{named:?}");
+                assert_eq!(v[2], named[0][2], "{named:?}");
+                assert_eq!(v[1], named[0][1], "{named:?}");
+            }
+        }
+        // A stone box is never cut.
+        let mut mesh = ChunkMesh::default();
+        let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0 };
+        add_plants(&mut mesh, [b].iter(), chunk, &m);
+        assert_eq!(mesh.opaque.len(), 5 * 4);
     }
 
     #[test]

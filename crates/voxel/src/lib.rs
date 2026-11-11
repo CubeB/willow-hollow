@@ -87,7 +87,11 @@ impl Kind {
 
 /// Vertex flag bits carried to the shader.
 pub mod flags {
+    /// On water faces, which are drawn apart from the rest.
     pub const WATER: u8 = 1 << 0;
+    /// On opaque faces, the same bit: a voxel with nothing above it, open to the sky,
+    /// so snow can settle on it (see `mesh_chunk_under_sky`).
+    pub const SKY: u8 = 1 << 0;
     /// Two bits of per-voxel colour jitter strength (0..=3).
     pub const JITTER_SHIFT: u8 = 1;
     pub const JITTER_MASK: u8 = 0b11 << JITTER_SHIFT;

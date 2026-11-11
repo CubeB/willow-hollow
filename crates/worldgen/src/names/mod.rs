@@ -38,7 +38,15 @@ const ATTEMPTS: i32 = 48;
 /// Longest word put into a compound such as "Bogwatch".
 const COMPOUND_MAX: usize = 6;
 /// Nearer than this, two places never lean on the same word.
-const SPACING: f32 = m(3000.0);
+const SPACING: f32 = m(7000.0);
+/// Most places on one continent that may lean on the same word of the surroundings or
+/// the same adjective, however far apart.
+const WORD_USES: usize = 3;
+/// Bits of words that a made-up word of a tongue must not contain.
+const UNFORTUNATE: &[&str] = &[
+    "penis", "anus", "anal", "rape", "nazi", "cunt", "slut", "shit", "piss", "fag", "dick", "cock", "twat", "porn", "sex",
+    "fuck", "butt", "poo", "turd", "wank", "tits",
+];
 /// How close a built place must be to a natural feature to borrow its name.
 const NEAR: f32 = m(250.0);
 /// Share of names that use a tongue's own patterns, where it has any for the kind.
@@ -357,6 +365,9 @@ impl Gazetteer {
             let kind_word = pick(&kind.kind, r(6));
             let role = pick(&kind.role, r(7));
             let adj = pick(&kind.adj, r(8));
+            if UNFORTUNATE.iter().any(|bad| low.contains(bad)) {
+                continue;
+            }
             let owner = if req.facts.residents.is_empty() {
                 req.kind.kept().then(|| pick(&tongue.given, r(9))).flatten()
             } else {
@@ -398,7 +409,12 @@ impl Gazetteer {
                 }
                 words.push(root.clone());
             }
-            let crowded = |w: &str| !shared && self.used.iter().any(|(u, p)| u == w && p.distance(req.at) < SPACING);
+            let crowded = |w: &str| {
+                !shared && {
+                    let uses = self.used.iter().filter(|(u, _)| u == w);
+                    uses.clone().any(|(_, p)| p.distance(req.at) < SPACING) || uses.count() >= WORD_USES
+                }
+            };
             if has("stem") {
                 if crowded(stem) {
                     continue;
@@ -413,7 +429,26 @@ impl Gazetteer {
                 }
                 words.push(word.to_string());
             }
+            if has("adj")
+                && let Some(adj) = adj
+            {
+                // "The Old ..." is a pattern of its own: only so many of those nearby.
+                let tag = format!("adj:{adj}");
+                if crowded(&tag) {
+                    continue;
+                }
+                words.push(tag);
+            }
             let core = core_of(&name, &root);
+            // The telling part of a name ("Roundring" of "Roundring Stones") is never
+            // repeated on one continent, unless it was lent on purpose through {near}.
+            if !shared
+                && !has("near")
+                && let Some(c) = &core
+                && self.places.iter().any(|p| p.core.as_ref() == Some(c) && !p.kind.shared())
+            {
+                continue;
+            }
             return (name, core, words);
         }
 
@@ -421,6 +456,10 @@ impl Gazetteer {
         let suffix = pick(&kind.kind, hash2(base, -1, 6)).map_or(String::new(), |t| format!(" {t}"));
         for k in 0..2000 {
             let (root, _) = make_root(tongue, hash2(base ^ 0x00fa_11ba, k, 0));
+            let low = root.to_lowercase();
+            if UNFORTUNATE.iter().any(|bad| low.contains(bad)) {
+                continue;
+            }
             let name = format!("{root}{suffix}");
             if !self.places.iter().any(|p| p.name == name) && !self.used.iter().any(|(u, _)| *u == root) {
                 return (name, Some(root.clone()), vec![root]);

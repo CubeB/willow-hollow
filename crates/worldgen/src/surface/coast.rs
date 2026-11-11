@@ -298,6 +298,7 @@ impl Shores {
             wind: c.desc.wind,
             strand: Strand::Sand,
             dune: 0.0,
+            rock: false,
         }
     }
 }
@@ -337,6 +338,8 @@ pub struct Shore {
     strand: Strand,
     /// Height added by dunes, in voxels.
     dune: f32,
+    /// Whether the column is the top of a boulder: bare rock, with sand between.
+    rock: bool,
 }
 
 impl Shore {
@@ -354,9 +357,10 @@ impl Shore {
             sea_cliff::Part::Face => return Some(Cover::Cliff),
             sea_cliff::Part::Shelf => return Some(Cover::Shelf),
             sea_cliff::Part::Foot => {
-                // Blocks fallen from the face lie along its foot.
-                *ground += boulder(seed, wx, wz);
-                return Some(Cover::Boulders);
+                // Blocks fallen from the face lie along its foot, on sand.
+                let b = boulder(seed, wx, wz);
+                *ground += b;
+                return Some(if b > 0.0 { Cover::Boulders } else { Cover::Beach });
             }
             sea_cliff::Part::None => {}
         }
@@ -394,7 +398,9 @@ impl Shore {
         let rocks = smoothstep(0.85, 1.0, stony) * fade;
         if rocks > 0.0 {
             let band = smoothstep(-m(1.5), -m(0.5), g) * (1.0 - smoothstep(m(2.5), m(3.6), g));
-            *ground += boulder(seed, wx, wz) * rocks * band;
+            let b = boulder(seed, wx, wz) * rocks * band;
+            self.rock = b > 0.25;
+            *ground += b;
         }
         // Estuary flats: low mud just above the sea, cut by winding creeks.
         if mud_w > 0.0 {
@@ -459,7 +465,8 @@ impl Shore {
         match self.strand {
             Strand::Mud => (ground < m(1.6)).then_some(Cover::Bank),
             Strand::Shingle => (ground < m(3.0)).then_some(Cover::Shingle),
-            Strand::Boulders => (ground < m(3.4)).then_some(Cover::Boulders),
+            // Between the boulders, ordinary sand.
+            Strand::Boulders => (ground < m(3.4)).then_some(if self.rock { Cover::Boulders } else { Cover::Beach }),
             Strand::Sand if ground < m(2.4) + m(1.2) * self.shelter => Some(Cover::Beach),
             Strand::Sand => (self.dune > m(0.35)).then_some(Cover::Dune),
         }
@@ -467,19 +474,19 @@ impl Shore {
 }
 
 /// A boulder's height above the ground at world column `(wx, wz)`, or 0: rounded stones
-/// up to 2 m across, at most one to each 6-voxel square so they never run together.
+/// 1.8 to 3.4 m across and up to 2 m high, at most one to each 10-voxel square so they never run together.
 pub fn boulder(seed: u32, wx: f64, wz: f64) -> f32 {
-    const CELL: i32 = 6;
+    const CELL: i32 = 10;
     let (x, z) = (wx.floor() as i32, wz.floor() as i32);
     let (cx, cz) = (x.div_euclid(CELL), z.div_euclid(CELL));
     let h = hash2(seed ^ 0xb01d, cx, cz);
     if unit(h) > 0.6 {
         return 0.0;
     }
-    let r = 1.4 + 1.0 * unit(h.rotate_left(5));
+    let r = 2.2 + 2.0 * unit(h.rotate_left(5));
     let span = CELL as f32 - 2.0 * r;
     let (ox, oz) = (r + span * unit(h.rotate_left(10)), r + span * unit(h.rotate_left(15)));
     let (dx, dz) = ((x - cx * CELL) as f32 + 0.5 - ox, (z - cz * CELL) as f32 + 0.5 - oz);
     let d2 = (dx * dx + dz * dz) / (r * r);
-    if d2 >= 1.0 { 0.0 } else { (m(0.35) + m(0.6) * unit(h.rotate_left(20))) * (1.0 - d2).sqrt() }
+    if d2 >= 1.0 { 0.0 } else { (m(0.9) + m(1.1) * unit(h.rotate_left(20))) * (1.0 - d2).powf(0.3) }
 }

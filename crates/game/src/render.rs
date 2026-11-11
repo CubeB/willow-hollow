@@ -147,8 +147,8 @@ struct Instance {
     scale: f32,
     /// The range of horizontal distances this chunk's ring is drawn in.
     band: [f32; 2],
-    /// Terrain: the biomes at its corners, for the snow (see `GpuChunk::biomes`).
-    biomes: u32,
+    /// Terrain: a grid of the biomes over it, for the snow (see `GpuChunk::biomes`).
+    biomes: [u32; 8],
 }
 
 /// The camera's position for the far trees' whole-voxel placement.
@@ -588,7 +588,7 @@ impl Renderer {
 
         let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
-        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32];
+        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32x4, 7 => Uint32x4];
         let terrain_buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<Vertex>() as u64,
@@ -1354,7 +1354,7 @@ impl Renderer {
                 origin: [0; 3],
                 scale: 1.0,
                 band: [0.0; 2],
-                biomes: 0,
+                biomes: [0; 8],
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -1372,7 +1372,7 @@ impl Renderer {
             origin: [0; 3],
             scale: 1.0,
             band: [0.0; 2],
-            biomes: 0,
+            biomes: [0; 8],
         });
         stats.far_tiles = far_tiles.len() as u32;
 
