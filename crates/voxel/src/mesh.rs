@@ -67,8 +67,7 @@ pub struct PlantBox {
     /// index (bit 2 is the top, +Y): a box one cell thick with one of these is a skin
     /// 0.05 m thick, like moss flat on a stone. Only half steps that land at 1/8, 5/8 or
     /// 7/8 of a voxel can be drawn (see [`Vertex`]); a skin flush against the voxel's
-    /// near or far face always does. A box with bit 3 (its underside) is also drawn from
-    /// below, which other plants are not.
+    /// near or far face always does.
     pub thin: u8,
 }
 
@@ -664,11 +663,6 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
         let positive = face.is_multiple_of(2);
         let (u_axis, v_axis) = ((n_axis + 1) % 3, (n_axis + 2) % 3);
         for b in &cut {
-            // Undersides are never seen from where a person stands, except a skin on a
-            // ceiling, which is nothing but its underside.
-            if face == 3 && b.thin & 1 << 3 == 0 {
-                continue;
-            }
             let m = mats.get(b.voxel);
             let n = if positive { b.hi[n_axis] } else { b.lo[n_axis] };
             let corners = [
@@ -932,10 +926,10 @@ mod tests {
             thin: 0,
         };
         add_plants(&mut mesh, [plant].iter(), chunk, &m);
-        assert_eq!(mesh.opaque.len(), (6 + 5) * 4, "bottom face is skipped");
+        assert_eq!(mesh.opaque.len(), (6 + 6) * 4, "all six faces, the bottom too");
         assert_eq!(mesh.faces[6], 6);
-        assert_eq!(mesh.faces[12], 11);
-        assert_eq!(mesh.faces[9], mesh.faces[10], "no downward group");
+        assert_eq!(mesh.faces[12], 12);
+        assert_eq!(mesh.faces[9] + 1, mesh.faces[10], "one downward quad");
         for v in &mesh.opaque[6 * 4..] {
             let fine = |shift: u32, frac: u32| ((v.a >> shift) & 63) * 4 + ((v.a >> frac) & 3);
             assert!((9..=10).contains(&fine(0, 23)));
@@ -999,7 +993,7 @@ mod tests {
         let mut mesh = ChunkMesh::default();
         let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0 };
         add_plants(&mut mesh, [b].iter(), chunk, &m);
-        assert_eq!(mesh.opaque.len(), 5 * 4);
+        assert_eq!(mesh.opaque.len(), 6 * 4);
     }
 
     #[test]
@@ -1033,9 +1027,7 @@ mod tests {
             };
             let mut mesh = ChunkMesh::default();
             add_plants(&mut mesh, [b].iter(), chunk, &m);
-            // A ceiling skin is seen from below, so it keeps its underside.
-            let quads = mesh.opaque.len() / 4;
-            assert_eq!(quads, if face == 3 { 6 } else { 5 }, "face {face}");
+            assert_eq!(mesh.opaque.len() / 4, 6, "face {face}");
             let host = if positive { v[axis] + CELLS } else { v[axis] };
             let mut depths = std::collections::BTreeSet::new();
             for vert in &mesh.opaque {
@@ -1055,16 +1047,15 @@ mod tests {
     }
 
     #[test]
-    fn only_ceiling_skins_are_drawn_from_below() {
+    fn every_plant_box_is_drawn_from_below() {
         let (m, stone, _) = mats();
         let skin = |thin| PlantBox { lo: [0, 7, 0], hi: [4, 8, 4], voxel: stone, sway_lo: false, sway_hi: false, thin };
-        let mut mesh = ChunkMesh::default();
-        add_plants(&mut mesh, [skin(1 << 3)].iter(), [0, 0, 0], &m);
-        assert_eq!(mesh.opaque.len() / 4, 6);
-        assert_eq!(mesh.faces[9] + 1, mesh.faces[10], "one downward quad");
-        let mut mesh = ChunkMesh::default();
-        add_plants(&mut mesh, [skin(1 << 2)].iter(), [0, 0, 0], &m);
-        assert_eq!(mesh.opaque.len() / 4, 5);
+        for thin in [0, 1 << 2, 1 << 3] {
+            let mut mesh = ChunkMesh::default();
+            add_plants(&mut mesh, [skin(thin)].iter(), [0, 0, 0], &m);
+            assert_eq!(mesh.opaque.len() / 4, 6);
+            assert_eq!(mesh.faces[9] + 1, mesh.faces[10], "one downward quad");
+        }
     }
 
     #[test]

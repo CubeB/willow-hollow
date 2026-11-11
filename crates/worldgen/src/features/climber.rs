@@ -770,9 +770,9 @@ fn leaf_lays(node: &Node, sign: i32) -> Vec<Lay> {
 
 /// Leaves on a clinging plant, one shape ([`Climber::leaf`]) of one size, every
 /// `leaf_gap` cells along each stem and on alternate sides of it, so they overlap down
-/// the stem like shingles. A leaf goes in whole or not at all: every cell of it held a
-/// cell off the surface it grows on, so none overhangs an edge, and none touching
-/// another leaf, so the surface and stem show between them. Colours come in patches
+/// the stem like shingles. A leaf goes in whole or not at all, in free cells, over no
+/// other leaf, and with at least half of it close against the surface it grows on, so
+/// it still fits on round, bumpy bark. Colours come in patches
 /// over the plant, not leaf by leaf.
 fn clinging_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &impl Voxels, mats: &Materials, raster: &mut Raster, leaves: f32) {
     let mut sense = Sensing { world, mats, cache: HashMap::new() };
@@ -805,14 +805,16 @@ fn clinging_leaves(params: &Climber, root: &Root, skel: &Skeleton, world: &impl 
         }
         let sign = if (dist[k] / gap).is_multiple_of(2) { 1 } else { -1 };
         let out = node.out;
-        let mut fits = |c: IVec3| {
-            sense.air(c)
-                && !raster.taken(c)
-                && sense.air(c - out)
-                && !sense.air(c - out * 2)
-                && !(-1..=1).any(|x| (-1..=1).any(|y| (-1..=1).any(|z| placed.contains(&(c + IVec3::new(x, y, z))))))
+        let free = |c: IVec3, sense: &mut Sensing<'_, _>| {
+            sense.air(c) && !raster.taken(c) && !placed.contains(&c)
         };
-        let Some(lay) = leaf_lays(node, sign).into_iter().find(|&lay| params.leaf.iter().all(|&uv| fits(lay.at(uv)))) else {
+        // Bark is round and bumpy and a stem may stand a little off it, so a leaf need
+        // only be held up over half its cells: those with the surface close behind.
+        let held = |c: IVec3, sense: &mut Sensing<'_, _>| (1..=3).any(|k| !sense.air(c - out * k));
+        let Some(lay) = leaf_lays(node, sign).into_iter().find(|&lay| {
+            params.leaf.iter().all(|&uv| free(lay.at(uv), &mut sense))
+                && 2 * params.leaf.iter().filter(|&&uv| held(lay.at(uv), &mut sense)).count() >= params.leaf.len()
+        }) else {
             continue;
         };
         cells.clear();
@@ -991,12 +993,12 @@ pub fn climbable(v: Voxel) -> bool {
 /// How likely a tree of this species is to carry ivy: mostly old broadleaves.
 fn tree_chance(species: Species) -> f32 {
     match species {
-        Species::ElderOak | Species::Kapok | Species::Redwood => 0.45,
-        Species::Oak | Species::Maple | Species::Willow | Species::Baobab => 0.22,
-        Species::Jungle | Species::Cherry | Species::DeadSnag => 0.14,
-        Species::Birch | Species::Acacia => 0.08,
-        Species::Spruce | Species::TallPine | Species::Palm => 0.03,
-        Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump => 0.14,
+        Species::ElderOak | Species::Kapok | Species::Redwood => 0.85,
+        Species::Oak | Species::Maple | Species::Willow | Species::Baobab => 0.5,
+        Species::Jungle | Species::Cherry | Species::DeadSnag => 0.32,
+        Species::Birch | Species::Acacia => 0.16,
+        Species::Spruce | Species::TallPine | Species::Palm => 0.06,
+        Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump => 0.2,
         _ => 0.0,
     }
 }
@@ -1100,23 +1102,27 @@ pub fn tree_root(placement: &Placement, world: &impl Voxels, mats: &Materials, s
     if rng.unit() >= tree_chance(placement.species) * chance_scale {
         return None;
     }
-    // Which way round the trunk: mostly the shady -Z side.
-    let (dx, dz) = match (rng.unit() * 4.0) as u32 {
+    // Which way round the trunk: any side, the shady -Z one a little more often.
+    let (dx, dz) = match (rng.unit() * 5.0) as u32 {
         0 | 1 => (0, -1),
         2 => (-1, 0),
-        _ => (1, 0),
+        3 => (1, 0),
+        _ => (0, 1),
     };
-    // Walk inward from outside the trunk at this height until it hits wood.
-    let y = placement.pos.y + 1;
+    // Walk inward from outside the trunk until it hits wood, a little higher each try
+    // where sloping ground or a root flare is in the way.
     let out = IVec3::new(dx, 0, dz);
-    for dist in (0..16).rev() {
-        let probe = IVec3::new(placement.pos.x + dx * dist, y, placement.pos.z + dz * dist);
-        if solid(world.voxel(probe), mats) {
-            let air = probe + out;
-            if solid(world.voxel(air), mats) || !climbable(world.voxel(probe)) {
-                return None;
+    let age = host_age(placement.species) * rng.range(0.55, 1.0);
+    for y in placement.pos.y + 1..=placement.pos.y + 4 {
+        for dist in (0..16).rev() {
+            let probe = IVec3::new(placement.pos.x + dx * dist, y, placement.pos.z + dz * dist);
+            if solid(world.voxel(probe), mats) {
+                let air = probe + out;
+                if !solid(world.voxel(air), mats) && climbable(world.voxel(probe)) {
+                    return Some(Root { cell: cell_beside(air, out), out, age, seed: h });
+                }
+                break;
             }
-            return Some(Root { cell: cell_beside(air, out), out, age: host_age(placement.species) * rng.range(0.55, 1.0), seed: h });
         }
     }
     None
@@ -1427,7 +1433,7 @@ impl RootFinder<'_> {
                     high >= air.y + 4 && solid(self.world.voxel(air + d), self.mats)
                 });
                 if let Some(d) = wall {
-                    if unit(h) < 0.5 * chance {
+                    if unit(h) < 0.9 * chance {
                         out.push((Root { cell: cell_beside(air, -d), out: -d, age: unit(h.rotate_left(7)) * 0.6 + 0.2, seed: h }, params));
                     }
                     continue;
@@ -1708,48 +1714,26 @@ mod tests {
                     let off_edge = sense.air(below) && !sense.braced(below);
                     assert!(!(n.dir == IVec3::NEG_Y && off_edge), "{}: a strand hangs down to {:?}", params.name, n.cell);
                 }
-                // Every leaf lies a cell off a wall or the ground, none off a ceiling.
+                // Leaves lie close against a wall or the ground, not off a ceiling: at
+                // least half of every leaf is held, so most leaf cells are.
                 let raster = plant(&params, &root, &world, &mats);
-                for c in leaf_cells(&params, &raster) {
-                    let held = BRACES.iter().any(|&d| sense.air(c + d) && !sense.air(c + d * 2));
-                    assert!(held, "{}: a leaf hangs at {c:?}", params.name);
-                }
+                let cells = leaf_cells(&params, &raster);
+                let held = cells.iter().filter(|&&c| BRACES.iter().any(|&d| (1..=3).any(|k| !sense.air(c + d * k)))).count();
+                assert!(2 * held >= cells.len(), "{}: only {held} of {} leaf cells are held", params.name, cells.len());
             }
         }
     }
 
     #[test]
-    fn leaves_are_whole_and_kept_apart() {
+    fn a_wall_plant_is_well_leaved() {
         let (world, mats) = wall(60);
         for params in [IVY, VIRGINIA_CREEPER] {
             let root = Root { age: 0.8, ..root_on_wall() };
             let raster = plant(&params, &root, &world, &mats);
-            let cells: HashSet<IVec3> = leaf_cells(&params, &raster).into_iter().collect();
-            // Group touching leaf cells, corners included: each group is one whole leaf.
-            let mut seen = HashSet::new();
-            let mut groups = 0;
-            for &start in &cells {
-                if !seen.insert(start) {
-                    continue;
-                }
-                let (mut stack, mut size) = (vec![start], 0);
-                while let Some(c) = stack.pop() {
-                    size += 1;
-                    for x in -1..=1 {
-                        for y in -1..=1 {
-                            for z in -1..=1 {
-                                let n = c + IVec3::new(x, y, z);
-                                if cells.contains(&n) && seen.insert(n) {
-                                    stack.push(n);
-                                }
-                            }
-                        }
-                    }
-                }
-                assert_eq!(size, params.leaf.len(), "{}: leaves touch or one is broken, near {start:?}", params.name);
-                groups += 1;
-            }
-            assert!(groups >= 12, "{}: only {groups} leaves", params.name);
+            let leaves = leaf_cells(&params, &raster).len();
+            let all = raster.cells().len();
+            assert!(leaves >= 12 * params.leaf.len(), "{}: only {leaves} leaf cells", params.name);
+            assert!(3 * leaves >= all, "{}: {leaves} leaf cells of {all}", params.name);
         }
     }
 
