@@ -929,4 +929,78 @@ mod leaf_tests {
         assert!(Needle.fall() > Broad.fall() && Broad.fall() > Petal.fall());
         assert!(Needle.spins() && !Broad.spins());
     }
+
+    /// Flat ground below y = 0.
+    struct Ground;
+
+    impl crate::player::Voxels for Ground {
+        fn kind(&mut self, _x: i32, y: i32, _z: i32) -> voxel::Kind {
+            if y < 0 { voxel::Kind::Solid } else { voxel::Kind::Air }
+        }
+    }
+
+    fn still_air(camera: glam::DVec3, time: f64) -> super::Surroundings<'static> {
+        super::Surroundings {
+            camera,
+            biome: worldgen::biome::Biome::Desert,
+            sun_elevation: -0.5,
+            cascades: &[],
+            springs: &[],
+            surf: &[],
+            leaves: &[],
+            flowers: &[],
+            player_entered_water: None,
+            leaf_fall: 0.0,
+            date: 0.62,
+            rain: 0.0,
+            snow: 0.0,
+            storm: 0.0,
+            time,
+        }
+    }
+
+    #[test]
+    fn leaves_turn_over_as_they_fall_and_last_until_they_land() {
+        use super::*;
+        let mut p = Particles::new();
+        for (i, shape) in [Broad, Needle, Autumn, Petal].into_iter().enumerate() {
+            p.spawn(Particle {
+                kind: PKind::Leaf,
+                pos: DVec3::new(i as f64 * 10.0, 40.0, 0.0),
+                vel: Vec3::ZERO,
+                age: 0.0,
+                life: f32::INFINITY,
+                size: shape.size(),
+                color: [0.5, 0.3, 0.1],
+                phase: i as f32 * 1.7,
+                settled: false,
+                rot: Vec3::ZERO,
+                spin: Vec4::new(2.4, 0.6, if shape.spins() { 12.0 } else { 6.0 }, shape.fall()),
+            });
+        }
+        let (mut rolls, mut drift) = (vec![(0.0f32, 0.0f32); 4], 0.0f64);
+        for step in 0..60 * 120 {
+            let falling = p.particles.iter().filter(|q| q.kind == PKind::Leaf && !q.settled).count();
+            p.update(1.0 / 60.0, &still_air(DVec3::ZERO, step as f64 / 60.0), &mut Ground);
+            let leaves: Vec<_> = p.particles.iter().filter(|q| q.kind == PKind::Leaf).collect();
+            // None is lost on the way down (those lying on the ground fade in time).
+            assert!(leaves.len() >= falling, "a leaf vanished in the air at step {step}");
+            for q in &leaves {
+                let i = (q.phase / 1.7).round() as usize;
+                if !q.settled {
+                    rolls[i] = (rolls[i].0.min(q.rot.z), rolls[i].1.max(q.rot.z));
+                    drift = drift.max((q.pos.x - i as f64 * 10.0).abs().max(q.pos.z.abs()));
+                }
+            }
+            if leaves.iter().all(|q| q.settled) {
+                // Each tipped well over both ways, and wandered from side to side.
+                assert!(rolls.iter().all(|r| r.0 < -0.5 && r.1 > 0.5), "{rolls:?}");
+                assert!(drift > 1.0);
+                // And lies flat on the ground.
+                assert!(leaves.iter().all(|q| q.pos.y > 0.0 && q.pos.y < 0.1 && q.rot.y == 0.0 && q.rot.z == 0.0));
+                return;
+            }
+        }
+        panic!("the leaves never came down");
+    }
 }
