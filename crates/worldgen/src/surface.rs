@@ -234,6 +234,21 @@ fn reach(half_width: f32) -> f32 {
     hw + bank_width(hw).max(BANK_MAX) + m(0.8)
 }
 
+/// How much of the ground around continent-local point `p`, whose natural ground is
+/// `ground` voxels, the voxel world makes sandy beach, 0 to 1, with the scatter along the
+/// beach's edge averaged out: for the far view, which must agree with the near terrain.
+pub fn beach_share(c: &Continent, p: Vec2, ground: f32) -> f32 {
+    let inland = coast::inland(c, p);
+    if inland == f32::MAX {
+        return 0.0;
+    }
+    let wx = c.desc.mx as f64 * MACRO_SIZE as f64 + p.x as f64;
+    let wz = c.desc.mz as f64 * MACRO_SIZE as f64 + p.y as f64;
+    let reach = coast::beach_reach(c.desc.seed, wx, wz);
+    let reach = reach + coast::WATERLINE_REACH * (1.0 - smoothstep(m(0.8), m(1.2), ground));
+    (1.0 - smoothstep(reach - m(1.2), reach + m(1.2), inland)) * (1.0 - smoothstep(m(2.2), m(2.6), ground))
+}
+
 /// Quantises a river's water level into flat pools separated by drops.
 ///
 /// Only some integer levels are allowed, chosen by hash; water sits at the highest
@@ -687,10 +702,25 @@ impl<'a> Sampler<'a> {
             if cover == Cover::Land {
                 cover = Cover::SeaFloor;
             }
-        } else if near_sea && cover == Cover::Land {
+        } else if cover == Cover::Land && (near_sea || (lake == NO_LAKE && ground < m(4.0))) {
+            // The beach reaches a varying way in from the shore, its edge fraying into the
+            // land over a few voxels, and a little further where the ground is barely above
+            // the water, which can lie inland of the grid's coastline. It is measured from
+            // the shore alone and runs on past the columns treated as coastal, so the
+            // squares of the grid never show along its edge.
+            let cseed = c.desc.seed;
+            let scatter = coast::beach_scatter(cseed, wx, wz);
+            let ground = ground + scatter * m(0.12);
+            let reach = coast::beach_reach(cseed, wx, wz) + if ground < m(1.0) { coast::WATERLINE_REACH } else { 0.0 };
+            let strand = coast::inland(c, p) + scatter * m(2.4) < reach;
             match &shore {
-                Some(s) => cover = s.cover(ground).unwrap_or(cover),
-                None if ground < m(2.4) => cover = Cover::Beach,
+                Some(s) => cover = s.cover(ground, strand).unwrap_or(cover),
+                None if !near_sea && strand => {
+                    let mut s = self.shores.at(c, &corners, tx, tz, p, &self.mouths);
+                    s.pick_strand(seed, slope * OLD_VOXEL / cs, wx, wz);
+                    cover = s.cover(ground, true).unwrap_or(cover);
+                }
+                None if strand && ground < m(2.4) => cover = Cover::Beach,
                 None => {}
             }
         }
@@ -1676,6 +1706,66 @@ mod tests {
                 .collect();
             eprintln!("{:>6} {}", z + dz, line.join(""));
         }
+    }
+
+    /// The beach's inland edge follows the shore, not the simulation grid: few of the
+    /// places where sand gives way to land lie on the line where the columns stop
+    /// counting as coastal (#96).
+    #[test]
+    fn beach_edge_ignores_the_grid() {
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let n = c.size;
+        let cs = c.cell_size();
+        let near_sea = |lx: i32, lz: i32| {
+            let max = (n - 1) as f32;
+            let (fx, fz) = (((lx as f32 + 0.5) / cs - 0.5).clamp(0.0, max), ((lz as f32 + 0.5) / cs - 0.5).clamp(0.0, max));
+            let (x0, z0) = ((fx as usize).min(n - 2), (fz as usize).min(n - 2));
+            [(0, 0), (1, 0), (0, 1), (1, 1)].iter().any(|&(dx, dz)| c.ocean[(z0 + dz) * n + x0 + dx])
+        };
+        // Low, gentle coast cells beside the sea.
+        let mut spots = Vec::new();
+        for i in 0..n * n {
+            let (x, z) = (i % n, i / n);
+            if c.ocean[i] || x < 4 || z < 4 || x >= n - 4 || z >= n - 4 || c.height[i] * OLD_VOXEL > m(3.0) || c.lake[i] != NO_LAKE {
+                continue;
+            }
+            if [i - 1, i + 1, i - n, i + n].iter().any(|&j| c.ocean[j]) {
+                spots.push(((x as f32 + 0.5) * cs, (z as f32 + 0.5) * cs));
+            }
+        }
+        assert!(spots.len() > 50, "{} low coast cells", spots.len());
+        let (mut edges, mut on_gate, mut worst, mut at) = (0, 0, 0, (0, 0));
+        for &(sx, sz) in spots.iter().step_by((spots.len() / 60).max(1)) {
+            let (x0, z0, span) = (sx as i32 - 96, sz as i32 - 96, 192);
+            let s = Sampler::new(&c, 7, x0, z0, span);
+            let cols: Vec<Column> = (0..span * span).map(|k| s.column(x0 + k % span, z0 + k / span)).collect();
+            let mut here = 0;
+            for dz in 0..span - 1 {
+                for dx in 0..span - 1 {
+                    let a = &cols[(dz * span + dx) as usize];
+                    for (ex, ez) in [(1, 0), (0, 1)] {
+                        let b = &cols[((dz + ez) * span + dx + ex) as usize];
+                        let (beach, land) = match (a.cover, b.cover) {
+                            (Cover::Beach, Cover::Land) => ((dx, dz), (dx + ex, dz + ez)),
+                            (Cover::Land, Cover::Beach) => ((dx + ex, dz + ez), (dx, dz)),
+                            _ => continue,
+                        };
+                        edges += 1;
+                        if near_sea(x0 + beach.0, z0 + beach.1) != near_sea(x0 + land.0, z0 + land.1) {
+                            on_gate += 1;
+                            here += 1;
+                        }
+                    }
+                }
+            }
+            if here > worst {
+                worst = here;
+                at = (sx as i32, sz as i32);
+            }
+        }
+        eprintln!("{on_gate}/{edges} beach edges on the coastal line; worst {worst} near {},{}", at.0, at.1);
+        assert!(edges > 200, "{edges} beach edges");
+        assert!(on_gate * 20 < edges, "{on_gate}/{edges} beach edges on the coastal line");
     }
 
     /// Prints column cost on steep, flat and gorge ground:

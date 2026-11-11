@@ -114,6 +114,52 @@ pub fn sand_bar(seed: u32, wx: f64, wz: f64, across: f32, bed: f32) -> f32 {
     bed + (crest - bed) * lift
 }
 
+/// Farthest inland of the grid's coastline that any beach reaches, in voxels. Columns
+/// further in are never beach.
+pub const BEACH_REACH: f32 = m(52.0);
+
+/// How much further the beach reaches over ground barely above the water, in voxels.
+pub const WATERLINE_REACH: f32 = m(12.0);
+
+/// How far continent-local `p` lies inland of the grid's coastline, in voxels: its
+/// distance to the centre of the nearest sea cell, less half a cell, or `f32::MAX` past
+/// [`BEACH_REACH`]. A smooth function of `p` alone, so the beach's inland edge follows the
+/// shore rather than the squares of the grid, and agrees across chunks.
+pub fn inland(c: &Continent, p: Vec2) -> f32 {
+    let n = c.size as i32;
+    let cs = c.cell_size();
+    // Any sea centre outside this block of cells is at least r + 0.5 cells away, at least
+    // half a cell plus BEACH_REACH, so within the reach the distance is exact.
+    let r = (BEACH_REACH / cs).ceil() as i32;
+    let (cx, cz) = ((p.x / cs).floor() as i32, (p.y / cs).floor() as i32);
+    let mut best = f32::MAX;
+    for z in (cz - r).max(0)..=(cz + r).min(n - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(n - 1) {
+            if c.ocean[(z * n + x) as usize] {
+                best = best.min((vec2((x as f32 + 0.5) * cs, (z as f32 + 0.5) * cs) - p).length_squared());
+            }
+        }
+    }
+    let d = best.sqrt() - 0.5 * cs;
+    if d < BEACH_REACH { d } else { f32::MAX }
+}
+
+/// How far inland of the grid's coastline the beach reaches at world column `(wx, wz)`,
+/// in voxels: broad stretches of narrow and wide strand, its edge broken into tongues and
+/// bays. `seed` is the continent's, so the far view can draw the same beach.
+pub fn beach_reach(seed: u32, wx: f64, wz: f64) -> f32 {
+    let n = |salt: u32, metres: f64| perlin2(seed ^ salt, wx / m64(metres), wz / m64(metres));
+    let width = m(10.0) + m(22.0) * smoothstep(-0.4, 0.4, n(0xbe01, 120.0));
+    let ragged = n(0xbe02, 16.0) * m(6.5) + n(0xbe03, 6.0) * m(2.5);
+    (width + ragged).min(BEACH_REACH - WATERLINE_REACH - m(2.0))
+}
+
+/// Per-column scatter, -0.5 to 0.5, so sand and land mix over a few voxels at the edge of
+/// a beach instead of meeting along a ruled line.
+pub fn beach_scatter(seed: u32, wx: f64, wz: f64) -> f32 {
+    unit(hash2(seed ^ 0xbe04, wx.floor() as i32, wz.floor() as i32)) - 0.5
+}
+
 /// Farthest from a river mouth that its estuary flats reach, in voxels.
 const MOUTH_REACH: f32 = m(120.0);
 
@@ -365,17 +411,7 @@ impl Shore {
             sea_cliff::Part::None => {}
         }
         let fade = self.fade();
-        let (stony, mud) = self.scores(seed, slope, wx, wz);
-        let jitter = (unit(hash2(seed ^ 0x5b1f, wx as i32 >> 1, wz as i32 >> 1)) - 0.5) * 0.12;
-        self.strand = if mud + jitter > 0.5 {
-            Strand::Mud
-        } else if stony + jitter > 0.95 {
-            Strand::Boulders
-        } else if stony + jitter > 0.6 {
-            Strand::Shingle
-        } else {
-            Strand::Sand
-        };
+        let (stony, mud) = self.pick_strand(seed, slope, wx, wz);
 
         // Shaping follows the scores rather than the strand chosen, so the ground stays
         // continuous where one kind of beach gives way to another.
@@ -419,6 +455,23 @@ impl Shore {
         None
     }
 
+    /// Chooses what the beach here is made of, for a column [`Shore::shape`] does not
+    /// shape. Returns the stony and muddy scores it chose by.
+    pub fn pick_strand(&mut self, seed: u32, slope: f32, wx: f64, wz: f64) -> (f32, f32) {
+        let (stony, mud) = self.scores(seed, slope, wx, wz);
+        let jitter = (unit(hash2(seed ^ 0x5b1f, wx as i32 >> 1, wz as i32 >> 1)) - 0.5) * 0.12;
+        self.strand = if mud + jitter > 0.5 {
+            Strand::Mud
+        } else if stony + jitter > 0.95 {
+            Strand::Boulders
+        } else if stony + jitter > 0.6 {
+            Strand::Shingle
+        } else {
+            Strand::Sand
+        };
+        (stony, mud)
+    }
+
     /// How stony and how muddy this shore is, from about 0 to 1 and beyond: the stony
     /// score picks shingle and boulders, the muddy one estuary flats.
     fn scores(&self, seed: u32, slope: f32, wx: f64, wz: f64) -> (f32, f32) {
@@ -460,8 +513,12 @@ impl Shore {
     }
 
     /// The cover of a dry coastal column whose final ground is `ground`, or `None` for
-    /// ordinary land.
-    pub fn cover(&self, ground: f32) -> Option<Cover> {
+    /// ordinary land. `strand` is whether the column lies within the beach's reach of the
+    /// shore; beyond it only dunes stand.
+    pub fn cover(&self, ground: f32, strand: bool) -> Option<Cover> {
+        if !strand {
+            return (self.strand == Strand::Sand && self.dune > m(0.35)).then_some(Cover::Dune);
+        }
         match self.strand {
             Strand::Mud => (ground < m(1.6)).then_some(Cover::Bank),
             Strand::Shingle => (ground < m(3.0)).then_some(Cover::Shingle),
