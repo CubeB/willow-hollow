@@ -114,11 +114,8 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
             bark = bark.or(Some(v));
         }
     }
-    // Birch roots are brown under the white bark.
-    let bark = match bark? {
-        mat::BARK_BIRCH => mat::BARK_OAK,
-        v => v,
-    };
+    // Roots wear the trunk's own bark, so a birch's are pale like its trunk.
+    let bark = bark?;
     let centre = Vec2::new(pos.x as f32, pos.z as f32) + sum / n as f32;
     let radius = (n as f32 / std::f32::consts::PI).sqrt();
     let base = pos.y - 1;
