@@ -295,7 +295,6 @@ impl<'a> Sampler<'a> {
 
         let mut falls = Vec::new();
         let mut springs = Vec::new();
-        let mut deltas = Vec::new();
         let mut pieces = Vec::new();
         for z in z0..=z1 {
             for x in x0..=x1 {
@@ -305,9 +304,6 @@ impl<'a> Sampler<'a> {
                 }
                 if let Some(s) = Spring::at(c, world_seed, z * c.size + x) {
                     springs.push(s);
-                }
-                if let Some(d) = coast::Delta::at(c, world_seed, z * c.size + x) {
-                    deltas.push(d);
                 }
             }
         }
@@ -336,7 +332,7 @@ impl<'a> Sampler<'a> {
             pieces,
             falls,
             springs,
-            deltas,
+            deltas: coast::deltas(c, world_seed, lo, hi),
             mouths: coast::mouths(c, lo, hi),
             shores: coast::Shores::new(c, lo, hi),
             trail_points,
@@ -842,18 +838,9 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
         ));
     }
     if c.ocean[r] {
-        // A mouth: carry the channel on into the sea, opening out as it goes, until the
-        // sea is deep enough that no flat or bar in front of the coast can close it off.
+        // A mouth: carry the channel on into the sea, opening out as it goes.
         let open = Continent::river_width(c.discharge[i]) * OLD_VOXEL * funnel(c, r, c.discharge[i]);
-        let cs = c.cell_size();
-        let ahead = (pr - exit).normalize_or_zero() * cs;
-        let mut end = pr;
-        for _ in 0..MOUTH_CELLS {
-            if grid_height(c, end / cs) < -MOUTH_DEPTH {
-                break;
-            }
-            end += ahead;
-        }
+        let end = mouth_end(c, i);
         out.push(Piece::new(
             exit,
             (exit + end) * 0.5,
@@ -864,6 +851,70 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             [i, r, r],
         ));
     }
+}
+
+/// Where the channel of the river leaving node `i` for the sea ends: it runs straight on
+/// from the coast until the sea is deep enough that no flat or bar in front of the coast
+/// can close it off, or until it runs into the channel of a bigger river's mouth, which
+/// it joins rather than crossing.
+pub(crate) fn mouth_end(c: &Continent, i: usize) -> Vec2 {
+    let (exit, end) = mouth_run(c, i);
+    let run = end - exit;
+    let n = c.size as i32;
+    let (x, z) = ((i % c.size) as i32, (i / c.size) as i32);
+    // Two mouths' channels can only meet if their nodes are this close: each node sits
+    // within a few cells of its own cell and each channel is a few cells long.
+    let span = 2 * MOUTH_CELLS as i32 + 6;
+    let mut cut = 1.0f32;
+    for nz in (z - span).max(1)..=(z + span).min(n - 2) {
+        for nx in (x - span).max(1)..=(x + span).min(n - 2) {
+            let j = (nz * n + nx) as usize;
+            if j == i || c.ocean[j] || !c.ocean[c.rcv[j] as usize] || (c.discharge[j], i) <= (c.discharge[i], j) {
+                continue;
+            }
+            let (from, to) = mouth_run(c, j);
+            let other = to - from;
+            let denom = run.perp_dot(other);
+            if denom.abs() < 1e-3 {
+                continue;
+            }
+            let (s, t) = ((from - exit).perp_dot(other) / denom, (from - exit).perp_dot(run) / denom);
+            if (0.0..=1.0).contains(&s) && (0.0..=1.0).contains(&t) {
+                cut = cut.min(s);
+            }
+        }
+    }
+    // Never so short that the channel has no length at all.
+    exit + run * cut.max((m(1.0) / run.length().max(1.0)).min(1.0))
+}
+
+/// Where the river leaving node `i` for the sea crosses the coast, and where its channel
+/// would end out at sea with no other river in its way.
+fn mouth_run(c: &Continent, i: usize) -> (Vec2, Vec2) {
+    let pr = node(c, c.rcv[i] as usize);
+    let exit = (node(c, i) + pr) * 0.5;
+    let cs = c.cell_size();
+    let ahead = (pr - exit).normalize_or_zero() * cs;
+    let mut end = pr;
+    for _ in 0..MOUTH_CELLS {
+        if grid_height(c, end / cs) < -MOUTH_DEPTH {
+            break;
+        }
+        end += ahead;
+    }
+    (exit, end)
+}
+
+/// Height of the simulated ground at continent-local voxel position `p`, in voxels,
+/// without the fine relief laid over it; or `None` away from the sea, where a column
+/// is not shaped as coast.
+pub(crate) fn coast_ground(c: &Continent, p: Vec2) -> Option<f32> {
+    let max = (c.size - 1) as f32;
+    let q = (p / c.cell_size() - 0.5).clamp(Vec2::ZERO, Vec2::splat(max));
+    // The grid corners the column blends between, as `Sampler::column` picks them.
+    let (x0, z0) = ((q.x as usize).min(c.size - 2), (q.y as usize).min(c.size - 2));
+    let near_sea = [0, 1, c.size, c.size + 1].into_iter().any(|o| c.ocean[z0 * c.size + x0 + o]);
+    near_sea.then(|| bicubic_slope(c, q.x, q.y).0 * OLD_VOXEL)
 }
 
 /// Furthest a river mouth's channel runs on past the first sea cell, in cells, and the
@@ -1170,6 +1221,98 @@ mod tests {
             }
         }
         best
+    }
+
+    /// Distributaries fan out: every stretch of every channel of a delta heads out to
+    /// sea, no two of its channels cross, each crosses open water and is cut all the
+    /// way, no two fans overlap, and a column of a fan is the same whatever area it is
+    /// sampled with. Nor does one river's mouth run across another's.
+    #[test]
+    fn distributaries_fan_out_to_sea_without_crossing() {
+        // Whether segments a-b and c-d cross at a point inside both.
+        let crosses = |a: Vec2, b: Vec2, c: Vec2, d: Vec2| {
+            let side = |p: Vec2, q: Vec2, r: Vec2| (q - p).perp_dot(r - p);
+            side(a, b, c) * side(a, b, d) < 0.0 && side(c, d, a) * side(c, d, b) < 0.0
+        };
+        let (mut fans, mut branches, mut wet, mut cut) = (0, 0, 0, 0);
+        for seed in [1u32, 7] {
+            let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
+            let deltas: Vec<coast::Delta> = (0..c.size * c.size).filter_map(|i| coast::Delta::at(&c, seed, i)).collect();
+            // Each river's channel out to sea, a little short of its end: where one
+            // joins another it ends on the other's centreline.
+            let mouths: Vec<(Vec2, Vec2)> = (0..c.size * c.size)
+                .filter(|&i| !c.ocean[i] && c.ocean[c.rcv[i] as usize] && c.discharge[i] >= MIN_RIVER_Q)
+                .map(|i| {
+                    let exit = (node(&c, i) + node(&c, c.rcv[i] as usize)) * 0.5;
+                    (exit, exit + (mouth_end(&c, i) - exit) * 0.97)
+                })
+                .collect();
+            for (n, a) in mouths.iter().enumerate() {
+                for b in &mouths[n + 1..] {
+                    assert!(!crosses(a.0, a.1, b.0, b.1), "the river mouths at {} and {} cross", a.0, b.0);
+                }
+            }
+            for (n, d) in deltas.iter().enumerate() {
+                fans += 1;
+                for other in &deltas[n + 1..] {
+                    assert!((other.pos - d.pos).length() >= other.radius + d.radius, "fans at {} and {} overlap", d.pos, other.pos);
+                }
+                let channels = d.channels();
+                branches += channels.len() - 1;
+                for (k, channel) in channels.iter().enumerate() {
+                    for w in channel.windows(2) {
+                        let heading = (w[1] - w[0]).normalize().dot(d.seaward());
+                        assert!(heading > 0.6, "channel {k} of the delta at {} heads {heading} seaward", d.pos);
+                    }
+                    // A branch touches the main channel where it leaves it, and nothing after.
+                    for (j, other) in channels.iter().enumerate().skip(k + 1) {
+                        for (ia, a) in channel.windows(2).enumerate() {
+                            for (ib, b) in other.windows(2).enumerate() {
+                                if k == 0 && ib == 0 {
+                                    assert!(ia == 0);
+                                    continue;
+                                }
+                                assert!(!crosses(a[0], a[1], b[0], b[1]), "channels {k} and {j} of the delta at {} cross", d.pos);
+                            }
+                        }
+                    }
+                }
+                for channel in &channels[1..] {
+                    // It leaves the main channel beyond the apex and ends further out than it began.
+                    let (first, last) = (channel[0], channel[channel.len() - 1]);
+                    assert!((first - d.pos).dot(d.seaward()) > 0.0);
+                    assert!((last - d.pos).length() > d.radius);
+                    for w in channel.windows(2) {
+                        for q in [w[0], (w[0] + w[1]) * 0.5] {
+                            if (q - d.pos).length() > d.radius * 1.2 {
+                                continue;
+                            }
+                            assert!(coast_ground(&c, q).is_some_and(|g| g < 0.0), "a branch of the delta at {} runs over land at {q}", d.pos);
+                            let (x, z) = (q.x as i32, q.y as i32);
+                            let col = Sampler::new(&c, seed, x, z, 1).column(x, z);
+                            cut += 1;
+                            assert!(col.ground < 0.0, "a branch of the delta at {} is blocked at {q}: ground {}", d.pos, col.ground);
+                            if col.water == Some(0) {
+                                wet += 1;
+                            }
+                        }
+                    }
+                }
+                // Across the fan and the estuary round it, columns agree between samplers
+                // of different areas.
+                for k in 0..32 {
+                    let a = k as f32 * 0.8;
+                    let q = d.pos + Vec2::from_angle(a) * (d.radius * 1.6 * (1 + k % 4) as f32 / 4.0);
+                    let (x, z) = (q.x as i32, q.y as i32);
+                    let (near, wide) = (Sampler::new(&c, seed, x, z, 1).column(x, z), Sampler::new(&c, seed, x - 50, z - 13, 64).column(x, z));
+                    assert!(near.ground == wide.ground && near.cover == wide.cover && near.water == wide.water, "column {x},{z} differs between samplers");
+                }
+            }
+        }
+        eprintln!("{fans} deltas, {branches} distributaries, {wet}/{cut} points along them under water");
+        assert!(fans >= 20, "only {fans} deltas");
+        assert!(branches >= fans, "only {branches} distributaries on {fans} deltas");
+        assert!(wet * 10 >= cut * 9, "{wet}/{cut} distributary points under water");
     }
 
     #[test]

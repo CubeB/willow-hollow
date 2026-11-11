@@ -18,42 +18,202 @@ use crate::{
     scale::{OLD_VOXEL, m, m64},
 };
 
-use super::{Cover, MIN_RIVER_Q, funnel, node, sea_cliff, smoothstep};
+use super::{Cover, MIN_RIVER_Q, coast_ground, funnel, mouth_end, node, sea_cliff, smoothstep};
 
 /// Smallest discharge that builds a delta.
 const DELTA_Q: f32 = 400.0;
 
+/// Farthest a delta's fan reaches from its apex, in voxels.
+const DELTA_RADIUS: f32 = m(110.0);
+
+/// Line segments a distributary's curve is flattened into.
+const BRANCH_SEGS: usize = 6;
+
+/// A distributary: a channel that leaves a delta's main channel and runs out across
+/// the fan to the sea.
+struct Branch {
+    /// Its centreline in the delta's own frame: x out to sea along the main channel,
+    /// y to the side.
+    pts: [Vec2; BRANCH_SEGS + 1],
+    /// Half its width where it leaves the main channel.
+    half: f32,
+}
+
+impl Branch {
+    /// A branch leaving the main channel `start` out from the apex, heading `a0` off
+    /// the main channel's direction to begin with and `a1` by its end `length` on.
+    fn new(start: f32, length: f32, side: f32, a0: f32, a1: f32, half: f32) -> Branch {
+        let heading = |a: f32| vec2(a.cos(), side * a.sin());
+        let p0 = vec2(start, 0.0);
+        let p1 = p0 + heading(a0) * (length * 0.5);
+        let p2 = p1 + heading(a1) * (length * 0.5);
+        let mut pts = [Vec2::ZERO; BRANCH_SEGS + 1];
+        for (k, pt) in pts.iter_mut().enumerate() {
+            let t = k as f32 / BRANCH_SEGS as f32;
+            *pt = p0 * ((1.0 - t) * (1.0 - t)) + p1 * (2.0 * (1.0 - t) * t) + p2 * (t * t);
+        }
+        Branch { pts, half }
+    }
+
+    /// How far `q` (in the delta's frame) is from the centreline, as a share of the
+    /// channel's half-width there: under 1 inside the channel.
+    fn across(&self, q: Vec2) -> f32 {
+        let mut best = f32::MAX;
+        for (k, w) in self.pts.windows(2).enumerate() {
+            let ab = w[1] - w[0];
+            let t = ((q - w[0]).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            // Narrowing towards the sea.
+            let half = self.half * (1.0 - 0.45 * (k as f32 + t) / BRANCH_SEGS as f32);
+            best = best.min((q - (w[0] + ab * t)).length() / half);
+        }
+        best
+    }
+}
+
 /// A small delta: a fan of low mud flats built out into shallow sea in front of a big,
 /// slow river, split by a few distributary channels.
+///
+/// The fan opens from where the river's channel meets open water. The main channel runs
+/// straight on through it, and one or two distributaries leave it on each side, each
+/// heading out to sea at an angle away from the main channel and bending a little as
+/// it goes. On one side the branch that leaves first always heads further off than the
+/// one that leaves after it, so no two channels can meet again or cross, and none can
+/// turn back to land.
 pub struct Delta {
-    /// Where the river reaches the coast, and the way it flows out to sea.
+    /// The apex of the fan, where the river reaches open water, and the way it flows
+    /// out to sea.
     pub(super) pos: Vec2,
     dir: Vec2,
     /// Width of the river at its mouth, in voxels.
     pub(super) width: f32,
     /// How far the fan reaches out to sea at most.
     pub radius: f32,
+    branches: Vec<Branch>,
     salt: u32,
 }
 
 impl Delta {
     /// The delta at the mouth of the river leaving node `i`, if it builds one: only big
-    /// rivers whose last reach is already down at sea level, so slow and silty.
+    /// rivers whose last reach is already down at sea level, so slow and silty, and
+    /// only the biggest of any whose fans would run into each other.
     pub fn at(c: &Continent, seed: u32, i: usize) -> Option<Delta> {
+        let mut delta = Self::fan(c, seed, i)?;
+        // Mouths close enough for their fans to overlap. A node can sit several cells
+        // from its own cell, and the apex some cells on from the node.
+        let n = c.size as i32;
+        let (x, z) = ((i % c.size) as i32, (i / c.size) as i32);
+        let span = (2.0 * DELTA_RADIUS / c.cell_size()).ceil() as i32 + 10;
+        // The channels other rivers run out to sea in nearby: where each starts and
+        // ends, and half its width.
+        let mut mouths = Vec::new();
+        for nz in (z - span).max(1)..=(z + span).min(n - 2) {
+            for nx in (x - span).max(1)..=(x + span).min(n - 2) {
+                let j = (nz * n + nx) as usize;
+                let r = c.rcv[j] as usize;
+                if j == i || c.ocean[j] || !c.ocean[r] || c.discharge[j] < MIN_RIVER_Q {
+                    continue;
+                }
+                let bigger = (c.discharge[j], i) > (c.discharge[i], j);
+                if bigger
+                    && let Some(other) = Self::fan(c, seed, j)
+                    && (other.pos - delta.pos).length() < other.radius + delta.radius
+                {
+                    return None;
+                }
+                let half = Continent::river_width(c.discharge[j]) * OLD_VOXEL * funnel(c, r, c.discharge[j]) * 0.65;
+                mouths.push(((node(c, j) + node(c, r)) * 0.5, mouth_end(c, j), half));
+            }
+        }
+        delta.branch(c, &mouths);
+        Some(delta)
+    }
+
+    /// The fan the river leaving node `i` would build, without its distributaries.
+    fn fan(c: &Continent, seed: u32, i: usize) -> Option<Delta> {
         let r = c.rcv[i] as usize;
         let q = c.discharge[i];
         if c.ocean[i] || !c.ocean[r] || q < DELTA_Q || c.water_level[i] > 3.0 {
             return None;
         }
         let (a, b) = (node(c, i), node(c, r));
+        let exit = (a + b) * 0.5;
+        let dir = (b - a).try_normalize()?;
+        // The coast the simulation drew is rarely where the river crosses it: follow
+        // the channel out to the first open water, so the fan stands in the sea rather
+        // than half of it lying buried under the land beside the last reach.
+        let run = (mouth_end(c, i) - exit).length();
+        let step = c.cell_size() / 8.0;
+        let pos = (0..=(run / step) as usize).map(|k| exit + dir * (k as f32 * step)).find(|&p| coast_ground(c, p).is_some_and(|g| g < -m(0.4)))?;
         let width = Continent::river_width(q) * OLD_VOXEL * funnel(c, r, q);
         Some(Delta {
-            pos: (a + b) * 0.5,
-            dir: (b - a).try_normalize()?,
+            pos,
+            dir,
             width,
-            radius: (width * 5.0).clamp(m(40.0), m(110.0)),
+            radius: (width * 5.0).clamp(m(40.0), DELTA_RADIUS),
+            branches: Vec::new(),
             salt: hash2(seed ^ 0xde17, i as i32, 1),
         })
+    }
+
+    /// Splits the main channel into distributaries, none of which may run into one of
+    /// the `mouths` of other rivers (the ends of each one's channel and half its width).
+    fn branch(&mut self, c: &Continent, mouths: &[(Vec2, Vec2, f32)]) {
+        let roll = |k: i32| unit(hash2(self.salt ^ 0xb2a, k, 3));
+        let reach = self.radius * 1.25;
+        let mut branches = Vec::new();
+        for (n, side) in [1.0f32, -1.0].into_iter().enumerate() {
+            let k = n as i32 * 8;
+            // The first to leave swings well out to the side.
+            let start = self.radius * (0.05 + 0.12 * roll(k));
+            // It bends as it goes, one way or the other.
+            let a0 = 0.5 + 0.3 * roll(k + 1);
+            let a1 = if a0 > 0.65 { 0.5 } else { 0.68 } + 0.12 * roll(k + 2);
+            let half = (self.width * 0.3).clamp(m(0.8), m(4.5));
+            branches.push(Branch::new(start, reach - start, side, a0, a1, half));
+            // Bigger deltas split again further out, the second branch keeping
+            // between the first and the main channel.
+            if self.width > m(8.0) && roll(k + 3) < 0.65 {
+                let start = self.radius * (0.3 + 0.15 * roll(k + 4));
+                let a0 = 0.2 + 0.22 * roll(k + 5);
+                let a1 = if a0 > 0.31 { 0.2 } else { 0.34 } + 0.08 * roll(k + 6);
+                let half = (self.width * 0.22).clamp(m(0.8), m(3.5));
+                branches.push(Branch::new(start, reach - start, side, a0, a1, half));
+            }
+        }
+        // A branch must cross open water all the way: one that would run into the
+        // shore beside the mouth, an islet, or another river's channel is not cut at all.
+        branches.retain(|b| {
+            b.pts.windows(2).flat_map(|w| [w[0], (w[0] + w[1]) * 0.5, w[1]]).all(|q| {
+                let p = self.place(q);
+                let clear = mouths.iter().all(|&(from, to, half)| {
+                    let run = to - from;
+                    let t = ((p - from).dot(run) / run.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                    (p - (from + run * t)).length() > half + b.half + m(4.0)
+                });
+                q.length() > self.radius * 1.2 || (clear && coast_ground(c, p).is_some_and(|g| g < 0.0))
+            })
+        });
+        self.branches = branches;
+    }
+
+    /// A point of the delta's own frame (x out to sea, y to the side) in
+    /// continent-local voxels.
+    fn place(&self, q: Vec2) -> Vec2 {
+        self.pos + self.dir * q.x + self.dir.perp() * q.y
+    }
+
+    /// The centrelines of the delta's channels, in continent-local voxels: the main
+    /// channel first, then each distributary from where it leaves the main channel.
+    #[cfg(test)]
+    pub fn channels(&self) -> Vec<Vec<Vec2>> {
+        let main = vec![self.pos, self.place(vec2(self.radius * 1.25, 0.0))];
+        std::iter::once(main).chain(self.branches.iter().map(|b| b.pts.iter().map(|&q| self.place(q)).collect())).collect()
+    }
+
+    /// The way the river flows out to sea.
+    #[cfg(test)]
+    pub fn seaward(&self) -> Vec2 {
+        self.dir
     }
 
     /// Builds the delta into a sea-side column at `p` whose ground is `ground`. Returns
@@ -70,6 +230,17 @@ impl Delta {
         // rather than ending in a wall over deep water.
         let shelf = smoothstep(-m(6.0), -m(2.5), *ground);
         let side = self.dir.perp_dot(v);
+        // Channels: the main one straight out, narrowing towards the sea, and the
+        // distributaries that leave it. They run on past the edge of the fan, so
+        // whatever shoals lie beyond it cannot close them off.
+        let main = side.abs() / (self.width * 0.5 * (1.0 - 0.4 * (d / self.radius).min(1.0)));
+        let q = vec2(along, side);
+        let across = self.branches.iter().map(|b| b.across(q)).fold(main, f32::min);
+        if across < 1.0 {
+            let depth = m(1.0) + m(0.8) * (1.0 - across);
+            *ground = ground.min(-depth);
+            return None;
+        }
         let angle = side.atan2(along);
         // The fan's edge, lobed.
         let lobes = perlin2(self.salt, angle as f64 * 2.5, 0.5) * 0.3;
@@ -78,26 +249,39 @@ impl Delta {
             return None;
         }
         let t = d / reach.max(1.0);
-        // Distributaries: the main channel straight out and two that branch off it,
-        // each wandering and narrowing towards the sea.
-        for (k, a0) in [0.0f32, -0.6, 0.55].into_iter().enumerate() {
-            let wander = perlin2(self.salt ^ (k as u32 + 1), d as f64 / m64(35.0), k as f64 * 3.1) * 0.35;
-            let lateral = (angle - a0 - wander).abs() * d;
-            let half = self.width * if k == 0 { 0.5 } else { 0.3 } * (1.0 - 0.4 * t);
-            // Branches split off a little way out.
-            let started = k == 0 || d > self.width * 1.5;
-            if started && lateral < half {
-                let depth = m(1.0) + m(0.8) * (1.0 - lateral / half);
-                *ground = ground.min(-depth);
-                return None;
-            }
-        }
         // Flats a little above the sea, fading into it at the fan's edge.
         let flat = m(0.2) + m(0.3) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.2);
         let edge = smoothstep(0.82, 1.0, t).max(1.0 - shelf);
         *ground = ground.max(flat + (*ground - flat) * edge);
         Some(if edge > 0.3 { Cover::Beach } else { Cover::Bank })
     }
+}
+
+/// The deltas whose fans can reach the area from `lo` to `hi` (continent-local voxels).
+/// Gathered from far enough out that every column sees the same deltas whatever area
+/// it is sampled with.
+pub fn deltas(c: &Continent, seed: u32, lo: Vec2, hi: Vec2) -> Vec<Delta> {
+    let cs = c.cell_size();
+    // A river node can sit several cells from its own cell (see `node`), and the fan's
+    // apex as far again along the mouth's channel.
+    let pad = DELTA_RADIUS * 1.2 + cs * ((10.0 * (c.size as f32 / 1024.0)).max(8.0) + 5.0);
+    let cell = |v: f32| ((v / cs).floor() as i32).clamp(1, c.size as i32 - 2) as usize;
+    let mut out = Vec::new();
+    for z in cell(lo.y - pad)..=cell(hi.y + pad) {
+        for x in cell(lo.x - pad)..=cell(hi.x + pad) {
+            let i = z * c.size + x;
+            // Cheap checks first: almost no cell is a big river's mouth.
+            if c.ocean[i] || !c.ocean[c.rcv[i] as usize] || c.discharge[i] < DELTA_Q {
+                continue;
+            }
+            if let Some(delta) = Delta::at(c, seed, i)
+                && (delta.pos - delta.pos.clamp(lo, hi)).length() < delta.radius * 1.2
+            {
+                out.push(delta);
+            }
+        }
+    }
+    out
 }
 
 /// Raises sand bars on the bed of a tidal river channel. `bed` is the channel bed and
@@ -117,10 +301,18 @@ pub fn sand_bar(seed: u32, wx: f64, wz: f64, across: f32, bed: f32) -> f32 {
 /// Farthest from a river mouth that its estuary flats reach, in voxels.
 const MOUTH_REACH: f32 = m(120.0);
 
+/// How far beyond a mouth's estuary the aimless creeks of swamp coasts keep clear of it,
+/// as a multiple of the estuary's reach.
+const MOUTH_CLEAR: f32 = 1.6;
+
 /// Where a river reaches the sea: near it the shore is estuary mud and reeds rather than
 /// beach or cliff.
 pub struct Mouth {
     pos: Vec2,
+    /// The way the river flows out to sea.
+    dir: Vec2,
+    /// The stretch of its channel either side of the coast.
+    run: (Vec2, Vec2),
     /// Fully estuary within `inner` of the mouth, fading out by `outer`.
     inner: f32,
     outer: f32,
@@ -139,6 +331,8 @@ impl Mouth {
         let inner = (width * 2.5).clamp(m(20.0), MOUTH_REACH / 2.2);
         Some(Mouth {
             pos: (node(c, i) + node(c, r)) * 0.5,
+            dir: (node(c, r) - node(c, i)).try_normalize()?,
+            run: (node(c, i), mouth_end(c, i)),
             inner,
             outer: inner * 2.2,
             strength: smoothstep(MIN_RIVER_Q * 4.0, 600.0, q),
@@ -148,6 +342,24 @@ impl Mouth {
     fn weight(&self, p: Vec2) -> f32 {
         (1.0 - smoothstep(self.inner, self.outer, (p - self.pos).length())) * self.strength
     }
+
+    /// Farthest from the mouth that it changes the shore.
+    fn reach(&self) -> f32 {
+        let run = (self.run.0 - self.pos).length().max((self.run.1 - self.pos).length());
+        (self.outer * MOUTH_CLEAR).max(run + m(16.0))
+    }
+
+    /// How far `p` is from the river's channel where it runs out to sea.
+    fn clearance(&self, p: Vec2) -> f32 {
+        let run = self.run.1 - self.run.0;
+        let t = ((p - self.run.0).dot(run) / run.length_squared().max(1e-6)).clamp(0.0, 1.0);
+        (p - (self.run.0 + run * t)).length()
+    }
+
+    /// How near `p` is to the mouth, 0 to 1, out to well beyond its estuary.
+    fn nearness(&self, p: Vec2) -> f32 {
+        1.0 - smoothstep(self.outer, self.outer * MOUTH_CLEAR, (p - self.pos).length())
+    }
 }
 
 /// The river mouths whose estuaries can reach the area from `lo` to `hi` (continent-local
@@ -156,14 +368,14 @@ impl Mouth {
 pub fn mouths(c: &Continent, lo: Vec2, hi: Vec2) -> Vec<Mouth> {
     let cs = c.cell_size();
     // A river node can sit several cells from its own cell (see `node`).
-    let pad = MOUTH_REACH + cs * (10.0 * (c.size as f32 / 1024.0)).max(8.0);
+    let pad = MOUTH_REACH * MOUTH_CLEAR + cs * (10.0 * (c.size as f32 / 1024.0)).max(8.0);
     let cell = |v: f32| ((v / cs).floor() as i32).clamp(1, c.size as i32 - 2) as usize;
     let mut out = Vec::new();
     for z in cell(lo.y - pad)..=cell(hi.y + pad) {
         for x in cell(lo.x - pad)..=cell(hi.x + pad) {
             if let Some(mouth) = Mouth::at(c, z * c.size + x) {
                 let near = mouth.pos.clamp(lo, hi);
-                if (mouth.pos - near).length() < mouth.outer {
+                if (mouth.pos - near).length() < mouth.reach() {
                     out.push(mouth);
                 }
             }
@@ -286,13 +498,32 @@ impl Shores {
             .filter(|&&i| !c.ocean[i])
             .max_by(|&&a, &&b| c.height[a].total_cmp(&c.height[b]))
             .map_or(Biome::Ocean, |&i| Biome::from_u8(c.biome[i]));
+        // The mouth whose estuary this is, and how clearly it is that one's rather than
+        // the next one's.
+        let (mut mouth, mut second, mut creek, mut own) = (0.0f32, 0.0f32, Vec2::ZERO, usize::MAX);
+        for (k, m) in mouths.iter().enumerate() {
+            let w = m.weight(p);
+            if w > mouth {
+                second = mouth;
+                mouth = w;
+                creek = vec2((p - m.pos).dot(m.dir), m.dir.perp_dot(p - m.pos));
+                own = k;
+            } else {
+                second = second.max(w);
+            }
+        }
+        // Its creeks stop short of any other river's channel rather than crossing it.
+        let rival = mouths.iter().enumerate().filter(|&(k, _)| k != own).map(|(_, m)| m.clearance(p)).fold(f32::MAX, f32::min);
         Shore {
             exposure: blend(|s| s.exposure),
             onshore: blend(|s| s.onshore),
             shelter: blend(|s| s.shelter),
             hinter: blend(|s| s.hinter),
             seaness: corners.iter().zip(weights).map(|(&i, w)| if c.ocean[i] { w } else { 0.0 }).sum(),
-            mouth: mouths.iter().map(|m| m.weight(p)).fold(0.0, f32::max),
+            mouth,
+            mouth_near: mouths.iter().map(|m| m.nearness(p)).fold(0.0, f32::max),
+            mouth_lead: (mouth - second).min(smoothstep(m(6.0), m(16.0), rival)),
+            creek,
             temperature: corners.iter().zip(weights).map(|(&i, w)| c.temperature[i] * w).sum(),
             biome,
             wind: c.desc.wind,
@@ -330,6 +561,14 @@ pub struct Shore {
     pub seaness: f32,
     /// Nearness to a river mouth, 0 to 1.
     pub mouth: f32,
+    /// Nearness to any river mouth at all, however small, out to beyond its estuary.
+    mouth_near: f32,
+    /// How much nearer that mouth is than the next nearest, 0 to 1; 0 beside another
+    /// river's channel.
+    mouth_lead: f32,
+    /// Where the column lies from that mouth, in voxels: how far out along the way its
+    /// river runs to sea, and how far to the side.
+    creek: Vec2,
     pub temperature: f32,
     /// The biome of the land behind the shore.
     pub biome: Biome,
@@ -402,21 +641,47 @@ impl Shore {
             self.rock = b > 0.25;
             *ground += b;
         }
-        // Estuary flats: low mud just above the sea, cut by winding creeks.
+        // Estuary flats: low mud just above the sea, cut by creeks.
         if mud_w > 0.0 {
             let band = smoothstep(-m(2.4), -m(0.4), g) * (1.0 - smoothstep(m(2.6), m(3.8), g));
-            let creek = perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)).abs() < 0.05;
-            let flat = if creek {
-                -m(0.9)
-            } else {
-                m(0.2) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.15)
-            };
+            let mut flat = m(0.2) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.15);
+            flat += (-m(0.9) - flat) * self.creek_depth(seed, wx, wz);
             *ground += (flat - *ground) * mud_w * band;
         }
         // Dunes heaped up behind wide beaches by the onshore wind.
         self.dune = self.dune_height(seed, slope, wx, wz, g) * sand_w * fade;
         *ground += self.dune;
         None
+    }
+
+    /// How far a tidal creek is cut into the mud flats at this column, 0 to 1.
+    ///
+    /// Beside a river mouth the creeks drain the way the river does: each runs out to
+    /// sea alongside it, swaying a little, and since each keeps its own distance to the
+    /// side of the river none can loop, turn back or cross another. Swamp coasts away
+    /// from any river mouth keep aimless winding creeks.
+    fn creek_depth(&self, seed: u32, wx: f64, wz: f64) -> f32 {
+        let winding = if perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)).abs() < 0.05 {
+            1.0 - self.mouth_near
+        } else {
+            0.0
+        };
+        if self.mouth <= 0.1 || self.mouth_lead <= 0.0 {
+            return winding;
+        }
+        let (along, side) = (self.creek.x as f64, self.creek.y as f64);
+        let sway = perlin2(seed ^ 0x30d3, along / m64(45.0), 0.5) as f64 * m64(8.0);
+        // One creek at most in each strip of flats beside the river.
+        let strip = (side + sway) / m64(32.0);
+        let h = hash2(seed ^ 0x30d4, strip.floor() as i32, 0);
+        let off = ((strip - strip.floor()) as f32 - (0.25 + 0.5 * unit(h))).abs() * m(32.0);
+        let draining = if unit(h.rotate_left(20)) < 0.75 && off < m(0.7) + m(0.7) * unit(h.rotate_left(11)) {
+            // Shoaling out where the next mouth's creeks take over.
+            smoothstep(0.1, 0.35, self.mouth) * smoothstep(0.0, 0.25, self.mouth_lead)
+        } else {
+            0.0
+        };
+        winding.max(draining)
     }
 
     /// How stony and how muddy this shore is, from about 0 to 1 and beyond: the stony
