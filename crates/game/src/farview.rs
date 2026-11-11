@@ -346,10 +346,15 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
         return Look { ground: sand, far: sand, plant: 0, lift: 0.0 };
     }
     let biome = Biome::from_u8(c.biome[i]);
-    let beach = c.height[i] < 2.5 && near_ocean(c, i);
-    let mut ground = color(if beach { mat::SAND } else { mat::ground_cover(biome) });
+    // Sand as far in from the shore as the voxel world's beach reaches, which the
+    // triangles shade into the land around it.
+    let cs = c.cell_size();
+    let centre = glam::Vec2::new((i % c.size) as f32 + 0.5, (i / c.size) as f32 + 0.5) * cs;
+    let sand = surface::beach_share(c, centre, c.height[i] * OLD_VOXEL);
+    let beach = sand > 0.5;
+    let mut ground = mix(color(mat::ground_cover(biome)), color(mat::SAND), sand);
     // The voxel world's snow line wanders by 0.015 either way of 0.10.
-    let snow = if beach { 0.0 } else { ((0.115 - c.temperature[i]) / 0.03).clamp(0.0, 1.0) };
+    let snow = ((0.115 - c.temperature[i]) / 0.03).clamp(0.0, 1.0) * (1.0 - sand);
     ground = mix(ground, color(mat::SNOW), snow);
     // Ground too steep to hold soil is bare rock, a quarter of it the darker kind. The
     // grid's slopes are gentler than the voxels', hence the steeper threshold.
@@ -513,13 +518,6 @@ fn far_surface_y(c: &Continent, stride: usize, lx: f32, lz: f32) -> f32 {
     } else {
         d + (cc - d) * (1.0 - fu) + (b - d) * (1.0 - fv)
     }
-}
-
-fn near_ocean(c: &Continent, i: usize) -> bool {
-    let s = c.size as isize;
-    [-1, 1, -s, s]
-        .iter()
-        .any(|&o| c.ocean[(i as isize + o).clamp(0, (c.size * c.size) as isize - 1) as usize])
 }
 
 fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize) -> CellMesh {
