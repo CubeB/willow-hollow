@@ -16,6 +16,7 @@ pub mod parts;
 pub mod pebbles;
 pub mod plants;
 pub mod props;
+pub mod roots;
 pub mod shape;
 pub mod tree_detail;
 pub mod trees;
@@ -76,6 +77,8 @@ pub struct Placement {
     pub turns: u32,
     /// How the model follows the ground, for those that lie along it.
     pub lie: Option<Lie>,
+    /// Roots bared where the ground falls away from a tree.
+    pub roots: Option<roots::Roots>,
 }
 
 impl Placement {
@@ -413,12 +416,22 @@ pub fn place(
                         pos.y = y;
                     }
                 }
+                let roots = if layer.salt == SMALL.salt {
+                    None
+                } else {
+                    let ground = |x: i32, z: i32| {
+                        let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
+                        c.water_surface().is_none().then_some(c.top())
+                    };
+                    roots::find(lib, species, variant, turns, pos, world_seed, ground)
+                };
                 out.push(Placement {
                     pos,
                     species,
                     variant,
                     turns,
                     lie,
+                    roots,
                 });
             }
         }
@@ -507,6 +520,9 @@ pub fn stamp(lib: &Library, mats: &Materials, p: &Placement, mut set: impl FnMut
         // Wood and rock displace whatever is there; leaves only fill empty space.
         let force = mats.get(v).kind == Kind::Solid;
         set(q, v, force);
+    }
+    if let Some(roots) = &p.roots {
+        roots.voxels(p.pos, |q, v| set(q, v, true));
     }
 }
 
@@ -638,6 +654,7 @@ mod tests {
                         variant,
                         turns,
                         lie: Some(lie),
+                        roots: None,
                     };
                     let mut bottoms: HashMap<(i32, i32), i32> = HashMap::new();
                     stamp(&lib, &mat::build(), &p, |q, _, _| {

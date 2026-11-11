@@ -701,6 +701,20 @@ impl GameWorld {
                 }
             }
         }
+        // The fine strands roots end in, drawn by the chunk column each box's corner is in.
+        let mut strands = Vec::new();
+        for p in &placements {
+            if let Some(roots) = &p.roots {
+                strands.clear();
+                roots.strands(p.pos, &mut strands);
+                for b in &strands {
+                    let q = IVec3::from_array(b.lo).div_euclid(cells);
+                    if (wx0 + 1..=wx0 + CHUNK).contains(&q.x) && (wz0 + 1..=wz0 + CHUNK).contains(&q.z) {
+                        plants.push(*b);
+                    }
+                }
+            }
+        }
         // Now the world's shape is final, things can grow on it.
         let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
         let mut standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
