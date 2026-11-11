@@ -7,7 +7,8 @@
 //!   dashes and peeling strips, ringed palm). Patterns come from world coordinates, so they
 //!   run unbroken up a trunk and across voxels, and merge into long boxes.
 //! - **Twigs** stick out of limbs, never trunks, so bare winter trees show them too, and
-//!   out of evergreen foliage, whose leaves never fall from around them.
+//!   out of evergreen foliage, whose leaves never fall from around them. Not palms: a
+//!   palm has no branches, only fronds on a bare trunk.
 //! - **Leaf clusters** hang under canopies and tuft their sides, in the leaf's own
 //!   material, so they turn, fall and sway exactly as the leaves they sit on.
 //!
@@ -256,7 +257,7 @@ pub fn grow(chunks: &[(i32, PaddedChunk)], voxels: &ColumnVoxels, mats: &Materia
             if h >= 1 && h <= relief.reach() + ragged {
                 bark.push(Job { site: *site, key: h });
             }
-        } else if h >= m(3.0) as i32 && site.toward != Toward::Above {
+        } else if h >= m(3.0) as i32 && site.toward != Toward::Above && site.host != mat::BARK_PALM {
             let roll = unit(hash3(seed ^ 0xba11, site.air.x, site.air.y * 7 + site.toward as i32, site.air.z));
             if roll < LIMB_TWIGS {
                 limb_twigs.push(Job { site: *site, key: (roll * 1e6) as i32 });
@@ -333,7 +334,7 @@ pub fn grow(chunks: &[(i32, PaddedChunk)], voxels: &ColumnVoxels, mats: &Materia
         // falling leaf drops whole voxels at a time, and every corner of a box must agree.
         let mut raster = Raster::new();
         let mut plot = site.plot(&mut raster);
-        if is_evergreen(site.host) && site.toward != Toward::Below && rng.unit() < CANOPY_TWIGS {
+        if is_evergreen(site.host) && site.host != mat::LEAVES_PALM && site.toward != Toward::Below && rng.unit() < CANOPY_TWIGS {
             twig(&mut plot, &mut rng, mat::TWIG);
         } else {
             cluster(&mut plot, &mut rng, site.toward == Toward::Above, site.host);
@@ -602,6 +603,15 @@ mod tests {
         }
         // Deciduous foliage grows no twigs that would hang in the air once it has fallen.
         assert!(!out.iter().any(|b| b.sway_hi && b.voxel == mat::TWIG));
+    }
+
+    #[test]
+    fn palms_grow_no_twigs() {
+        for seed in 0..4 {
+            let palm = grown(64, mat::BARK_PALM, mat::LEAVES_PALM, seed);
+            assert!(palm.iter().any(|b| b.voxel == mat::LEAVES_PALM), "no frond clusters");
+            assert!(!palm.iter().any(|b| b.voxel == mat::TWIG || b.voxel == mat::TWIG_PALE), "a palm grew a twig");
+        }
     }
 
     #[test]
