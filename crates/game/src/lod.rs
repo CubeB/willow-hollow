@@ -122,8 +122,8 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
             },
             mat::DIRT,
         ),
-        // Tidal flats.
-        Cover::Bank if col.ground < worldgen::scale::m(1.0) => (mat::MUD, mat::MUD),
+        // Tidal flats: wet sand where barely above the sea, as the voxel world has them.
+        Cover::Bank if !col.biome.arid() && worldgen::surface::flat_is_sand(col.ground, 0.5) => (mat::SAND, mat::SAND),
         Cover::Bank | Cover::Land if slope > 0.95 => {
             let (light, _) = mat::bedrock(col.biome);
             (light, light)

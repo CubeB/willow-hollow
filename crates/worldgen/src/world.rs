@@ -258,10 +258,12 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
         // Banks take the ground of the land around them: grass with a little bare earth
         // in green country, sand in the desert, mud only where the land is mud anyway.
-        // Flats at sea level are wet sand along the water, in broad patches.
+        // Flats barely above the sea are wet sand, the grass above them reaching down in
+        // the odd tongue.
         Cover::Bank if col.biome.arid() => (cover, mat::subsoil(cover)),
-        Cover::Bank if col.ground < m(0.6) && patch < 0.5 => (mat::SAND, mat::SAND),
-        Cover::Bank if roll < 0.10 && mat::subsoil(cover) == mat::DIRT => (mat::DIRT, mat::DIRT),
+        // The edge frays over a voxel or two whatever the slope, never into a band of speckle.
+        Cover::Bank if crate::surface::flat_is_sand(col.ground + (roll - 0.5) * ((steepness + 0.1) * 2.5).min(0.6), patch) => (mat::SAND, mat::SAND),
+        Cover::Bank if roll < 0.10 && col.river < m(1.4) && mat::subsoil(cover) == mat::DIRT => (mat::DIRT, mat::DIRT),
         Cover::Bank | Cover::Land => {
             // Ground too steep to hold soil shows bare rock.
             // Soil gives way to rock between about 35 and 50 degrees, raggedly.
@@ -419,7 +421,7 @@ impl GameWorld {
                 let steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
-                let patch = perlin2(self.seed ^ 0x9a7c, wx / m64(7.2), wz / m64(7.2)) * 0.5 + 0.5;
+                let patch = crate::surface::ground_patch(self.seed, wx, wz);
                 let col = &columns[px * PAD + pz];
                 let skin = surface_materials(col, steep, roll, patch);
                 let mut growing = skin.0;
