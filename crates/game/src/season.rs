@@ -75,6 +75,8 @@ pub fn warmth(biome: Biome) -> f32 {
         Biome::Tundra => -0.35,
         Biome::Taiga => -0.2,
         Biome::Heath | Biome::Grassland | Biome::Deciduous | Biome::OldGrowth | Biome::Ocean => 0.25,
+        // Flowering grass below the summit snow: snowed on in winter, green in summer.
+        Biome::AlpineMeadow => 0.25,
         // Steppe is the dry, warm side of the heath: snow is rare there.
         Biome::Steppe => 0.45,
         // Woodland is the wet tropics between savanna and rainforest.
@@ -113,10 +115,13 @@ impl Ground {
         Self { snow: lying.clamp(0.0, 1.0), frozen: ice.clamp(0.0, 1.0), wet, highland, snowline: Self::snowline(warmth) }
     }
 
-    /// The height of the year-round summit snow: lower in the cold, and only on real high
-    /// mountains where it never snows below.
+    /// The height of the year-round summit snow, metres: lower in the cold, and only on
+    /// real high mountains where it never snows below. Biomes already go colder with
+    /// height (Alpine is the high summits), so summer snow is kept to those: 320 m in the
+    /// temperate lands, clear of their hills and of the alpine meadows at about 300 m;
+    /// 170 m on the Alpine summits; 380 m and up where it never snows.
     pub fn snowline(warmth: f32) -> f32 {
-        if warmth >= NEVER_SNOWS { 220.0 + (warmth - NEVER_SNOWS) * 150.0 } else { 70.0 + 80.0 * warmth.max(-0.5) }
+        if warmth >= NEVER_SNOWS { 380.0 + (warmth - NEVER_SNOWS) * 150.0 } else { 270.0 + 200.0 * warmth.max(-0.5) }
     }
 }
 
@@ -167,6 +172,16 @@ mod tests {
     }
 
     #[test]
+    fn summer_snow_is_only_on_high_peaks() {
+        // Temperate hills and alpine meadows (about 300 m) are clear in summer.
+        for b in [Biome::Deciduous, Biome::Grassland, Biome::AlpineMeadow, Biome::BirchGrove] {
+            assert!(Ground::snowline(warmth(b)) >= 300.0, "{b:?}");
+        }
+        assert!(Ground::snowline(warmth(Biome::Taiga)) >= 200.0);
+        assert!(Ground::snowline(warmth(Biome::Alpine)) < Ground::snowline(warmth(Biome::Taiga)));
+    }
+
+    #[test]
     fn warm_biomes_never_snow() {
         let warm = [
             Biome::Desert,
@@ -183,7 +198,7 @@ mod tests {
             for i in 0..100 {
                 let g = Ground::at(i as f32 / 100.0, warmth(b), 1.0, 1.0, 0.0);
                 assert_eq!((g.snow, g.frozen, g.highland), (0.0, 0.0, 0.0), "{b:?}");
-                assert!(g.snowline >= 220.0);
+                assert!(g.snowline >= 380.0);
             }
         }
         for b in [Biome::Tundra, Biome::Alpine, Biome::Taiga, Biome::SnowyPine, Biome::Deciduous, Biome::Bog, Biome::Steppe] {
