@@ -269,6 +269,8 @@ pub struct Sampler<'a> {
     falls: Vec<Fall>,
     /// Springs whose pools can reach the area.
     springs: Vec<Spring>,
+    /// Heads of the streams in the area that have no spring pool.
+    heads: Vec<Vec2>,
     /// River deltas that can reach the area.
     deltas: Vec<coast::Delta>,
     /// River mouths whose estuaries can reach the area, and the shores of its grid cells.
@@ -295,6 +297,7 @@ impl<'a> Sampler<'a> {
 
         let mut falls = Vec::new();
         let mut springs = Vec::new();
+        let mut heads = Vec::new();
         let mut deltas = Vec::new();
         let mut pieces = Vec::new();
         for z in z0..=z1 {
@@ -305,6 +308,8 @@ impl<'a> Sampler<'a> {
                 }
                 if let Some(s) = Spring::at(c, world_seed, z * c.size + x) {
                     springs.push(s);
+                } else if let Some(h) = Spring::head(c, z * c.size + x) {
+                    heads.push(h);
                 }
                 if let Some(d) = coast::Delta::at(c, world_seed, z * c.size + x) {
                     deltas.push(d);
@@ -329,6 +334,7 @@ impl<'a> Sampler<'a> {
             let (a, b) = (s.pos - r, s.pos + r);
             a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y
         });
+        heads.retain(|h| h.x >= lo.x && h.x <= hi.x && h.y >= lo.y && h.y <= hi.y);
         let (trail_points, pads) = c.trails.gather(lo, hi);
         let mut s = Self {
             c,
@@ -336,6 +342,7 @@ impl<'a> Sampler<'a> {
             pieces,
             falls,
             springs,
+            heads,
             deltas,
             mouths: coast::mouths(c, lo, hi),
             shores: coast::Shores::new(c, lo, hi),
@@ -408,6 +415,12 @@ impl<'a> Sampler<'a> {
     /// Springs whose pools can reach the area.
     pub fn springs(&self) -> &[Spring] {
         &self.springs
+    }
+
+    /// Heads of streams in the area with no spring pool, each the middle of a voxel
+    /// column in continent-local voxels.
+    pub fn heads(&self) -> &[Vec2] {
+        &self.heads
     }
 
     /// The column at continent-local voxel `(lx, lz)`.
