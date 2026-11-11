@@ -93,7 +93,7 @@ impl Delta {
             }
         }
         // Flats a little above the sea, fading into it at the fan's edge.
-        let flat = m(0.3) + m(0.6) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.3);
+        let flat = m(0.2) + m(0.3) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.2);
         let edge = smoothstep(0.82, 1.0, t).max(1.0 - shelf);
         *ground = ground.max(flat + (*ground - flat) * edge);
         Some(if edge > 0.3 { Cover::Beach } else { Cover::Bank })
@@ -398,12 +398,12 @@ impl Shore {
         }
         // Estuary flats: low mud just above the sea, cut by winding creeks.
         if mud_w > 0.0 {
-            let band = smoothstep(-m(1.4), -m(0.4), g) * (1.0 - smoothstep(m(2.6), m(3.8), g));
+            let band = smoothstep(-m(2.4), -m(0.4), g) * (1.0 - smoothstep(m(2.6), m(3.8), g));
             let creek = perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)).abs() < 0.05;
             let flat = if creek {
                 -m(0.9)
             } else {
-                m(0.35) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.25)
+                m(0.2) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.15)
             };
             *ground += (flat - *ground) * mud_w * band;
         }
