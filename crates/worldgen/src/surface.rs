@@ -1641,6 +1641,27 @@ mod tests {
         }
     }
 
+    /// Prints the cover, ground and water of a grid of columns around a world position:
+    /// `PROBE=seed,x,z,radius,step cargo test --release -p worldgen column_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn column_probe() {
+        let v: Vec<i32> = std::env::var("PROBE").expect("PROBE").split(',').map(|s| s.parse().unwrap()).collect();
+        let (seed, x, z, r, step) = (v[0] as u32, v[1], v[2], v[3], v[4]);
+        let w = crate::world::GameWorld::new(seed);
+        for dz in (-r..=r).step_by(step as usize) {
+            let line: Vec<String> = (-r..=r)
+                .step_by(step as usize)
+                .map(|dx| {
+                    let col = w.column(x + dx, z + dz);
+                    let c = format!("{:?}", col.cover);
+                    format!("{}{:>4}{}", &c[..2], col.ground.floor() as i32, if col.water_surface().is_some() { '~' } else { ' ' })
+                })
+                .collect();
+            eprintln!("{:>6} {}", z + dz, line.join(""));
+        }
+    }
+
     /// Prints column cost on steep, flat and gorge ground:
     /// `cargo test --release -p worldgen column_cost -- --ignored --nocapture`.
     #[test]
