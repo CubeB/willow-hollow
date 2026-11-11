@@ -112,7 +112,10 @@ impl Ground {
             return Self { snow: 0.0, frozen: 0.0, wet, highland: 0.0, snowline: Self::snowline(warmth) };
         }
         let highland = snow_cover(date) * ((NEVER_SNOWS - warmth) / (NEVER_SNOWS - 0.25)).clamp(0.0, 1.0);
-        Self { snow: lying.clamp(0.0, 1.0), frozen: ice.clamp(0.0, 1.0), wet, highland, snowline: Self::snowline(warmth) }
+        // In winter the snowline comes down the hills, as far as `winter_snowline`.
+        let summer = Self::snowline(warmth);
+        let snowline = summer + (Self::winter_snowline(warmth) - summer) * highland;
+        Self { snow: lying.clamp(0.0, 1.0), frozen: ice.clamp(0.0, 1.0), wet, highland, snowline }
     }
 
     /// The height of the year-round summit snow, metres: lower in the cold, and only on
@@ -122,6 +125,12 @@ impl Ground {
     /// 170 m on the Alpine summits; 380 m and up where it never snows.
     pub fn snowline(warmth: f32) -> f32 {
         if warmth >= NEVER_SNOWS { 380.0 + (warmth - NEVER_SNOWS) * 150.0 } else { 270.0 + 200.0 * warmth.max(-0.5) }
+    }
+
+    /// How far the snowline comes down in deep winter, metres, where it snows at all:
+    /// 90 m in the temperate lands, 30 m on the Alpine summits.
+    pub fn winter_snowline(warmth: f32) -> f32 {
+        70.0 + 80.0 * warmth.max(-0.5)
     }
 }
 
@@ -179,6 +188,10 @@ mod tests {
         }
         assert!(Ground::snowline(warmth(Biome::Taiga)) >= 200.0);
         assert!(Ground::snowline(warmth(Biome::Alpine)) < Ground::snowline(warmth(Biome::Taiga)));
+        // It comes down the hills in winter, and is back up by summer.
+        let temperate = warmth(Biome::Deciduous);
+        assert!(Ground::at(0.86, temperate, 0.0, 0.0, 0.0).snowline <= 100.0);
+        assert!(Ground::at(DEFAULT_DATE, temperate, 0.0, 0.0, 0.0).snowline >= 300.0);
     }
 
     #[test]
