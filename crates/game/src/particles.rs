@@ -4,7 +4,7 @@
 //! Each kind has its own spawn rule, tied to where the player is and the time of day.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, Vec3, Vec4};
+use glam::{DVec3, Vec2, Vec3, Vec4};
 use voxel::Kind;
 use worldgen::{
     Cascade, SpringMark, Surf,
@@ -71,7 +71,6 @@ enum PKind {
     Firefly,
     Mote,
     Butterfly,
-    Bird,
     Droplet,
     Rain,
     Snow,
@@ -221,6 +220,7 @@ pub struct Particles {
     instances: Vec<ParticleInstance>,
     rng: u32,
     bird_timer: f32,
+    flocks: Vec<Flock>,
     /// Each leaf site's shedding weight and leaf colour this frame (see `shedding`).
     shed: Vec<(f32, [f32; 3])>,
     pub wind: Wind,
@@ -242,6 +242,7 @@ impl Particles {
             instances: Vec::new(),
             rng: 0x2545_f491,
             bird_timer: 20.0,
+            flocks: Vec::new(),
             shed: Vec::new(),
             wind: Wind::new(),
         }
@@ -530,35 +531,18 @@ impl Particles {
             self.spawn(particle);
         }
 
-        // Now and then a flock passes high overhead.
+        // Now and then a flock passes overhead.
         self.bird_timer -= dt;
         if day && self.bird_timer <= 0.0 {
-            self.bird_timer = self.range(35.0, 80.0);
-            let heading = self.range(0.0, std::f32::consts::TAU);
-            let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
-            let start = s.camera - (dir * 220.0 * U).as_dvec3() + DVec3::new(0.0, (self.range(45.0, 90.0) * U) as f64, 0.0);
-            let n = 5 + (self.unit() * 5.0) as i32;
-            for i in 0..n {
-                // A V: alternate sides, each bird further back and out.
-                let k = ((i + 1) / 2) as f32;
-                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let offset = -dir * (k * 2.2) + Vec3::new(-dir.z, 0.0, dir.x) * (k * 1.6 * side);
-                let particle = Particle {
-                    kind: PKind::Bird,
-                    pos: start + (offset * U).as_dvec3(),
-                    vel: dir * 9.0,
-                    age: 0.0,
-                    life: 55.0,
-                    size: Vec3::new(0.5, 0.12, 0.9),
-                    color: [0.08, 0.08, 0.1],
-                    phase: self.range(0.0, std::f32::consts::TAU),
-                    settled: false,
-                    rot: Vec3::ZERO,
-                    spin: Vec4::ZERO,
-                };
-                self.spawn(particle);
+            self.bird_timer = self.range(25.0, 60.0);
+            if self.flocks.len() < MAX_FLOCKS {
+                self.spawn_flock(s.camera);
             }
         }
+        for flock in &mut self.flocks {
+            flock.update(dt);
+        }
+        self.flocks.retain(|f| !f.gone(s.camera));
 
         // Splash when the player goes in.
         if let Some(at) = s.player_entered_water {
@@ -765,10 +749,6 @@ impl Particles {
                     // Wings: the body flattens and widens as it flaps.
                     p.size.x = 0.18 + 0.2 * ((t * 14.0 + p.phase).sin()).abs();
                 }
-                PKind::Bird => {
-                    p.pos += (p.vel * U * dt).as_dvec3();
-                    p.size.x = 0.3 + 0.5 * ((t * 6.0 + p.phase).sin()).abs();
-                }
             }
         }
         // A few of the drops that hit water throw up a speck.
@@ -871,6 +851,14 @@ impl Particles {
                 tilt,
             });
         }
+        for flock in &self.flocks {
+            flock.draw(s.camera, &mut self.instances);
+        }
+    }
+
+    /// Where each flock in the sky is, its birds' middle, and how many birds it has.
+    pub fn flocks(&self) -> Vec<(DVec3, usize)> {
+        self.flocks.iter().map(|f| (f.birds.iter().map(|b| b.pos).sum::<DVec3>() / f.birds.len().max(1) as f64, f.birds.len())).collect()
     }
 
     pub fn instances(&self) -> &[ParticleInstance] {
@@ -915,6 +903,270 @@ fn ground_below(voxels: &mut impl Voxels, from: DVec3, depth: i32) -> Option<DVe
         prev = k;
     }
     None
+}
+
+// --- Birds ---------------------------------------------------------------------------
+
+/// One bird of a flock, in voxels and voxels a second.
+struct Bird {
+    pos: DVec3,
+    vel: Vec3,
+    /// Through its wing beat, radians.
+    flap: f32,
+    /// Wing beats a second, as radians a second.
+    rate: f32,
+    /// How far its wings are raised now, radians.
+    wing: f32,
+    /// Leaning into a turn, radians.
+    bank: f32,
+    /// Its heading last frame, for how fast it is turning.
+    yaw: f32,
+    /// Its place in a V, behind and to one side of the lead (across, back), voxels.
+    slot: Vec3,
+    seed: f32,
+}
+
+/// Birds flying together overhead. Big ones (geese, gulls) keep a loose V and beat their
+/// wings slowly; small ones bunch, stream and wheel about, beating fast between glides.
+struct Flock {
+    large: bool,
+    /// The point the flock is making for: it runs on ahead of the birds.
+    lead: DVec3,
+    heading: f32,
+    /// Voxels a second.
+    speed: f32,
+    seed: f32,
+    age: f32,
+    /// Bird length and half wingspan in metres.
+    body: f32,
+    span: f32,
+    body_color: [f32; 3],
+    wing_color: [f32; 3],
+    birds: Vec<Bird>,
+}
+
+/// At most this many flocks in the sky at once.
+const MAX_FLOCKS: usize = 2;
+/// Metres off at which a flock is out of sight and let go.
+const FLOCK_REACH: f32 = 380.0;
+
+impl Particles {
+    fn spawn_flock(&mut self, camera: DVec3) {
+        let vpm = VOXELS_PER_METRE;
+        // Big birds a third of the time, and their flocks are smaller.
+        let large = self.unit() < 0.4;
+        let n = if large {
+            // A pair, a skein of a dozen, or anything between.
+            2 + (self.unit().powf(1.5) * 13.0) as usize
+        } else {
+            6 + (self.unit().powf(1.3) * 40.0) as usize
+        };
+        let heading = self.range(0.0, std::f32::consts::TAU);
+        let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
+        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        let height = if large { self.range(35.0, 120.0) } else { self.range(18.0, 70.0) };
+        // From out of sight on one side, passing over or near the player.
+        let start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
+            + (side * self.range(-70.0, 70.0) * vpm).as_dvec3()
+            + DVec3::new(0.0, (height * vpm) as f64, 0.0);
+        let speed = if large { self.range(13.0, 17.0) } else { self.range(10.0, 14.0) } * vpm;
+        let (body, span) = if large { (self.range(0.6, 0.9), self.range(0.65, 0.85)) } else { (0.22, 0.2) };
+        // Geese and cormorants dark, gulls pale; small birds near black against the sky.
+        let pale = large && self.unit() < 0.35;
+        let (body_color, wing_color) = if pale {
+            ([0.62, 0.62, 0.6], [0.5, 0.5, 0.5])
+        } else if large {
+            ([0.07, 0.06, 0.05], [0.1, 0.09, 0.08])
+        } else {
+            ([0.035, 0.035, 0.04], [0.045, 0.045, 0.05])
+        };
+        let mut birds = Vec::with_capacity(n);
+        for i in 0..n {
+            // A V for big birds: alternate sides, each further back and out, one arm
+            // often longer than the other. Small birds start in a loose ball.
+            let slot = if large {
+                let k = ((i + 1) / 2) as f32;
+                let s = if i % 2 == 0 { 1.0 } else { -1.0 };
+                Vec3::new(k * self.range(1.6, 2.1) * s, self.range(-0.3, 0.3), k * self.range(1.7, 2.3)) * span * 2.0 * vpm
+            } else {
+                Vec3::ZERO
+            };
+            let scatter = if large {
+                Vec3::ZERO
+            } else {
+                Vec3::new(self.range(-1.0, 1.0), self.range(-0.5, 0.5), self.range(-1.0, 1.0)) * 6.0 * vpm
+            };
+            let place = side * slot.x - dir * slot.z + Vec3::Y * slot.y + scatter;
+            birds.push(Bird {
+                pos: start + place.as_dvec3(),
+                vel: dir * speed,
+                flap: self.range(0.0, std::f32::consts::TAU),
+                rate: if large { self.range(2.2, 2.9) } else { self.range(9.0, 12.0) } * std::f32::consts::TAU,
+                wing: 0.0,
+                bank: 0.0,
+                yaw: heading,
+                slot,
+                seed: self.range(0.0, 1000.0),
+            });
+        }
+        let seed = self.range(0.0, 1000.0);
+        self.flocks.push(Flock {
+            large,
+            lead: start,
+            heading,
+            speed,
+            seed,
+            age: 0.0,
+            body,
+            span,
+            body_color,
+            wing_color,
+            birds,
+        });
+    }
+}
+
+impl Flock {
+    fn update(&mut self, dt: f32) {
+        let vpm = VOXELS_PER_METRE;
+        self.age += dt;
+        let (a, seed) = (self.age as f64, self.seed as f64);
+        // The lead wheels: big birds in long gentle curves, small ones in sudden sweeps
+        // and rolls, rising and falling as they go.
+        let turn = if self.large {
+            0.06 * noise::perlin2(0x6a, seed, a * 0.05)
+        } else {
+            0.55 * noise::perlin2(0x6b, seed, a * 0.12) + 0.35 * noise::perlin2(0x6c, seed, a * 0.4)
+        };
+        self.heading += turn as f32 * dt;
+        let dir = Vec3::new(self.heading.cos(), 0.0, self.heading.sin());
+        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        let climb = if self.large { 0.0 } else { noise::perlin2(0x6d, seed, a * 0.15) as f32 * 3.0 * vpm };
+        let lead_vel = dir * self.speed + Vec3::Y * climb;
+        self.lead += (lead_vel * dt).as_dvec3();
+
+        let n = self.birds.len();
+        let centre = self.birds.iter().map(|b| b.pos).sum::<DVec3>() / n.max(1) as f64;
+        let mean_vel = self.birds.iter().map(|b| b.vel).sum::<Vec3>() / n.max(1) as f32;
+        // Personal space: a wingspan or two.
+        let room = self.span * 2.0 * vpm * if self.large { 1.6 } else { 3.0 };
+        for i in 0..n {
+            let me = &self.birds[i];
+            let mut apart = Vec3::ZERO;
+            for (j, other) in self.birds.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                let d = (me.pos - other.pos).as_vec3();
+                let l = d.length();
+                if l < room && l > 1e-3 {
+                    apart += d / l * (1.0 - l / room);
+                }
+            }
+            let mut want = if self.large {
+                // Its place in the V, which breathes a little: a loose V, never a stiff one.
+                let s = me.slot;
+                let breathe = 1.0 + 0.12 * noise::perlin2(0x6e, me.seed as f64, a * 0.2) as f32;
+                let place = self.lead.as_vec3() + side * s.x * breathe - dir * s.z * breathe + Vec3::Y * s.y;
+                let to = (place.as_dvec3() - me.pos).as_vec3();
+                lead_vel + to * 0.5 + (mean_vel - me.vel) * 0.2
+            } else {
+                // Cohesion, alignment and separation, and the lead to make for.
+                let to_centre = (centre - me.pos).as_vec3();
+                let to_lead = (self.lead - me.pos).as_vec3();
+                let jitter = Vec3::new(
+                    noise::perlin2(0x70, me.seed as f64, a * 0.7) as f32,
+                    noise::perlin2(0x71, me.seed as f64, a * 0.7) as f32 * 0.4,
+                    noise::perlin2(0x72, me.seed as f64, a * 0.7) as f32,
+                ) * 2.0 * vpm;
+                mean_vel + to_centre * 0.25 + to_lead * 0.12 + jitter
+            };
+            want += apart * self.speed * 1.2;
+            let me = &mut self.birds[i];
+            let pull = if self.large { 1.2 } else { 2.5 };
+            me.vel += (want - me.vel) * (1.0 - (-pull * dt).exp());
+            // Never stalls, never races.
+            let speed = me.vel.length().clamp(self.speed * 0.7, self.speed * 1.35);
+            me.vel = me.vel.normalize_or(dir) * speed;
+            me.pos += (me.vel * dt).as_dvec3();
+            // Leaning into its turns.
+            let yaw = (-me.vel.x).atan2(me.vel.z);
+            let rate = (yaw - me.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            me.yaw = yaw;
+            let lean = (rate / dt.max(1e-4) * if self.large { 1.2 } else { 0.5 }).clamp(-0.9, 0.9);
+            me.bank += (lean - me.bank) * (1.0 - (-4.0 * dt).exp());
+            // Beating, or gliding on held wings: a big bird mostly beats, slowly; a small
+            // one beats in bursts between glides. Climbing takes beating.
+            let glide = noise::perlin2(0x73, me.seed as f64, a * if self.large { 0.12 } else { 0.6 }) as f32;
+            let gliding = me.vel.y < 0.3 * vpm && glide > if self.large { 0.25 } else { 0.05 };
+            let raised = if gliding {
+                0.12
+            } else {
+                me.flap += me.rate * dt;
+                0.12 + if self.large { 0.65 } else { 0.8 } * me.flap.sin()
+            };
+            me.wing += (raised - me.wing) * (1.0 - (-25.0 * dt).exp());
+        }
+    }
+
+    /// Body and wings for each bird, three cubes apiece.
+    fn draw(&self, camera: DVec3, out: &mut Vec<ParticleInstance>) {
+        let vpm = VOXELS_PER_METRE;
+        for b in &self.birds {
+            let rel = (b.pos - camera).as_vec3();
+            let metres = rel.length() / vpm;
+            let alpha = 1.0 - smooth(FLOCK_REACH - 60.0, FLOCK_REACH, metres);
+            if alpha <= 0.0 {
+                continue;
+            }
+            // Far off a bird is drawn a little bigger than life, so it still reads as a
+            // bird with wings rather than a speck.
+            let near = if self.large { 70.0 } else { 25.0 };
+            let grow = (metres / near).max(1.0).powf(0.85) * vpm;
+            let speed = b.vel.length().max(1e-3);
+            let pitch = -(b.vel.y / speed).clamp(-0.6, 0.6).asin();
+            let (body, span) = (self.body * grow, self.span * grow);
+            out.push(ParticleInstance {
+                pos: rel.to_array(),
+                yaw: b.yaw,
+                size: [body * 0.24, body * 0.2, body],
+                glow: 0.0,
+                color: [self.body_color[0], self.body_color[1], self.body_color[2], alpha],
+                tilt: [pitch, b.bank],
+            });
+            for side in [1.0f32, -1.0] {
+                // Each wing hinges at the body, raised by `wing` above the lean.
+                let roll = b.bank + side * b.wing;
+                let out_dir = Vec3::new(side * roll.cos(), side * roll.sin(), 0.0);
+                let centre = out_dir * (span * 0.5) + Vec3::new(0.0, 0.0, body * 0.08);
+                let at = rel + turn(centre, b.yaw, [pitch, 0.0]);
+                out.push(ParticleInstance {
+                    pos: at.to_array(),
+                    yaw: b.yaw,
+                    size: [span, body * 0.05, body * 0.38],
+                    glow: 0.0,
+                    color: [self.wing_color[0], self.wing_color[1], self.wing_color[2], alpha],
+                    tilt: [pitch, roll],
+                });
+            }
+        }
+    }
+
+    fn gone(&self, camera: DVec3) -> bool {
+        let off = (self.lead - camera).as_vec3();
+        let far = Vec2::new(off.x, off.z).length() / VOXELS_PER_METRE > FLOCK_REACH + 40.0;
+        (self.age > 20.0 && far) || self.age > 160.0
+    }
+}
+
+/// The particle shader's `turn`: roll about z, then pitch about x, then yaw about y.
+fn turn(v: Vec3, yaw: f32, tilt: [f32; 2]) -> Vec3 {
+    let (sr, cr) = tilt[1].sin_cos();
+    let a = Vec3::new(v.x * cr - v.y * sr, v.x * sr + v.y * cr, v.z);
+    let (sp, cp) = tilt[0].sin_cos();
+    let b = Vec3::new(a.x, a.y * cp - a.z * sp, a.y * sp + a.z * cp);
+    let (s, c) = yaw.sin_cos();
+    Vec3::new(b.x * c - b.z * s, b.y, b.x * s + b.z * c)
 }
 
 #[cfg(test)]
@@ -1002,5 +1254,40 @@ mod leaf_tests {
             }
         }
         panic!("the leaves never came down");
+    }
+
+    #[test]
+    fn flocks_hold_together_and_beat_their_wings() {
+        use super::*;
+        let mut p = Particles::new();
+        let mut kinds = (false, false);
+        for _ in 0..12 {
+            p.flocks.clear();
+            p.spawn_flock(DVec3::ZERO);
+            let mut f = p.flocks.pop().unwrap();
+            kinds = (kinds.0 || f.large, kinds.1 || !f.large);
+            let mut wings = (f32::MAX, f32::MIN);
+            for _ in 0..60 * 40 {
+                f.update(1.0 / 60.0);
+                for b in &f.birds {
+                    assert!(b.pos.is_finite() && b.vel.is_finite());
+                    wings = (wings.0.min(b.wing), wings.1.max(b.wing));
+                }
+            }
+            let n = f.birds.len() as f64;
+            let centre = f.birds.iter().map(|b| b.pos).sum::<DVec3>() / n;
+            let metres = |d: DVec3| d.length() / VOXELS_PER_METRE as f64;
+            // Together after 40 s of wheeling, never piled on one another.
+            let spread = f.birds.iter().map(|b| metres(b.pos - centre)).fold(0.0, f64::max);
+            assert!(spread < if f.large { 60.0 } else { 40.0 }, "spread {spread} m in a flock of {n}");
+            for (i, a) in f.birds.iter().enumerate() {
+                for b in &f.birds[i + 1..] {
+                    assert!(metres(a.pos - b.pos) > 0.15, "two birds in one place");
+                }
+            }
+            // Wings went up and down.
+            assert!(wings.1 - wings.0 > 0.8, "wings {wings:?}");
+        }
+        assert!(kinds.0 && kinds.1, "both big birds and small came by");
     }
 }

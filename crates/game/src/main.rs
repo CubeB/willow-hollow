@@ -1230,6 +1230,10 @@ fn main() -> Result<()> {
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
         log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, weather.ground(env.date, warmth));
+        for (at, n) in particles.flocks() {
+            let off = at - camera.pos;
+            log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
+        }
         let lamps: Vec<DVec3> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         render::screenshot(
             &gpu,
