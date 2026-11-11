@@ -444,6 +444,61 @@ impl Opening {
 
 /// Thickness of a stone bridge's piers along the bridge, in voxels.
 const PIER: f32 = 3.0;
+/// About how wide one arch of a stone bridge spans, in voxels.
+const ARCH: f32 = 14.0;
+
+/// Where along a stone bridge over the water run `run` (`len` voxels long) its piers
+/// stand, in voxels from where the water begins.
+///
+/// The river's own channel, the deepest stretch of running water, is spanned by one
+/// arch with a pier clear of it on either side, so the stream flows through the arch
+/// rather than against a pier. Any shallows or marsh either side get arches of their own.
+fn pier_sites(cols: &[Column], (s0, e0): (usize, usize), len: f32) -> Vec<f32> {
+    let even = |from: f32, to: f32, out: &mut Vec<f32>| {
+        let n = (((to - from) / ARCH).round() as usize).max(1);
+        out.extend((1..n).map(|j| from + (to - from) * j as f32 / n as f32));
+    };
+    // Runs of river channel along the crossing, with the deepest water in each.
+    let mut best: Option<(usize, usize, i32)> = None;
+    let mut i = s0;
+    while i <= e0 {
+        let channel = |c: &Column| c.cover == Cover::RiverBed && c.water_surface().is_some();
+        if !channel(&cols[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut deep = 0;
+        while i <= e0 && channel(&cols[i]) {
+            deep = deep.max(cols[i].water_surface().map_or(0, |k| k - cols[i].top()));
+            i += 1;
+        }
+        if best.is_none_or(|b| deep > b.2) {
+            best = Some((start, i - 1, deep));
+        }
+    }
+    let mut piers = Vec::new();
+    // A broad river is crossed by a row of arches with piers standing in it.
+    let Some((a, b, _)) = best.filter(|&(a, b, _)| (b - a + 1) as f32 * OLD_VOXEL <= ARCH * 1.6) else {
+        even(0.0, len, &mut piers);
+        return piers;
+    };
+    // The channel's extent along the bridge, with a little room either side.
+    let lo = (a - s0) as f32 * OLD_VOXEL - 1.0 - PIER * 0.5;
+    let hi = (b - s0 + 1) as f32 * OLD_VOXEL + 1.0 + PIER * 0.5;
+    // Too little room for an arch of its own beside the channel: the channel's arch
+    // runs on to the bank instead.
+    const SIDE: f32 = 6.0;
+    if lo > SIDE {
+        even(0.0, lo, &mut piers);
+        piers.push(lo);
+    }
+    if len - hi > SIDE {
+        piers.push(hi);
+        even(hi, len, &mut piers);
+    }
+    piers
+}
 
 /// What one bridge is built from and how it is laid out, for building it column by column.
 struct Deck<'a> {
@@ -722,8 +777,8 @@ fn bridge(
     // the water to two voxels under the deck at its crown.
     let (mut piers, mut openings) = (Vec::new(), Vec::new());
     if kind == CrossingKind::Arch {
-        let n = ((len / 14.0).round() as usize).max(1);
-        piers = (1..n).map(|j| len * j as f32 / n as f32).collect::<Vec<f32>>();
+        piers = pier_sites(cols, run, len);
+        let n = piers.len() + 1;
         for j in 0..n {
             let a = if j == 0 { 0.0 } else { piers[j - 1] + PIER * 0.5 };
             let b = if j + 1 == n { len } else { piers[j] - PIER * 0.5 };

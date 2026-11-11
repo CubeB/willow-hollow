@@ -77,7 +77,10 @@ pub fn kind_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Aquatic, f32)
         Cover::Bank if col.water_surface().is_none() && col.temperature > HOT && col.ground < m(1.6) => {
             Some((Aquatic::MangroveRoots, 0.12))
         }
-        Cover::Bank if col.water_surface().is_none() => Some((Aquatic::Rush, 0.10)),
+        // Rushes in patches along the bank, none along a desert stream.
+        Cover::Bank if col.water_surface().is_none() && !col.biome.arid() => {
+            (patch(seed, 0x4b54, x, z, 5.6) > 0.0).then_some((Aquatic::Rush, 0.10))
+        }
         Cover::RiverBed if wet > 0.0 => {
             if patch(seed, 0xee1d, x, z, 3.2) > 0.1 {
                 Some((Aquatic::Weed, 0.16))
@@ -281,6 +284,7 @@ mod tests {
         assert_eq!(kind(&column(Cover::SeaFloor, Biome::Ocean, Some(m(40.0)), 0.5)), None);
         assert!(matches!(kind(&column(Cover::RiverBed, Biome::Deciduous, Some(m(1.0)), 0.5)), Some(Aquatic::Weed | Aquatic::MossyStone)));
         assert_eq!(kind(&column(Cover::Bank, Biome::Deciduous, None, 0.5)), Some(Aquatic::Rush));
+        assert_eq!(kind(&column(Cover::Bank, Biome::Desert, None, 0.5)), None, "rushes along a desert stream");
         assert_eq!(kind(&column(Cover::Bank, Biome::Rainforest, None, 0.9)), Some(Aquatic::MangroveRoots));
         let warm_pond = column(Cover::LakeBed, Biome::Rainforest, Some(2.0), 0.9);
         let cold_pond = column(Cover::LakeBed, Biome::Taiga, Some(2.0), 0.3);

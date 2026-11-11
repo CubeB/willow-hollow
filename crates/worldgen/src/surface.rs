@@ -217,10 +217,20 @@ fn bank_width(half_width: f32) -> f32 {
     m(2.4) + 2.0 * half_width
 }
 
+/// Widest a bank is laid back to, however far the land stands above the water.
+const BANK_MAX: f32 = m(20.0);
+
+/// How far from the channel edge the bank reaches where the land stands `rise` voxels
+/// above (or below) the bank top: wide enough that the bank slopes gently, about one in
+/// three, rather than standing as a wall of bare rock beside the water.
+fn bank_reach(half_width: f32, rise: f32) -> f32 {
+    bank_width(half_width).max(rise.abs() * 2.6).min(BANK_MAX.max(bank_width(half_width)))
+}
+
 /// Farthest from its centreline a river touches the terrain.
 fn reach(half_width: f32) -> f32 {
     let hw = half_width.max(MIN_HALF_WIDTH);
-    hw + bank_width(hw) + m(0.8)
+    hw + bank_width(hw).max(BANK_MAX) + m(0.8)
 }
 
 /// Quantises a river's water level into flat pools separated by drops.
@@ -229,16 +239,17 @@ fn reach(half_width: f32) -> f32 {
 /// allowed level at or below its simulated level. Because this is a non-decreasing
 /// function of the level alone, the result still never rises downstream. On a gentle
 /// river the allowed levels are far apart along its length, giving long still pools
-/// and the odd weir; on a steep one they come quickly, giving cascades. Missing levels
-/// become taller falls, more often at altitude. Takes simulation units and returns
-/// voxels, so pools keep the same height however fine the voxels are.
+/// and the odd weir; on a steep one they come quickly, giving cascades. Most levels are
+/// kept, so most drops are a single subtle step of one block; missing levels become
+/// taller falls, more often at altitude. Takes simulation units and returns voxels, so
+/// pools keep the same height however fine the voxels are.
 pub fn pool_level(seed: u32, level: f32) -> i32 {
     let mut k = level.floor() as i32;
     while k > 0 {
         let keep = match k {
-            ..24 => 0.80,
-            24..120 => 0.60,
-            _ => 0.45,
+            ..24 => 0.85,
+            24..120 => 0.75,
+            _ => 0.60,
         };
         if unit(hash2(seed ^ 0x9001, k, 11)) < keep {
             break;
@@ -467,7 +478,11 @@ impl<'a> Sampler<'a> {
             for f in &self.falls {
                 let d = (p - f.pos).length();
                 if d < f.radius {
+                    // The face is cut down into the ground below the lip; the ground
+                    // above it is never heaped up into a platform round the lip.
+                    let before = ground;
                     let fall = f.cut(d, slope, wx, wz, &mut ground);
+                    ground = ground.min(before);
                     if part == cliff::Part::None {
                         part = fall;
                     }
@@ -531,12 +546,20 @@ impl<'a> Sampler<'a> {
                 // Out at sea a river mouth shoals to the sea floor rather than ending in a
                 // deep rounded hole.
                 let seaward = if piece.nodes[1] == piece.nodes[2] { smoothstep(0.2, 0.95, t) } else { 0.0 };
-                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool, seaward));
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(0.8)), pool, seaward));
             }
         }
         if let Some((sd, hw, level, upstream_level, pool, seaward)) = nearest {
             river = sd;
-            let k = pool_level(c.desc.seed, level);
+            let mut k = pool_level(c.desc.seed, level);
+            // Where the channel runs on out into a lake, its water is the lake's: a river
+            // entering a lake comes down to the lake's level at the shore instead of
+            // running on across it as a raised ribbon.
+            if let Some(lk) = lake_level
+                && ground < lk as f32 - 1.0
+            {
+                k = k.min(lk);
+            }
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
                 let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6)) + pool;
@@ -556,16 +579,20 @@ impl<'a> Sampler<'a> {
                 }
                 ground = if submerged { ground.min(bed) } else { bed };
                 water = Some(k);
-            } else if !submerged && sd < bank_width(hw) {
+            } else if !submerged {
                 // Banks meet the water flush with its surface, then rise (or fall) to
-                // the surrounding terrain. Where the land is lower than the river this
-                // builds the levee that keeps the water in.
+                // the surrounding terrain, laid back the further they have to climb so
+                // the valley side slopes rather than standing as a wall. Where the land
+                // is lower than the river this builds the levee that keeps the water in.
                 // Beside a drop the bank holds the level of the pool above it for a
                 // couple of voxels, so the upper pool cannot spill around the lip.
                 let bank = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
-                ground = bank + (ground - bank) * smoothstep(0.0, bank_width(hw), sd);
-                if sd < m(1.28) && seaward < 0.3 {
-                    cover = Cover::Bank;
+                let width = bank_reach(hw, ground - bank);
+                if sd < width {
+                    ground = bank + (ground - bank) * smoothstep(0.0, width, sd);
+                    if sd < m(1.28) && seaward < 0.3 {
+                        cover = Cover::Bank;
+                    }
                 }
             }
         }
@@ -822,12 +849,22 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
         ));
     }
     if c.ocean[r] {
-        // A mouth: carry the channel on into the sea, opening out as it goes.
+        // A mouth: carry the channel on into the sea, opening out as it goes, until the
+        // sea is deep enough that no flat or bar in front of the coast can close it off.
         let open = Continent::river_width(c.discharge[i]) * OLD_VOXEL * funnel(c, r, c.discharge[i]);
+        let cs = c.cell_size();
+        let ahead = (pr - exit).normalize_or_zero() * cs;
+        let mut end = pr;
+        for _ in 0..MOUTH_CELLS {
+            if grid_height(c, end / cs) < -MOUTH_DEPTH {
+                break;
+            }
+            end += ahead;
+        }
         out.push(Piece::new(
             exit,
-            (exit + pr) * 0.5,
-            pr,
+            (exit + end) * 0.5,
+            end,
             (wi, open * 1.3),
             (exit_level, exit_level * 0.5, 0.0),
             exit_level,
@@ -835,6 +872,11 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
         ));
     }
 }
+
+/// Furthest a river mouth's channel runs on past the first sea cell, in cells, and the
+/// depth of sea it runs out to, in simulation units.
+const MOUTH_CELLS: usize = 3;
+const MOUTH_DEPTH: f32 = 2.5;
 
 /// Simulated level at which the sea's rise and fall reaches up a river: below it the
 /// river is tidal, and its water stands at sea level.
@@ -858,11 +900,12 @@ pub(crate) fn river_level(c: &Continent, j: usize) -> f32 {
     }
 }
 
-/// How much wider than usual a river carrying `discharge` is at node `j`: big rivers
-/// open into a funnel-shaped estuary over the last few metres of their fall.
+/// How much wider than usual a river carrying `discharge` is at node `j`: rivers open
+/// into a funnel-shaped estuary as the land flattens out over the last few metres of
+/// their fall, the bigger rivers the more.
 fn funnel(c: &Continent, j: usize, discharge: f32) -> f32 {
-    let low = 1.0 - smoothstep(0.0, 8.0, river_level(c, j));
-    1.0 + 1.8 * low * smoothstep(150.0, 1500.0, discharge)
+    let low = 1.0 - smoothstep(0.0, 10.0, river_level(c, j));
+    1.0 + 2.2 * low * low.sqrt() * smoothstep(60.0, 1500.0, discharge)
 }
 
 /// Smallest drop, in simulation units, that a river can make as one waterfall.
@@ -971,10 +1014,33 @@ pub(crate) fn node(c: &Continent, i: usize) -> Vec2 {
         let size = smoothstep(40.0, 4000.0, c.discharge[i]);
         let drift = 0.35 + 1.25 * size;
         let (nx, nz) = (x as f64 / 4.5, z as f64 / 4.5);
-        p += vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift;
-        p += sinuosity(c, i, size);
+        let swing = vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift + sinuosity(c, i, size);
+        // The swing stays on the valley floor: where it would carry the river up the
+        // valley side, into ground standing well above the water, it is cut back, or the
+        // river would run in a trench with a wall of rock along one bank.
+        // Failing that it swings the other way, so the reach still bends.
+        let level = c.water_level[i];
+        let fits = |s: f32| grid_height(c, p + swing * s) - level <= SWING_RISE;
+        let scale = [1.0, 0.75, 0.5, -0.5, 0.25, -0.25].into_iter().find(|&s| fits(s)).unwrap_or(0.0);
+        p += swing * scale;
     }
     p * c.cell_size()
+}
+
+/// Highest the ground may stand above a river's water where a meander carries it,
+/// in simulation units.
+const SWING_RISE: f32 = 4.0;
+
+/// Simulated ground height at `q`, in cells, interpolated between cell centres.
+fn grid_height(c: &Continent, q: Vec2) -> f32 {
+    let max = (c.size - 1) as f32;
+    let (fx, fz) = ((q.x - 0.5).clamp(0.0, max), (q.y - 0.5).clamp(0.0, max));
+    let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
+    let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+    let h = |x: usize, z: usize| c.height[z * c.size + x];
+    let a = h(x0, z0) + (h(x0 + 1, z0) - h(x0, z0)) * tx;
+    let b = h(x0, z0 + 1) + (h(x0 + 1, z0 + 1) - h(x0, z0 + 1)) * tx;
+    a + (b - a) * tz
 }
 
 /// A sideways swing, in cells, that turns the long straight runs the router leaves on
@@ -1486,6 +1552,113 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Lists springs, falls, deltas, lake inflows, tall banks and stone bridges with
+    /// world coordinates, for screenshots:
+    /// `SURVEY=seed,mx,mz cargo test --release -p worldgen water_survey -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn water_survey() {
+        let arg = std::env::var("SURVEY").unwrap_or_else(|_| "1,0,0".into());
+        let v: Vec<i32> = arg.split(',').map(|s| s.parse().unwrap()).collect();
+        let (seed, mx, mz) = (v[0] as u32, v[1], v[2]);
+        let w = crate::world::GameWorld::new(seed);
+        let c = w.continent(mx, mz);
+        let (ox, oz) = (mx * MACRO_SIZE, mz * MACRO_SIZE);
+        let at = |p: Vec2| (p.x as i32 + ox, p.y as i32 + oz);
+        let biome = |p: Vec2| Sampler::new(&c, seed, p.x as i32, p.y as i32, 1).column(p.x as i32, p.y as i32);
+        let mut n = 0;
+        for i in 0..c.size * c.size {
+            if let Some(s) = Spring::at(&c, seed, i) {
+                n += 1;
+                if n % 40 == 0 {
+                    let col = biome(s.pos);
+                    eprintln!("spring {:?} r {:.1} water {} ground {:.1} {:?}", at(s.pos), s.radius, s.water, col.ground, col.biome);
+                }
+            }
+        }
+        eprintln!("{n} springs");
+        let mut k = 0;
+        for i in 0..c.size * c.size {
+            if let Some(f) = Fall::at(&c, seed, i) {
+                k += 1;
+                if k % 10 == 0 {
+                    eprintln!("fall {:?} height {:.1} level {:.1}", at(f.pos), f.height, f.level);
+                }
+            }
+            if let Some(d) = coast::Delta::at(&c, seed, i) {
+                eprintln!("delta {:?} q {:.0} width {:.1} {:?}", at(d.pos), c.discharge[i], d.width, biome(d.pos).biome);
+            }
+            let r = c.rcv[i] as usize;
+            if !c.ocean[i] && c.lake[i] == NO_LAKE && c.discharge[i] > 400.0 && c.lake[r] != NO_LAKE && i % 3 == 0 {
+                let p = (node(&c, i) + node(&c, r)) * 0.5;
+                eprintln!("lake inflow {:?} q {:.0} level {:.1} lake {}", at(p), c.discharge[i], river_level(&c, i), pool_level(c.desc.seed, c.lake[r]));
+            }
+            if c.lake[i] != NO_LAKE
+                && c.discharge[i] >= MIN_RIVER_Q
+                && pool_level(c.desc.seed, river_level(&c, i)) > pool_level(c.desc.seed, c.lake[i])
+                && i % 4 == 0
+            {
+                let p = node(&c, i);
+                let col = biome(p);
+                eprintln!("raised river in lake {:?} river {} lake {} column water {:?} ground {:.1} {:?}", at(p), pool_level(c.desc.seed, river_level(&c, i)), pool_level(c.desc.seed, c.lake[i]), col.water, col.ground, col.biome);
+            }
+            if !c.ocean[i] && c.ocean[r] && c.discharge[i] > 150.0 && c.discharge[i] < 1500.0 && i % 2 == 0 {
+                let p = (node(&c, i) + node(&c, r)) * 0.5;
+                eprintln!("mouth {:?} q {:.0} {:?}", at(p), c.discharge[i], biome(p).biome);
+            }
+        }
+        // Rivers running well below the land just beside them, where banks were walls.
+        let cs = c.cell_size();
+        let mut walls = 0;
+        for i in (0..c.size * c.size).step_by(7) {
+            let r = c.rcv[i] as usize;
+            if c.ocean[i] || c.ocean[r] || c.lake[i] != NO_LAKE || c.discharge[i] < 100.0 {
+                continue;
+            }
+            let (a, b) = (node(&c, i), node(&c, r));
+            let Some(dir) = (b - a).try_normalize() else { continue };
+            let mid = (a + b) * 0.5;
+            let hw = Continent::river_width(c.discharge[i]) * OLD_VOXEL * 0.5;
+            let level = river_level(&c, i).min(river_level(&c, r)) * OLD_VOXEL;
+            let q = mid + vec2(-dir.y, dir.x) * (hw + m(5.0));
+            let (fx, fz) = (q.x / cs - 0.5, q.y / cs - 0.5);
+            let (wx, wz) = (q.x as f64 + ox as f64, q.y as f64 + oz as f64);
+            let (natural, _) = natural_ground(&c, seed, fx, fz, wx, wz);
+            if natural - level > m(4.0) {
+                walls += 1;
+                if walls % 25 == 0 {
+                    eprintln!("wall bank {:?} rise {:.1} m {:?}", at(mid), (natural - level) / m(1.0), biome(mid).biome);
+                }
+            }
+        }
+        for x in &c.trails.crossings {
+            if x.kind == crate::trails::CrossingKind::Arch {
+                eprintln!("arch bridge {:?} span {} {:?}", (x.x + ox, x.z + oz), x.span, biome(vec2(x.x as f32, x.z as f32)).biome);
+            }
+        }
+    }
+
+    /// Prints the cover, ground and water of a grid of columns around a world position:
+    /// `PROBE=seed,x,z,radius,step cargo test --release -p worldgen column_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn column_probe() {
+        let v: Vec<i32> = std::env::var("PROBE").expect("PROBE").split(',').map(|s| s.parse().unwrap()).collect();
+        let (seed, x, z, r, step) = (v[0] as u32, v[1], v[2], v[3], v[4]);
+        let w = crate::world::GameWorld::new(seed);
+        for dz in (-r..=r).step_by(step as usize) {
+            let line: Vec<String> = (-r..=r)
+                .step_by(step as usize)
+                .map(|dx| {
+                    let col = w.column(x + dx, z + dz);
+                    let c = format!("{:?}", col.cover);
+                    format!("{}{:>4}{}", &c[..2], col.ground.floor() as i32, if col.water_surface().is_some() { '~' } else { ' ' })
+                })
+                .collect();
+            eprintln!("{:>6} {}", z + dz, line.join(""));
         }
     }
 

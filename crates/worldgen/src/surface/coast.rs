@@ -21,16 +21,16 @@ use crate::{
 use super::{Cover, MIN_RIVER_Q, funnel, node, sea_cliff, smoothstep};
 
 /// Smallest discharge that builds a delta.
-const DELTA_Q: f32 = 1500.0;
+const DELTA_Q: f32 = 400.0;
 
 /// A small delta: a fan of low mud flats built out into shallow sea in front of a big,
 /// slow river, split by a few distributary channels.
 pub struct Delta {
     /// Where the river reaches the coast, and the way it flows out to sea.
-    pos: Vec2,
+    pub(super) pos: Vec2,
     dir: Vec2,
     /// Width of the river at its mouth, in voxels.
-    width: f32,
+    pub(super) width: f32,
     /// How far the fan reaches out to sea at most.
     pub radius: f32,
     salt: u32,
@@ -63,9 +63,12 @@ impl Delta {
         let v = p - self.pos;
         let d = v.length();
         let along = v.dot(self.dir);
-        if d > self.radius * 1.2 || along < 0.0 || *ground < -m(5.0) {
+        if d > self.radius * 1.2 || along < 0.0 || *ground < -m(6.0) {
             return None;
         }
+        // The fan is built on the shallows and slopes away where the sea deepens,
+        // rather than ending in a wall over deep water.
+        let shelf = smoothstep(-m(6.0), -m(2.5), *ground);
         let side = self.dir.perp_dot(v);
         let angle = side.atan2(along);
         // The fan's edge, lobed.
@@ -80,7 +83,7 @@ impl Delta {
         for (k, a0) in [0.0f32, -0.6, 0.55].into_iter().enumerate() {
             let wander = perlin2(self.salt ^ (k as u32 + 1), d as f64 / m64(35.0), k as f64 * 3.1) * 0.35;
             let lateral = (angle - a0 - wander).abs() * d;
-            let half = self.width * if k == 0 { 0.4 } else { 0.25 } * (1.0 - 0.4 * t);
+            let half = self.width * if k == 0 { 0.5 } else { 0.3 } * (1.0 - 0.4 * t);
             // Branches split off a little way out.
             let started = k == 0 || d > self.width * 1.5;
             if started && lateral < half {
@@ -90,8 +93,8 @@ impl Delta {
             }
         }
         // Flats a little above the sea, fading into it at the fan's edge.
-        let flat = m(0.3) + m(0.6) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.3);
-        let edge = smoothstep(0.82, 1.0, t);
+        let flat = m(0.2) + m(0.3) * (1.0 - t) + perlin2(self.salt ^ 0x77, wx / m64(15.0), wz / m64(15.0)) * m(0.2);
+        let edge = smoothstep(0.82, 1.0, t).max(1.0 - shelf);
         *ground = ground.max(flat + (*ground - flat) * edge);
         Some(if edge > 0.3 { Cover::Beach } else { Cover::Bank })
     }
@@ -99,14 +102,16 @@ impl Delta {
 
 /// Raises sand bars on the bed of a tidal river channel. `bed` is the channel bed and
 /// `across` runs from 0 mid-stream to 1 at the channel edge. Some bars break the surface
-/// as low sand islands.
+/// as low sand islands, flush with the water or a voxel proud of it.
 pub fn sand_bar(seed: u32, wx: f64, wz: f64, across: f32, bed: f32) -> f32 {
     if across > 0.85 {
         return bed;
     }
     let b = perlin2(seed ^ 0xba55, wx / m64(16.0), wz / m64(16.0));
     let lift = smoothstep(0.15, 0.45, b) * (1.0 - smoothstep(0.6, 0.85, across));
-    bed + (m(0.5) - bed) * lift
+    // The crest is level with the water; only its highest middle stands a voxel above.
+    let crest = if b > 0.4 { 0.5 } else { -0.5 };
+    bed + (crest - bed) * lift
 }
 
 /// Farthest from a river mouth that its estuary flats reach, in voxels.
@@ -393,12 +398,12 @@ impl Shore {
         }
         // Estuary flats: low mud just above the sea, cut by winding creeks.
         if mud_w > 0.0 {
-            let band = smoothstep(-m(1.4), -m(0.4), g) * (1.0 - smoothstep(m(2.6), m(3.8), g));
+            let band = smoothstep(-m(2.4), -m(0.4), g) * (1.0 - smoothstep(m(2.6), m(3.8), g));
             let creek = perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)).abs() < 0.05;
             let flat = if creek {
                 -m(0.9)
             } else {
-                m(0.35) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.25)
+                m(0.2) + g.max(0.0) * 0.12 + perlin2(seed ^ 0x30d1, wx / m64(14.0), wz / m64(14.0)) * m(0.15)
             };
             *ground += (flat - *ground) * mud_w * band;
         }
