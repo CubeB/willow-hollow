@@ -14,7 +14,7 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{CELLS, ChunkMesh, Vertex, add_plants, mesh_chunk, mesh_chunk_with_currents, tag_trees},
+    mesh::{CELLS, ChunkMesh, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees},
 };
 use worldgen::{Cascade, SpringMark, Surf, World, features, scale::m, world::GameWorld};
 
@@ -558,6 +558,19 @@ fn release(arena: &mut VertexArena, chunks: &[GpuChunk]) {
     }
 }
 
+/// For each chunk of a column (in order of height, with no gaps), which of its padded
+/// columns have something opaque or water in a chunk above it: those voxels never see
+/// the sky, so no snow settles on them.
+fn roofs(chunks: &[(i32, voxel::PaddedChunk)], mats: &voxel::Materials) -> Vec<Vec<bool>> {
+    let mut out = vec![Vec::new(); chunks.len()];
+    let mut covered = vec![false; voxel::PAD * voxel::PAD];
+    for (i, (_, chunk)) in chunks.iter().enumerate().rev() {
+        out[i] = covered.clone();
+        cover_columns(chunk, mats, &mut covered);
+    }
+    out
+}
+
 fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
     if !focus.in_range(col, UNLOAD_SLACK) {
         return ColumnResult {
@@ -578,11 +591,13 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     let t0 = Instant::now();
     let output = world.generate_column(col.1, col.2);
     let t1 = Instant::now();
+    let roofs = roofs(&output.chunks, world.materials());
     let chunks = output
         .chunks
         .iter()
-        .map(|(cy, chunk)| {
-            let mut mesh = mesh_chunk_with_currents(chunk, world.materials(), &output.currents);
+        .zip(&roofs)
+        .map(|((cy, chunk), roof)| {
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof);
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
@@ -620,10 +635,12 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
     // nearest tree's, as coarse cells are too big to say exactly.
     let step = 1 << col.0;
     let trunks: Vec<(IVec3, u8)> = trees.iter().map(|p| (p.pos.div_euclid(IVec3::splat(step)), features::tree_tag(p.pos))).collect();
+    let roofs = roofs(&chunks, world.materials());
     let meshes = chunks
         .iter()
-        .map(|(cy, chunk)| {
-            let mut mesh = mesh_chunk(chunk, world.materials());
+        .zip(&roofs)
+        .map(|((cy, chunk), roof)| {
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &[], roof);
             tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
                 trunks
                     .iter()

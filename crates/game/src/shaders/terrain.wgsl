@@ -26,6 +26,8 @@ struct VOut {
     @location(8) current: vec3<f32>,
     // The ground here: its row of G.snow, blended between the chunk's corners.
     @location(9) snow: vec4<f32>,
+    // Voxels per cell of the chunk's mesh.
+    @location(10) @interpolate(flat) scale: f32,
 };
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
@@ -66,7 +68,8 @@ fn face_normal(face: u32) -> vec3<f32> {
     }
 }
 
-const FLAG_WATER: u32 = 1u;
+// On opaque faces: the voxel is open to the sky (voxel::flags::SKY).
+const FLAG_SKY: u32 = 1u;
 const FLAG_FOLIAGE: u32 = 8u;
 const FLAG_EMISSIVE: u32 = 16u;
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
@@ -83,11 +86,8 @@ fn vs(in: VIn) -> VOut {
     out.local = local;
     out.band = in.band;
     out.snow = corner_snow(in.biomes, local.xz / 32.0);
+    out.scale = in.scale;
     var rel = local * in.scale + in.offset;
-    if ((out.flags & FLAG_WATER) != 0u && out.face == 2u) {
-        // Water surfaces sit a little below the top of their voxel.
-        rel.y -= 0.125;
-    }
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
         // Leaves stir in the wind. The offset is a smooth function of world position,
         // so neighbouring leaf voxels move together and no gaps open between them.
@@ -151,7 +151,10 @@ fn shade(in: VOut) -> vec4<f32> {
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
     base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, in.flags >> 8u);
-    base = ground_weather(base, n, in.rel, h, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, fract(in.local.y), in.snow);
+    // The middle of the voxel, camera-relative, for snow that is the same all over it.
+    let cell = floor(in.local - n * 0.5);
+    let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
+    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), in.snow);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -197,6 +200,7 @@ fn vs_water(in: VIn) -> VOut {
     out.band = in.band;
     out.snow = corner_snow(in.biomes, local.xz / 32.0);
     out.current = water_current(in.a);
+    out.scale = in.scale;
     var rel = local * in.scale + in.offset;
     if (out.face == 2u) {
         // Water surfaces sit a little below the top of their voxel.

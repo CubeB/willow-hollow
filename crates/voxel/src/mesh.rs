@@ -171,7 +171,36 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 /// indexed `x * PAD + z` in padded coordinates, like the voxels, or empty if all the
 /// water is still.
 pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents: &[Current]) -> ChunkMesh {
+    mesh_chunk_under_sky(chunk, mats, currents, &[])
+}
+
+/// Marks each padded column (`x * PAD + z`) in `covered` that holds anything opaque or
+/// any water in this chunk, from its first interior voxel up. Meshing a column of chunks
+/// from the top down, what the chunks above have marked is what covers the next one.
+pub fn cover_columns(chunk: &PaddedChunk, mats: &Materials, covered: &mut [bool]) {
+    let voxels = chunk.voxels();
+    for (i, c) in covered.iter_mut().enumerate().take(PAD * PAD) {
+        if !*c {
+            *c = voxels[i * PAD + 1..(i + 1) * PAD].iter().any(|&v| roofs(mats, v));
+        }
+    }
+}
+
+/// Whether a voxel keeps snow off what is below it: anything but air, broadleaf leaves,
+/// which are down by the time snow lies, and wood (bare branches, a plank), which snow
+/// falls past.
+fn roofs(mats: &Materials, v: crate::Voxel) -> bool {
+    let m = mats.get(v);
+    m.kind != Kind::Air && !matches!(m.plant, plant::DECIDUOUS | plant::AUTUMN | plant::VINE)
+}
+
+/// [`mesh_chunk_with_currents`], knowing which columns have something above the chunk
+/// (`covered`, from [`cover_columns`] on the chunks above, or empty for none). Every
+/// opaque face of a voxel with nothing above it, open to the sky, carries
+/// [`flags::SKY`], which is where snow settles.
+pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool]) -> ChunkMesh {
     assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
+    assert!(covered.is_empty() || covered.len() == PAD * PAD, "one cover per padded column");
     const SOLID: u8 = Kind::Solid as u8;
     const WATER: u8 = Kind::Water as u8;
     /// Bits of the interior voxels (padded y 1..=N) in a column mask.
@@ -193,12 +222,18 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
     // The foliage among the solid bits. Foliage sways, so it must not hide the faces of
     // what it stands on, or the sway would open holes in the ground.
     let mut leafy = [[0u64; PAD]; PAD];
+    // What keeps the snow off the voxels under it (see `roofs`).
+    let mut roof = [[0u64; PAD]; PAD];
+    let roofing: Vec<bool> = (0..mats.len()).map(|i| roofs(mats, i as crate::Voxel)).collect();
     let voxels = chunk.voxels();
     for x in 0..PAD {
         for z in 0..PAD {
             let col = &voxels[(x * PAD + z) * PAD..][..PAD];
-            let (mut s, mut w, mut l) = (0u64, 0u64, 0u64);
+            let (mut s, mut w, mut l, mut r) = (0u64, 0u64, 0u64, 0u64);
             for (y, &v) in col.iter().enumerate() {
+                if roofing[v as usize] {
+                    r |= 1 << y;
+                }
                 match kind_of[v as usize] {
                     SOLID => {
                         s |= 1 << y;
@@ -213,6 +248,7 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
             solid[x][z] = s;
             water[x][z] = w;
             leafy[x][z] = l;
+            roof[x][z] = r;
         }
     }
     let is_solid = |p: [usize; 3]| ((solid[p[0]][p[2]] >> p[1]) & 1) as u32;
@@ -237,6 +273,7 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
                     if s == 0 && w == 0 {
                         continue;
                     }
+                    let roofed = !covered.is_empty() && covered[x * PAD + z];
                     // Solid and water masks of the neighbour each voxel's face looks at.
                     let (ns, nw, nl) = match face {
                         0 => (solid[x + 1][z], water[x + 1][z], leafy[x + 1][z]),
@@ -284,6 +321,9 @@ pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents:
                             fl |= flags::EMISSIVE;
                         }
                         fl |= m.plant << flags::PLANT_SHIFT;
+                        if !roofed && roof[x][z] >> (y + 1) == 0 {
+                            fl |= flags::SKY;
+                        }
                         // Leaves that fall one by one stay one voxel each, so the shader can tell
                         // which voxel every corner of a face belongs to.
                         let single = m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN;
@@ -428,7 +468,9 @@ pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a Plan
                 // Darker where a rooted stem meets the ground.
                 let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
                 let sways = if at_top { b.sway_hi } else { b.sway_lo };
+                // Plants are taken to stand in the open, where snow settles on them.
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
+                    | flags::SKY
                     | if sways { flags::FOLIAGE } else { 0 }
                     | m.plant << flags::PLANT_SHIFT;
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
