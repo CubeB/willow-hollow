@@ -290,13 +290,14 @@ impl Particles {
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
                 let side = Vec3::new(-c.dir.z, 0.0, c.dir.x) * self.range(-0.5, 0.5) * U;
-                // A fast river throws its spray further out over the drop.
-                let speed = 1.2 + drop * 0.35 + c.speed * VOXELS_PER_METRE / U;
+                // A fast river throws its spray further out over the drop, but only a
+                // little: it stays close to the sheet of falling water.
+                let speed = (0.6 + drop * 0.15 + 0.5 * c.speed * VOXELS_PER_METRE / U).min(2.2);
                 let particle = Particle {
                     kind: PKind::Spray,
                     pos: c.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.1 * U as f64, 0.0),
                     vel: c.dir * (speed * self.range(0.6, 1.2)) + Vec3::Y * self.range(0.8, 1.6 + drop * 0.4)
-                        + Vec3::new(self.range(-0.4, 0.4), 0.0, self.range(-0.4, 0.4)),
+                        + Vec3::new(self.range(-0.25, 0.25), 0.0, self.range(-0.25, 0.25)),
                     age: 0.0,
                     life: self.range(0.7, 1.4),
                     size: Vec3::splat(self.range(0.1, 0.22)),
