@@ -4,7 +4,7 @@
 //! Each kind has its own spawn rule, tied to where the player is and the time of day.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, Vec3};
+use glam::{DVec3, Vec2, Vec3, Vec4};
 use voxel::Kind;
 use worldgen::{
     Cascade, SpringMark, Surf,
@@ -27,6 +27,9 @@ pub struct ParticleInstance {
     pub glow: f32,
     /// Linear rgb and alpha.
     pub color: [f32; 4],
+    /// Pitch (about the cube's own x) and roll (about its own z), radians, turned
+    /// before the yaw: a leaf tumbling, a wing beating.
+    pub tilt: [f32; 2],
 }
 
 /// Prevailing wind: a slowly wandering vector, as in nature never quite steady.
@@ -68,7 +71,6 @@ enum PKind {
     Firefly,
     Mote,
     Butterfly,
-    Bird,
     Droplet,
     Rain,
     Snow,
@@ -94,24 +96,78 @@ pub enum LeafShape {
 }
 
 impl LeafShape {
-    /// Size (width, thickness, length) in old voxels, and how many extra falls it brings.
+    /// Size (width, thickness, length) in old voxels.
     fn size(self) -> Vec3 {
         match self {
-            LeafShape::Needle => Vec3::new(0.04, 0.03, 0.14),
-            LeafShape::Slip => Vec3::new(0.07, 0.04, 0.36),
-            LeafShape::Broad => Vec3::new(0.2, 0.06, 0.24),
-            LeafShape::Autumn => Vec3::new(0.26, 0.06, 0.28),
-            LeafShape::Petal => Vec3::new(0.1, 0.03, 0.1),
+            // A needle: a thin sliver, several times longer than it is wide.
+            LeafShape::Needle => Vec3::new(0.022, 0.018, 0.2),
+            LeafShape::Slip => Vec3::new(0.07, 0.03, 0.36),
+            LeafShape::Broad => Vec3::new(0.2, 0.03, 0.24),
+            LeafShape::Autumn => Vec3::new(0.26, 0.03, 0.28),
+            LeafShape::Petal => Vec3::new(0.1, 0.02, 0.1),
         }
     }
-    fn weight(self) -> f32 {
+    /// How fast it falls in still air, old voxels a second: a needle drops, a petal floats.
+    fn fall(self) -> f32 {
         match self {
-            LeafShape::Needle => 0.5,
-            LeafShape::Slip => 0.8,
-            LeafShape::Broad | LeafShape::Petal => 1.0,
-            LeafShape::Autumn => 3.5,
+            LeafShape::Needle => 1.9,
+            LeafShape::Slip => 1.5,
+            LeafShape::Broad => 1.15,
+            LeafShape::Autumn => 1.05,
+            LeafShape::Petal => 0.75,
         }
     }
+    /// Whether it is long and thin, and so spins about its length as it falls rather
+    /// than swinging from side to side.
+    fn spins(self) -> bool {
+        matches!(self, LeafShape::Needle | LeafShape::Slip)
+    }
+}
+
+/// A place in a tree's crown that leaves fall from.
+pub struct LeafSite {
+    /// The top leaf voxel of the crown here (its corner).
+    pub pos: DVec3,
+    /// The height of the crown's underside, where it is open below.
+    pub under: Option<f64>,
+    /// The leaf's colour as modelled, linear.
+    pub color: [f32; 3],
+    pub shape: LeafShape,
+    /// Its plant kind (voxel::plant), for its year.
+    pub plant: u8,
+    /// Its tree's tag (features::tree_tag), 0 if not known.
+    pub tag: u8,
+}
+
+/// How readily this site sheds a leaf on date `s`, and the colour of the leaf: that of
+/// the leaves still on its tree, autumn's gold and red included. A tree sheds most in
+/// the days before its own leaves are down, and a bare one sheds none.
+fn shedding(site: &LeafSite, s: f32, leaf_fall: f32) -> (f32, [f32; 3]) {
+    use voxel::plant;
+    let c = Vec3::from(site.color);
+    match site.plant {
+        plant::DECIDUOUS | plant::AUTUMN => {
+            let maple = site.plant == plant::AUTUMN;
+            let vox = site.pos.floor().as_ivec3();
+            let leaf = crate::season::leaf(s, vox, maple, site.tag);
+            if !leaf.keep {
+                return (0.0, site.color);
+            }
+            let colour = crate::season::leaf_colour(c, &leaf, maple, s);
+            // Turned leaves let go; most of all in the last days before the tree is bare.
+            let last = smooth(leaf.fall_at - 0.035, leaf.fall_at, s);
+            let w = 0.03 + 2.2 * leaf.turn * leaf.turn + 4.5 * last;
+            (if maple { w * 1.3 } else { w }, colour.to_array())
+        }
+        // Evergreens drop a few old needles all year, a few more in autumn.
+        _ if site.shape == LeafShape::Needle => (0.06 + 0.3 * leaf_fall, site.color),
+        _ => (0.04 + 0.15 * leaf_fall, site.color),
+    }
+}
+
+fn smooth(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 struct Particle {
@@ -126,6 +182,10 @@ struct Particle {
     phase: f32,
     /// Leaves that have come to rest.
     settled: bool,
+    /// A falling leaf's heading, pitch and roll.
+    rot: Vec3,
+    /// A falling leaf's ways: swing rate, spiral rate, tumble rate, and how fast it falls.
+    spin: Vec4,
 }
 
 /// What the spawners need to know about the player's surroundings this frame.
@@ -139,13 +199,15 @@ pub struct Surroundings<'a> {
     pub springs: &'a [SpringMark],
     /// Where the sea breaks on rock near the player.
     pub surf: &'a [Surf],
-    /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
-    pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
+    /// Places in the trees near the player that leaves fall from, refreshed by the caller.
+    pub leaves: &'a [LeafSite],
     /// Flower voxels near the player.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
+    /// The time of year, 0 to 1 (see season.rs), which each tree's leaves follow.
+    pub date: f32,
     /// Weather: rain and snow strength and how hard the wind blows beyond usual, 0..1.
     pub rain: f32,
     pub snow: f32,
@@ -158,10 +220,17 @@ pub struct Particles {
     instances: Vec<ParticleInstance>,
     rng: u32,
     bird_timer: f32,
+    flocks: Vec<Flock>,
+    /// Each leaf site's shedding weight and leaf colour this frame (see `shedding`).
+    shed: Vec<(f32, [f32; 3])>,
     pub wind: Wind,
 }
 
 const MAX_PARTICLES: usize = 8000;
+/// Leaves in the air at once, at most; more wait their turn on the tree.
+const MAX_FALLING: usize = 1500;
+/// How far off (voxels, across) a falling leaf is let go of, being out of sight.
+const LEAF_REACH: f64 = 110.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
 const RAIN_COUNT: f32 = 2200.0;
 const SNOW_COUNT: f32 = 1500.0;
@@ -173,6 +242,8 @@ impl Particles {
             instances: Vec::new(),
             rng: 0x2545_f491,
             bird_timer: 20.0,
+            flocks: Vec::new(),
+            shed: Vec::new(),
             wind: Wind::new(),
         }
     }
@@ -232,6 +303,8 @@ impl Particles {
                     color: [0.85, 0.92, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -247,6 +320,8 @@ impl Particles {
                     color: [0.9, 0.94, 1.0],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -274,6 +349,8 @@ impl Particles {
                     color: [0.92, 0.95, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -297,34 +374,69 @@ impl Particles {
                     color: [0.85, 0.94, 1.0],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
         }
 
-        // Leaves let go in the wind.
-        if !s.leaves.is_empty() {
+        // Leaves let go in the wind, each tree on its own date and in its own colours.
+        let falling = self.particles.iter().filter(|p| p.kind == PKind::Leaf && !p.settled).count();
+        if !s.leaves.is_empty() && falling < MAX_FALLING {
             let gust = self.wind.vector.length();
             // Gusts shake leaves loose far faster than a steady breeze does.
-            let windiness = 0.3 + gust * 0.4 + (gust - 1.8).max(0.0) * 2.0;
-            // Autumn groves (maple and the like) shed much more.
-            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32
-                // Leaves hold on through summer, let go in autumn, and few are left by winter.
-                * (0.2 + 2.4 * s.leaf_fall);
-            let rate = 2.5 * windiness * weight * (s.leaves.len() as f32 / 400.0).min(1.5);
+            let windiness = 0.4 + gust * 0.35 + (gust - 1.8).max(0.0) * 1.5;
+            self.shed.clear();
+            self.shed.extend(s.leaves.iter().map(|l| shedding(l, s.date, s.leaf_fall)));
+            let total: f32 = self.shed.iter().map(|w| w.0).sum();
+            let most = self.shed.iter().map(|w| w.0).fold(0.0, f32::max);
+            let rate = 0.15 * windiness * total;
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
-                let (pos, color, shape) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
+                // A site by its weight: try a few at random, keeping each by how much it sheds.
+                let mut pick = None;
+                for _ in 0..12 {
+                    let i = (self.unit() * s.leaves.len() as f32) as usize % s.leaves.len();
+                    if self.unit() * most < self.shed[i].0 {
+                        pick = Some(i);
+                        break;
+                    }
+                }
+                let Some(i) = pick else {
+                    continue;
+                };
+                let (site, color) = (&s.leaves[i], self.shed[i].1);
+                // Most fall from under the crown, where they come into view at once.
+                let y = match site.under {
+                    Some(under) if self.unit() < 0.75 => under - 0.15,
+                    _ => site.pos.y - 0.1,
+                };
+                let shape = site.shape;
+                // Each leaf a little lighter or darker, as the cubes of its tree are.
+                let shade = self.range(0.88, 1.1);
+                let tumble = if self.unit() < 0.5 { 1.0 } else { -1.0 };
                 let particle = Particle {
                     kind: PKind::Leaf,
-                    pos: pos + DVec3::new(self.range(0.1, 0.9) as f64, -0.1, self.range(0.1, 0.9) as f64),
+                    pos: DVec3::new(site.pos.x + self.range(0.1, 0.9) as f64, y, site.pos.z + self.range(0.1, 0.9) as f64),
                     vel: Vec3::ZERO,
                     age: 0.0,
-                    life: self.range(9.0, 14.0),
+                    // It lives until it comes down (see the simulation).
+                    life: f32::INFINITY,
                     size: shape.size() * self.range(0.8, 1.2),
-                    color,
+                    color: color.map(|c| c * shade),
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::new(self.range(0.0, std::f32::consts::TAU), 0.0, self.range(-1.0, 1.0)),
+                    spin: Vec4::new(
+                        // Swinging from side to side, about once every two or three seconds.
+                        self.range(1.8, 3.2) * if shape == LeafShape::Petal { 1.4 } else { 1.0 },
+                        // The heading turns slowly, so the swings trace a spiral.
+                        self.range(0.25, 1.1) * if self.unit() < 0.5 { 1.0 } else { -1.0 },
+                        // Spinning: needles and slips quickly about their length.
+                        tumble * if shape.spins() { self.range(9.0, 16.0) } else { self.range(4.0, 8.0) },
+                        shape.fall() * self.range(0.85, 1.15),
+                    ),
                 };
                 self.spawn(particle);
             }
@@ -347,6 +459,8 @@ impl Particles {
                     color: if rain { [0.72, 0.8, 0.9] } else { [0.95, 0.97, 1.0] },
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -370,6 +484,8 @@ impl Particles {
                     color: if self.unit() < 0.85 { [0.75, 1.0, 0.25] } else { [0.45, 1.0, 0.35] },
                     phase: self.range(0.0, 100.0),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -389,6 +505,8 @@ impl Particles {
                     color: [1.0, 0.95, 0.75],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -407,37 +525,24 @@ impl Particles {
                 color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
+                rot: Vec3::ZERO,
+                spin: Vec4::ZERO,
             };
             self.spawn(particle);
         }
 
-        // Now and then a flock passes high overhead.
+        // Now and then a flock passes overhead.
         self.bird_timer -= dt;
         if day && self.bird_timer <= 0.0 {
-            self.bird_timer = self.range(35.0, 80.0);
-            let heading = self.range(0.0, std::f32::consts::TAU);
-            let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
-            let start = s.camera - (dir * 220.0 * U).as_dvec3() + DVec3::new(0.0, (self.range(45.0, 90.0) * U) as f64, 0.0);
-            let n = 5 + (self.unit() * 5.0) as i32;
-            for i in 0..n {
-                // A V: alternate sides, each bird further back and out.
-                let k = ((i + 1) / 2) as f32;
-                let side = if i % 2 == 0 { 1.0 } else { -1.0 };
-                let offset = -dir * (k * 2.2) + Vec3::new(-dir.z, 0.0, dir.x) * (k * 1.6 * side);
-                let particle = Particle {
-                    kind: PKind::Bird,
-                    pos: start + (offset * U).as_dvec3(),
-                    vel: dir * 9.0,
-                    age: 0.0,
-                    life: 55.0,
-                    size: Vec3::new(0.5, 0.12, 0.9),
-                    color: [0.08, 0.08, 0.1],
-                    phase: self.range(0.0, std::f32::consts::TAU),
-                    settled: false,
-                };
-                self.spawn(particle);
+            self.bird_timer = self.range(25.0, 60.0);
+            if self.flocks.len() < MAX_FLOCKS {
+                self.spawn_flock(s.camera);
             }
         }
+        for flock in &mut self.flocks {
+            flock.update(dt);
+        }
+        self.flocks.retain(|f| !f.gone(s.camera));
 
         // Splash when the player goes in.
         if let Some(at) = s.player_entered_water {
@@ -454,6 +559,8 @@ impl Particles {
                     color: [0.8, 0.9, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -513,19 +620,58 @@ impl Particles {
                     if p.settled {
                         continue;
                     }
-                    // A hover, then a slow swaying fall carried along by the wind.
-                    let fall = if p.age < 0.6 { 0.0 } else { -1.1 };
-                    let sway = (t * 2.2 + p.phase).sin() * 0.8;
-                    let drift = wind * 0.6;
-                    p.vel += (Vec3::new(drift.x + sway, fall, drift.z + sway * 0.5) - p.vel) * (1.0 - (-3.0 * dt).exp());
+                    // A leaf falls one of two ways, and changes between them as it goes:
+                    // swinging from side to side like a pendulum, banking at each end of
+                    // its swing, or spinning end over end and gliding off sideways as it
+                    // does. Its heading wanders round, so either way it spirals. A needle
+                    // or a slip of a leaf spins about its length nearly all the way down.
+                    let a = p.age;
+                    let [rate, spiral, spin, fall] = p.spin.to_array();
+                    let gust = wind.length();
+                    let wander = noise::perlin2(0x5a, (p.phase * 13.0) as f64, (a * 0.35) as f64);
+                    let spinning = if p.size.z > p.size.x * 2.5 { wander > -0.6 } else { wander > 0.2 - gust * 0.08 };
+                    p.rot.x += (spiral + wander * 0.8) * dt;
+                    let across = Vec3::new(p.rot.x.cos(), 0.0, p.rot.x.sin());
+                    let (swing, back) = (a * rate + p.phase).sin_cos();
+                    let (want_pitch, glide, drop) = if spinning {
+                        // Rolling over and over; the cube looks the same turned half round,
+                        // so the roll is kept within a half turn either side.
+                        p.rot.z = (p.rot.z + spin * dt + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI)
+                            - std::f32::consts::FRAC_PI_2;
+                        (0.4 * (a * rate * 0.7 + p.phase).sin(), across * 0.5 * spin.signum(), fall * 1.25)
+                    } else {
+                        // Tipped furthest at either end of the swing, where it stalls, and
+                        // falling fastest through the middle.
+                        let roll = -0.9 * swing;
+                        p.rot.z += (roll - p.rot.z) * (1.0 - (-6.0 * dt).exp());
+                        (0.35 * back, across * (1.2 * back), fall * (0.45 + 0.8 * (1.0 - swing.abs())))
+                    };
+                    p.rot.y += (want_pitch - p.rot.y) * (1.0 - (-5.0 * dt).exp());
+                    // It hangs a moment as it lets go.
+                    let start = (a / 0.5).min(1.0);
+                    let flutter = Vec3::new(
+                        noise::perlin2(0x5b, (p.phase * 7.0) as f64, (a * 1.3) as f64),
+                        0.0,
+                        noise::perlin2(0x5c, (p.phase * 7.0) as f64, (a * 1.3) as f64),
+                    ) * (0.3 + gust * 0.15);
+                    let target = glide + flutter + Vec3::new(wind.x, 0.0, wind.z) * 0.6 - Vec3::Y * drop * start;
+                    p.vel += (target - p.vel) * (1.0 - (-3.5 * dt).exp());
+                    // Long gone from view, or caught somewhere for good: let it go.
+                    let off = p.pos - s.camera;
+                    if off.x.abs().max(off.z.abs()) > LEAF_REACH || a > 240.0 {
+                        p.life = p.age;
+                        continue;
+                    }
                     let next = p.pos + (p.vel * U * dt).as_dvec3();
                     let below = next.floor().as_ivec3();
                     match voxels.kind(below.x, below.y, below.z) {
                         Kind::Solid => {
                             p.settled = true;
                             p.pos.y = below.y as f64 + 1.02;
-                            // Leaves gather where they land and lie a good while.
-                            p.life = p.age + 30.0;
+                            // It lies flat where it lands, and a while later fades.
+                            p.rot.y = 0.0;
+                            p.rot.z = 0.0;
+                            p.life = p.age + 14.0 + 8.0 * (p.phase / std::f32::consts::TAU);
                         }
                         Kind::Water => {
                             // It floats on the top voxel of the water, and goes where that takes it.
@@ -603,10 +749,6 @@ impl Particles {
                     // Wings: the body flattens and widens as it flaps.
                     p.size.x = 0.18 + 0.2 * ((t * 14.0 + p.phase).sin()).abs();
                 }
-                PKind::Bird => {
-                    p.pos += (p.vel * U * dt).as_dvec3();
-                    p.size.x = 0.3 + 0.5 * ((t * 6.0 + p.phase).sin()).abs();
-                }
             }
         }
         // A few of the drops that hit water throw up a speck.
@@ -622,6 +764,8 @@ impl Particles {
                     color: [0.8, 0.9, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -640,6 +784,8 @@ impl Particles {
                     color: [0.9, 0.96, 1.0],
                     phase: a,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -686,14 +832,33 @@ impl Particles {
                 }
                 _ => {}
             }
+            let (yaw, tilt) = match p.kind {
+                PKind::Leaf => {
+                    // Fading slowly where it lies.
+                    if p.settled {
+                        alpha = fade_in * ((p.life - p.age) / 3.0).clamp(0.0, 1.0);
+                    }
+                    (p.rot.x, [p.rot.y, p.rot.z])
+                }
+                _ => (p.phase, [0.0; 2]),
+            };
             self.instances.push(ParticleInstance {
                 pos: (p.pos - s.camera).as_vec3().to_array(),
-                yaw: p.phase,
+                yaw,
                 size: (p.size * U).to_array(),
                 glow,
                 color: [color[0], color[1], color[2], alpha],
+                tilt,
             });
         }
+        for flock in &self.flocks {
+            flock.draw(s.camera, &mut self.instances);
+        }
+    }
+
+    /// Where each flock in the sky is, its birds' middle, and how many birds it has.
+    pub fn flocks(&self) -> Vec<(DVec3, usize)> {
+        self.flocks.iter().map(|f| (f.birds.iter().map(|b| b.pos).sum::<DVec3>() / f.birds.len().max(1) as f64, f.birds.len())).collect()
     }
 
     pub fn instances(&self) -> &[ParticleInstance] {
@@ -740,13 +905,389 @@ fn ground_below(voxels: &mut impl Voxels, from: DVec3, depth: i32) -> Option<DVe
     None
 }
 
+// --- Birds ---------------------------------------------------------------------------
+
+/// One bird of a flock, in voxels and voxels a second.
+struct Bird {
+    pos: DVec3,
+    vel: Vec3,
+    /// Through its wing beat, radians.
+    flap: f32,
+    /// Wing beats a second, as radians a second.
+    rate: f32,
+    /// How far its wings are raised now, radians.
+    wing: f32,
+    /// Leaning into a turn, radians.
+    bank: f32,
+    /// Its heading last frame, for how fast it is turning.
+    yaw: f32,
+    /// Its place in a V, behind and to one side of the lead (across, back), voxels.
+    slot: Vec3,
+    seed: f32,
+}
+
+/// Birds flying together overhead. Big ones (geese, gulls) keep a loose V and beat their
+/// wings slowly; small ones bunch, stream and wheel about, beating fast between glides.
+struct Flock {
+    large: bool,
+    /// The point the flock is making for: it runs on ahead of the birds.
+    lead: DVec3,
+    heading: f32,
+    /// Voxels a second.
+    speed: f32,
+    seed: f32,
+    age: f32,
+    /// Bird length and half wingspan in metres.
+    body: f32,
+    span: f32,
+    body_color: [f32; 3],
+    wing_color: [f32; 3],
+    birds: Vec<Bird>,
+}
+
+/// At most this many flocks in the sky at once.
+const MAX_FLOCKS: usize = 2;
+/// Metres off at which a flock is out of sight and let go.
+const FLOCK_REACH: f32 = 380.0;
+
+impl Particles {
+    fn spawn_flock(&mut self, camera: DVec3) {
+        let vpm = VOXELS_PER_METRE;
+        // Big birds a third of the time, and their flocks are smaller.
+        let large = self.unit() < 0.4;
+        let n = if large {
+            // A pair, a skein of a dozen, or anything between.
+            2 + (self.unit().powf(1.5) * 13.0) as usize
+        } else {
+            6 + (self.unit().powf(1.3) * 40.0) as usize
+        };
+        let heading = self.range(0.0, std::f32::consts::TAU);
+        let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
+        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        let height = if large { self.range(35.0, 120.0) } else { self.range(18.0, 70.0) };
+        // From out of sight on one side, passing over or near the player.
+        let start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
+            + (side * self.range(-70.0, 70.0) * vpm).as_dvec3()
+            + DVec3::new(0.0, (height * vpm) as f64, 0.0);
+        let speed = if large { self.range(13.0, 17.0) } else { self.range(10.0, 14.0) } * vpm;
+        let (body, span) = if large { (self.range(0.6, 0.9), self.range(0.65, 0.85)) } else { (0.22, 0.2) };
+        // Geese and cormorants dark, gulls pale; small birds near black against the sky.
+        let pale = large && self.unit() < 0.35;
+        let (body_color, wing_color) = if pale {
+            ([0.62, 0.62, 0.6], [0.5, 0.5, 0.5])
+        } else if large {
+            ([0.07, 0.06, 0.05], [0.1, 0.09, 0.08])
+        } else {
+            ([0.035, 0.035, 0.04], [0.045, 0.045, 0.05])
+        };
+        let mut birds = Vec::with_capacity(n);
+        for i in 0..n {
+            // A V for big birds: alternate sides, each further back and out, one arm
+            // often longer than the other. Small birds start in a loose ball.
+            let slot = if large {
+                let k = ((i + 1) / 2) as f32;
+                let s = if i % 2 == 0 { 1.0 } else { -1.0 };
+                Vec3::new(k * self.range(1.6, 2.1) * s, self.range(-0.3, 0.3), k * self.range(1.7, 2.3)) * span * 2.0 * vpm
+            } else {
+                Vec3::ZERO
+            };
+            let scatter = if large {
+                Vec3::ZERO
+            } else {
+                Vec3::new(self.range(-1.0, 1.0), self.range(-0.5, 0.5), self.range(-1.0, 1.0)) * 6.0 * vpm
+            };
+            let place = side * slot.x - dir * slot.z + Vec3::Y * slot.y + scatter;
+            birds.push(Bird {
+                pos: start + place.as_dvec3(),
+                vel: dir * speed,
+                flap: self.range(0.0, std::f32::consts::TAU),
+                rate: if large { self.range(2.2, 2.9) } else { self.range(9.0, 12.0) } * std::f32::consts::TAU,
+                wing: 0.0,
+                bank: 0.0,
+                yaw: heading,
+                slot,
+                seed: self.range(0.0, 1000.0),
+            });
+        }
+        let seed = self.range(0.0, 1000.0);
+        self.flocks.push(Flock {
+            large,
+            lead: start,
+            heading,
+            speed,
+            seed,
+            age: 0.0,
+            body,
+            span,
+            body_color,
+            wing_color,
+            birds,
+        });
+    }
+}
+
+impl Flock {
+    fn update(&mut self, dt: f32) {
+        let vpm = VOXELS_PER_METRE;
+        self.age += dt;
+        let (a, seed) = (self.age as f64, self.seed as f64);
+        // The lead wheels: big birds in long gentle curves, small ones in sudden sweeps
+        // and rolls, rising and falling as they go.
+        let turn = if self.large {
+            0.06 * noise::perlin2(0x6a, seed, a * 0.05)
+        } else {
+            0.55 * noise::perlin2(0x6b, seed, a * 0.12) + 0.35 * noise::perlin2(0x6c, seed, a * 0.4)
+        };
+        self.heading += turn as f32 * dt;
+        let dir = Vec3::new(self.heading.cos(), 0.0, self.heading.sin());
+        let side = Vec3::new(-dir.z, 0.0, dir.x);
+        let climb = if self.large { 0.0 } else { noise::perlin2(0x6d, seed, a * 0.15) as f32 * 3.0 * vpm };
+        let lead_vel = dir * self.speed + Vec3::Y * climb;
+        self.lead += (lead_vel * dt).as_dvec3();
+
+        let n = self.birds.len();
+        let centre = self.birds.iter().map(|b| b.pos).sum::<DVec3>() / n.max(1) as f64;
+        let mean_vel = self.birds.iter().map(|b| b.vel).sum::<Vec3>() / n.max(1) as f32;
+        // Personal space: a wingspan or two.
+        let room = self.span * 2.0 * vpm * if self.large { 1.6 } else { 3.0 };
+        for i in 0..n {
+            let me = &self.birds[i];
+            let mut apart = Vec3::ZERO;
+            for (j, other) in self.birds.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                let d = (me.pos - other.pos).as_vec3();
+                let l = d.length();
+                if l < room && l > 1e-3 {
+                    apart += d / l * (1.0 - l / room);
+                }
+            }
+            let mut want = if self.large {
+                // Its place in the V, which breathes a little: a loose V, never a stiff one.
+                let s = me.slot;
+                let breathe = 1.0 + 0.12 * noise::perlin2(0x6e, me.seed as f64, a * 0.2) as f32;
+                let place = self.lead.as_vec3() + side * s.x * breathe - dir * s.z * breathe + Vec3::Y * s.y;
+                let to = (place.as_dvec3() - me.pos).as_vec3();
+                lead_vel + to * 0.5 + (mean_vel - me.vel) * 0.2
+            } else {
+                // Cohesion, alignment and separation, and the lead to make for.
+                let to_centre = (centre - me.pos).as_vec3();
+                let to_lead = (self.lead - me.pos).as_vec3();
+                let jitter = Vec3::new(
+                    noise::perlin2(0x70, me.seed as f64, a * 0.7) as f32,
+                    noise::perlin2(0x71, me.seed as f64, a * 0.7) as f32 * 0.4,
+                    noise::perlin2(0x72, me.seed as f64, a * 0.7) as f32,
+                ) * 2.0 * vpm;
+                mean_vel + to_centre * 0.25 + to_lead * 0.12 + jitter
+            };
+            want += apart * self.speed * 1.2;
+            let me = &mut self.birds[i];
+            let pull = if self.large { 1.2 } else { 2.5 };
+            me.vel += (want - me.vel) * (1.0 - (-pull * dt).exp());
+            // Never stalls, never races.
+            let speed = me.vel.length().clamp(self.speed * 0.7, self.speed * 1.35);
+            me.vel = me.vel.normalize_or(dir) * speed;
+            me.pos += (me.vel * dt).as_dvec3();
+            // Leaning into its turns.
+            let yaw = (-me.vel.x).atan2(me.vel.z);
+            let rate = (yaw - me.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            me.yaw = yaw;
+            let lean = (rate / dt.max(1e-4) * if self.large { 1.2 } else { 0.5 }).clamp(-0.9, 0.9);
+            me.bank += (lean - me.bank) * (1.0 - (-4.0 * dt).exp());
+            // Beating, or gliding on held wings: a big bird mostly beats, slowly; a small
+            // one beats in bursts between glides. Climbing takes beating.
+            let glide = noise::perlin2(0x73, me.seed as f64, a * if self.large { 0.12 } else { 0.6 }) as f32;
+            let gliding = me.vel.y < 0.3 * vpm && glide > if self.large { 0.25 } else { 0.05 };
+            let raised = if gliding {
+                0.12
+            } else {
+                me.flap += me.rate * dt;
+                0.12 + if self.large { 0.65 } else { 0.8 } * me.flap.sin()
+            };
+            me.wing += (raised - me.wing) * (1.0 - (-25.0 * dt).exp());
+        }
+    }
+
+    /// Body and wings for each bird, three cubes apiece.
+    fn draw(&self, camera: DVec3, out: &mut Vec<ParticleInstance>) {
+        let vpm = VOXELS_PER_METRE;
+        for b in &self.birds {
+            let rel = (b.pos - camera).as_vec3();
+            let metres = rel.length() / vpm;
+            let alpha = 1.0 - smooth(FLOCK_REACH - 60.0, FLOCK_REACH, metres);
+            if alpha <= 0.0 {
+                continue;
+            }
+            // Far off a bird is drawn a little bigger than life, so it still reads as a
+            // bird with wings rather than a speck.
+            let near = if self.large { 70.0 } else { 25.0 };
+            let grow = (metres / near).max(1.0).powf(0.85) * vpm;
+            let speed = b.vel.length().max(1e-3);
+            let pitch = -(b.vel.y / speed).clamp(-0.6, 0.6).asin();
+            let (body, span) = (self.body * grow, self.span * grow);
+            out.push(ParticleInstance {
+                pos: rel.to_array(),
+                yaw: b.yaw,
+                size: [body * 0.24, body * 0.2, body],
+                glow: 0.0,
+                color: [self.body_color[0], self.body_color[1], self.body_color[2], alpha],
+                tilt: [pitch, b.bank],
+            });
+            for side in [1.0f32, -1.0] {
+                // Each wing hinges at the body, raised by `wing` above the lean.
+                let roll = b.bank + side * b.wing;
+                let out_dir = Vec3::new(side * roll.cos(), side * roll.sin(), 0.0);
+                let centre = out_dir * (span * 0.5) + Vec3::new(0.0, 0.0, body * 0.08);
+                let at = rel + turn(centre, b.yaw, [pitch, 0.0]);
+                out.push(ParticleInstance {
+                    pos: at.to_array(),
+                    yaw: b.yaw,
+                    size: [span, body * 0.05, body * 0.38],
+                    glow: 0.0,
+                    color: [self.wing_color[0], self.wing_color[1], self.wing_color[2], alpha],
+                    tilt: [pitch, roll],
+                });
+            }
+        }
+    }
+
+    fn gone(&self, camera: DVec3) -> bool {
+        let off = (self.lead - camera).as_vec3();
+        let far = Vec2::new(off.x, off.z).length() / VOXELS_PER_METRE > FLOCK_REACH + 40.0;
+        (self.age > 20.0 && far) || self.age > 160.0
+    }
+}
+
+/// The particle shader's `turn`: roll about z, then pitch about x, then yaw about y.
+fn turn(v: Vec3, yaw: f32, tilt: [f32; 2]) -> Vec3 {
+    let (sr, cr) = tilt[1].sin_cos();
+    let a = Vec3::new(v.x * cr - v.y * sr, v.x * sr + v.y * cr, v.z);
+    let (sp, cp) = tilt[0].sin_cos();
+    let b = Vec3::new(a.x, a.y * cp - a.z * sp, a.y * sp + a.z * cp);
+    let (s, c) = yaw.sin_cos();
+    Vec3::new(b.x * c - b.z * s, b.y, b.x * s + b.z * c)
+}
+
 #[cfg(test)]
 mod leaf_tests {
     use super::LeafShape::*;
 
     #[test]
-    fn shapes_differ_and_autumn_falls_heavier() {
+    fn shapes_differ_and_needles_drop_fastest() {
         assert!(Needle.size().z < Broad.size().z && Slip.size().z > Broad.size().z);
-        assert!(Autumn.weight() > Broad.weight());
+        // A needle is thin and long.
+        assert!(Needle.size().z > 6.0 * Needle.size().x);
+        assert!(Needle.fall() > Broad.fall() && Broad.fall() > Petal.fall());
+        assert!(Needle.spins() && !Broad.spins());
+    }
+
+    /// Flat ground below y = 0.
+    struct Ground;
+
+    impl crate::player::Voxels for Ground {
+        fn kind(&mut self, _x: i32, y: i32, _z: i32) -> voxel::Kind {
+            if y < 0 { voxel::Kind::Solid } else { voxel::Kind::Air }
+        }
+    }
+
+    fn still_air(camera: glam::DVec3, time: f64) -> super::Surroundings<'static> {
+        super::Surroundings {
+            camera,
+            biome: worldgen::biome::Biome::Desert,
+            sun_elevation: -0.5,
+            cascades: &[],
+            springs: &[],
+            surf: &[],
+            leaves: &[],
+            flowers: &[],
+            player_entered_water: None,
+            leaf_fall: 0.0,
+            date: 0.62,
+            rain: 0.0,
+            snow: 0.0,
+            storm: 0.0,
+            time,
+        }
+    }
+
+    #[test]
+    fn leaves_turn_over_as_they_fall_and_last_until_they_land() {
+        use super::*;
+        let mut p = Particles::new();
+        for (i, shape) in [Broad, Needle, Autumn, Petal].into_iter().enumerate() {
+            p.spawn(Particle {
+                kind: PKind::Leaf,
+                pos: DVec3::new(i as f64 * 10.0, 40.0, 0.0),
+                vel: Vec3::ZERO,
+                age: 0.0,
+                life: f32::INFINITY,
+                size: shape.size(),
+                color: [0.5, 0.3, 0.1],
+                phase: i as f32 * 1.7,
+                settled: false,
+                rot: Vec3::ZERO,
+                spin: Vec4::new(2.4, 0.6, if shape.spins() { 12.0 } else { 6.0 }, shape.fall()),
+            });
+        }
+        let (mut rolls, mut drift) = (vec![(0.0f32, 0.0f32); 4], 0.0f64);
+        for step in 0..60 * 120 {
+            let falling = p.particles.iter().filter(|q| q.kind == PKind::Leaf && !q.settled).count();
+            p.update(1.0 / 60.0, &still_air(DVec3::ZERO, step as f64 / 60.0), &mut Ground);
+            let leaves: Vec<_> = p.particles.iter().filter(|q| q.kind == PKind::Leaf).collect();
+            // None is lost on the way down (those lying on the ground fade in time).
+            assert!(leaves.len() >= falling, "a leaf vanished in the air at step {step}");
+            for q in &leaves {
+                let i = (q.phase / 1.7).round() as usize;
+                if !q.settled {
+                    rolls[i] = (rolls[i].0.min(q.rot.z), rolls[i].1.max(q.rot.z));
+                    drift = drift.max((q.pos.x - i as f64 * 10.0).abs().max(q.pos.z.abs()));
+                }
+            }
+            if leaves.iter().all(|q| q.settled) {
+                // Each tipped well over both ways, and wandered from side to side.
+                assert!(rolls.iter().all(|r| r.0 < -0.5 && r.1 > 0.5), "{rolls:?}");
+                assert!(drift > 1.0);
+                // And lies flat on the ground.
+                assert!(leaves.iter().all(|q| q.pos.y > 0.0 && q.pos.y < 0.1 && q.rot.y == 0.0 && q.rot.z == 0.0));
+                return;
+            }
+        }
+        panic!("the leaves never came down");
+    }
+
+    #[test]
+    fn flocks_hold_together_and_beat_their_wings() {
+        use super::*;
+        let mut p = Particles::new();
+        let mut kinds = (false, false);
+        for _ in 0..12 {
+            p.flocks.clear();
+            p.spawn_flock(DVec3::ZERO);
+            let mut f = p.flocks.pop().unwrap();
+            kinds = (kinds.0 || f.large, kinds.1 || !f.large);
+            let mut wings = (f32::MAX, f32::MIN);
+            for _ in 0..60 * 40 {
+                f.update(1.0 / 60.0);
+                for b in &f.birds {
+                    assert!(b.pos.is_finite() && b.vel.is_finite());
+                    wings = (wings.0.min(b.wing), wings.1.max(b.wing));
+                }
+            }
+            let n = f.birds.len() as f64;
+            let centre = f.birds.iter().map(|b| b.pos).sum::<DVec3>() / n;
+            let metres = |d: DVec3| d.length() / VOXELS_PER_METRE as f64;
+            // Together after 40 s of wheeling, never piled on one another.
+            let spread = f.birds.iter().map(|b| metres(b.pos - centre)).fold(0.0, f64::max);
+            assert!(spread < if f.large { 60.0 } else { 40.0 }, "spread {spread} m in a flock of {n}");
+            for (i, a) in f.birds.iter().enumerate() {
+                for b in &f.birds[i + 1..] {
+                    assert!(metres(a.pos - b.pos) > 0.15, "two birds in one place");
+                }
+            }
+            // Wings went up and down.
+            assert!(wings.1 - wings.0 > 0.8, "wings {wings:?}");
+        }
+        assert!(kinds.0 && kinds.1, "both big birds and small came by");
     }
 }

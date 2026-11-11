@@ -10,6 +10,8 @@ struct VIn {
     @location(4) size: vec3<f32>,
     @location(5) glow: f32,
     @location(6) color: vec4<f32>,
+    // Pitch about the cube's own x, then roll about its own z, before the yaw.
+    @location(7) tilt: vec2<f32>,
 };
 
 struct VOut {
@@ -20,13 +22,23 @@ struct VOut {
     @location(3) glow: f32,
 };
 
+// Roll about z, then pitch about x, then yaw about the vertical.
+fn turn(v: vec3<f32>, yaw: f32, tilt: vec2<f32>) -> vec3<f32> {
+    let cr = cos(tilt.y);
+    let sr = sin(tilt.y);
+    let a = vec3<f32>(v.x * cr - v.y * sr, v.x * sr + v.y * cr, v.z);
+    let cp = cos(tilt.x);
+    let sp = sin(tilt.x);
+    let b = vec3<f32>(a.x, a.y * cp - a.z * sp, a.y * sp + a.z * cp);
+    let c = cos(yaw);
+    let s = sin(yaw);
+    return vec3<f32>(b.x * c - b.z * s, b.y, b.x * s + b.z * c);
+}
+
 @vertex
 fn vs(in: VIn) -> VOut {
-    let c = cos(in.yaw);
-    let s = sin(in.yaw);
-    let local = in.corner * in.size;
-    let turned = vec3<f32>(local.x * c - local.z * s, local.y, local.x * s + local.z * c);
-    let n = vec3<f32>(in.normal.x * c - in.normal.z * s, in.normal.y, in.normal.x * s + in.normal.z * c);
+    let turned = turn(in.corner * in.size, in.yaw, in.tilt);
+    let n = turn(in.normal, in.yaw, in.tilt);
     var out: VOut;
     out.rel = in.pos + turned;
     out.clip = G.view_proj * vec4<f32>(out.rel, 1.0);

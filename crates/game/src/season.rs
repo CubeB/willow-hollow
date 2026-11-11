@@ -8,6 +8,7 @@
 
 use std::ops::RangeInclusive;
 
+use glam::{IVec3, Vec3};
 use worldgen::biome::Biome;
 
 /// Game days in a year, unless the settings say otherwise.
@@ -144,6 +145,75 @@ pub struct Places {
     pub biomes: [Ground; Biome::ALL.len()],
 }
 
+/// season.wgsl's `season_hash`, bit for bit.
+fn hash(p: IVec3) -> f32 {
+    let mut h = (p.x as u32)
+        .wrapping_mul(374761393)
+        .wrapping_add((p.y as u32).wrapping_mul(668265263))
+        .wrapping_add((p.z as u32).wrapping_mul(2246822519));
+    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+    h ^= h >> 16;
+    (h & 0xff_ffff) as f32 / 16777216.0
+}
+
+/// One broadleaf leaf's year on this date, as season.wgsl's `Leaf`.
+pub struct Leaf {
+    /// False once it has fallen, or before it has budded.
+    pub keep: bool,
+    /// 0..1 through the colours of autumn.
+    pub turn: f32,
+    /// 1 for a new leaf, easing to 0 as it matures.
+    pub bud: f32,
+    /// The tree's own random, 0..1.
+    pub tree: f32,
+    /// The date it falls.
+    pub fall_at: f32,
+}
+
+/// The leaf at voxel `vox` on a tree tagged `tag` (features::tree_tag, 0 if unknown):
+/// season.wgsl's `season_leaf`, so a falling leaf has the colour and the date of the
+/// leaves still on its tree. Keep the two in step.
+pub fn leaf(s: f32, vox: IVec3, maple: bool, tag: u8) -> Leaf {
+    let h = hash(vox);
+    let branch = hash(vox.div_euclid(IVec3::splat(3)) + IVec3::new(11, 3, 7));
+    let tree = if tag == 0 {
+        hash(IVec3::new(vox.x.div_euclid(10), 7, vox.z.div_euclid(10)))
+    } else {
+        (tag - 1) as f32 / 62.0
+    };
+    let early = if maple { 0.025 } else { 0.0 };
+    let bud_at = 0.02 + 0.10 * tree + 0.03 * h;
+    let fall_at = 0.625 + 0.05 * tree + 0.016 * (branch - 0.5) + 0.03 * (h - 0.5) - early;
+    let turn_at = 0.47 + 0.06 * tree + 0.02 * (branch - 0.5) - early;
+    Leaf {
+        // Midsummer: every leaf is on (season_gone).
+        keep: (s > 0.27 && s < 0.40) || (s >= bud_at && s < fall_at),
+        turn: smoothstep(turn_at, turn_at + 0.10, s),
+        bud: 1.0 - smoothstep(bud_at, bud_at + 0.12, s),
+        tree,
+        fall_at,
+    }
+}
+
+/// The colour of a broadleaf leaf still on, from its modelled linear colour `c`:
+/// season.wgsl's `season_apply` for a deciduous or maple leaf.
+pub fn leaf_colour(c: Vec3, leaf: &Leaf, maple: bool, s: f32) -> Vec3 {
+    if !maple && s > 0.27 && s < 0.40 {
+        return c;
+    }
+    let mut o = c;
+    if maple {
+        o = Vec3::new(0.30, 0.95, 0.20) * c.dot(Vec3::new(0.3, 0.59, 0.11)) * 1.1;
+    }
+    o = o.lerp(o * Vec3::new(1.45, 1.3, 0.6) + Vec3::new(0.02, 0.03, 0.0), leaf.bud * 0.7);
+    if maple {
+        return o.lerp(c, leaf.turn);
+    }
+    let (gold, red) = (Vec3::new(0.62, 0.36, 0.04), Vec3::new(0.5, 0.1, 0.03));
+    let tint = gold.lerp(red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + c.y * 2.0);
+    o.lerp(tint, leaf.turn * 0.92)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +229,20 @@ mod tests {
         assert_eq!(Ground::at(DEFAULT_DATE, temperate, 0.6, 0.0, 0.0).snow, 0.6);
         assert_eq!(named("winter"), Some(0.86));
         assert_eq!(named("monsoon"), None);
+    }
+
+    #[test]
+    fn falling_leaves_turn_with_their_tree() {
+        let green = Vec3::new(0.05, 0.22, 0.03);
+        let v = IVec3::new(40, 80, -12);
+        // As modelled in summer; gold or red, and on, partway through autumn.
+        assert_eq!(leaf_colour(green, &leaf(0.32, v, false, 9), false, 0.32), green);
+        let l = leaf(0.6, v, false, 9);
+        let c = leaf_colour(green, &l, false, 0.6);
+        assert!(l.keep && c.x > c.y && c.x > green.x);
+        // Gone by early winter; one tree drops later than another.
+        assert!(!leaf(0.7, v, false, 9).keep);
+        assert!(leaf(0.6, v, false, 60).fall_at > leaf(0.6, v, false, 2).fall_at);
     }
 
     #[test]
