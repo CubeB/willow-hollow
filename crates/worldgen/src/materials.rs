@@ -186,8 +186,8 @@ palette! {
     // Climber leaves and stems that read as leaves and lines, not moss: ivy a dark,
     // bluish, glossy green well apart from moss's yellow greens, and little per-voxel
     // jitter, so a leaf is one colour and its neighbours hardly jump.
-    IVY_GLOSS         = ( 30,  72,  46), Foliage, 1;
-    IVY_GLOSS_LIT     = ( 40,  88,  54), Foliage, 1;
+    IVY_GLOSS         = ( 42,  94,  52), Foliage, 1;
+    IVY_GLOSS_LIT     = ( 56, 114,  60), Foliage, 1;
     IVY_GLOSS_NEW     = ( 70, 118,  64), Foliage, 1;
     CREEPER_GREEN     = ( 82, 122,  50), Foliage, 1;
     CREEPER_GREEN_DARK = ( 62, 102,  46), Foliage, 1;
