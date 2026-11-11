@@ -22,7 +22,13 @@ use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 /// Water faces (those with [`flags::WATER`](crate::flags::WATER)) have no fractions or
 /// corner bits, so `a` bits 23..=31 hold the current instead (see [`pack_current`]):
 /// direction << 23 (5 bits) | speed << 28 (3 bits) | river << 31. `b` is laid out as for
-/// any face, with plant kind 0. All nine bits are zero on still water.
+/// any face, with plant kind 0. All nine bits are zero on still water. The two AO bits of
+/// a water surface say instead where it meets a fall: bit 21 set at a corner at the foot
+/// of one (foam), bit 22 at a corner on the lip of one, which the shader draws lower so
+/// the surface bends over into the fall.
+///
+/// The sheet of falling water itself has face index 6 and its own layout (see
+/// [`spill_vertex`]).
 ///
 /// Positions are chunk-local, 0..=32. Face index: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
 #[repr(C)]
@@ -162,6 +168,177 @@ thread_local! {
     static FACE_MASK: std::cell::RefCell<Vec<FaceKey>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The sheets of falling water passing out through the bottom of a chunk, for the chunk
+/// below it to carry on down. Meshing a column of chunks from the top down with one of
+/// these, starting empty, makes a fall whole however many chunks it drops through.
+#[derive(Default)]
+pub struct Falls {
+    /// Per padded column (`x * PAD + z`) and direction (see [`SPILL_DIRS`]): 0 for no
+    /// sheet, else one more than how far below its lip, in voxels, the sheet is at the
+    /// top of the chunk's lowest voxel. Empty for none at all.
+    through: Vec<[u8; 4]>,
+}
+
+/// The ways a sheet of water can fall from a column: toward +X, -X, +Z, -Z.
+const SPILL_DIRS: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+/// Furthest below its lip a sheet's vertices can say they are, in voxels.
+const SPILL_DEEPEST: u32 = 57;
+
+/// How far below the lip a row of a sheet is, as a vertex holds it: quarter voxels down
+/// to two voxels, where the sheet curves most, then whole voxels.
+fn spill_code(quarters: u32) -> u32 {
+    if quarters <= 8 { quarters } else { (quarters / 4 + 6).min(63) }
+}
+
+/// One vertex of a sheet of falling water, which has its own layout in `a`:
+/// x | y << 6 | z << 12 as for any vertex, face 6 << 18, the way it falls << 21 (an index
+/// into [`SPILL_DIRS`]), how far below the lip it is << 23 (6 bits, [`spill_code`]), how
+/// near the water it lands in << 29 (0..=3, 3 at the foot), and << 31 a bit set on the
+/// vertices that close the sheet's open ends, which stay on the face of the column the
+/// water left. The shader moves the rest out from that face along the curve of the fall,
+/// and every vertex down by the quarter voxels in its code, so `y` here is the voxel
+/// boundary at or above it.
+fn spill_vertex(p: [usize; 3], dir: usize, code: u32, foot: u32, flat: bool, b: u32) -> Vertex {
+    Vertex {
+        a: p[0] as u32 | (p[1] as u32) << 6 | (p[2] as u32) << 12 | 6 << 18 | (dir as u32) << 21 | code << 23 | foot << 29 | (flat as u32) << 31,
+        b,
+    }
+}
+
+/// Adds the sheets of water falling from every open side of the chunk's water, in place
+/// of flat side faces: each starts at the lip, the top of a run of water with air beside
+/// it, curves out and down through that air, and ends on the first water or ground under
+/// it. `falls` brings in the sheets that come down from the chunk above and takes out
+/// those that go on into the chunk below.
+fn add_spills(mesh: &mut ChunkMesh, chunk: &PaddedChunk, mats: &Materials, solid: &[[u64; PAD]; PAD], water: &[[u64; PAD]; PAD], falls: &mut Falls) {
+    let entering = std::mem::take(&mut falls.through);
+    if entering.is_empty() && water.iter().all(|row| row.iter().all(|&w| w == 0)) {
+        return;
+    }
+    let top = PAD - 1;
+    // One walk down a column's side: calls `each(y, below)` for every level a sheet
+    // passes, with how many voxels below the lip the top of that level is.
+    let walk = |exposed: u64, air: u64, enter: u8, each: &mut dyn FnMut(usize, u32)| {
+        let (mut live, mut below) = (false, 0u32);
+        for y in (0..PAD).rev() {
+            if y == top && enter != 0 {
+                (live, below) = (true, enter as u32 - 1);
+            } else if live && air >> y & 1 != 0 {
+                below = (below + 1).min(SPILL_DEEPEST);
+            } else {
+                (live, below) = (exposed >> y & 1 != 0, 0);
+            }
+            if live {
+                each(y, below);
+            }
+        }
+    };
+    // Which levels of each column's four sides a sheet passes, border columns included:
+    // a sheet is closed at an end only where the column beside it has none.
+    let mut passes = vec![[0u64; 4]; PAD * PAD];
+    let mut active = Vec::new();
+    for x in 0..PAD {
+        for z in 0..PAD {
+            for (d, &(dx, dz)) in SPILL_DIRS.iter().enumerate() {
+                let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                if nx < 0 || nz < 0 || nx >= PAD as i32 || nz >= PAD as i32 {
+                    continue;
+                }
+                let air = !(solid[nx as usize][nz as usize] | water[nx as usize][nz as usize]);
+                let exposed = water[x][z] & air;
+                let enter = entering.get(x * PAD + z).map_or(0, |e| e[d]);
+                if exposed == 0 && enter == 0 {
+                    continue;
+                }
+                let (mut levels, mut leaving) = (0u64, 0u8);
+                walk(exposed, air, enter, &mut |y, below| {
+                    levels |= 1 << y;
+                    if y == 1 {
+                        leaving = below as u8 + 1;
+                    }
+                });
+                passes[x * PAD + z][d] = levels;
+                if leaving != 0 {
+                    if falls.through.is_empty() {
+                        falls.through = vec![[0; 4]; PAD * PAD];
+                    }
+                    falls.through[x * PAD + z][d] = leaving;
+                }
+                if (1..=N).contains(&x) && (1..=N).contains(&z) {
+                    active.push((x, z, d, exposed, air, enter));
+                }
+            }
+        }
+    }
+    // A sheet that comes down past rock has no water of its own to take its colour from.
+    let any_water = (1..mats.len()).map(|i| i as crate::Voxel).find(|&v| mats.get(v).kind == Kind::Water);
+    let voxels = chunk.voxels();
+    for (x, z, d, exposed, air, enter) in active {
+        let (dx, dz) = SPILL_DIRS[d];
+        let (nx, nz) = ((x as i32 + dx) as usize, (z as i32 + dz) as usize);
+        let landing = water[nx][nz];
+        let own = voxels[(x * PAD + z) * PAD..][..PAD].iter().rev().copied().find(|&v| mats.get(v).kind == Kind::Water);
+        let Some(v) = own.or(any_water) else { continue };
+        let m = mats.get(v);
+        let b = color_bits(m.color) as u32 | ((flags::WATER | ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)) as u32) << 24;
+        // The face of the column the water leaves, and the two ends of the sheet along
+        // it, in local voxels.
+        let along_x = dx == 0;
+        let near = if along_x { z } else { x };
+        let plane = if dx + dz > 0 { near } else { near - 1 };
+        let ends = if along_x { [x - 1, x] } else { [z - 1, z] };
+        let at = |end: usize, y: usize| if along_x { [ends[end], y, plane] } else { [plane, y, ends[end]] };
+        walk(exposed, air, enter, &mut |y, below| {
+            if !(1..=N).contains(&y) {
+                return;
+            }
+            // Rows of the sheet across this level: (code, y, nearness to the foot).
+            let foot = air >> (y - 1) & 1 == 0 && landing >> (y - 1) & 1 != 0;
+            let first = if below == 0 { 1 } else { 0 };
+            let steps = if below < 2 { 4 } else { 1 };
+            let rows: Vec<(u32, usize, u32)> = (first..=steps)
+                .map(|r| {
+                    let quarters = below * 4 + r * (4 / steps);
+                    let nearness = if !foot { 0 } else if steps == 4 { (3 + r).saturating_sub(4) } else { 3 * r };
+                    (spill_code(quarters), if r == steps { y - 1 } else { y }, nearness)
+                })
+                .collect();
+            // Open ends: air beside the landing column with no sheet of its own in it.
+            let open = [-1i32, 1].map(|step| {
+                let (sx, sz) = if along_x { (step, 0) } else { (0, step) };
+                let (ax, az) = ((x as i32 + sx) as usize, (z as i32 + sz) as usize);
+                let (bx, bz) = ((nx as i32 + sx) as usize, (nz as i32 + sz) as usize);
+                (solid[bx][bz] | water[bx][bz]) >> y & 1 == 0 && passes[ax * PAD + az][d] >> y & 1 == 0
+            });
+            for pair in rows.windows(2) {
+                let (hi, lo) = (pair[0], pair[1]);
+                let corner = |end: usize, row: (u32, usize, u32), flat: bool| spill_vertex(at(end, row.1), d, row.0, row.2, flat, b);
+                mesh.water.extend([corner(0, hi, false), corner(1, hi, false), corner(1, lo, false), corner(0, lo, false)]);
+                for end in 0..2 {
+                    if open[end] {
+                        mesh.water.extend([corner(end, hi, true), corner(end, hi, false), corner(end, lo, false), corner(end, lo, true)]);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Where a corner of a water surface meets a fall, for the two AO bits of its vertex:
+/// bit 0 at the foot of one (a column around the corner holds water a level higher),
+/// bit 1 on the lip of one (a column around it is open air at this level). `x` and `z`
+/// are chunk-local corner coordinates, `y` the padded level of the surface's voxel.
+fn corner_spill(solid: &[[u64; PAD]; PAD], water: &[[u64; PAD]; PAD], x: usize, y: usize, z: usize) -> u32 {
+    let mut bits = 0;
+    for px in x..=x + 1 {
+        for pz in z..=z + 1 {
+            bits |= (water[px][pz] >> (y + 1) & 1) as u32;
+            bits |= (((solid[px][pz] | water[px][pz]) >> y & 1) as u32 ^ 1) << 1;
+        }
+    }
+    bits
+}
+
 /// Meshes a chunk whose water is all still.
 pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
     mesh_chunk_with_currents(chunk, mats, &[])
@@ -171,7 +348,7 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 /// indexed `x * PAD + z` in padded coordinates, like the voxels, or empty if all the
 /// water is still.
 pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents: &[Current]) -> ChunkMesh {
-    mesh_chunk_under_sky(chunk, mats, currents, &[])
+    mesh_chunk_under_sky(chunk, mats, currents, &[], &mut Falls::default())
 }
 
 /// Marks each padded column (`x * PAD + z`) in `covered` that holds anything opaque or
@@ -197,8 +374,9 @@ fn roofs(mats: &Materials, v: crate::Voxel) -> bool {
 /// [`mesh_chunk_with_currents`], knowing which columns have something above the chunk
 /// (`covered`, from [`cover_columns`] on the chunks above, or empty for none). Every
 /// opaque face of a voxel with nothing above it, open to the sky, carries
-/// [`flags::SKY`], which is where snow settles.
-pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool]) -> ChunkMesh {
+/// [`flags::SKY`], which is where snow settles. `falls` carries falling water down a
+/// column of chunks meshed from the top (see [`Falls`]).
+pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool], falls: &mut Falls) -> ChunkMesh {
     assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
     assert!(covered.is_empty() || covered.len() == PAD * PAD, "one cover per padded column");
     const SOLID: u8 = Kind::Solid as u8;
@@ -286,7 +464,9 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                     // Solid faces show against anything not solid, and against foliage;
                     // foliage only against what is not solid; water only against air.
                     let mut opaque_faces = ((s & !l & !(ns & !nl)) | (l & !ns)) & INTERIOR;
-                    let mut water_faces = w & !(ns | nw) & INTERIOR;
+                    // Water shows its surface. Where its side stands open it falls, and
+                    // the fall is drawn as a sheet (see `add_spills`), not as a flat face.
+                    let mut water_faces = if face == 2 { w & !(ns | nw) & INTERIOR } else { 0 };
 
                     while opaque_faces != 0 {
                         let y = opaque_faces.trailing_zeros() as usize;
@@ -343,10 +523,20 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                     // corner can carry the current where it stands and the flow turns
                     // smoothly from voxel to voxel. Merged faces never touch a river
                     // column, so their corners are still, as the averages beside them are.
-                    let running = face == 2
-                        && water_faces != 0
+                    let running = water_faces != 0
                         && !currents.is_empty()
                         && (x - 1..=x + 1).any(|i| (z - 1..=z + 1).any(|j| currents[i * PAD + j].river));
+                    // So is the surface at the lip and at the foot of a fall, whose corners
+                    // say which they are: the levels at which a column around this one is
+                    // open air, or holds water a level higher.
+                    let mut by_fall = 0u64;
+                    if water_faces != 0 {
+                        for i in x - 1..=x + 1 {
+                            for j in z - 1..=z + 1 {
+                                by_fall |= !(solid[i][j] | water[i][j]) | water[i][j] >> 1;
+                            }
+                        }
+                    }
                     while water_faces != 0 {
                         let y = water_faces.trailing_zeros() as usize;
                         water_faces &= water_faces - 1;
@@ -357,10 +547,9 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         // Water has no AO and, unless it is running, always merges.
                         let key = 1
                             | 2
-                            | (if running { 8 } else { 4 })
+                            | (if running || by_fall >> y & 1 != 0 { 8 } else { 4 })
                             | color_bits(m.color) << 8
-                            | (fl as u64) << 32
-                            | 0xFF << 40;
+                            | (fl as u64) << 32;
                         let (slice, u, v) = (p[n_axis] - 1, p[u_axis] - 1, p[v_axis] - 1);
                         mask[(slice * N + v) * N + u] = key;
                         used_rows[slice] |= 1 << v;
@@ -405,7 +594,7 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         for dv in 0..h {
                             mask[(v + dv) * N + u..(v + dv) * N + u + w].fill(0);
                         }
-                        emit_quad(&mut mesh, key, face, [n_axis, u_axis, v_axis], s, u, v, w, h, currents);
+                        emit_quad(&mut mesh, key, face, [n_axis, u_axis, v_axis], s, u, v, w, h, currents, &solid, &water);
                         u += w;
                     }
                 }
@@ -413,6 +602,8 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
         }
         mesh.faces[6..].fill((mesh.opaque.len() / 4) as u32);
     });
+    // After the surfaces, so that a fall is drawn over the water behind it.
+    add_spills(&mut mesh, chunk, mats, &solid, &water, falls);
     mesh
 }
 
@@ -600,6 +791,8 @@ fn emit_quad(
     w: usize,
     h: usize,
     currents: &[Current],
+    solid: &[[u64; PAD]; PAD],
+    water: &[[u64; PAD]; PAD],
 ) {
     let [n_axis, u_axis, v_axis] = axes;
     let positive = face.is_multiple_of(2);
@@ -610,11 +803,20 @@ fn emit_quad(
 
     // Corners counter-clockwise seen from +N, matching the AO corner order.
     let corners = [(u, v), (u + w, v), (u + w, v + h), (u, v + h)];
-    let vertex = |i: usize| {
+    let place = |i: usize| {
         let mut p = [0u32; 3];
         p[n_axis] = n as u32;
         p[u_axis] = corners[i].0 as u32;
         p[v_axis] = corners[i].1 as u32;
+        p
+    };
+    // Where a corner of a water surface meets a fall (only surfaces are kept apart).
+    let spill = |i: usize| {
+        let p = place(i);
+        corner_spill(solid, water, p[0] as usize, s + 1, p[2] as usize)
+    };
+    let vertex = |i: usize| {
+        let p = place(i);
         // A single leaf (or other droppable plant) voxel says which side of it each corner
         // is on, so the shader can name the voxel from any corner.
         let kind = ((key >> 32) as u8 & flags::PLANT_MASK) >> flags::PLANT_SHIFT;
@@ -624,10 +826,17 @@ fn emit_quad(
             corner |= ((corners[i].0 > u) as u32) << u_axis;
             corner |= ((corners[i].1 > v) as u32) << v_axis;
         }
-        // Running water keeps its current where other faces keep fractions and corners.
-        let current = if key & 8 != 0 { corner_current(currents, p[0] as usize, p[2] as usize) } else { 0 };
+        // Running water keeps its current where other faces keep fractions and corners,
+        // and water by a fall says so where other faces keep AO.
+        let (mut current, mut shade) = (0, ao(i));
+        if key & 8 != 0 {
+            if !currents.is_empty() {
+                current = corner_current(currents, p[0] as usize, p[2] as usize);
+            }
+            shade = spill(i);
+        }
         Vertex {
-            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao(i) << 21 | corner << 29 | current,
+            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | shade << 21 | corner << 29 | current,
             b,
         }
     };
@@ -636,6 +845,10 @@ fn emit_quad(
     // The index pattern splits along the first-to-third diagonal. Put that diagonal
     // between the brighter pair of corners so a dark corner stays in its own triangle.
     if ao(order[1]) + ao(order[3]) > ao(order[0]) + ao(order[2]) {
+        order.rotate_left(1);
+    }
+    // A surface with one corner on a lip folds down across the corners beside it.
+    if key & 8 != 0 && spill(order[0]) >> 1 != spill(order[2]) >> 1 && spill(order[1]) >> 1 == spill(order[3]) >> 1 {
         order.rotate_left(1);
     }
     let out = if key & 2 != 0 {
@@ -1074,6 +1287,156 @@ mod tests {
                 _ => assert_eq!(cur, Current::default()),
             }
         }
+    }
+
+    /// The chunk at `origin` (in chunks) of a world given voxel by voxel, border and all.
+    fn chunk_of(world: impl Fn(i32, i32, i32) -> Voxel, origin: [i32; 3]) -> PaddedChunk {
+        let mut c = PaddedChunk::new();
+        for x in 0..PAD {
+            for z in 0..PAD {
+                for y in 0..PAD {
+                    let at = |i: usize, p: usize| origin[i] * CHUNK + p as i32 - 1;
+                    c.set(x, y, z, world(at(0, x), at(1, y), at(2, z)));
+                }
+            }
+        }
+        c
+    }
+
+    /// The parts of a vertex of a sheet of falling water: way, code, foot, flat.
+    fn sheet(v: &Vertex) -> (u32, u32, u32, bool) {
+        assert_eq!(v.a >> 18 & 7, 6);
+        (v.a >> 21 & 3, v.a >> 23 & 63, v.a >> 29 & 3, v.a >> 31 != 0)
+    }
+
+    fn is_sheet(v: &Vertex) -> bool {
+        v.a >> 18 & 7 == 6
+    }
+
+    #[test]
+    fn water_falls_from_the_lip_to_the_water_below() {
+        let (m, stone, water) = mats();
+        // A pool ten voxels up, stepping down two voxels toward +X.
+        let world = |x: i32, y: i32, _z: i32| match y {
+            ..4 => stone,
+            4..10 if x < 16 => water,
+            4..8 => water,
+            _ => crate::AIR,
+        };
+        let mesh = mesh_chunk(&chunk_of(world, [0; 3]), &m);
+        assert!(mesh.water.iter().all(|v| matches!(v.a >> 18 & 7, 2 | 6)), "only surfaces and sheets");
+        let sheets: Vec<&Vertex> = mesh.water.iter().filter(|v| is_sheet(v)).collect();
+        // Three quarter-voxel rows down the first voxel (the lip is a quarter down), four
+        // down the second, in each of 32 columns; no ends to close.
+        assert_eq!(sheets.len() / 4, 32 * 7);
+        for v in &sheets {
+            let (way, code, foot, flat) = sheet(v);
+            assert_eq!((way, flat), (0, false));
+            assert_eq!(pos(v)[0], 16, "on the face the water leaves");
+            // Code 1 is the lip, a quarter below the upper surface; 8 the foot, on the
+            // lower one. `y` is the voxel boundary at or above the row.
+            assert!((1..=8).contains(&code));
+            assert_eq!(pos(v)[1], 10 - code / 4, "code {code}");
+            assert_eq!(foot, code.saturating_sub(5), "the last three rows near the foot");
+        }
+        for code in 1..=8 {
+            assert!(sheets.iter().any(|v| sheet(v).1 == code), "no row {code}");
+        }
+        // The surfaces say where they meet the fall: the upper bends over at its lip, the
+        // lower foams at the foot, and neither a voxel further off.
+        for v in mesh.water.iter().filter(|v| !is_sheet(v)) {
+            let [x, y, _] = pos(v);
+            let marks = v.a >> 21 & 3;
+            match (y, x) {
+                (10, 16) => assert_eq!(marks, 2, "lip"),
+                (8, 16) => assert_eq!(marks, 1, "foot"),
+                _ => assert_eq!(marks, 0, "at {:?}", pos(v)),
+            }
+        }
+        // Away from the fall the surfaces still merge: a row of single voxels each side.
+        assert_eq!(mesh.water.iter().filter(|v| !is_sheet(v)).count() / 4, 2 * 32 + 2);
+    }
+
+    #[test]
+    fn a_fall_carries_on_through_the_chunk_below() {
+        let (m, stone, water) = mats();
+        // A stream on a cliff top (surface the top of voxel 43) over a pool far below
+        // (the top of voxel 11): the fall passes out of one chunk into the next.
+        let world = |x: i32, y: i32, _z: i32| match (x < 16, y) {
+            (true, ..40) | (false, ..10) => stone,
+            (true, 40..44) | (false, 10..12) => water,
+            _ => crate::AIR,
+        };
+        let mut falls = Falls::default();
+        let upper = mesh_chunk_under_sky(&chunk_of(world, [0, 1, 0]), &m, &[], &[], &mut falls);
+        let lower = mesh_chunk_under_sky(&chunk_of(world, [0, 0, 0]), &m, &[], &[], &mut falls);
+        assert!(falls.through.is_empty(), "the fall ended in the pool");
+        // Each row of the sheet, by its height in the world, with its code and foot.
+        let mut rows = std::collections::BTreeMap::new();
+        for (base, mesh) in [(32, &upper), (0, &lower)] {
+            for v in mesh.water.iter().filter(|v| is_sheet(v)) {
+                let (_, code, foot, _) = sheet(v);
+                let quarters = if code <= 8 { code & 3 } else { 0 };
+                let height = (base + pos(v)[1]) * 4 - quarters;
+                assert_eq!(*rows.entry(height).or_insert((code, foot)), (code, foot), "rows differ at {height}");
+            }
+        }
+        // From the lip, a quarter under the top of voxel 43, to the pool at the top of 11.
+        let heights: Vec<u32> = rows.keys().copied().collect();
+        let expect: Vec<u32> = (12..=43).map(|y| y * 4).chain((168..=175).filter(|q| q % 4 != 0)).collect();
+        let mut expect = expect;
+        expect.sort();
+        assert_eq!(heights, expect);
+        assert_eq!(rows[&(12 * 4)], (spill_code(32 * 4), 3), "the foot");
+        assert_eq!(rows[&(13 * 4)], (spill_code(31 * 4), 0));
+        assert_eq!(rows[&(32 * 4)].0, spill_code(12 * 4), "where the chunks meet");
+        assert!(lower.water.iter().filter(|v| is_sheet(v)).count() / 4 == 32 * 20);
+        // Meshed on its own the lower chunk knows nothing of the fall.
+        let alone = mesh_chunk(&chunk_of(world, [0, 0, 0]), &m);
+        assert!(!alone.water.iter().any(is_sheet));
+    }
+
+    #[test]
+    fn falls_agree_across_chunk_borders_and_close_their_open_ends() {
+        let (m, stone, water) = mats();
+        // A step running across the border between two chunks, and stopping short of the
+        // far side of the second, where the upper pool ends against a bank.
+        let world = |x: i32, y: i32, z: i32| match y {
+            ..4 => stone,
+            4..10 if z < 20 && x < 50 => water,
+            4..10 if z < 20 => stone,
+            4..8 => water,
+            _ => crate::AIR,
+        };
+        let west = mesh_chunk(&chunk_of(world, [0; 3]), &m);
+        let east = mesh_chunk(&chunk_of(world, [1, 0, 0]), &m);
+        // Surface corners on the shared border carry the same marks from either side.
+        let marks = |mesh: &ChunkMesh, x: u32| {
+            let mut at = std::collections::BTreeMap::new();
+            for v in mesh.water.iter().filter(|v| !is_sheet(v) && pos(v)[0] == x) {
+                let bits = v.a >> 21 & 3;
+                assert_eq!(*at.entry((pos(v)[1], pos(v)[2])).or_insert(bits), bits);
+            }
+            at
+        };
+        let (a, b) = (marks(&west, 32), marks(&east, 0));
+        assert_eq!(a, b);
+        assert_eq!((a[&(10, 20)], a[&(8, 20)], a[&(10, 19)], a[&(8, 21)]), (2, 1, 0, 0));
+        // So do the rows of the sheet where the two halves of it meet.
+        let rows = |mesh: &ChunkMesh, x: u32| {
+            let mut at: Vec<(u32, u32, u32)> = mesh.water.iter().filter(|v| is_sheet(v) && pos(v)[0] == x).map(|v| (pos(v)[1], pos(v)[2], sheet(v).1)).collect();
+            at.sort();
+            at.dedup();
+            at
+        };
+        assert_eq!(rows(&west, 32), rows(&east, 0));
+        assert_eq!(rows(&west, 32).len(), 8);
+        // No end is closed at the border; the one end that stands open, where the pool
+        // stops and the lower water runs on past, is.
+        assert!(!west.water.iter().any(|v| is_sheet(v) && sheet(v).3));
+        let caps: Vec<&Vertex> = east.water.iter().filter(|v| is_sheet(v) && sheet(v).3).collect();
+        assert_eq!(caps.len(), 7 * 2, "two corners on the face in each quad of the end");
+        assert!(caps.iter().all(|v| pos(v)[0] == 50 - 32 && pos(v)[2] == 20));
     }
 
     #[test]

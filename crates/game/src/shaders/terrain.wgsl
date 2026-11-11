@@ -32,6 +32,10 @@ struct VOut {
     // The chunk's grid of biomes, as in VIn.
     @location(11) @interpolate(flat) grid0: vec4<u32>,
     @location(12) @interpolate(flat) grid1: vec4<u32>,
+    // Water only, where it falls. x: how near the foot of a fall, 0..1. y: on a surface,
+    // 1 at the lip of a fall; on the falling sheet, how far below the surface it fell
+    // from, in voxels of its chunk's mesh.
+    @location(13) spill: vec2<f32>,
 };
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
@@ -217,27 +221,70 @@ fn water_current(a: u32) -> vec3<f32> {
     return vec3<f32>(cos(angle) * speed, sin(angle) * speed, f32(a >> 31u));
 }
 
-// The water's own vertex shader. Water faces carry their current where other faces keep
-// quarter-voxel fractions and corner bits, and never sway or go with the season.
+// How far a water surface is drawn down at the lip of a fall, where the sheet of falling
+// water takes over from it, in voxels.
+const LIP_DIP: f32 = 0.25;
+// `face` of the sheet of water falling toward +X; -X, +Z and -Z follow.
+const FACE_SPILL: u32 = 8u;
+
+// The way a sheet of water falls (SPILL_DIRS in mesh.rs).
+fn spill_dir(d: u32) -> vec3<f32> {
+    switch d {
+        case 0u: { return vec3<f32>(1.0, 0.0, 0.0); }
+        case 1u: { return vec3<f32>(-1.0, 0.0, 0.0); }
+        case 2u: { return vec3<f32>(0.0, 0.0, 1.0); }
+        default: { return vec3<f32>(0.0, 0.0, -1.0); }
+    }
+}
+
+// How far out from the face it left a sheet of falling water has got, `s` voxels below
+// the surface it fell from: the curve of water thrown off a lip, which leaves it level
+// and steepens, kept within the voxel it falls through.
+fn spill_reach(s: f32) -> f32 {
+    return min(0.5 * sqrt(max(s - LIP_DIP, 0.0)), 0.95);
+}
+
+// The water's own vertex shader. Water surfaces carry their current where other faces
+// keep quarter-voxel fractions and corner bits, and where they meet a fall where other
+// faces keep AO; the sheets of falling water (face 6) have a layout of their own (see
+// spill_vertex in mesh.rs). Water never sways or goes with the season.
 @vertex
 fn vs_water(in: VIn) -> VOut {
     var out: VOut;
-    let local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
+    var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
     out.face = (in.a >> 18u) & 7u;
-    out.ao = f32((in.a >> 21u) & 3u) / 3.0;
+    out.ao = 1.0;
+    if (out.face == 6u) {
+        // Rows of a sheet are quarter voxels apart for the first two voxels of the fall,
+        // then whole voxels.
+        let code = (in.a >> 23u) & 63u;
+        var s = f32(code) - 6.0;
+        if (code <= 8u) {
+            s = f32(code) * 0.25;
+            local.y -= f32(code & 3u) * 0.25;
+        }
+        let d = (in.a >> 21u) & 3u;
+        if ((in.a >> 31u) == 0u) {
+            local += spill_dir(d) * spill_reach(s);
+        }
+        out.face = FACE_SPILL + d;
+        out.spill = vec2<f32>(f32((in.a >> 29u) & 3u) / 3.0, s);
+    } else {
+        out.current = water_current(in.a);
+        let lip = f32((in.a >> 22u) & 1u);
+        local.y -= lip * LIP_DIP;
+        out.spill = vec2<f32>(f32((in.a >> 21u) & 1u), lip);
+    }
     out.flags = in.b >> 24u;
     out.local = local;
     out.band = in.band;
     out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
     out.grid0 = in.grid0;
     out.grid1 = in.grid1;
-    out.current = water_current(in.a);
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
-    if (out.face == 2u) {
-        // Water surfaces sit a little below the top of their voxel.
-        rel.y -= 0.125;
-    }
+    // Water surfaces sit a little below the top of their voxel, and falls start there.
+    rel.y -= 0.125;
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
@@ -334,6 +381,11 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
     let view = normalize(in.rel);
     let world_xz = in.rel.xz + G.cam_wrapped.xz;
     let t = G.sun_dir.w;
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    // The way the surface itself faces, which is not straight up where it bends over a lip.
+    let slope = cross(dpdx(in.rel), dpdy(in.rel));
+    // White water, lit.
+    let white = vec3<f32>(0.85) * (G.sun_color.rgb * 0.6 * max(G.sun_dir.y, 0.0) + ambient(up));
 
     // How much water the view ray passes through before hitting the bed, from the
     // depth of what was drawn behind this surface (reverse-Z: depth = near / dist).
@@ -349,7 +401,11 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // sparkle there.
         let calm = smoothstep(80.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
         let flow = in.current.xy;
-        let n = normalize(mix(ripple_normal(world_xz, flow, t), vec3<f32>(0.0, 1.0, 0.0), calm));
+        var lie = up;
+        if (in.spill.y > 0.0 && abs(slope.y) > 0.0) {
+            lie = normalize(slope * sign(slope.y));
+        }
+        let n = normalize(mix(ripple_normal(world_xz, flow, t), up, calm) + lie - up);
         let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
         let reflected = sky_color(reflect(view, n));
         // Clear and bright-bedded in the shallows, deep blue-green further out.
@@ -365,14 +421,21 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Foam streaks on fast water.
         let foam = foam_streaks(world_xz, flow, t) * 0.6 * (1.0 - calm);
         if (foam > 0.0) {
-            let up = vec3<f32>(0.0, 1.0, 0.0);
-            color = mix(color, vec3<f32>(0.85) * (G.sun_color.rgb * 0.6 * max(G.sun_dir.y, 0.0) + ambient(up)), foam);
+            color = mix(color, white, foam);
             alpha = mix(alpha, 0.95, foam);
+        }
+        // Where a fall lands the water is churned white, thinning out away from it.
+        let foot = in.spill.x;
+        if (foot > 0.0) {
+            let p = world_xz / VOXELS_PER_METRE;
+            let churn = vnoise(p * 7.0 + vec2<f32>(t * 1.3, -t * 0.9)) * 0.6 + vnoise(p * 15.0 - vec2<f32>(t * 1.7, t * 1.1)) * 0.4;
+            let wash = smoothstep(0.85 - foot * 1.1, 1.0 - foot * 0.8, churn) * 0.9;
+            color = mix(color, white, wash);
+            alpha = mix(alpha, 0.95, wash);
         }
         // Further out, water looks the way the far view paints it: opaque, with no bed
         // showing through to mark the rings.
         let far = smoothstep(150.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
-        let up = vec3<f32>(0.0, 1.0, 0.0);
         let far_fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
         let far_body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
@@ -389,16 +452,41 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
             alpha = mix(alpha, 1.0, ice);
         }
     } else {
-        // A vertical face of water is a fall or the step of a cascade: white and streaky,
-        // the streaks running downward.
-        let world_y = (in.rel.y + G.cam_wrapped.y) / VOXELS_PER_METRE;
-        let along = select(world_xz.x, world_xz.y, abs(n_face.x) > 0.5) / VOXELS_PER_METRE;
-        let streak = vnoise(vec2<f32>(along * 2.0, world_y * 0.4375 + t * 6.0))
-            * vnoise(vec2<f32>(along * 3.875 + 9.0, world_y * 0.875 + t * 9.0));
-        let foam = smoothstep(0.12, 0.45, streak);
-        let body = in.color * (G.sun_color.rgb * 0.4 + ambient(n_face));
-        color = mix(body, vec3<f32>(0.85) * (G.sun_color.rgb * 0.6 + ambient(n_face)), foam * 0.85);
-        alpha = mix(0.6, 0.95, foam);
+        // A sheet of falling water: the surface carried on over the lip, glassy where it
+        // leaves and breaking into white streaks as it gathers speed, down to the foam
+        // where it lands.
+        let d = spill_dir(in.face - FACE_SPILL);
+        let s = in.spill.y;
+        // The curve's own normal: straight up at the lip, turning outward as it steepens.
+        var n = normalize(d * sqrt(max(s - LIP_DIP, 0.0)) + up * 0.25 * (1.0 - smoothstep(2.5, 3.86, s)));
+        if (dot(n, view) > 0.0) {
+            n = -n;
+        }
+        let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
+        let body = in.color * 1.2 * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(up));
+        color = mix(body, sky_color(reflect(view, n)), fresnel);
+        alpha = mix(0.3, 1.0, fresnel);
+        let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
+        color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, up);
+        // The streaks ride down with the water: each is drawn where water that left the
+        // lip when it did has fallen to, so they stretch out as they speed up.
+        let fall = max(s - LIP_DIP, 0.0) * in.scale / VOXELS_PER_METRE;
+        let left = (sqrt(0.64 + 19.6 * fall) - 0.8) / 9.8 - t;
+        let along = select(world_xz.x, world_xz.y, abs(d.x) > 0.5) / VOXELS_PER_METRE;
+        let streak = vnoise(vec2<f32>(along * 16.0, left * 6.0)) * 0.6 + vnoise(vec2<f32>(along * 37.0 + 9.0, left * 10.0)) * 0.4;
+        let broken = 0.2 * smoothstep(0.0, 1.5, fall) + 0.25 * smoothstep(1.5, 6.0, fall) + 0.15 * in.spill.x;
+        // At the foot it is all thrown up as spray, to a ragged, shifting edge.
+        let spray = smoothstep(0.45, 0.95, in.spill.x + (vnoise(vec2<f32>(along * 9.0, t * 2.5)) - 0.5) * 0.5);
+        let foam = max(smoothstep(0.66 - broken, 0.86 - broken, streak), spray) * 0.9;
+        color = mix(color, white, foam);
+        alpha = mix(alpha, 0.95, foam);
+        // In deep cold a fall freezes over too, with a little water still running down it.
+        let ice = ice_amount(world_xz, in.snow.y) * 0.75;
+        if (ice > 0.0) {
+            let sheet = vec3<f32>(0.62, 0.78, 0.88) * (G.sun_color.rgb * 0.7 * max(G.sun_dir.y, 0.0) + ambient(up));
+            color = mix(color, sheet, ice);
+            alpha = mix(alpha, 1.0, ice);
+        }
     }
     return vec4<f32>(apply_fog(color, in.rel), alpha);
 }
