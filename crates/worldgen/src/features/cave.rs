@@ -412,8 +412,16 @@ impl Carve {
         if !self.caves.is_empty() {
             self.carve(seed, &mut grid, columns, (wx0, wz0), plants, placements, &mut decor);
         }
-        ravine_floors(seed, sampler, columns, (wx0, wz0), (lx0, lz0), &mut decor);
+        let ferns = ravine_floors(seed, sampler, columns, (wx0, wz0), (lx0, lz0), &mut decor);
+        // A frond reaches over the neighbouring columns, whose grass, pebbles and rubble
+        // would share its cells and flicker through it: the fern wins.
+        if !ferns.is_empty() {
+            let clear = |b: &PlantBox| !ferns.iter().any(|f| overlaps(b, f));
+            plants.retain(clear);
+            decor.retain(clear);
+        }
         plants.extend(decor);
+        plants.extend(ferns);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -700,11 +708,29 @@ fn rubble(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng, mut 
     }
 }
 
-/// Rubble and ferns on the floors of small ravines.
-fn ravine_floors(seed: u32, sampler: &Sampler, columns: &[Column], (wx0, wz0): (i32, i32), (lx0, lz0): (i32, i32), out: &mut Vec<PlantBox>) {
+/// Whether two boxes share any volume.
+fn overlaps(a: &PlantBox, b: &PlantBox) -> bool {
+    (0..3).all(|k| a.lo[k] < b.hi[k] && b.lo[k] < a.hi[k])
+}
+
+/// Rubble and ferns on the floors of small ravines: the rubble into `out`, the ferns
+/// returned on their own.
+fn ravine_floors(seed: u32, sampler: &Sampler, columns: &[Column], (wx0, wz0): (i32, i32), (lx0, lz0): (i32, i32), out: &mut Vec<PlantBox>) -> Vec<PlantBox> {
+    let mut ferns = Vec::new();
     if sampler.ravines().is_empty() {
-        return;
+        return ferns;
     }
+    // A fern's cell must be open air over the ground, not inside the wall or a bank
+    // beside it, nor a cell another fern already has.
+    let mut taken = std::collections::HashSet::new();
+    let mut open = |c: [i32; 3]| {
+        let (px, vy, pz) = (c[0].div_euclid(CELLS) - wx0, c[1].div_euclid(CELLS), c[2].div_euclid(CELLS) - wz0);
+        if px < 0 || pz < 0 || px >= PAD as i32 || pz >= PAD as i32 {
+            return false;
+        }
+        let col = &columns[px as usize * PAD + pz as usize];
+        vy > col.top() && col.water.is_none() && taken.insert(c)
+    };
     for px in 1..=CHUNK {
         for pz in 1..=CHUNK {
             let col = &columns[px as usize * PAD + pz as usize];
@@ -718,7 +744,7 @@ fn ravine_floors(seed: u32, sampler: &Sampler, columns: &[Column], (wx0, wz0): (
             let y = col.top() + 1;
             // Ferns in the shade at the foot of the walls, on soil.
             if col.cover == Cover::Land && inside < m(1.4) && unit(h) < 0.3 && (3..=CHUNK - 2).contains(&px) && (3..=CHUNK - 2).contains(&pz) {
-                fern(out, wx, y, wz, &mut rng);
+                fern(&mut ferns, wx, y, wz, &mut rng, &mut open);
                 continue;
             }
             if unit(h.rotate_left(9)) < if col.cover == Cover::Scree { 0.35 } else { 0.1 } {
@@ -727,11 +753,14 @@ fn ravine_floors(seed: u32, sampler: &Sampler, columns: &[Column], (wx0, wz0): (
             }
         }
     }
+    ferns
 }
 
 /// A small fern: fronds arching out from a crown on voxel column `(wx, wz)`, standing
-/// on voxel `y - 1`.
-fn fern(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng) {
+/// on voxel `y - 1`. A frond stops short at the first cell `open` refuses (it is told of
+/// every cell, and keeps track of those it gives out), so no two cells of a fern
+/// coincide and none lies inside the ground or another plant's cell.
+fn fern(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng, open: &mut impl FnMut([i32; 3]) -> bool) {
     let (cx, cy, cz) = (wx * CELLS + 2, y * CELLS, wz * CELLS + 2);
     let fronds = rng.int(5, 7);
     let turn = rng.range(0.0, std::f32::consts::TAU);
@@ -739,6 +768,9 @@ fn fern(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng) {
     let mut add = |x: i32, y: i32, z: i32, w: i32, d: i32, v: Voxel, sway: bool| {
         out.push(PlantBox { lo: [x, y, z], hi: [x + w, y + 1, z + d], voxel: v, sway_lo: sway, sway_hi: sway, thin: 0 });
     };
+    for (x, z) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
+        open([x, cy, z]);
+    }
     add(cx - 1, cy, cz - 1, 2, 2, mat::LEAVES_JUNGLE, false);
     for k in 0..fronds {
         let a = turn + k as f32 / fronds as f32 * std::f32::consts::TAU + rng.range(-0.25, 0.25);
@@ -754,6 +786,9 @@ fn fern(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng) {
                 _ => 2,
             };
             let (x, z) = (cx + (dx * i as f32).round() as i32, cz + (dz * i as f32).round() as i32);
+            if !open([x, cy + rise, z]) {
+                break;
+            }
             add(x, cy + rise, z, 1, 1, v, i > 1);
         }
     }

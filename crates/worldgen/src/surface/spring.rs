@@ -39,26 +39,12 @@ pub struct Spring {
 impl Spring {
     /// The spring at the source node `i`, if it is one.
     pub fn at(c: &Continent, world_seed: u32, i: usize) -> Option<Spring> {
-        let size = c.size as isize;
-        let (x, z) = ((i % c.size) as isize, (i / c.size) as isize);
-        if x < 1 || z < 1 || x >= size - 1 || z >= size - 1 {
-            return None;
-        }
-        let is_river = |j: usize| !c.ocean[j] && c.discharge[j] >= MIN_RIVER_Q;
-        if !is_river(i) || c.lake[i] != NO_LAKE || fall_drop(c, i) > 0.0 {
+        if !is_source(c, i) || fall_drop(c, i) > 0.0 {
             return None;
         }
         let r = c.rcv[i] as usize;
         if c.ocean[r] {
             return None;
-        }
-        for dz in -1..=1isize {
-            for dx in -1..=1isize {
-                let d = (i as isize + dz * size + dx) as usize;
-                if d != i && c.rcv[d] as usize == i && is_river(d) {
-                    return None;
-                }
-            }
         }
         let (pi, pr) = (node(c, i), node(c, r));
         let down = (pr - pi).normalize_or_zero();
@@ -84,6 +70,14 @@ impl Spring {
         let roll = unit(h);
         let radius = 1.0 + roll * 0.8 + level * flush * unit(h.rotate_left(8)) * m(1.2);
         Some(Spring { pos, radius, water })
+    }
+
+    /// Where the stream from the source node `i` starts, if it is one: the middle of the
+    /// voxel column at the head of its channel. Every stream has one, pool or not; where
+    /// [`Spring::at`] finds no pool, a single voxel of the stream's own water bubbles up
+    /// here instead.
+    pub fn head(c: &Continent, i: usize) -> Option<Vec2> {
+        is_source(c, i).then(|| node(c, i).floor() + 0.5)
     }
 
     /// Farthest from the centre this spring changes anything.
@@ -117,4 +111,27 @@ impl Spring {
     pub fn wet(edge: f32) -> bool {
         (0.0..RIM + WET * 0.6).contains(&edge)
     }
+}
+
+/// Whether node `i` is where a stream starts: a river node no river runs into, away from
+/// the edge of the grid and not in a lake.
+fn is_source(c: &Continent, i: usize) -> bool {
+    let size = c.size as isize;
+    let (x, z) = ((i % c.size) as isize, (i / c.size) as isize);
+    if x < 1 || z < 1 || x >= size - 1 || z >= size - 1 {
+        return false;
+    }
+    let is_river = |j: usize| !c.ocean[j] && c.discharge[j] >= MIN_RIVER_Q;
+    if !is_river(i) || c.lake[i] != NO_LAKE {
+        return false;
+    }
+    for dz in -1..=1isize {
+        for dx in -1..=1isize {
+            let d = (i as isize + dz * size + dx) as usize;
+            if d != i && c.rcv[d] as usize == i && is_river(d) {
+                return false;
+            }
+        }
+    }
+    true
 }

@@ -78,11 +78,14 @@ pub fn lantern_parts(style: LampStyle, p: &Palette, height: i32, turns: u32) -> 
     lantern_parts_spanning(style, p, height, turns, GATE_HALF)
 }
 
-/// The usual distance of a gate's posts either side of its middle.
-pub const GATE_HALF: i32 = 2;
+/// The usual distance of a gate's posts either side of its middle, and the least: the
+/// way between them is then five voxels (2 m) wide, in keeping with its height.
+pub const GATE_HALF: i32 = 3;
 /// The furthest a gate's posts stand either side of its middle: its lintel, one voxel
 /// further out each side, is then 11 voxels wide.
 pub const GATE_HALF_MAX: i32 = 4;
+/// Clear height under a gate's tie beam, in voxels: 2.4 m, well over a walker's head.
+pub const GATE_CLEAR: i32 = 6;
 
 /// [`lantern_parts`], with a gate's posts `half` voxels either side of its middle (up to
 /// [`GATE_HALF_MAX`]), so it spans a wider trail. Other styles ignore `half`.
@@ -225,7 +228,9 @@ pub fn paint_lantern(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, he
 /// [`paint_lantern`], with a gate's posts `half` voxels either side of its middle.
 pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: IVec3, height: i32, turns: u32, half: i32) {
     let half = half.clamp(GATE_HALF, GATE_HALF_MAX);
-    let h = height.max(5);
+    // A gate is walked under, so it stands taller than a post: its tie beam, the lowest
+    // thing across the way, is at least `GATE_CLEAR` up.
+    let h = if style == LampStyle::Gate { (height + 3).clamp(GATE_CLEAR + 3, GATE_CLEAR + 4) } else { height.max(5) };
     let mut voxels: Vec<(IVec3, Voxel)> = Vec::new();
     let mut put = |x: i32, y: i32, z: i32, v: Voxel| voxels.push((IVec3::new(x, y, z), v));
     let v = IVec3::new;

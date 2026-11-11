@@ -1257,7 +1257,7 @@ impl Layer<'_> {
                 style = parts::LampStyle::Gate;
             }
             let gate_turns = turns_toward(normal);
-            let gate_half = (widths[i] + 1.0).ceil() as i32;
+            let gate_half = ((widths[i] + 1.0).ceil() as i32).max(parts::GATE_HALF);
             if style == parts::LampStyle::Gate
                 && !(arrival && gate_half <= parts::GATE_HALF_MAX && gate_fits(pts, widths, i, gate_turns, gate_half))
             {

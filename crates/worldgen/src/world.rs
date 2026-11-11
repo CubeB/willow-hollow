@@ -649,6 +649,16 @@ impl GameWorld {
                 pos: Vec3::new(s.pos.x + (wx0 - lx0) as f32, s.water as f32, s.pos.y + (wz0 - lz0) as f32),
                 radius: s.radius,
             })
+            .chain(sampler.heads().iter().filter_map(|h| {
+                // A stream with no pool still bubbles up from the voxel of water at its
+                // head, if that column holds the stream's water.
+                let (x, z) = (h.x.floor() as i32 - lx0, h.y.floor() as i32 - lz0);
+                if !(1..=CHUNK).contains(&x) || !(1..=CHUNK).contains(&z) {
+                    return None;
+                }
+                let k = columns[x as usize * PAD + z as usize].water_surface()?;
+                Some(SpringMark { pos: Vec3::new(h.x + (wx0 - lx0) as f32, k as f32, h.y + (wz0 - lz0) as f32), radius: 0.5 })
+            }))
             .collect();
 
         let mut put = |q: IVec3, v: Voxel, force: bool| {
