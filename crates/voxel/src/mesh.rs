@@ -415,15 +415,68 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
     mesh
 }
 
+/// Whether the shader may drop a plant of this kind one voxel at a time (season.wgsl's
+/// `season_gone`, and grass buried in snow), which it decides at each corner of a face
+/// from the voxel the corner names.
+fn droppable(kind: u8) -> bool {
+    matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::GRASS | plant::FLOWER)
+}
+
+/// A plant box cut at voxel boundaries, so that every corner of every face names the
+/// same voxel. Otherwise the shader could drop some corners of a face and not others,
+/// and the face would be torn into a long sliver toward the middle of the screen. Grass
+/// is decided by column alone, so it is only cut across x and z.
+fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<PlantBox>) {
+    let kind = mats.get(b.voxel).plant;
+    if !droppable(kind) {
+        out.push(*b);
+        return;
+    }
+    let axes = if kind == plant::GRASS { [true, false, true] } else { [true; 3] };
+    let start = out.len();
+    out.push(*b);
+    for axis in 0..3 {
+        if !axes[axis] {
+            continue;
+        }
+        let mut k = start;
+        while k < out.len() {
+            let p = out[k];
+            // The first voxel boundary strictly inside the box.
+            let cut = (p.lo[axis].div_euclid(CELLS) + 1) * CELLS;
+            if cut < p.hi[axis] {
+                let (mut a, mut c) = (p, p);
+                a.hi[axis] = cut;
+                c.lo[axis] = cut;
+                // Each piece keeps the skin insets of the faces it still has.
+                a.thin &= !(1 << (2 * axis));
+                c.thin &= !(1 << (2 * axis + 1));
+                out[k] = a;
+                out.push(c);
+            } else {
+                k += 1;
+            }
+        }
+    }
+}
+
 /// Appends plants to a chunk's mesh. `origin` is the chunk's corner in world cells, and
-/// every box must start inside the chunk.
-pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a PlantBox> + Clone, origin: [i32; 3], mats: &Materials) {
+/// every box must start inside the chunk; any box reaching outside what a vertex can
+/// hold is left out.
+pub fn add_plants<'a>(mesh: &mut ChunkMesh, boxes: impl Iterator<Item = &'a PlantBox>, origin: [i32; 3], mats: &Materials) {
+    let reach = 63 * CELLS;
+    let mut cut = Vec::new();
+    for b in boxes {
+        if (0..3).all(|a| b.lo[a] >= origin[a] && b.hi[a] <= origin[a] + reach && b.lo[a] < b.hi[a]) {
+            split_at_voxels(b, mats, &mut cut);
+        }
+    }
     for face in 0..6usize {
         mesh.faces[6 + face] = (mesh.opaque.len() / 4) as u32;
         let n_axis = face / 2;
         let positive = face.is_multiple_of(2);
         let (u_axis, v_axis) = ((n_axis + 1) % 3, (n_axis + 2) % 3);
-        for b in boxes.clone() {
+        for b in &cut {
             // Undersides are never seen from where a person stands, except a skin on a
             // ceiling, which is nothing but its underside.
             if face == 3 && b.thin & 1 << 3 == 0 {
@@ -707,6 +760,40 @@ mod tests {
             let bit = ((v.a >> (29 + axis)) & 1) as i32;
             e[axis].div_euclid(8) - if q == 0 { bit } else { 0 }
         })
+    }
+
+    #[test]
+    fn every_corner_of_a_droppable_plant_face_names_one_voxel() {
+        let (mut m, _, _) = mats();
+        let flower = m.add(Material { color: [200, 60, 200], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::FLOWER });
+        let grass = m.add(Material { color: [60, 160, 60], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::GRASS });
+        let stone = m.add(Material { color: [100, 100, 100], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::NONE });
+        let chunk = [0, 0, 0];
+        // Boxes straddling voxel boundaries on every axis, and one reaching out of the chunk.
+        let boxes = [
+            PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: flower, sway_lo: false, sway_hi: true, thin: 0 },
+            PlantBox { lo: [7, 2, 2], hi: [10, 9, 5], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
+            PlantBox { lo: [-2, 2, 2], hi: [2, 3, 3], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
+        ];
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, boxes.iter(), chunk, &m);
+        assert!(!mesh.opaque.is_empty());
+        for quad in mesh.opaque.chunks_exact(4) {
+            let kind = (quad[0].b >> 29) as u8 & 7;
+            let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
+            for v in &named {
+                assert_eq!(v[0], named[0][0], "{named:?}");
+                assert_eq!(v[2], named[0][2], "{named:?}");
+                if kind == plant::FLOWER {
+                    assert_eq!(v[1], named[0][1], "{named:?}");
+                }
+            }
+        }
+        // A stone box is never cut.
+        let mut mesh = ChunkMesh::default();
+        let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0 };
+        add_plants(&mut mesh, [b].iter(), chunk, &m);
+        assert_eq!(mesh.opaque.len(), 5 * 4);
     }
 
     #[test]
