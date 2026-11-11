@@ -4,7 +4,7 @@
 //! Each kind has its own spawn rule, tied to where the player is and the time of day.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, Vec3};
+use glam::{DVec3, Vec3, Vec4};
 use voxel::Kind;
 use worldgen::{
     Cascade, SpringMark, Surf,
@@ -27,6 +27,9 @@ pub struct ParticleInstance {
     pub glow: f32,
     /// Linear rgb and alpha.
     pub color: [f32; 4],
+    /// Pitch (about the cube's own x) and roll (about its own z), radians, turned
+    /// before the yaw: a leaf tumbling, a wing beating.
+    pub tilt: [f32; 2],
 }
 
 /// Prevailing wind: a slowly wandering vector, as in nature never quite steady.
@@ -94,24 +97,78 @@ pub enum LeafShape {
 }
 
 impl LeafShape {
-    /// Size (width, thickness, length) in old voxels, and how many extra falls it brings.
+    /// Size (width, thickness, length) in old voxels.
     fn size(self) -> Vec3 {
         match self {
-            LeafShape::Needle => Vec3::new(0.04, 0.03, 0.14),
-            LeafShape::Slip => Vec3::new(0.07, 0.04, 0.36),
-            LeafShape::Broad => Vec3::new(0.2, 0.06, 0.24),
-            LeafShape::Autumn => Vec3::new(0.26, 0.06, 0.28),
-            LeafShape::Petal => Vec3::new(0.1, 0.03, 0.1),
+            // A needle: a thin sliver, several times longer than it is wide.
+            LeafShape::Needle => Vec3::new(0.022, 0.018, 0.2),
+            LeafShape::Slip => Vec3::new(0.07, 0.03, 0.36),
+            LeafShape::Broad => Vec3::new(0.2, 0.03, 0.24),
+            LeafShape::Autumn => Vec3::new(0.26, 0.03, 0.28),
+            LeafShape::Petal => Vec3::new(0.1, 0.02, 0.1),
         }
     }
-    fn weight(self) -> f32 {
+    /// How fast it falls in still air, old voxels a second: a needle drops, a petal floats.
+    fn fall(self) -> f32 {
         match self {
-            LeafShape::Needle => 0.5,
-            LeafShape::Slip => 0.8,
-            LeafShape::Broad | LeafShape::Petal => 1.0,
-            LeafShape::Autumn => 3.5,
+            LeafShape::Needle => 1.9,
+            LeafShape::Slip => 1.5,
+            LeafShape::Broad => 1.15,
+            LeafShape::Autumn => 1.05,
+            LeafShape::Petal => 0.75,
         }
     }
+    /// Whether it is long and thin, and so spins about its length as it falls rather
+    /// than swinging from side to side.
+    fn spins(self) -> bool {
+        matches!(self, LeafShape::Needle | LeafShape::Slip)
+    }
+}
+
+/// A place in a tree's crown that leaves fall from.
+pub struct LeafSite {
+    /// The top leaf voxel of the crown here (its corner).
+    pub pos: DVec3,
+    /// The height of the crown's underside, where it is open below.
+    pub under: Option<f64>,
+    /// The leaf's colour as modelled, linear.
+    pub color: [f32; 3],
+    pub shape: LeafShape,
+    /// Its plant kind (voxel::plant), for its year.
+    pub plant: u8,
+    /// Its tree's tag (features::tree_tag), 0 if not known.
+    pub tag: u8,
+}
+
+/// How readily this site sheds a leaf on date `s`, and the colour of the leaf: that of
+/// the leaves still on its tree, autumn's gold and red included. A tree sheds most in
+/// the days before its own leaves are down, and a bare one sheds none.
+fn shedding(site: &LeafSite, s: f32, leaf_fall: f32) -> (f32, [f32; 3]) {
+    use voxel::plant;
+    let c = Vec3::from(site.color);
+    match site.plant {
+        plant::DECIDUOUS | plant::AUTUMN => {
+            let maple = site.plant == plant::AUTUMN;
+            let vox = site.pos.floor().as_ivec3();
+            let leaf = crate::season::leaf(s, vox, maple, site.tag);
+            if !leaf.keep {
+                return (0.0, site.color);
+            }
+            let colour = crate::season::leaf_colour(c, &leaf, maple, s);
+            // Turned leaves let go; most of all in the last days before the tree is bare.
+            let last = smooth(leaf.fall_at - 0.035, leaf.fall_at, s);
+            let w = 0.03 + 2.2 * leaf.turn * leaf.turn + 4.5 * last;
+            (if maple { w * 1.3 } else { w }, colour.to_array())
+        }
+        // Evergreens drop a few old needles all year, a few more in autumn.
+        _ if site.shape == LeafShape::Needle => (0.06 + 0.3 * leaf_fall, site.color),
+        _ => (0.04 + 0.15 * leaf_fall, site.color),
+    }
+}
+
+fn smooth(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 struct Particle {
@@ -126,6 +183,10 @@ struct Particle {
     phase: f32,
     /// Leaves that have come to rest.
     settled: bool,
+    /// A falling leaf's heading, pitch and roll.
+    rot: Vec3,
+    /// A falling leaf's ways: swing rate, spiral rate, tumble rate, and how fast it falls.
+    spin: Vec4,
 }
 
 /// What the spawners need to know about the player's surroundings this frame.
@@ -139,13 +200,15 @@ pub struct Surroundings<'a> {
     pub springs: &'a [SpringMark],
     /// Where the sea breaks on rock near the player.
     pub surf: &'a [Surf],
-    /// Leaf voxels near the player, as (position, colour), refreshed by the caller.
-    pub leaves: &'a [(DVec3, [f32; 3], LeafShape)],
+    /// Places in the trees near the player that leaves fall from, refreshed by the caller.
+    pub leaves: &'a [LeafSite],
     /// Flower voxels near the player.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
+    /// The time of year, 0 to 1 (see season.rs), which each tree's leaves follow.
+    pub date: f32,
     /// Weather: rain and snow strength and how hard the wind blows beyond usual, 0..1.
     pub rain: f32,
     pub snow: f32,
@@ -158,10 +221,16 @@ pub struct Particles {
     instances: Vec<ParticleInstance>,
     rng: u32,
     bird_timer: f32,
+    /// Each leaf site's shedding weight and leaf colour this frame (see `shedding`).
+    shed: Vec<(f32, [f32; 3])>,
     pub wind: Wind,
 }
 
 const MAX_PARTICLES: usize = 8000;
+/// Leaves in the air at once, at most; more wait their turn on the tree.
+const MAX_FALLING: usize = 1500;
+/// How far off (voxels, across) a falling leaf is let go of, being out of sight.
+const LEAF_REACH: f64 = 110.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
 const RAIN_COUNT: f32 = 2200.0;
 const SNOW_COUNT: f32 = 1500.0;
@@ -173,6 +242,7 @@ impl Particles {
             instances: Vec::new(),
             rng: 0x2545_f491,
             bird_timer: 20.0,
+            shed: Vec::new(),
             wind: Wind::new(),
         }
     }
@@ -232,6 +302,8 @@ impl Particles {
                     color: [0.85, 0.92, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -247,6 +319,8 @@ impl Particles {
                     color: [0.9, 0.94, 1.0],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -274,6 +348,8 @@ impl Particles {
                     color: [0.92, 0.95, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -297,34 +373,69 @@ impl Particles {
                     color: [0.85, 0.94, 1.0],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
         }
 
-        // Leaves let go in the wind.
-        if !s.leaves.is_empty() {
+        // Leaves let go in the wind, each tree on its own date and in its own colours.
+        let falling = self.particles.iter().filter(|p| p.kind == PKind::Leaf && !p.settled).count();
+        if !s.leaves.is_empty() && falling < MAX_FALLING {
             let gust = self.wind.vector.length();
             // Gusts shake leaves loose far faster than a steady breeze does.
-            let windiness = 0.3 + gust * 0.4 + (gust - 1.8).max(0.0) * 2.0;
-            // Autumn groves (maple and the like) shed much more.
-            let weight = s.leaves.iter().map(|l| l.2.weight()).sum::<f32>() / s.leaves.len() as f32
-                // Leaves hold on through summer, let go in autumn, and few are left by winter.
-                * (0.2 + 2.4 * s.leaf_fall);
-            let rate = 2.5 * windiness * weight * (s.leaves.len() as f32 / 400.0).min(1.5);
+            let windiness = 0.4 + gust * 0.35 + (gust - 1.8).max(0.0) * 1.5;
+            self.shed.clear();
+            self.shed.extend(s.leaves.iter().map(|l| shedding(l, s.date, s.leaf_fall)));
+            let total: f32 = self.shed.iter().map(|w| w.0).sum();
+            let most = self.shed.iter().map(|w| w.0).fold(0.0, f32::max);
+            let rate = 0.15 * windiness * total;
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
-                let (pos, color, shape) = s.leaves[(self.unit() * s.leaves.len() as f32) as usize % s.leaves.len()];
+                // A site by its weight: try a few at random, keeping each by how much it sheds.
+                let mut pick = None;
+                for _ in 0..12 {
+                    let i = (self.unit() * s.leaves.len() as f32) as usize % s.leaves.len();
+                    if self.unit() * most < self.shed[i].0 {
+                        pick = Some(i);
+                        break;
+                    }
+                }
+                let Some(i) = pick else {
+                    continue;
+                };
+                let (site, color) = (&s.leaves[i], self.shed[i].1);
+                // Most fall from under the crown, where they come into view at once.
+                let y = match site.under {
+                    Some(under) if self.unit() < 0.75 => under - 0.15,
+                    _ => site.pos.y - 0.1,
+                };
+                let shape = site.shape;
+                // Each leaf a little lighter or darker, as the cubes of its tree are.
+                let shade = self.range(0.88, 1.1);
+                let tumble = if self.unit() < 0.5 { 1.0 } else { -1.0 };
                 let particle = Particle {
                     kind: PKind::Leaf,
-                    pos: pos + DVec3::new(self.range(0.1, 0.9) as f64, -0.1, self.range(0.1, 0.9) as f64),
+                    pos: DVec3::new(site.pos.x + self.range(0.1, 0.9) as f64, y, site.pos.z + self.range(0.1, 0.9) as f64),
                     vel: Vec3::ZERO,
                     age: 0.0,
-                    life: self.range(9.0, 14.0),
+                    // It lives until it comes down (see the simulation).
+                    life: f32::INFINITY,
                     size: shape.size() * self.range(0.8, 1.2),
-                    color,
+                    color: color.map(|c| c * shade),
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::new(self.range(0.0, std::f32::consts::TAU), 0.0, self.range(-1.0, 1.0)),
+                    spin: Vec4::new(
+                        // Swinging from side to side, about once every two or three seconds.
+                        self.range(1.8, 3.2) * if shape == LeafShape::Petal { 1.4 } else { 1.0 },
+                        // The heading turns slowly, so the swings trace a spiral.
+                        self.range(0.25, 1.1) * if self.unit() < 0.5 { 1.0 } else { -1.0 },
+                        // Spinning: needles and slips quickly about their length.
+                        tumble * if shape.spins() { self.range(9.0, 16.0) } else { self.range(4.0, 8.0) },
+                        shape.fall() * self.range(0.85, 1.15),
+                    ),
                 };
                 self.spawn(particle);
             }
@@ -347,6 +458,8 @@ impl Particles {
                     color: if rain { [0.72, 0.8, 0.9] } else { [0.95, 0.97, 1.0] },
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -370,6 +483,8 @@ impl Particles {
                     color: if self.unit() < 0.85 { [0.75, 1.0, 0.25] } else { [0.45, 1.0, 0.35] },
                     phase: self.range(0.0, 100.0),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -389,6 +504,8 @@ impl Particles {
                     color: [1.0, 0.95, 0.75],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -407,6 +524,8 @@ impl Particles {
                 color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
+                rot: Vec3::ZERO,
+                spin: Vec4::ZERO,
             };
             self.spawn(particle);
         }
@@ -434,6 +553,8 @@ impl Particles {
                     color: [0.08, 0.08, 0.1],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -454,6 +575,8 @@ impl Particles {
                     color: [0.8, 0.9, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -513,19 +636,58 @@ impl Particles {
                     if p.settled {
                         continue;
                     }
-                    // A hover, then a slow swaying fall carried along by the wind.
-                    let fall = if p.age < 0.6 { 0.0 } else { -1.1 };
-                    let sway = (t * 2.2 + p.phase).sin() * 0.8;
-                    let drift = wind * 0.6;
-                    p.vel += (Vec3::new(drift.x + sway, fall, drift.z + sway * 0.5) - p.vel) * (1.0 - (-3.0 * dt).exp());
+                    // A leaf falls one of two ways, and changes between them as it goes:
+                    // swinging from side to side like a pendulum, banking at each end of
+                    // its swing, or spinning end over end and gliding off sideways as it
+                    // does. Its heading wanders round, so either way it spirals. A needle
+                    // or a slip of a leaf spins about its length nearly all the way down.
+                    let a = p.age;
+                    let [rate, spiral, spin, fall] = p.spin.to_array();
+                    let gust = wind.length();
+                    let wander = noise::perlin2(0x5a, (p.phase * 13.0) as f64, (a * 0.35) as f64);
+                    let spinning = if p.size.z > p.size.x * 2.5 { wander > -0.6 } else { wander > 0.2 - gust * 0.08 };
+                    p.rot.x += (spiral + wander * 0.8) * dt;
+                    let across = Vec3::new(p.rot.x.cos(), 0.0, p.rot.x.sin());
+                    let (swing, back) = (a * rate + p.phase).sin_cos();
+                    let (want_pitch, glide, drop) = if spinning {
+                        // Rolling over and over; the cube looks the same turned half round,
+                        // so the roll is kept within a half turn either side.
+                        p.rot.z = (p.rot.z + spin * dt + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::PI)
+                            - std::f32::consts::FRAC_PI_2;
+                        (0.4 * (a * rate * 0.7 + p.phase).sin(), across * 0.5 * spin.signum(), fall * 1.25)
+                    } else {
+                        // Tipped furthest at either end of the swing, where it stalls, and
+                        // falling fastest through the middle.
+                        let roll = -0.9 * swing;
+                        p.rot.z += (roll - p.rot.z) * (1.0 - (-6.0 * dt).exp());
+                        (0.35 * back, across * (1.2 * back), fall * (0.45 + 0.8 * (1.0 - swing.abs())))
+                    };
+                    p.rot.y += (want_pitch - p.rot.y) * (1.0 - (-5.0 * dt).exp());
+                    // It hangs a moment as it lets go.
+                    let start = (a / 0.5).min(1.0);
+                    let flutter = Vec3::new(
+                        noise::perlin2(0x5b, (p.phase * 7.0) as f64, (a * 1.3) as f64),
+                        0.0,
+                        noise::perlin2(0x5c, (p.phase * 7.0) as f64, (a * 1.3) as f64),
+                    ) * (0.3 + gust * 0.15);
+                    let target = glide + flutter + Vec3::new(wind.x, 0.0, wind.z) * 0.6 - Vec3::Y * drop * start;
+                    p.vel += (target - p.vel) * (1.0 - (-3.5 * dt).exp());
+                    // Long gone from view, or caught somewhere for good: let it go.
+                    let off = p.pos - s.camera;
+                    if off.x.abs().max(off.z.abs()) > LEAF_REACH || a > 240.0 {
+                        p.life = p.age;
+                        continue;
+                    }
                     let next = p.pos + (p.vel * U * dt).as_dvec3();
                     let below = next.floor().as_ivec3();
                     match voxels.kind(below.x, below.y, below.z) {
                         Kind::Solid => {
                             p.settled = true;
                             p.pos.y = below.y as f64 + 1.02;
-                            // Leaves gather where they land and lie a good while.
-                            p.life = p.age + 30.0;
+                            // It lies flat where it lands, and a while later fades.
+                            p.rot.y = 0.0;
+                            p.rot.z = 0.0;
+                            p.life = p.age + 14.0 + 8.0 * (p.phase / std::f32::consts::TAU);
                         }
                         Kind::Water => {
                             // It floats on the top voxel of the water, and goes where that takes it.
@@ -622,6 +784,8 @@ impl Particles {
                     color: [0.8, 0.9, 0.98],
                     phase: 0.0,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -640,6 +804,8 @@ impl Particles {
                     color: [0.9, 0.96, 1.0],
                     phase: a,
                     settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
             }
@@ -686,12 +852,23 @@ impl Particles {
                 }
                 _ => {}
             }
+            let (yaw, tilt) = match p.kind {
+                PKind::Leaf => {
+                    // Fading slowly where it lies.
+                    if p.settled {
+                        alpha = fade_in * ((p.life - p.age) / 3.0).clamp(0.0, 1.0);
+                    }
+                    (p.rot.x, [p.rot.y, p.rot.z])
+                }
+                _ => (p.phase, [0.0; 2]),
+            };
             self.instances.push(ParticleInstance {
                 pos: (p.pos - s.camera).as_vec3().to_array(),
-                yaw: p.phase,
+                yaw,
                 size: (p.size * U).to_array(),
                 glow,
                 color: [color[0], color[1], color[2], alpha],
+                tilt,
             });
         }
     }
@@ -745,8 +922,11 @@ mod leaf_tests {
     use super::LeafShape::*;
 
     #[test]
-    fn shapes_differ_and_autumn_falls_heavier() {
+    fn shapes_differ_and_needles_drop_fastest() {
         assert!(Needle.size().z < Broad.size().z && Slip.size().z > Broad.size().z);
-        assert!(Autumn.weight() > Broad.weight());
+        // A needle is thin and long.
+        assert!(Needle.size().z > 6.0 * Needle.size().x);
+        assert!(Needle.fall() > Broad.fall() && Broad.fall() > Petal.fall());
+        assert!(Needle.spins() && !Broad.spins());
     }
 }

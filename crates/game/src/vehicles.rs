@@ -181,6 +181,7 @@ fn push_parts(parts: &[Part], origin: DVec3, heading: f32, cam: DVec3, out: &mut
             size: (Vec3::from(*size) * OLD_VOXEL).into(),
             glow: 0.0,
             color: [color[0], color[1], color[2], 1.0],
+            tilt: [0.0; 2],
         });
     }
 }

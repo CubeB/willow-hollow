@@ -439,6 +439,9 @@ pub struct WorldVoxels {
     columns: HashMap<(i32, i32), Vec<(i32, PaddedChunk)>>,
     /// The currents in the same columns (see `ColumnOutput::currents`).
     currents: HashMap<(i32, i32), Vec<Current>>,
+    /// The trees reaching into the same columns (see `ColumnOutput::trees`), to tell
+    /// whose leaf is whose.
+    trees: HashMap<(i32, i32), Vec<worldgen::features::Placement>>,
 }
 
 /// The chunks of column `col`, generating it if it is not held yet.
@@ -446,11 +449,13 @@ fn load<'a>(
     world: &GameWorld,
     columns: &'a mut HashMap<(i32, i32), Vec<(i32, PaddedChunk)>>,
     currents: &mut HashMap<(i32, i32), Vec<Current>>,
+    trees: &mut HashMap<(i32, i32), Vec<worldgen::features::Placement>>,
     col: (i32, i32),
 ) -> &'a [(i32, PaddedChunk)] {
     columns.entry(col).or_insert_with(|| {
         let out = world.generate_column(col.0, col.1);
         currents.insert(col, out.currents);
+        trees.insert(col, out.trees);
         out.chunks
     })
 }
@@ -461,6 +466,7 @@ impl WorldVoxels {
             world,
             columns: HashMap::new(),
             currents: HashMap::new(),
+            trees: HashMap::new(),
         }
     }
 
@@ -474,6 +480,7 @@ impl WorldVoxels {
             self.columns
                 .retain(|&(x, z), _| (x - cx).abs() <= 2 && (z - cz).abs() <= 2);
             self.currents.retain(|c, _| self.columns.contains_key(c));
+            self.trees.retain(|c, _| self.columns.contains_key(c));
         }
     }
 }
@@ -482,7 +489,7 @@ impl WorldVoxels {
     /// The voxel id at a world position (air outside generated chunks).
     pub fn voxel(&mut self, x: i32, y: i32, z: i32) -> voxel::Voxel {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        let chunks = load(&self.world, &mut self.columns, &mut self.currents, col);
+        let chunks = load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
         let cy = y.div_euclid(CHUNK);
         match chunks.iter().find(|(c, _)| *c == cy) {
             Some((_, chunk)) => chunk.get(
@@ -496,10 +503,23 @@ impl WorldVoxels {
     }
 }
 
+impl WorldVoxels {
+    /// The tag of the tree whose leaf is at a world voxel (`features::leaf_tag`), the same
+    /// the mesh gives its faces, so the seasons turn it on its tree's date. 0 for none.
+    pub fn leaf_tag(&mut self, x: i32, y: i32, z: i32) -> u8 {
+        let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
+        match self.trees.get(&col) {
+            Some(trees) => worldgen::features::leaf_tag(self.world.library(), self.world.materials(), trees, IVec3::new(x, y, z)),
+            None => 0,
+        }
+    }
+}
+
 impl Voxels for WorldVoxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        let chunks = load(&self.world, &mut self.columns, &mut self.currents, col);
+        let chunks = load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
         let cy = y.div_euclid(CHUNK);
         match chunks.iter().find(|(c, _)| *c == cy) {
             Some((_, chunk)) => {
@@ -519,7 +539,7 @@ impl Voxels for WorldVoxels {
 
     fn current(&mut self, x: i32, z: i32) -> Vec2 {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
-        load(&self.world, &mut self.columns, &mut self.currents, col);
+        load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
         match self.currents.get(&col) {
             Some(c) if !c.is_empty() => {
                 let c = c[(x.rem_euclid(CHUNK) as usize + 1) * PAD + z.rem_euclid(CHUNK) as usize + 1];

@@ -860,7 +860,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
         let cube_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-        let particle_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 5 => Float32, 6 => Float32x4];
+        let particle_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 5 => Float32, 6 => Float32x4, 7 => Float32x2];
         let particles = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("particles"),
             layout: Some(&scene_layout),

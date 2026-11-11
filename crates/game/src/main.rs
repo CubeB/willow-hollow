@@ -86,6 +86,8 @@ struct Options {
     frames: Option<u64>,
     /// Fly straight ahead at this many metres a second, to measure streaming.
     drift: Option<f32>,
+    /// Seconds of ambient life (leaves, birds, spray) simulated before a screenshot.
+    ambient: f32,
 }
 
 impl Default for Options {
@@ -106,6 +108,7 @@ impl Default for Options {
             size: (1280, 720),
             frames: None,
             drift: None,
+            ambient: 8.0,
         }
     }
 }
@@ -127,6 +130,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --map FILE            write a map of the continent around the start to a PNG, then exit
+  --ambient S           seconds of ambient life before a screenshot (default 8)
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went
@@ -172,6 +176,7 @@ fn parse_args() -> Result<Options> {
                 o.look = (v[0], v[1]);
             }
             "--time" => o.time = Some(value()?.parse()?),
+            "--ambient" => o.ambient = value()?.parse::<f32>()?.clamp(0.0, 600.0),
             "--date" => o.date = Some(value()?.parse::<f32>()?.rem_euclid(1.0)),
             "--weather" => {
                 let name = value()?;
@@ -247,7 +252,7 @@ const BOARD_REACH: f64 = m64(4.8);
 
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
-type Leaves = Vec<(DVec3, [f32; 3], particles::LeafShape)>;
+type Leaves = Vec<particles::LeafSite>;
 
 /// Which shape of leaf a tree's foliage sheds; plants and vines shed none.
 fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
@@ -280,8 +285,9 @@ fn scan_surroundings(
     let mut rng = salt.wrapping_mul(0x9e37_79b9) ^ (cx as u32).wrapping_mul(31) ^ (cz as u32).wrapping_mul(17) | 1;
     let half = (30.0 * OLD_VOXEL) as i32;
     let span = 2 * half as u32 + 1;
-    let (under, above) = ((12.0 * OLD_VOXEL) as i32, (40.0 * OLD_VOXEL) as i32);
-    for _ in 0..700 {
+    let (under, above) = ((40.0 * OLD_VOXEL) as i32, (40.0 * OLD_VOXEL) as i32);
+    // Enough looks to find most of the trees in reach, not just a few of them.
+    for _ in 0..1100 {
         rng ^= rng << 13;
         rng ^= rng >> 17;
         rng ^= rng << 5;
@@ -294,7 +300,22 @@ fn scan_surroundings(
             let kind = mats.get(v).kind;
             if kind == voxel::Kind::Foliage && mats.get(below).kind == voxel::Kind::Air {
                 if let Some(shape) = leaf_shape(v) {
-                    leaves.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color), shape));
+                    // Leaves fall from under the canopy as well as off its top: find its
+                    // underside, where a falling leaf comes into view.
+                    let mut under = y;
+                    while under > y - 40 && mats.get(voxels.voxel(x, under - 1, z)).kind == voxel::Kind::Foliage {
+                        under -= 1;
+                    }
+                    let m = mats.get(v);
+                    let open = mats.get(voxels.voxel(x, under - 1, z)).kind == voxel::Kind::Air;
+                    leaves.push(particles::LeafSite {
+                        pos: DVec3::new(x as f64, y as f64, z as f64),
+                        under: open.then_some(under as f64),
+                        color: to_linear(m.color),
+                        shape,
+                        plant: m.plant,
+                        tag: voxels.leaf_tag(x, y, z),
+                    });
                 }
                 break;
             }
@@ -820,6 +841,7 @@ impl Running {
             flowers: &self.flowers,
             player_entered_water: entered_water,
             leaf_fall: season::leaf_fall(self.env.date),
+            date: self.env.date,
             rain: self.weather.now.rain,
             snow: self.weather.now.snow,
             storm: self.weather.now.storm,
@@ -1187,7 +1209,7 @@ fn main() -> Result<()> {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
         }
         let mut particles = Particles::new();
-        for step in 0..480 {
+        for step in 0..(opts.ambient * 60.0) as u32 {
             let surroundings = Surroundings {
                 camera: camera.pos,
                 biome,
@@ -1199,6 +1221,7 @@ fn main() -> Result<()> {
                 flowers: &flowers,
                 player_entered_water: None,
                 leaf_fall: season::leaf_fall(env.date),
+                date: env.date,
                 rain: weather.now.rain,
                 snow: weather.now.snow,
                 storm: weather.now.storm,
