@@ -46,8 +46,8 @@ fn field(col: &Column, surface: Voxel) -> Option<(f32, Rock)> {
     Some(match (col.cover, surface) {
         // Storm beaches: sea-rounded stones lying thick, far denser than on land.
         (Cover::Shingle, _) => (0.6, Rock { main: mat::GRAVEL, other: rock.main, fleck: rock.other }),
-        // Boulder shores: the gaps between the boulders are strewn with big stones.
-        (Cover::Boulders, _) => (0.3, Rock { main: rock.main, other: mat::ROCK_DARK, fleck: mat::GRAVEL }),
+        // Boulder tops: now and then a loose stone lodged on one.
+        (Cover::Boulders, _) => (0.06, Rock { main: rock.main, other: mat::ROCK_DARK, fleck: mat::GRAVEL }),
         // Beaches: sea-smoothed pebbles and the odd shell.
         (Cover::Beach, _) => (0.07, Rock { main: mat::GRAVEL, other: rock.main, fleck: mat::MUSHROOM_STEM }),
         // Gravel bars and river beds.
