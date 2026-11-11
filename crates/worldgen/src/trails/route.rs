@@ -34,6 +34,39 @@ pub struct Router<'a> {
     pub used: Vec<u32>,
     /// How hard each cell's ground is to cross, as a multiple of easy open ground.
     terrain: Vec<f32>,
+    /// Extra cost per unit distance of crossing each cell for being low ground at the
+    /// edge of the sea or a lake (see [`shallows`]).
+    shallows: Vec<f32>,
+}
+
+/// Extra cost, per simulation unit walked, of low ground at the edge of the sea or a
+/// lake. On the map such a cell is land, but at the surface its low parts are under
+/// water, so a trail across it ends up on a long bridge over shallows and marsh.
+pub fn shallows(c: &Continent, i: usize) -> f32 {
+    const NEAR: i32 = 2;
+    let n = c.size as i32;
+    let (x, z) = (i as i32 % n, i as i32 / n);
+    let mut water = f32::MIN;
+    for dz in -NEAR..=NEAR {
+        for dx in -NEAR..=NEAR {
+            let (nx, nz) = (x + dx, z + dz);
+            if nx < 0 || nz < 0 || nx >= n || nz >= n {
+                continue;
+            }
+            let j = (nz * n + nx) as usize;
+            if c.ocean[j] {
+                water = water.max(0.0);
+            } else if c.lake[j] != NO_LAKE {
+                water = water.max(c.lake[j]);
+            }
+        }
+    }
+    if water == f32::MIN {
+        return 0.0;
+    }
+    // Within about 2 m of the water's height the ground floods in places.
+    let above = c.height[i] - water;
+    6.0 * (1.0 - ((above - 0.5) / 2.5).clamp(0.0, 1.0))
 }
 
 /// How hard a cell's ground is to cross, as a multiple of open level ground. People
@@ -90,6 +123,7 @@ impl<'a> Router<'a> {
             current: 0,
             used: vec![0; n],
             terrain: (0..n).map(|i| terrain_factor(c, i)).collect(),
+            shallows: (0..n).map(|i| shallows(c, i)).collect(),
         }
     }
 
@@ -111,6 +145,10 @@ impl<'a> Router<'a> {
             let width = Continent::river_width(q);
             cost += 150.0 + width * width * 6.0 + if width > 4.0 { 600.0 + width * 60.0 } else { 0.0 };
         }
+        // Low ground beside the sea or a lake is shallows, marsh and mud flats at the
+        // scale people walk: a trail kept to it would need a long bridge over water
+        // that a path a little inland goes round dry-shod.
+        cost += dist * self.shallows[b];
         if self.used[b] != 0 {
             cost *= REUSE;
         }
