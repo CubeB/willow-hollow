@@ -239,16 +239,17 @@ fn reach(half_width: f32) -> f32 {
 /// allowed level at or below its simulated level. Because this is a non-decreasing
 /// function of the level alone, the result still never rises downstream. On a gentle
 /// river the allowed levels are far apart along its length, giving long still pools
-/// and the odd weir; on a steep one they come quickly, giving cascades. Missing levels
-/// become taller falls, more often at altitude. Takes simulation units and returns
-/// voxels, so pools keep the same height however fine the voxels are.
+/// and the odd weir; on a steep one they come quickly, giving cascades. Most levels are
+/// kept, so most drops are a single subtle step of one block; missing levels become
+/// taller falls, more often at altitude. Takes simulation units and returns voxels, so
+/// pools keep the same height however fine the voxels are.
 pub fn pool_level(seed: u32, level: f32) -> i32 {
     let mut k = level.floor() as i32;
     while k > 0 {
         let keep = match k {
-            ..24 => 0.80,
-            24..120 => 0.60,
-            _ => 0.45,
+            ..24 => 0.85,
+            24..120 => 0.75,
+            _ => 0.60,
         };
         if unit(hash2(seed ^ 0x9001, k, 11)) < keep {
             break;
@@ -477,7 +478,11 @@ impl<'a> Sampler<'a> {
             for f in &self.falls {
                 let d = (p - f.pos).length();
                 if d < f.radius {
+                    // The face is cut down into the ground below the lip; the ground
+                    // above it is never heaped up into a platform round the lip.
+                    let before = ground;
                     let fall = f.cut(d, slope, wx, wz, &mut ground);
+                    ground = ground.min(before);
                     if part == cliff::Part::None {
                         part = fall;
                     }
@@ -541,7 +546,7 @@ impl<'a> Sampler<'a> {
                 // Out at sea a river mouth shoals to the sea floor rather than ending in a
                 // deep rounded hole.
                 let seaward = if piece.nodes[1] == piece.nodes[2] { smoothstep(0.2, 0.95, t) } else { 0.0 };
-                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(1.6)), pool, seaward));
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(0.8)), pool, seaward));
             }
         }
         if let Some((sd, hw, level, upstream_level, pool, seaward)) = nearest {
