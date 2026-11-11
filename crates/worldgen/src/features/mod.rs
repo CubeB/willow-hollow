@@ -498,6 +498,11 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
             _ => species,
         };
     }
+    // Bare tidal sand grows nothing: only boulders and driftwood lie on it.
+    let bare = col.cover == Cover::Bank && !col.biome.arid() && crate::surface::flat_is_sand(col.ground, crate::surface::ground_patch(seed, x as f64, z as f64));
+    if bare && !matches!(species, Species::Boulder | Species::FallenLog) {
+        return None;
+    }
     if too_cold && !matches!(species, Species::Boulder | Species::MossyBoulder) {
         return None;
     }

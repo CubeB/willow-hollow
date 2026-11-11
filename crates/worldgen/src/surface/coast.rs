@@ -453,6 +453,25 @@ pub fn beach_scatter(seed: u32, wx: f64, wz: f64) -> f32 {
     unit(hash2(seed ^ 0xbe04, wx.floor() as i32, wz.floor() as i32)) - 0.5
 }
 
+/// How far the shaping of the shore (flats, dunes, berms, boulders) is faded in at a
+/// column `inland` voxels in from the grid's coastline (see [`inland`]), 0 to 1. Full
+/// beside the sea, it is gone by the time the sampler stops treating columns as coastal,
+/// half a cell in, so the coast blends into the inland ground there. It follows the
+/// shore and wanders with it: faded by how much of the grid round a column is sea, the
+/// flats and dunes ended along the straight lines and diagonals of the grid's squares.
+/// `seed` is the world's.
+pub fn shore_fade(c: &Continent, seed: u32, inland: f32, wx: f64, wz: f64) -> f32 {
+    let cs = c.cell_size();
+    if inland >= 0.5 * cs {
+        return 0.0;
+    }
+    if inland <= 0.08 * cs {
+        return 1.0;
+    }
+    let wander = perlin2(seed ^ 0xfade, wx / m64(18.0), wz / m64(18.0)) + 0.4 * perlin2(seed ^ 0xfadf, wx / m64(5.0), wz / m64(5.0));
+    1.0 - smoothstep(0.16 * cs, 0.4 * cs, inland + wander * 0.05 * cs)
+}
+
 /// Farthest from a river mouth that its estuary flats reach, in voxels.
 const MOUTH_REACH: f32 = m(120.0);
 
@@ -537,6 +556,12 @@ pub fn mouths(c: &Continent, lo: Vec2, hi: Vec2) -> Vec<Mouth> {
         }
     }
     out
+}
+
+/// How much the shore at continent-local `p` is a river mouth's estuary, 0 to 1: there
+/// the low ground is tidal flat and grass rather than beach.
+pub fn estuary(c: &Continent, p: Vec2) -> f32 {
+    mouths(c, p, p).iter().map(|m| m.weight(p)).fold(0.0, f32::max)
 }
 
 /// A cell's shore, from the coarse grid alone.
@@ -643,16 +668,13 @@ impl Shores {
     }
 
     /// The shore at `p`, a column whose grid corners are `corners` (in the order the
-    /// sampler blends them) at blend weights `tx`, `tz`.
-    pub fn at(&self, c: &Continent, corners: &[usize; 4], tx: f32, tz: f32, p: Vec2, mouths: &[Mouth]) -> Shore {
+    /// sampler blends them) at blend weights `tx`, `tz`. `biome` is the biome of the land
+    /// behind the shore and `fade` how far its effects are faded in (see [`shore_fade`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn at(&self, c: &Continent, corners: &[usize; 4], tx: f32, tz: f32, p: Vec2, mouths: &[Mouth], biome: Biome, fade: f32) -> Shore {
         let weights = [(1.0 - tx) * (1.0 - tz), tx * (1.0 - tz), (1.0 - tx) * tz, tx * tz];
         let cells = corners.map(|i| self.cell(c, i));
         let blend = |f: fn(&ShoreCell) -> f32| cells.iter().zip(weights).map(|(s, w)| f(s) * w).sum::<f32>();
-        let biome = corners
-            .iter()
-            .filter(|&&i| !c.ocean[i])
-            .max_by(|&&a, &&b| c.height[a].total_cmp(&c.height[b]))
-            .map_or(Biome::Ocean, |&i| Biome::from_u8(c.biome[i]));
         // The mouth whose estuary this is, and how clearly it is that one's rather than
         // the next one's.
         let (mut mouth, mut second, mut creek, mut own) = (0.0f32, 0.0f32, Vec2::ZERO, usize::MAX);
@@ -675,6 +697,7 @@ impl Shores {
             shelter: blend(|s| s.shelter),
             hinter: blend(|s| s.hinter),
             seaness: corners.iter().zip(weights).map(|(&i, w)| if c.ocean[i] { w } else { 0.0 }).sum(),
+            fade,
             mouth,
             mouth_near: mouths.iter().map(|m| m.nearness(p)).fold(0.0, f32::max),
             mouth_lead: (mouth - second).min(smoothstep(m(6.0), m(16.0), rival)),
@@ -710,10 +733,10 @@ pub struct Shore {
     pub shelter: f32,
     /// The highest ground nearby, in voxels.
     pub hinter: f32,
-    /// The share of the surrounding grid that is sea. Every shore effect fades out with
-    /// it, so the coast blends into the inland ground where the sampler stops treating
-    /// columns as coastal.
+    /// The share of the surrounding grid that is sea.
     pub seaness: f32,
+    /// How far every shore effect is faded in, 0 to 1 (see [`shore_fade`]).
+    fade: f32,
     /// Nearness to a river mouth, 0 to 1.
     pub mouth: f32,
     /// Nearness to any river mouth at all, however small, out to beyond its estuary.
@@ -739,7 +762,7 @@ pub struct Shore {
 impl Shore {
     /// How far every shore effect is faded in, 0 to 1.
     pub fn fade(&self) -> f32 {
-        smoothstep(0.0, 0.15, self.seaness)
+        self.fade
     }
 
     /// Shapes the ground of a coastal column, whose natural ground is `ground` and whose
@@ -803,7 +826,14 @@ impl Shore {
     /// shape. Returns the stony and muddy scores it chose by.
     pub fn pick_strand(&mut self, seed: u32, slope: f32, wx: f64, wz: f64) -> (f32, f32) {
         let (stony, mud) = self.scores(seed, slope, wx, wz);
-        let jitter = (unit(hash2(seed ^ 0x5b1f, wx as i32 >> 1, wz as i32 >> 1)) - 0.5) * 0.12;
+        // One kind of shore gives way to the next along a wandering line, not through a
+        // band of speckle.
+        let close = [(mud, 0.5), (stony, 0.95), (stony, 0.6)].iter().any(|(score, limit)| (score - limit).abs() < 0.11);
+        let jitter = if close {
+            perlin2(seed ^ 0x5b1f, wx / m64(6.0), wz / m64(6.0)) * 0.07 + perlin2(seed ^ 0x5b20, wx / m64(2.2), wz / m64(2.2)) * 0.035
+        } else {
+            0.0
+        };
         self.strand = if mud + jitter > 0.5 {
             Strand::Mud
         } else if stony + jitter > 0.95 {
@@ -823,7 +853,10 @@ impl Shore {
     /// side of the river none can loop, turn back or cross another. Swamp coasts away
     /// from any river mouth keep aimless winding creeks.
     fn creek_depth(&self, seed: u32, wx: f64, wz: f64) -> f32 {
-        let winding = if perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)).abs() < 0.05 {
+        // Two noises on different lattices: the contour of one alone runs dead straight
+        // along the odd edge of its lattice.
+        let wander = perlin2(seed ^ 0x30d2, wx / m64(34.0), wz / m64(34.0)) + 0.25 * perlin2(seed ^ 0x30d5, wx / m64(13.0) + 0.37, wz / m64(13.0) + 0.61);
+        let winding = if wander.abs() < 0.05 {
             1.0 - self.mouth_near
         } else {
             0.0

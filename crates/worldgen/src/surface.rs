@@ -246,7 +246,31 @@ pub fn beach_share(c: &Continent, p: Vec2, ground: f32) -> f32 {
     let wz = c.desc.mz as f64 * MACRO_SIZE as f64 + p.y as f64;
     let reach = coast::beach_reach(c.desc.seed, wx, wz);
     let reach = reach + coast::WATERLINE_REACH * (1.0 - smoothstep(m(0.8), m(1.2), ground));
-    (1.0 - smoothstep(reach - m(1.2), reach + m(1.2), inland)) * (1.0 - smoothstep(m(2.2), m(2.6), ground))
+    let beach = (1.0 - smoothstep(reach - m(1.2), reach + m(1.2), inland)) * (1.0 - smoothstep(m(2.2), m(2.6), ground));
+    if beach <= 0.0 {
+        return 0.0;
+    }
+    // Round a river mouth the shore is tidal flat, sand only where it is barely above
+    // the water (see `flat_is_sand`), and grass above.
+    let flats = smoothstep(0.35, 0.65, coast::estuary(c, p)) * smoothstep(m(0.4), m(0.8), ground);
+    beach * (1.0 - flats)
+}
+
+/// Whether a river bank or tidal flat whose ground is `ground` voxels is bare wet sand
+/// rather than the grass of the land around it: the flats barely above the water are,
+/// up to a height that wanders with `patch` (0 to 1, smooth over several voxels), so
+/// the odd tongue of grass runs down onto the sand and of sand up into the grass.
+pub fn flat_is_sand(ground: f32, patch: f32) -> bool {
+    ground < m(0.6) + m(0.8) * (patch - 0.5)
+}
+
+/// Width of the patches [`ground_patch`] varies the ground in, in voxels.
+const PATCH: f64 = m64(7.2);
+
+/// Noise that varies smoothly over several voxels, 0 to 1, by which the ground's
+/// materials change in broad patches. `seed` is the world's.
+pub fn ground_patch(seed: u32, wx: f64, wz: f64) -> f32 {
+    perlin2(seed ^ 0x9a7c, wx / PATCH, wz / PATCH) * 0.5 + 0.5
 }
 
 /// Quantises a river's water level into flat pools separated by drops.
@@ -534,7 +558,18 @@ impl<'a> Sampler<'a> {
             }
         }
         // Coasts: sea cliffs, shingle, boulders, dunes and estuary flats.
-        let mut shore = (near_sea && lake == NO_LAKE).then(|| self.shores.at(c, &corners, tx, tz, p, &self.mouths));
+        // How far in from the grid's coastline the column lies, and the shore there. Both
+        // are measured from the shore alone, never from which square of the grid the
+        // column is in, so nothing about the coast shows the grid's squares.
+        let inland_cell = std::cell::OnceCell::new();
+        let inland = || *inland_cell.get_or_init(|| coast::inland(c, p));
+        let lookup_cell = std::cell::OnceCell::new();
+        let lookup = || *lookup_cell.get_or_init(|| blend::lookup(c, seed, lx, lz));
+        let shore_at = || {
+            let fade = coast::shore_fade(c, seed, inland(), wx, wz);
+            self.shores.at(c, &corners, tx, tz, p, &self.mouths, lookup().land_biome(c), fade)
+        };
+        let mut shore = (near_sea && lake == NO_LAKE).then(shore_at);
         if let Some(s) = &mut shore
             && let Some(rock) = s.shape(seed, slope * OLD_VOXEL / cs, wx, wz, &mut ground)
         {
@@ -585,6 +620,11 @@ impl<'a> Sampler<'a> {
             {
                 k = k.min(lk);
             }
+            // Beside a tidal reach the water is the sea's, and ground below it is under
+            // the sea wherever it lies. Were that left to whether the column's square of
+            // the grid touches the sea, the banks built over such ground would stop dead
+            // along the sides of the square.
+            let submerged = submerged || (k == 0 && ground < 0.0 && lake == NO_LAKE);
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
                 let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6)) + pool;
@@ -704,15 +744,20 @@ impl<'a> Sampler<'a> {
             // the water, which can lie inland of the grid's coastline. It is measured from
             // the shore alone and runs on past the columns treated as coastal, so the
             // squares of the grid never show along its edge.
+            //
+            // The scatter moves the edge a voxel or so either way and no more: the
+            // heights the beach stops at are scattered only as far as the slope carries
+            // them that distance, or on flat ground sand and grass would mix in a broad
+            // band of speckle rather than along a frayed line.
             let cseed = c.desc.seed;
             let scatter = coast::beach_scatter(cseed, wx, wz);
-            let ground = ground + scatter * m(0.12);
-            let reach = coast::beach_reach(cseed, wx, wz) + if ground < m(1.0) { coast::WATERLINE_REACH } else { 0.0 };
-            let strand = coast::inland(c, p) + scatter * m(2.4) < reach;
+            let ground = ground + scatter * (slope * OLD_VOXEL / cs * 2.5).min(m(0.12));
+            let reach = coast::beach_reach(cseed, wx, wz) + coast::WATERLINE_REACH * (1.0 - smoothstep(m(0.8), m(1.2), ground));
+            let strand = inland() + scatter * m(1.0) < reach;
             match &shore {
                 Some(s) => cover = s.cover(ground, strand).unwrap_or(cover),
                 None if !near_sea && strand => {
-                    let mut s = self.shores.at(c, &corners, tx, tz, p, &self.mouths);
+                    let mut s = shore_at();
                     s.pick_strand(seed, slope * OLD_VOXEL / cs, wx, wz);
                     cover = s.cover(ground, true).unwrap_or(cover);
                 }
@@ -723,11 +768,19 @@ impl<'a> Sampler<'a> {
 
         let clear = self.apply_trails(p, lx, lz, &mut ground, &mut cover, river, water, lake_level, near_sea);
 
+        // Dry ground on the sea's side of the grid's coastline (flats, bars, the foot of
+        // a beach) belongs to the land beside it. Left as the sea's it would be bare
+        // sand to the last voxel of the grid's square, whatever the shore was doing.
+        let mut biome = lookup().biome(c);
+        if biome == Biome::Ocean && water.is_none() {
+            biome = lookup().land_biome(c);
+        }
+
         Column {
             ground,
             water,
             cover,
-            biome: blend::biome_at(c, seed, lx, lz),
+            biome,
             temperature: bilinear(&c.temperature),
             river,
             clear,
@@ -1881,6 +1934,64 @@ mod tests {
                 .collect();
             eprintln!("{:>6} {}", z + dz, line.join(""));
         }
+    }
+
+    /// Round river mouths, where low flats lie on both sides of the grid's coastline, the
+    /// edge between sand and grass ignores the simulation grid: no more of it lies along
+    /// the borders of the grid's cells, or the lines between their centres, than chance
+    /// puts there. Nor is it a broad band of speckle: few columns are sand alone among
+    /// grass or grass alone among sand (#99).
+    #[test]
+    fn mouth_flats_ignore_the_grid() {
+        let seed = 1;
+        let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let deltas: Vec<coast::Delta> = (0..c.size * c.size).filter_map(|i| coast::Delta::at(&c, seed, i)).collect();
+        assert!(deltas.len() >= 20, "{} deltas", deltas.len());
+        // Whether a line of the grid, or of the lattice of the noise that patches the
+        // ground, runs between neighbouring columns `a` and `a + 1`.
+        let line = |a: i32| {
+            let cell = |v: i32, off: f32| ((v as f32 + 0.5) / cs - off).floor();
+            cell(a, 0.0) != cell(a + 1, 0.0) || cell(a, 0.5) != cell(a + 1, 0.5) || (a + 1) % (PATCH as i32) == 0
+        };
+        // Whether a dry column shows sand (true) or grass, if it is either.
+        let sandy = |col: &Column, x: i32, z: i32| match col.cover {
+            _ if col.water_surface().is_some() => None,
+            Cover::Beach | Cover::Dune => Some(true),
+            Cover::Bank => Some(col.biome == Biome::Ocean || flat_is_sand(col.ground, ground_patch(seed, x as f64, z as f64))),
+            Cover::Land => Some(col.biome == Biome::Ocean),
+            _ => None,
+        };
+        let (mut edges, mut on_line, mut dry, mut specks) = (0, 0, 0, 0);
+        for d in deltas.iter().step_by(deltas.len() / 20) {
+            let span = 224;
+            let (x0, z0) = (d.pos.x as i32 - span / 2, d.pos.y as i32 - span / 2);
+            let s = Sampler::new(&c, seed, x0, z0, span);
+            let cols: Vec<Option<bool>> = (0..span * span).map(|k| (x0 + k % span, z0 + k / span)).map(|(x, z)| sandy(&s.column(x, z), x, z)).collect();
+            let at = |dx: i32, dz: i32| cols[(dz * span + dx) as usize];
+            for dz in 1..span - 1 {
+                for dx in 1..span - 1 {
+                    let Some(here) = at(dx, dz) else { continue };
+                    dry += 1;
+                    if at(dx + 1, dz) == Some(!here) {
+                        edges += 1;
+                        on_line += line(x0 + dx) as i32;
+                    }
+                    if at(dx, dz + 1) == Some(!here) {
+                        edges += 1;
+                        on_line += line(z0 + dz) as i32;
+                    }
+                    if [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(ex, ez)| at(dx + ex, dz + ez) == Some(!here)) {
+                        specks += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("{on_line}/{edges} sand edges on grid lines; {specks} lone columns among {dry} dry ones");
+        assert!(edges > 2000, "{edges} sand edges");
+        // Chance puts 2 in every cell's width of them on a line, and 1 in every 18: 8%.
+        assert!(on_line * 100 < edges * 11, "{on_line}/{edges} sand edges on grid lines");
+        assert!(specks * 400 < dry, "{specks} lone columns among {dry} dry ones");
     }
 
     /// The beach's inland edge follows the shore, not the simulation grid: few of the
