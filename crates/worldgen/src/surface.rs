@@ -587,8 +587,18 @@ impl<'a> Sampler<'a> {
                 // is lower than the river this builds the levee that keeps the water in.
                 // Beside a drop the bank holds the level of the pool above it for a
                 // couple of voxels, so the upper pool cannot spill around the lip.
-                let bank = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
-                let width = bank_reach(hw, ground - bank);
+                //
+                // Only the water's edge follows the pools. The water steps down from
+                // pool to pool, and a bank that stepped with it all the way out would
+                // cut every drop across the whole valley floor as a terrace. A few
+                // metres from the water the bank instead rises from the river's smooth
+                // simulated level, which is never below the pool's, so the valley floor
+                // (and a levee, where the stream runs along a hillside) slopes evenly
+                // down the valley.
+                let lip = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
+                let smooth = (upstream_level * OLD_VOXEL - 0.5).max(lip);
+                let bank = lip + (smooth - lip) * smoothstep(m(0.4), m(3.2), sd);
+                let width = bank_reach(hw, ground - smooth);
                 if sd < width {
                     ground = bank + (ground - bank) * smoothstep(0.0, width, sd);
                     if sd < m(1.28) && seaward < 0.3 {
