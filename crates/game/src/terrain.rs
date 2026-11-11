@@ -14,7 +14,7 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{CELLS, ChunkMesh, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees},
+    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees},
 };
 use worldgen::{Cascade, SpringMark, Surf, World, features, scale::m, world::GameWorld};
 
@@ -594,12 +594,15 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     let output = world.generate_column(col.1, col.2);
     let t1 = Instant::now();
     let roofs = roofs(&output.chunks, world.materials());
-    let chunks = output
+    // From the top down, so that falling water carries on from each chunk into the next.
+    let mut falls = Falls::default();
+    let mut chunks: Vec<(i32, ChunkMesh)> = output
         .chunks
         .iter()
         .zip(&roofs)
+        .rev()
         .map(|((cy, chunk), roof)| {
-            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof);
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof, &mut falls);
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
@@ -613,6 +616,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         })
         .filter(|(_, mesh)| !mesh.is_empty())
         .collect();
+    chunks.reverse();
     let t2 = Instant::now();
     let lamps = lamp_voxels(&output.chunks, col, world.materials());
     ColumnResult {
@@ -638,11 +642,13 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
     let step = 1 << col.0;
     let trunks: Vec<(IVec3, u8)> = trees.iter().map(|p| (p.pos.div_euclid(IVec3::splat(step)), features::tree_tag(p.pos))).collect();
     let roofs = roofs(&chunks, world.materials());
-    let meshes = chunks
+    let mut falls = Falls::default();
+    let mut meshes: Vec<(i32, ChunkMesh)> = chunks
         .iter()
         .zip(&roofs)
+        .rev()
         .map(|((cy, chunk), roof)| {
-            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &[], roof);
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &[], roof, &mut falls);
             tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
                 trunks
                     .iter()
@@ -653,6 +659,7 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         })
         .filter(|(_, mesh)| !mesh.is_empty())
         .collect();
+    meshes.reverse();
     let t2 = Instant::now();
     ColumnResult {
         col,
