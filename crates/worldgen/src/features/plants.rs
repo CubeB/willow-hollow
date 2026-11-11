@@ -339,7 +339,23 @@ pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut V
     };
 
     match col.cover {
-        Cover::Bank if a < 0.25 && patch(seed, 0x4eed, x, z, 3.2) > 0.05 => reeds(&mut plot, &mut rng),
+        // Dry streams have no reeds, only a tussock now and then along the banks.
+        Cover::Bank if col.biome.arid() => {
+            if col.water_surface().is_none() && a < 0.035 && patch(seed, 0x4eef, x, z, 6.0) > 0.1 {
+                bunch(&mut plot, &mut rng);
+            }
+        }
+        // Elsewhere reeds stand in clumps and stretches along the water, with open bank
+        // between them where the grass comes down to the edge.
+        Cover::Bank if a < 0.25 && patch(seed, 0x4eed, x, z, 4.8) > 0.3 => reeds(&mut plot, &mut rng),
+        Cover::Bank if col.clear >= m(0.8) && col.water_surface().is_none() => {
+            if let Some((kind, sward)) = grass_at(col, seed, x, z)
+                && surface == mat::ground_cover(col.biome)
+                && a < kind.share(&sward)
+            {
+                grass(&mut plot, &mut rng, kind, &sward);
+            }
+        }
         Cover::LakeBed => {
             if let Some(k) = col.water_surface()
                 && k - col.top() >= 2 * BLOCK
