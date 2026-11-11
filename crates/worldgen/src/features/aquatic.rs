@@ -85,8 +85,12 @@ pub fn kind_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Aquatic, f32)
                 Some((Aquatic::MossyStone, 0.025))
             }
         }
-        Cover::SeaFloor if wet > 0.0 && wet <= SHALLOWS => {
-            (patch(seed, 0x5ea6, x, z, 5.6) > -0.1).then_some((Aquatic::Eelgrass, 0.45))
+        // Eelgrass grows in meadows, not everywhere: in quiet water clear of the surf line
+        // and not too deep for the light, in scattered beds tens of metres across, each a
+        // patchwork of clumps over bare sand.
+        Cover::SeaFloor if wet > m(0.5) && wet <= SHALLOWS => {
+            let meadow = patch(seed, 0x5ea7, x, z, 45.0) + 0.25 * patch(seed, 0x5ea8, x, z, 14.0);
+            (meadow > 0.1 && patch(seed, 0x5ea6, x, z, 5.6) > -0.1).then_some((Aquatic::Eelgrass, 0.45))
         }
         Cover::SeaFloor if wet > SHALLOWS && wet <= KELP_MAX => {
             (patch(seed, 0x4e1b, x, z, 8.0) > 0.0).then_some((Aquatic::Kelp, 0.30))
