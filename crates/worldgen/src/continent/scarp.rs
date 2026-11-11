@@ -143,11 +143,14 @@ impl Scarps {
             .iter()
             .filter_map(|s| s.fault_dist(wx, wz))
             .min_by(|a, b| a.abs().total_cmp(&b.abs()))?;
-        // Buttresses and bays along the face, a few metres to a few tens across, so it
-        // is no ruled line. In simulation units, like everything below.
+        // The face is no ruled line: it swings in long curves, juts in buttresses and
+        // falls back in bays, a few metres to a couple of hundred across. In simulation
+        // units, like everything below; well inside the grid's ramp, so the lift still
+        // hands back to the grid's surface.
         let (gx, gz) = (wx * MACRO_SIZE as f64, wz * MACRO_SIZE as f64);
-        let ragged = perlin2(self.world_seed ^ 0x5ca1, gx / 60.0, gz / 60.0) * 3.0
-            + perlin2(self.world_seed ^ 0x5ca2, gx / 17.0, gz / 17.0) * 1.0;
+        let noise = |salt: u32, scale: f64| perlin2(self.world_seed ^ salt, gx / scale, gz / scale);
+        let ragged = (noise(0x5ca5, 260.0) * 9.0 + noise(0x5ca1, 70.0) * 4.0 + noise(0x5ca2, 17.0) * 1.2)
+            .clamp(-self.soft * 0.4, self.soft * 0.4);
         let d = up * SIM_SPAN + ragged;
         let reach = self.soft + SIM_SPAN / n as f32;
         if d.abs() >= reach {
@@ -159,8 +162,11 @@ impl Scarps {
             return None;
         }
         // The face stands at most FACE high: the rest of a big step is a long bank of
-        // fallen stone, as old scarps crumble back.
-        let banked = step * TALUS.max(1.0 - FACE / step.max(1.0));
+        // fallen stone, as old scarps crumble back. How far it has crumbled changes along
+        // its length, so the face rises and falls, and in places is worn right down to a
+        // steep bank of stone where a gully has eaten it back.
+        let worn = (0.62 + noise(0x5ca6, 180.0) * 0.55 + noise(0x5ca7, 45.0) * 0.3).clamp(0.08, 1.0);
+        let banked = step * TALUS.max(1.0 - FACE * worn / step.max(1.0));
         let talus = (banked + d * TALUS_SLOPE).max(0.0);
         let sharp = if d >= 0.0 { step * fault_block(up) } else { talus };
         // Hand back to the grid's own surface at the edge of the reach.
