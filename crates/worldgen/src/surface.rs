@@ -546,7 +546,15 @@ impl<'a> Sampler<'a> {
         }
         if let Some((sd, hw, level, upstream_level, pool, seaward)) = nearest {
             river = sd;
-            let k = pool_level(c.desc.seed, level);
+            let mut k = pool_level(c.desc.seed, level);
+            // Where the channel runs on out into a lake, its water is the lake's: a river
+            // entering a lake comes down to the lake's level at the shore instead of
+            // running on across it as a raised ribbon.
+            if let Some(lk) = lake_level
+                && ground < lk as f32 - 1.0
+            {
+                k = k.min(lk);
+            }
             if sd < 0.0 {
                 // In the channel: a parabolic bed, deepest mid-stream.
                 let depth = (m(0.48) + 0.44 * hw).clamp(m(0.8), m(5.6)) + pool;

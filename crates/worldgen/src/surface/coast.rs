@@ -102,14 +102,16 @@ impl Delta {
 
 /// Raises sand bars on the bed of a tidal river channel. `bed` is the channel bed and
 /// `across` runs from 0 mid-stream to 1 at the channel edge. Some bars break the surface
-/// as low sand islands.
+/// as low sand islands, flush with the water or a voxel proud of it.
 pub fn sand_bar(seed: u32, wx: f64, wz: f64, across: f32, bed: f32) -> f32 {
     if across > 0.85 {
         return bed;
     }
     let b = perlin2(seed ^ 0xba55, wx / m64(16.0), wz / m64(16.0));
     let lift = smoothstep(0.15, 0.45, b) * (1.0 - smoothstep(0.6, 0.85, across));
-    bed + (m(0.5) - bed) * lift
+    // The crest is level with the water; only its highest middle stands a voxel above.
+    let crest = if b > 0.4 { 0.5 } else { -0.5 };
+    bed + (crest - bed) * lift
 }
 
 /// Farthest from a river mouth that its estuary flats reach, in voxels.
