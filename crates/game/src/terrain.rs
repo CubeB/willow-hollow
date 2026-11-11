@@ -89,6 +89,9 @@ pub struct Stats {
     /// Smoothed per-column times on a worker thread.
     pub gen_ms: f32,
     pub mesh_ms: f32,
+    /// For each level: columns built, and the worker time generating and meshing them
+    /// in total, in milliseconds.
+    pub built: [(u32, f32, f32); LEVELS],
 }
 
 /// Camera column and load radius, shared with workers so stale jobs can bail out.
@@ -342,6 +345,8 @@ impl Streamer {
                     let s = &mut self.stats;
                     s.gen_ms += (result.gen_ms - s.gen_ms) * 0.05;
                     s.mesh_ms += (result.mesh_ms - s.mesh_ms) * 0.05;
+                    let b = &mut s.built[result.col.0 as usize];
+                    *b = (b.0 + 1, b.1 + result.gen_ms, b.2 + result.mesh_ms);
                     let Some(chunks) = self.upload_column(gpu, result.col, meshes) else {
                         // Out of GPU memory. The rest can wait until the view has shrunk.
                         self.shrink_view();
@@ -533,8 +538,16 @@ fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Mat
     use voxel::PAD;
     let lit: Vec<bool> = (0..mats.len()).map(|i| mats.get(i as voxel::Voxel).emissive).collect();
     let mut out = Vec::new();
+    // Nearly every chunk holds nothing lit, and is passed over a run of voxels at a time
+    // by asking only whether any is in the range of the lit materials.
+    let Some(first) = lit.iter().position(|&l| l) else { return out };
+    let span = (lit.iter().rposition(|&l| l).unwrap_or(first) - first) as voxel::Voxel;
+    let in_range = |run: &[voxel::Voxel]| run.iter().fold(false, |any, &v| any | (v.wrapping_sub(first as voxel::Voxel) <= span));
     for (cy, chunk) in chunks {
         let voxels = chunk.voxels();
+        if !voxels.chunks(256).any(in_range) {
+            continue;
+        }
         for (i, &v) in voxels.iter().enumerate() {
             if !lit[v as usize] {
                 continue;
@@ -591,7 +604,9 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         return build_coarse_column(world, models, col);
     }
     let t0 = Instant::now();
-    let output = world.generate_column(col.1, col.2);
+    // Growing the small plants is most of the work of a column: not for one too far
+    // away to show them.
+    let output = if plants { world.generate_column(col.1, col.2) } else { world.generate_column_bare(col.1, col.2) };
     let t1 = Instant::now();
     let roofs = roofs(&output.chunks, world.materials());
     // From the top down, so that falling water carries on from each chunk into the next.
@@ -605,7 +620,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof, &mut falls);
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
-            let inside = output.plants.iter().filter(|p| plants && p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
+            let inside = output.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
             add_plants(&mut mesh, inside, origin, world.materials());
             // Each tree's leaves go on its own date.
             let (lib, mats) = (world.library(), world.materials());

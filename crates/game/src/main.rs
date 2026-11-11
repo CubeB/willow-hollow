@@ -366,8 +366,8 @@ impl Scanner {
                 let mut voxels = WorldVoxels::new(world.clone());
                 // Ends when the game drops `ask`.
                 while let Ok((camera, salt)) = questions.recv() {
-                    let found = scan_surroundings(&world, &mut voxels, camera, salt);
                     voxels.trim(camera);
+                    let found = scan_surroundings(&world, &mut voxels, camera, salt);
                     if reply.send(found).is_err() {
                         break;
                     }
@@ -803,7 +803,6 @@ impl Running {
                 turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
             self.player.update(&mut self.voxels, controls, dt);
-            self.voxels.trim(self.player.pos);
             self.camera.pos = self.player.eye();
             self.camera.roll = self.player.bank;
         } else {
@@ -859,7 +858,9 @@ impl Running {
             storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
         };
-        self.particles.update(dt, &surroundings, &mut self.voxels);
+        // Leaves and rain can wait a frame for ground that is not generated yet.
+        self.voxels.trim(self.camera.pos);
+        self.particles.update(dt, &surroundings, &mut self.voxels.lazily());
         self.update_footsteps(dt);
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
@@ -1129,6 +1130,10 @@ impl ApplicationHandler for App {
                     log::info!("{}", r.cpu.worst_summary());
                     if let Some(timer) = &r.renderer.timer {
                         log::info!("{}", timer.summary());
+                    }
+                    for (level, (n, generate, mesh)) in s.built.iter().enumerate().filter(|(_, b)| b.0 > 0) {
+                        let n = *n as f32;
+                        log::info!("level {level}: {n} columns built, {:.2} ms to generate and {:.2} ms to mesh each", generate / n, mesh / n);
                     }
                     log::info!(
                         "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles, {} far tree boxes, arena {} MiB",

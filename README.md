@@ -83,6 +83,7 @@ crates/worldgen   continents, climate, biomes, rivers, trees, trails and landmar
 crates/voxel      chunk storage and the mesher
 crates/game       renderer, chunk streaming, player, sound
 tools/mapgen      draws a continent's simulation as PNG maps
+tools/bench       times chunk generation and checksums what it made
 ```
 
 If you're curious about the details:
@@ -92,7 +93,8 @@ If you're curious about the details:
 - Land never crosses the border of a world cell. That's what makes it possible to simulate a whole watershed at once and still have an endless world.
 - All chunk meshes live in one big GPU buffer and go out as a multi-draw, with faces grouped by direction so the ones pointing away from you get skipped.
 - Positions are 64-bit on the CPU and camera-relative on the GPU, so nothing gets jittery a long way from the start.
-- Collision doesn't keep any voxel data around. A column takes about a millisecond to generate, so the few under the player are just rebuilt when needed.
+- Collision doesn't keep any voxel data around. A column without its small plants takes about a millisecond to generate, so the few under the player are just rebuilt when needed. Falling leaves and rain get theirs from a background thread, so they never hold up a frame.
+- Moss, ivy, bark and twigs are most of the cost of a column, so they're only grown for columns close enough to show them. `cargo run --release -p bench` times all this and prints a checksum of everything generated, which is how a speed-up gets shown not to have changed the world.
 - The whole world comes from the seed. The tests check that drainage reaches the sea, rivers only grow on the way down, lakes are flat, and chunk edges line up.
 
 The logo is drawn by `docs/logo.py`, using Pillow and Georgia. Run `python docs/logo.py docs/images` to redraw it.
