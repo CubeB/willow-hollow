@@ -26,47 +26,128 @@ const DELTA_Q: f32 = 400.0;
 /// Farthest a delta's fan reaches from its apex, in voxels.
 const DELTA_RADIUS: f32 = m(110.0);
 
-/// Line segments a distributary's curve is flattened into.
-const BRANCH_SEGS: usize = 6;
+/// Length of each straight piece of a distributary's centreline, in voxels.
+const BRANCH_STEP: f32 = m(2.0);
 
-/// A distributary: a channel that leaves a delta's main channel and runs out across
+/// The furthest a distributary ever heads off the main channel's direction, in radians:
+/// within it the branch always makes for the sea.
+const BRANCH_TURN: f32 = 0.9;
+
+/// A distributary: a channel that leaves a delta's main channel and winds out across
 /// the fan to the sea.
 struct Branch {
     /// Its centreline in the delta's own frame: x out to sea along the main channel,
     /// y to the side.
-    pts: [Vec2; BRANCH_SEGS + 1],
+    pts: Vec<Vec2>,
+    /// Half its width at each of those points.
+    halves: Vec<f32>,
+    /// Half its width at its widest.
+    half: f32,
+    /// The box its channel lies within, in the delta's frame.
+    bounds: (Vec2, Vec2),
+}
+
+/// How a distributary is laid out.
+struct Course {
+    /// How far out from the apex it leaves the main channel, and how far from the apex
+    /// it ends.
+    start: f32,
+    reach: f32,
+    /// Which side of the main channel it runs on, 1 or -1.
+    side: f32,
+    /// How far off the main channel's direction it heads to begin with, and by its end.
+    a0: f32,
+    a1: f32,
+    /// The least it ever heads off the main channel's direction.
+    floor: f32,
     /// Half its width where it leaves the main channel.
     half: f32,
+    /// How far its meanders swing its heading either way, in radians.
+    swing: f32,
+    salt: u32,
 }
 
 impl Branch {
-    /// A branch leaving the main channel `start` out from the apex, heading `a0` off
-    /// the main channel's direction to begin with and `a1` by its end `length` on.
-    fn new(start: f32, length: f32, side: f32, a0: f32, a1: f32, half: f32) -> Branch {
-        let heading = |a: f32| vec2(a.cos(), side * a.sin());
-        let p0 = vec2(start, 0.0);
-        let p1 = p0 + heading(a0) * (length * 0.5);
-        let p2 = p1 + heading(a1) * (length * 0.5);
-        let mut pts = [Vec2::ZERO; BRANCH_SEGS + 1];
-        for (k, pt) in pts.iter_mut().enumerate() {
-            let t = k as f32 / BRANCH_SEGS as f32;
-            *pt = p0 * ((1.0 - t) * (1.0 - t)) + p1 * (2.0 * (1.0 - t) * t) + p2 * (t * t);
+    /// A branch following `course`, its meanders scaled by `wind` (0 for none).
+    ///
+    /// Its heading is the course's steady turn from `a0` to `a1` with a meander added:
+    /// a swing from side to side whose wavelength and size both drift along its length,
+    /// so no two bends are alike. The swing is squeezed to keep the heading between the
+    /// course's `floor` and [`BRANCH_TURN`], so however it winds the branch always runs
+    /// seaward and ever further from the main channel, and can neither loop nor turn
+    /// back.
+    fn new(course: &Course, wind: f32) -> Branch {
+        let Course { start, reach, side, a0, a1, floor, half, swing, salt } = *course;
+        // Smooth noise along the branch, -1 to 1.
+        let drift = |k: u32, s: f32, metres: f64| perlin2(salt ^ k, s as f64 / m64(metres), 0.37);
+        let roll = |k: i32| unit(hash2(salt, k, 9));
+        let run = (reach - start).max(BRANCH_STEP);
+        // Bends about a dozen widths apart, as rivers make them.
+        let wave = (half * (22.0 + 10.0 * roll(0))).clamp(m(18.0), m(46.0));
+        let mut phase = roll(1) * std::f32::consts::TAU;
+        let mut p = vec2(start, 0.0);
+        let (mut pts, mut halves) = (vec![p], Vec::new());
+        let mut s = 0.0;
+        loop {
+            // Narrowing towards the sea, swelling and pinching a little on the way.
+            halves.push(half * (1.0 - 0.45 * (s / run).min(1.0)) * (1.0 + 0.22 * drift(2, s, 21.0)));
+            if p.length() >= reach || pts.len() > 140 {
+                break;
+            }
+            let steady = a0 + (a1 - a0) * (s / run).min(1.0);
+            // It leaves the main channel at its own angle and starts to wind beyond.
+            let size = swing * wind * (0.6 + 0.4 * drift(3, s, 35.0)) * smoothstep(0.0, wave * 0.35, s);
+            let off = size * phase.sin();
+            let room = if off > 0.0 { BRANCH_TURN - steady } else { steady - floor }.max(1e-3);
+            let a = steady + off.signum() * room * (1.0 - (-off.abs() / room).exp());
+            p += vec2(a.cos(), side * a.sin()) * BRANCH_STEP;
+            pts.push(p);
+            s += BRANCH_STEP;
+            phase += std::f32::consts::TAU * BRANCH_STEP / (wave * (1.0 + 0.35 * drift(4, s, 50.0)));
         }
-        Branch { pts, half }
+        let widest = halves.iter().copied().fold(0.0, f32::max);
+        let lo = pts.iter().copied().fold(Vec2::MAX, Vec2::min) - Vec2::splat(widest);
+        let hi = pts.iter().copied().fold(Vec2::MIN, Vec2::max) + Vec2::splat(widest);
+        Branch { pts, halves, half: widest, bounds: (lo, hi) }
     }
 
     /// How far `q` (in the delta's frame) is from the centreline, as a share of the
     /// channel's half-width there: under 1 inside the channel.
     fn across(&self, q: Vec2) -> f32 {
+        if q.cmplt(self.bounds.0).any() || q.cmpgt(self.bounds.1).any() {
+            return f32::MAX;
+        }
         let mut best = f32::MAX;
         for (k, w) in self.pts.windows(2).enumerate() {
             let ab = w[1] - w[0];
             let t = ((q - w[0]).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-            // Narrowing towards the sea.
-            let half = self.half * (1.0 - 0.45 * (k as f32 + t) / BRANCH_SEGS as f32);
+            let half = self.halves[k] + (self.halves[k + 1] - self.halves[k]) * t;
             best = best.min((q - (w[0] + ab * t)).length() / half);
         }
         best
+    }
+
+    /// How far to the side of the main channel the centreline is where it is `x` out
+    /// from the apex, if it reaches that far.
+    fn side_at(&self, x: f32) -> Option<f32> {
+        self.pts.windows(2).find(|w| w[0].x <= x && x <= w[1].x).map(|w| {
+            let t = (x - w[0].x) / (w[1].x - w[0].x).max(1e-6);
+            (w[0].y + (w[1].y - w[0].y) * t).abs()
+        })
+    }
+
+    /// Whether `inner`, a branch leaving the main channel further out on the same side,
+    /// keeps between this one and the main channel: the two never touch, and once they
+    /// have parted they do not close up again.
+    fn clears(&self, inner: &Branch) -> bool {
+        let apart = self.half + inner.half + m(1.5);
+        let mut parted = false;
+        inner.pts.iter().skip(1).all(|q| {
+            let Some(side) = self.side_at(q.x) else { return true };
+            let gap = side - q.y.abs();
+            parted |= gap >= apart;
+            gap > m(0.5) && (!parted || gap >= apart)
+        })
     }
 }
 
@@ -75,10 +156,10 @@ impl Branch {
 ///
 /// The fan opens from where the river's channel meets open water. The main channel runs
 /// straight on through it, and one or two distributaries leave it on each side, each
-/// heading out to sea at an angle away from the main channel and bending a little as
-/// it goes. On one side the branch that leaves first always heads further off than the
-/// one that leaves after it, so no two channels can meet again or cross, and none can
-/// turn back to land.
+/// heading out to sea at an angle away from the main channel and winding gently as it
+/// goes, each its own length and width. On one side the branch that leaves first keeps
+/// further off than the one that leaves after it, so no two channels can meet again or
+/// cross, and none can turn back to land.
 pub struct Delta {
     /// The apex of the fan, where the river reaches open water, and the way it flows
     /// out to sea.
@@ -159,30 +240,9 @@ impl Delta {
     /// the `mouths` of other rivers (the ends of each one's channel and half its width).
     fn branch(&mut self, c: &Continent, mouths: &[(Vec2, Vec2, f32)]) {
         let roll = |k: i32| unit(hash2(self.salt ^ 0xb2a, k, 3));
-        let reach = self.radius * 1.25;
-        let mut branches = Vec::new();
-        for (n, side) in [1.0f32, -1.0].into_iter().enumerate() {
-            let k = n as i32 * 8;
-            // The first to leave swings well out to the side.
-            let start = self.radius * (0.05 + 0.12 * roll(k));
-            // It bends as it goes, one way or the other.
-            let a0 = 0.5 + 0.3 * roll(k + 1);
-            let a1 = if a0 > 0.65 { 0.5 } else { 0.68 } + 0.12 * roll(k + 2);
-            let half = (self.width * 0.3).clamp(m(0.8), m(4.5));
-            branches.push(Branch::new(start, reach - start, side, a0, a1, half));
-            // Bigger deltas split again further out, the second branch keeping
-            // between the first and the main channel.
-            if self.width > m(8.0) && roll(k + 3) < 0.65 {
-                let start = self.radius * (0.3 + 0.15 * roll(k + 4));
-                let a0 = 0.2 + 0.22 * roll(k + 5);
-                let a1 = if a0 > 0.31 { 0.2 } else { 0.34 } + 0.08 * roll(k + 6);
-                let half = (self.width * 0.22).clamp(m(0.8), m(3.5));
-                branches.push(Branch::new(start, reach - start, side, a0, a1, half));
-            }
-        }
         // A branch must cross open water all the way: one that would run into the
-        // shore beside the mouth, an islet, or another river's channel is not cut at all.
-        branches.retain(|b| {
+        // shore beside the mouth, an islet, or another river's channel is not cut.
+        let open = |b: &Branch| {
             b.pts.windows(2).flat_map(|w| [w[0], (w[0] + w[1]) * 0.5, w[1]]).all(|q| {
                 let p = self.place(q);
                 let clear = mouths.iter().all(|&(from, to, half)| {
@@ -192,7 +252,56 @@ impl Delta {
                 });
                 q.length() > self.radius * 1.2 || (clear && coast_ground(c, p).is_some_and(|g| g < 0.0))
             })
-        });
+        };
+        // Each winds as much as it can without running aground or into its neighbour:
+        // if its meanders would, it is tried with gentler ones, and then with none.
+        let wind = |course: Course, fits: &dyn Fn(&Branch) -> bool| {
+            [1.0, 0.5, 0.0].into_iter().map(|w| Branch::new(&course, w)).find(|b| open(b) && fits(b))
+        };
+        let mut branches = Vec::new();
+        for (n, side) in [1.0f32, -1.0].into_iter().enumerate() {
+            let k = n as i32 * 16;
+            let salt = hash2(self.salt ^ 0xb2b, k, 5);
+            // The first to leave swings well out to the side. It bends as it goes, one
+            // way or the other, and no two are as long or as wide.
+            let a0 = 0.5 + 0.25 * roll(k + 1);
+            let outer = wind(
+                Course {
+                    start: self.radius * (0.05 + 0.12 * roll(k)),
+                    reach: self.radius * (1.06 + 0.34 * roll(k + 7)),
+                    side,
+                    a0,
+                    a1: if a0 > 0.62 { 0.48 } else { 0.62 } + 0.12 * roll(k + 2),
+                    floor: 0.36,
+                    half: (self.width * (0.22 + 0.16 * roll(k + 8))).clamp(m(0.8), m(4.5)),
+                    swing: 0.42,
+                    salt,
+                },
+                &|_| true,
+            );
+            // Bigger deltas split again further out, the second branch keeping
+            // between the first and the main channel: it never heads as far off as
+            // the first, so left to run without meanders it always clears it.
+            if self.width > m(8.0) && roll(k + 3) < 0.65 {
+                let a0 = 0.12 + 0.18 * roll(k + 5);
+                let inner = wind(
+                    Course {
+                        start: self.radius * (0.3 + 0.15 * roll(k + 4)),
+                        reach: self.radius * (1.06 + 0.34 * roll(k + 9)),
+                        side,
+                        a0,
+                        a1: if a0 > 0.21 { 0.12 } else { 0.26 } + 0.08 * roll(k + 6),
+                        floor: 0.05,
+                        half: (self.width * (0.16 + 0.12 * roll(k + 10))).clamp(m(0.8), m(3.5)),
+                        swing: 0.3,
+                        salt: salt.rotate_left(13),
+                    },
+                    &|b| outer.as_ref().is_none_or(|o| o.clears(b)),
+                );
+                branches.extend(inner);
+            }
+            branches.extend(outer);
+        }
         self.branches = branches;
     }
 

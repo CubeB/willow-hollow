@@ -1288,6 +1288,7 @@ mod tests {
             side(a, b, c) * side(a, b, d) < 0.0 && side(c, d, a) * side(c, d, b) < 0.0
         };
         let (mut fans, mut branches, mut wet, mut cut) = (0, 0, 0, 0);
+        let (mut winding, mut reaches) = (0, Vec::new());
         for seed in [1u32, 7] {
             let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
             let deltas: Vec<coast::Delta> = (0..c.size * c.size).filter_map(|i| coast::Delta::at(&c, seed, i)).collect();
@@ -1335,6 +1336,32 @@ mod tests {
                     let (first, last) = (channel[0], channel[channel.len() - 1]);
                     assert!((first - d.pos).dot(d.seaward()) > 0.0);
                     assert!((last - d.pos).length() > d.radius);
+                    reaches.push((last - d.pos).length() / d.radius);
+                    // It winds: it bends one way and then the other, and strays from the
+                    // straight line between its ends.
+                    let turns: Vec<f32> = channel.windows(3).map(|w| (w[1] - w[0]).angle_to(w[2] - w[1])).collect();
+                    let mut bends = 0;
+                    let mut swung = 0.0f32;
+                    let mut run = 0.0f32;
+                    for &t in &turns {
+                        // A bend is a stretch turning one way by more than 0.15 radians in all.
+                        if t * run < 0.0 {
+                            run = 0.0;
+                        }
+                        let before = run.abs();
+                        run += t;
+                        if before <= 0.15 && run.abs() > 0.15 {
+                            bends += 1;
+                        }
+                        swung += t.abs();
+                    }
+                    let chord = last - first;
+                    let stray = channel.iter().map(|&q| chord.perp_dot(q - first).abs() / chord.length()).fold(0.0, f32::max);
+                    if bends >= 2 && swung > 0.5 && stray > m(0.6) {
+                        winding += 1;
+                    }
+                    // However it winds, it never doubles back on itself.
+                    assert!(turns.iter().all(|t| t.abs() < 0.5), "a branch of the delta at {} turns sharply", d.pos);
                     for w in channel.windows(2) {
                         for q in [w[0], (w[0] + w[1]) * 0.5] {
                             if (q - d.pos).length() > d.radius * 1.2 {
@@ -1362,9 +1389,13 @@ mod tests {
                 }
             }
         }
-        eprintln!("{fans} deltas, {branches} distributaries, {wet}/{cut} points along them under water");
+        let (short, long) = reaches.iter().fold((f32::MAX, 0.0f32), |(lo, hi), &r| (lo.min(r), hi.max(r)));
+        eprintln!("{fans} deltas, {branches} distributaries, {winding} of them winding, reaching {short:.2} to {long:.2} fan radii, {wet}/{cut} points along them under water");
         assert!(fans >= 20, "only {fans} deltas");
         assert!(branches >= fans, "only {branches} distributaries on {fans} deltas");
+        // Distributaries wind and differ in length rather than running out as straight spokes (#98).
+        assert!(winding * 5 >= branches * 4, "only {winding} of {branches} distributaries wind");
+        assert!(long - short > 0.2, "distributaries all reach {short:.2} to {long:.2} fan radii");
         assert!(wet * 10 >= cut * 9, "{wet}/{cut} distributary points under water");
     }
 
@@ -1844,7 +1875,8 @@ mod tests {
                 .map(|dx| {
                     let col = w.column(x + dx, z + dz);
                     let c = format!("{:?}", col.cover);
-                    format!("{}{:>4}{}", &c[..2], col.ground.floor() as i32, if col.water_surface().is_some() { '~' } else { ' ' })
+                    let b = format!("{:?}", col.biome);
+                    format!("{}{}{:>3}{}", &c[..2], &b[..2].to_lowercase(), col.ground.floor() as i32, if col.water_surface().is_some() { '~' } else { ' ' })
                 })
                 .collect();
             eprintln!("{:>6} {}", z + dz, line.join(""));
