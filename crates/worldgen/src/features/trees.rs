@@ -178,6 +178,19 @@ fn trunk(s: &mut Shape, rng: &mut Rng, height: f32, r_base: f32, r_top: f32, lea
     top
 }
 
+/// Two or three thinner branches forking from the end of a limb, up and out along
+/// `out`, so a bare winter crown branches the way a real one does instead of ending in
+/// stubs. Hidden inside the leaves in summer. `r` is the limb's end radius.
+fn forks(s: &mut Shape, rng: &mut Rng, at: Vec3, out: Vec3, len: f32, r: f32, bark: Voxel) {
+    let side = Vec3::new(-out.z, 0.0, out.x);
+    for k in 0..rng.int(2, 3) {
+        let turn = if k % 2 == 0 { 1.0 } else { -1.0 } * rng.range(0.35, 0.9);
+        let dir = (out + side * turn + Vec3::Y * rng.range(0.5, 1.1)).normalize_or_zero();
+        let tip = at + dir * len * rng.range(0.7, 1.15);
+        s.limb(at, tip, r, (r * 0.75).max(0.32), bark);
+    }
+}
+
 fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
     let h = rng.range(12.0, 20.0) * scale;
     let r0 = rng.range(0.9, 1.5) * scale;
@@ -192,6 +205,8 @@ fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
         let start = top - Vec3::Y * rng.range(0.0, h * 0.15);
         let end = start + out * rng.range(3.5, 6.5) * scale + Vec3::Y * rng.range(2.0, 5.0) * scale;
         s.limb(start, end, 0.65 * scale, 0.4, mat::BARK_OAK);
+        let fork = rng.range(1.8, 2.8) * scale;
+        forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
         let r = rng.range(3.0, 4.4) * scale;
         s.blob(end + Vec3::Y * 0.5, Vec3::new(r, r * 0.72, r), leaves, rng.next_u32(), 0.4);
     }
@@ -218,6 +233,8 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
         let end = mid + out * rng.range(4.0, 7.0) + Vec3::Y * rng.range(1.0, 4.0);
         s.limb(start, mid, 1.5, 1.0, mat::BARK_OAK);
         s.limb(mid, end, 1.0, 0.5, mat::BARK_OAK);
+        let fork = rng.range(2.5, 4.0);
+        forks(s, rng, end, out, fork, 0.45, mat::BARK_OAK);
         let r = rng.range(6.5, 8.5);
         s.blob(mid + Vec3::Y * 2.0, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
         let r = rng.range(5.0, 7.0);
@@ -231,15 +248,35 @@ fn birch(s: &mut Shape, rng: &mut Rng) {
     let h = rng.range(13.0, 20.0);
     let lean = rng.range(0.0, 2.0);
     let top = trunk(s, rng, h, 0.75, 0.45, lean, mat::BARK_BIRCH);
-    // Light, open crown of small clusters up the top half of the trunk.
-    for i in 0..rng.int(4, 6) {
-        let t = 0.5 + i as f32 * 0.1 + rng.range(-0.05, 0.05);
-        let (dir, _) = rng.heading();
-        let c = Vec3::new(0.5, 0.0, 0.5).lerp(top, t) + dir * rng.range(0.5, 2.0);
-        let r = rng.range(1.8, 2.8);
-        s.blob(c, Vec3::new(r, r * 0.9, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
+    // A light, open crown: slender branches climb steeply out of the upper half of the
+    // trunk, turning a golden angle each, every one carrying its own small cluster, so the
+    // leaves hang from wood and a bare winter birch is a fan of thin branches.
+    let n = rng.int(5, 7);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..n {
+        let t = 0.42 + 0.48 * i as f32 / (n - 1) as f32 + rng.range(-0.03, 0.03);
+        let start = Vec3::new(0.5, 0.0, 0.5).lerp(top, t);
+        let angle = a0 + i as f32 * 2.4 + rng.range(-0.4, 0.4);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        // Longer low down, shorter toward the top.
+        let len = rng.range(2.6, 4.2) * (1.15 - 0.6 * (t - 0.42));
+        let end = start + out * len + Vec3::Y * len * rng.range(0.7, 1.1);
+        s.limb(start, end, 0.4, 0.34, mat::BARK_BIRCH);
+        if rng.unit() < 0.6 {
+            let side = Vec3::new(-out.z, 0.0, out.x) * if rng.unit() < 0.5 { 1.0 } else { -1.0 };
+            let from = start.lerp(end, 0.55);
+            let tip = from + (out + side * 0.8 + Vec3::Y).normalize_or_zero() * rng.range(1.4, 2.2);
+            s.limb(from, tip, 0.34, 0.34, mat::BARK_BIRCH);
+            let r = rng.range(1.3, 1.8);
+            s.blob(tip + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
+        }
+        let r = rng.range(1.7, 2.5);
+        s.blob(end + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
     }
-    s.blob(top + Vec3::Y, Vec3::new(2.2, 2.4, 2.2), mat::LEAVES_BIRCH, rng.next_u32(), 0.5);
+    // The leader runs on a little past the trunk into the top cluster.
+    let tip = top + Vec3::Y * 1.6 + Vec3::new(rng.range(-0.4, 0.4), 0.0, rng.range(-0.4, 0.4));
+    s.limb(top, tip, 0.45, 0.34, mat::BARK_BIRCH);
+    s.blob(tip, Vec3::new(2.0, 2.3, 2.0), mat::LEAVES_BIRCH, rng.next_u32(), 0.5);
 }
 
 fn spruce(s: &mut Shape, rng: &mut Rng, scale: f32) {
