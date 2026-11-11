@@ -7,8 +7,9 @@ struct VIn {
     // Per chunk: voxels per cell of its mesh, and the distances between which it is shown.
     @location(4) scale: f32,
     @location(5) band: vec2<f32>,
-    // Per chunk: the biomes at its corners, for the snow (see corner_snow in ground.wgsl).
-    @location(6) biomes: u32,
+    // Per chunk: a grid of the biomes over it, for the snow (see grid_snow in ground.wgsl).
+    @location(6) grid0: vec4<u32>,
+    @location(7) grid1: vec4<u32>,
 };
 
 struct VOut {
@@ -28,6 +29,9 @@ struct VOut {
     @location(9) snow: vec4<f32>,
     // Voxels per cell of the chunk's mesh.
     @location(10) @interpolate(flat) scale: f32,
+    // The chunk's grid of biomes, as in VIn.
+    @location(11) @interpolate(flat) grid0: vec4<u32>,
+    @location(12) @interpolate(flat) grid1: vec4<u32>,
 };
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
@@ -85,7 +89,9 @@ fn vs(in: VIn) -> VOut {
     out.flags = (in.b >> 24u) | (tag << 8u);
     out.local = local;
     out.band = in.band;
-    out.snow = corner_snow(in.biomes, local.xz / 32.0);
+    out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
+    out.grid0 = in.grid0;
+    out.grid1 = in.grid1;
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
@@ -154,7 +160,8 @@ fn shade(in: VOut) -> vec4<f32> {
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
     let cell = floor(in.local - n * 0.5);
     let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
-    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), in.snow);
+    let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
+    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow);
 
     let ao = in.ao * in.ao * 0.75 + 0.25;
     let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -198,7 +205,9 @@ fn vs_water(in: VIn) -> VOut {
     out.flags = in.b >> 24u;
     out.local = local;
     out.band = in.band;
-    out.snow = corner_snow(in.biomes, local.xz / 32.0);
+    out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
+    out.grid0 = in.grid0;
+    out.grid1 = in.grid1;
     out.current = water_current(in.a);
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;

@@ -9,6 +9,7 @@
 
 use glam::{Vec2, vec2};
 
+pub mod blend;
 mod cliff;
 mod coast;
 mod current;
@@ -646,19 +647,11 @@ impl<'a> Sampler<'a> {
 
         let clear = self.apply_trails(p, lx, lz, &mut ground, &mut cover, river, water, lake_level, near_sea);
 
-        // Biome from the nearest cell, with the lookup position wobbled so borders
-        // interlock and dither instead of following the grid.
-        let wobble = |s: u32| {
-            perlin2(seed ^ s, wx / m64(35.2), wz / m64(35.2)) * 0.55
-                + (unit(hash2(seed ^ s, lx, lz)) - 0.5) * 0.16
-        };
-        let bx = ((p.x / cs + wobble(0xb1)) as i32).clamp(0, c.size as i32 - 1) as usize;
-        let bz = ((p.y / cs + wobble(0xb2)) as i32).clamp(0, c.size as i32 - 1) as usize;
         Column {
             ground,
             water,
             cover,
-            biome: Biome::from_u8(c.biome[bz * c.size + bx]),
+            biome: blend::biome_at(c, seed, lx, lz),
             temperature: bilinear(&c.temperature),
             river,
             clear,

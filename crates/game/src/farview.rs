@@ -428,12 +428,13 @@ pub fn biome_in(c: &Continent, lx: f32, lz: f32) -> u8 {
     c.biome[cell(lz) * c.size + cell(lx)]
 }
 
-/// The biome (as u8) at world voxel column `(x, z)`, or `Biome::Ocean`, which stands
-/// for wherever the camera is, while its continent has not been simulated. Never blocks.
+/// The biome (as u8) at world voxel column `(x, z)`, exactly as the voxel terrain has
+/// it, or `Biome::Ocean`, which stands for wherever the camera is, while its continent
+/// has not been simulated. Never blocks.
 pub fn biome_at(world: &GameWorld, x: i32, z: i32) -> u8 {
     let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
     world.continent_if_ready(mx, mz).map_or(Biome::Ocean as u8, |c| {
-        biome_in(&c, (x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32)
+        worldgen::surface::blend::biome_at(&c, world.seed(), x - mx * MACRO_SIZE, z - mz * MACRO_SIZE) as u8
     })
 }
 

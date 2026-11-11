@@ -14,16 +14,44 @@ fn biome_snow(id: u32) -> vec4<f32> {
     return G.snow[min(id, 23u)];
 }
 
-// The ground at a point of a terrain chunk, from the biomes at its four corners (packed a
-// byte each, see terrain::GpuChunk::biomes), blended across it so that neighbouring
-// chunks, which share their corners, meet without a seam. `t` is 0..1 across the chunk.
-fn corner_snow(biomes: u32, t: vec2<f32>) -> vec4<f32> {
-    let a = biome_snow(biomes & 255u);
-    let b = biome_snow((biomes >> 8u) & 255u);
-    let c = biome_snow((biomes >> 16u) & 255u);
-    let d = biome_snow(biomes >> 24u);
-    let u = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+// One point of a terrain chunk's grid of biomes (see terrain::GpuChunk::biomes): 5 x 5
+// points, x fastest, a byte each, packed in two vec4s.
+fn grid_biome(g0: vec4<u32>, g1: vec4<u32>, k: u32) -> u32 {
+    let word = k / 4u;
+    var w = g1[(word - 4u) & 3u];
+    if (word < 4u) {
+        w = g0[word];
+    }
+    return (w >> (8u * (k % 4u))) & 255u;
+}
+
+// The ground at a point of a terrain chunk, blended across the grid's points, so that
+// neighbouring chunks, which share their edge points, meet without a seam. `t` is 0..1
+// across the chunk.
+fn grid_snow(g0: vec4<u32>, g1: vec4<u32>, t: vec2<f32>) -> vec4<f32> {
+    let p = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0)) * 4.0;
+    let i = min(vec2<u32>(p), vec2<u32>(3u));
+    let f = p - vec2<f32>(i);
+    let k = i.y * 5u + i.x;
+    let a = biome_snow(grid_biome(g0, g1, k));
+    let b = biome_snow(grid_biome(g0, g1, k + 1u));
+    let c = biome_snow(grid_biome(g0, g1, k + 5u));
+    let d = biome_snow(grid_biome(g0, g1, k + 6u));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// The ground under one voxel column of a terrain chunk: the biome of one of the grid
+// points around it, picked at random in proportion to how near each is, through noise,
+// so a border between biomes frays into clumps of voxels rather than a straight blend.
+// `t` is the voxel's middle, 0..1 across the chunk; `world_xz` its world position in
+// voxels; `h` a random of its own.
+fn voxel_snow(g0: vec4<u32>, g1: vec4<u32>, t: vec2<f32>, world_xz: vec2<f32>, h: vec2<f32>) -> vec4<f32> {
+    let p = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0)) * 4.0;
+    let i = min(vec2<u32>(p), vec2<u32>(3u));
+    let clump = vec2<f32>(vnoise(world_xz / (VOXELS_PER_METRE * 2.2)), vnoise(world_xz / (VOXELS_PER_METRE * 2.2) + vec2<f32>(31.7, 11.3)));
+    let f = clamp(p - vec2<f32>(i) + (clump - 0.5) * 0.9, vec2<f32>(0.0), vec2<f32>(1.0));
+    let step = vec2<u32>(h < f);
+    return biome_snow(grid_biome(g0, g1, (i.y + step.y) * 5u + i.x + step.x));
 }
 
 // Snow settles thicker the higher the ground: a little more of what lies for each metre of
