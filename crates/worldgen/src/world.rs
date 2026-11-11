@@ -256,10 +256,12 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Dune => (mat::SAND, mat::SAND),
         // Wet stone and moss around a spring, with a little mud.
         Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
-        // Banks and flats at sea level are tidal mud, with a little sand.
-        Cover::Bank if col.ground < m(1.0) => (if roll < 0.8 { mat::MUD } else { mat::SAND }, mat::MUD),
-        Cover::Bank if roll < 0.30 => (mat::GRAVEL, mat::DIRT),
-        Cover::Bank if roll < 0.42 => (mat::MUD, mat::DIRT),
+        // Banks take the ground of the land around them: grass with a little bare earth
+        // in green country, sand in the desert, mud only where the land is mud anyway.
+        // Flats at sea level are wet sand along the water, in broad patches.
+        Cover::Bank if col.biome.arid() => (cover, mat::subsoil(cover)),
+        Cover::Bank if col.ground < m(0.6) && patch < 0.5 => (mat::SAND, mat::SAND),
+        Cover::Bank if roll < 0.10 && mat::subsoil(cover) == mat::DIRT => (mat::DIRT, mat::DIRT),
         Cover::Bank | Cover::Land => {
             // Ground too steep to hold soil shows bare rock.
             // Soil gives way to rock between about 35 and 50 degrees, raggedly.

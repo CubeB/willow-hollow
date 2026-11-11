@@ -217,10 +217,20 @@ fn bank_width(half_width: f32) -> f32 {
     m(2.4) + 2.0 * half_width
 }
 
+/// Widest a bank is laid back to, however far the land stands above the water.
+const BANK_MAX: f32 = m(20.0);
+
+/// How far from the channel edge the bank reaches where the land stands `rise` voxels
+/// above (or below) the bank top: wide enough that the bank slopes gently, about one in
+/// three, rather than standing as a wall of bare rock beside the water.
+fn bank_reach(half_width: f32, rise: f32) -> f32 {
+    bank_width(half_width).max(rise.abs() * 2.6).min(BANK_MAX.max(bank_width(half_width)))
+}
+
 /// Farthest from its centreline a river touches the terrain.
 fn reach(half_width: f32) -> f32 {
     let hw = half_width.max(MIN_HALF_WIDTH);
-    hw + bank_width(hw) + m(0.8)
+    hw + bank_width(hw).max(BANK_MAX) + m(0.8)
 }
 
 /// Quantises a river's water level into flat pools separated by drops.
@@ -556,16 +566,20 @@ impl<'a> Sampler<'a> {
                 }
                 ground = if submerged { ground.min(bed) } else { bed };
                 water = Some(k);
-            } else if !submerged && sd < bank_width(hw) {
+            } else if !submerged {
                 // Banks meet the water flush with its surface, then rise (or fall) to
-                // the surrounding terrain. Where the land is lower than the river this
-                // builds the levee that keeps the water in.
+                // the surrounding terrain, laid back the further they have to climb so
+                // the valley side slopes rather than standing as a wall. Where the land
+                // is lower than the river this builds the levee that keeps the water in.
                 // Beside a drop the bank holds the level of the pool above it for a
                 // couple of voxels, so the upper pool cannot spill around the lip.
                 let bank = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
-                ground = bank + (ground - bank) * smoothstep(0.0, bank_width(hw), sd);
-                if sd < m(1.28) && seaward < 0.3 {
-                    cover = Cover::Bank;
+                let width = bank_reach(hw, ground - bank);
+                if sd < width {
+                    ground = bank + (ground - bank) * smoothstep(0.0, width, sd);
+                    if sd < m(1.28) && seaward < 0.3 {
+                        cover = Cover::Bank;
+                    }
                 }
             }
         }
@@ -971,10 +985,33 @@ pub(crate) fn node(c: &Continent, i: usize) -> Vec2 {
         let size = smoothstep(40.0, 4000.0, c.discharge[i]);
         let drift = 0.35 + 1.25 * size;
         let (nx, nz) = (x as f64 / 4.5, z as f64 / 4.5);
-        p += vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift;
-        p += sinuosity(c, i, size);
+        let swing = vec2(perlin2(seed ^ 0x3ea1, nx, nz), perlin2(seed ^ 0x3ea2, nx, nz)) * drift + sinuosity(c, i, size);
+        // The swing stays on the valley floor: where it would carry the river up the
+        // valley side, into ground standing well above the water, it is cut back, or the
+        // river would run in a trench with a wall of rock along one bank.
+        // Failing that it swings the other way, so the reach still bends.
+        let level = c.water_level[i];
+        let fits = |s: f32| grid_height(c, p + swing * s) - level <= SWING_RISE;
+        let scale = [1.0, 0.75, 0.5, -0.5, 0.25, -0.25].into_iter().find(|&s| fits(s)).unwrap_or(0.0);
+        p += swing * scale;
     }
     p * c.cell_size()
+}
+
+/// Highest the ground may stand above a river's water where a meander carries it,
+/// in simulation units.
+const SWING_RISE: f32 = 4.0;
+
+/// Simulated ground height at `q`, in cells, interpolated between cell centres.
+fn grid_height(c: &Continent, q: Vec2) -> f32 {
+    let max = (c.size - 1) as f32;
+    let (fx, fz) = ((q.x - 0.5).clamp(0.0, max), (q.y - 0.5).clamp(0.0, max));
+    let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
+    let (tx, tz) = (fx - x0 as f32, fz - z0 as f32);
+    let h = |x: usize, z: usize| c.height[z * c.size + x];
+    let a = h(x0, z0) + (h(x0 + 1, z0) - h(x0, z0)) * tx;
+    let b = h(x0, z0 + 1) + (h(x0 + 1, z0 + 1) - h(x0, z0 + 1)) * tx;
+    a + (b - a) * tz
 }
 
 /// A sideways swing, in cells, that turns the long straight runs the router leaves on

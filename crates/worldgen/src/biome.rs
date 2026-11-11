@@ -184,6 +184,11 @@ impl Biome {
         }
     }
 
+    /// Dry country, whose streams run between banks of bare sand or rock with no reeds.
+    pub fn arid(self) -> bool {
+        matches!(self, Biome::Desert | Biome::DuneSea | Biome::RedRock | Biome::Volcanic)
+    }
+
     /// The original biome a newer one is closest to, for things that have not yet been
     /// given their own variant for it.
     pub fn parent(self) -> Biome {
