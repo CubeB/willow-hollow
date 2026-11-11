@@ -1489,6 +1489,92 @@ mod tests {
         }
     }
 
+    /// Lists springs, falls, deltas, lake inflows, tall banks and stone bridges with
+    /// world coordinates, for screenshots:
+    /// `SURVEY=seed,mx,mz cargo test --release -p worldgen water_survey -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn water_survey() {
+        let arg = std::env::var("SURVEY").unwrap_or_else(|_| "1,0,0".into());
+        let v: Vec<i32> = arg.split(',').map(|s| s.parse().unwrap()).collect();
+        let (seed, mx, mz) = (v[0] as u32, v[1], v[2]);
+        let w = crate::world::GameWorld::new(seed);
+        let c = w.continent(mx, mz);
+        let (ox, oz) = (mx * MACRO_SIZE, mz * MACRO_SIZE);
+        let at = |p: Vec2| (p.x as i32 + ox, p.y as i32 + oz);
+        let biome = |p: Vec2| Sampler::new(&c, seed, p.x as i32, p.y as i32, 1).column(p.x as i32, p.y as i32);
+        let mut n = 0;
+        for i in 0..c.size * c.size {
+            if let Some(s) = Spring::at(&c, seed, i) {
+                n += 1;
+                if n % 40 == 0 {
+                    let col = biome(s.pos);
+                    eprintln!("spring {:?} r {:.1} water {} ground {:.1} {:?}", at(s.pos), s.radius, s.water, col.ground, col.biome);
+                }
+            }
+        }
+        eprintln!("{n} springs");
+        let mut k = 0;
+        for i in 0..c.size * c.size {
+            if let Some(f) = Fall::at(&c, seed, i) {
+                k += 1;
+                if k % 10 == 0 {
+                    eprintln!("fall {:?} height {:.1} level {:.1}", at(f.pos), f.height, f.level);
+                }
+            }
+            if let Some(d) = coast::Delta::at(&c, seed, i) {
+                eprintln!("delta {:?} q {:.0} width {:.1} {:?}", at(d.pos), c.discharge[i], d.width, biome(d.pos).biome);
+            }
+            let r = c.rcv[i] as usize;
+            if !c.ocean[i] && c.lake[i] == NO_LAKE && c.discharge[i] > 400.0 && c.lake[r] != NO_LAKE && i % 3 == 0 {
+                let p = (node(&c, i) + node(&c, r)) * 0.5;
+                eprintln!("lake inflow {:?} q {:.0} level {:.1} lake {}", at(p), c.discharge[i], river_level(&c, i), pool_level(c.desc.seed, c.lake[r]));
+            }
+            if c.lake[i] != NO_LAKE
+                && c.discharge[i] >= MIN_RIVER_Q
+                && pool_level(c.desc.seed, river_level(&c, i)) > pool_level(c.desc.seed, c.lake[i])
+                && i % 4 == 0
+            {
+                let p = node(&c, i);
+                let col = biome(p);
+                eprintln!("raised river in lake {:?} river {} lake {} column water {:?} ground {:.1} {:?}", at(p), pool_level(c.desc.seed, river_level(&c, i)), pool_level(c.desc.seed, c.lake[i]), col.water, col.ground, col.biome);
+            }
+            if !c.ocean[i] && c.ocean[r] && c.discharge[i] > 150.0 && c.discharge[i] < 1500.0 && i % 2 == 0 {
+                let p = (node(&c, i) + node(&c, r)) * 0.5;
+                eprintln!("mouth {:?} q {:.0} {:?}", at(p), c.discharge[i], biome(p).biome);
+            }
+        }
+        // Rivers running well below the land just beside them, where banks were walls.
+        let cs = c.cell_size();
+        let mut walls = 0;
+        for i in (0..c.size * c.size).step_by(7) {
+            let r = c.rcv[i] as usize;
+            if c.ocean[i] || c.ocean[r] || c.lake[i] != NO_LAKE || c.discharge[i] < 100.0 {
+                continue;
+            }
+            let (a, b) = (node(&c, i), node(&c, r));
+            let Some(dir) = (b - a).try_normalize() else { continue };
+            let mid = (a + b) * 0.5;
+            let hw = Continent::river_width(c.discharge[i]) * OLD_VOXEL * 0.5;
+            let level = river_level(&c, i).min(river_level(&c, r)) * OLD_VOXEL;
+            let q = mid + vec2(-dir.y, dir.x) * (hw + m(5.0));
+            let (fx, fz) = (q.x / cs - 0.5, q.y / cs - 0.5);
+            let (wx, wz) = (q.x as f64 + ox as f64, q.y as f64 + oz as f64);
+            let (natural, _) = natural_ground(&c, seed, fx, fz, wx, wz);
+            if natural - level > m(4.0) {
+                walls += 1;
+                if walls % 25 == 0 {
+                    eprintln!("wall bank {:?} rise {:.1} m {:?}", at(mid), (natural - level) / m(1.0), biome(mid).biome);
+                }
+            }
+        }
+        for x in &c.trails.crossings {
+            if x.kind == crate::trails::CrossingKind::Arch {
+                eprintln!("arch bridge {:?} span {} {:?}", (x.x + ox, x.z + oz), x.span, biome(vec2(x.x as f32, x.z as f32)).biome);
+            }
+        }
+    }
+
     /// Prints column cost on steep, flat and gorge ground:
     /// `cargo test --release -p worldgen column_cost -- --ignored --nocapture`.
     #[test]

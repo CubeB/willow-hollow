@@ -27,10 +27,10 @@ const DELTA_Q: f32 = 1500.0;
 /// slow river, split by a few distributary channels.
 pub struct Delta {
     /// Where the river reaches the coast, and the way it flows out to sea.
-    pos: Vec2,
+    pub(super) pos: Vec2,
     dir: Vec2,
     /// Width of the river at its mouth, in voxels.
-    width: f32,
+    pub(super) width: f32,
     /// How far the fan reaches out to sea at most.
     pub radius: f32,
     salt: u32,
