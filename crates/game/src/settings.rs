@@ -110,6 +110,9 @@ pub struct Overrides {
     pub vsync: Option<bool>,
     /// The start position was given by hand, so this run is a visit, not a playthrough.
     pub placed: bool,
+    /// The seed was picked at random for a new game, so it isn't remembered as the
+    /// default world (each world's own progress is still saved under its seed).
+    pub random: bool,
 }
 
 impl Overrides {
@@ -133,7 +136,7 @@ impl Overrides {
     /// "the world I was in" means, so it sticks unless the run was only a visit.
     pub fn worth_keeping(&self, live: Settings, saved: Settings) -> Settings {
         Settings {
-            seed: if self.keeps_position() { live.seed } else { saved.seed },
+            seed: if self.keeps_position() && !self.random { live.seed } else { saved.seed },
             radius: if self.radius.is_some() { saved.radius } else { live.radius },
             day_minutes: if self.day_minutes.is_some() { saved.day_minutes } else { live.day_minutes },
             vsync: if self.vsync.is_some() { saved.vsync } else { live.vsync },
@@ -360,6 +363,8 @@ mod tests {
         let visit = Overrides { placed: true, ..played };
         assert_eq!(visit.worth_keeping(visit.applied_to(saved), saved).seed, saved.seed);
         assert!(!visit.keeps_position());
+        let new_game = Overrides { random: true, ..played };
+        assert_eq!(new_game.worth_keeping(new_game.applied_to(saved), saved).seed, saved.seed);
     }
 
     #[test]

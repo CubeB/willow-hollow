@@ -116,7 +116,8 @@ impl Default for Options {
 const USAGE: &str = "\
 usage: game [options]
 Options hold for one run. Settings and your place in each world are saved between runs.
-  --seed N              world seed (default: the last one played)
+  --seed N              play world N, from where you left off (default: a new random
+                        world each run, starting on foot at its spawn point)
   --fresh               start from the spawn point instead of where you left off
   --pos X,Y,Z           camera start position in voxels
   --over X,Z,H          start H voxels above the ground (or water) at X,Z
@@ -204,6 +205,16 @@ fn parse_args() -> Result<Options> {
             }
             other => bail!("unknown argument '{other}'\n{USAGE}"),
         }
+    }
+    // A plain run is a new game: a random world, on foot at its spawn point. Runs that
+    // only look at a place (screenshots, maps, smoke tests, --pos/--over) keep the
+    // saved seed so they stay repeatable.
+    if o.overrides.seed.is_none() && !o.overrides.placed && o.screenshot.is_none() && o.map.is_none() && o.frames.is_none() {
+        use std::hash::{BuildHasher, Hasher};
+        let seed = std::collections::hash_map::RandomState::new().build_hasher().finish() as u32;
+        o.overrides.seed = Some(seed);
+        o.overrides.random = true;
+        o.fresh = true;
     }
     Ok(o)
 }
@@ -475,6 +486,7 @@ impl Running {
 
         // Simulating the continent takes seconds, so it starts now, alongside the window
         // and the GPU, instead of waiting its turn after them.
+        log::info!("world seed {0} (run with --seed {0} to come back to it)", settings.seed);
         let world = Arc::new(GameWorld::new(settings.seed));
         let first_column = opts.over.map(|(x, z, _)| (x, z)).or(progress.map(|p| (p.pos.x.floor() as i32, p.pos.z.floor() as i32)));
         let warming = world.clone();
@@ -894,7 +906,7 @@ impl Running {
         let (frame_ms, speed) = (self.frame_ms, self.fly.speed);
         let gpu_name = &self.gpu.adapter_name;
         let (s, d) = (self.streamer.stats, self.renderer.stats);
-        let (particle_count, biome) = (self.particles.len(), self.biome);
+        let (particle_count, biome, seed) = (self.particles.len(), self.biome, self.settings.seed);
         let (gpu_line, cpu_line) = (self.renderer.timer.as_ref().map(profile::GpuTimer::summary), self.cpu.summary());
         let mode = match (self.walking, self.player.mode, self.player.swimming, self.player.on_ground) {
             (false, ..) => "flying",
@@ -972,7 +984,7 @@ impl Running {
                         ui.label(&cpu_line);
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
                         ui.add(egui::Slider::new(&mut date, 0.0..=1.0).text("time of year"));
-                        ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}"));
+                        ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}   seed {seed}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
