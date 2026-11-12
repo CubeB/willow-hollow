@@ -201,12 +201,29 @@ fn shade(in: VOut) -> vec4<f32> {
     if (far > 0.0 && abs(n.y) < 0.5) {
         lit_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), far * 0.65));
     }
-    let ndl = max(dot(lit_n, G.sun_dir.xyz), 0.0);
+    let facing = dot(lit_n, G.sun_dir.xyz);
+    let foliage = (in.flags & FLAG_FOLIAGE) != 0u;
+    // Leaves are not flat boards: light wraps a little way round a clump of them.
+    let ndl = select(max(facing, 0.0), max((facing + 0.25) / 1.25, 0.0), foliage);
     // Past the shadow maps, ground and trunks under a canopy are taken to be in its
     // shade, so a far forest does not light up where the maps end.
-    let beyond = select(0.3, 1.0, (in.flags & FLAG_SKY) != 0u);
-    let direct = G.sun_color.rgb * ndl * sun_reaching(in.rel, n, beyond) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    let open = (in.flags & FLAG_SKY) != 0u;
+    let beyond = select(0.3, 1.0, open);
+    var direct = vec3<f32>(0.0);
+    if (ndl > 0.0) {
+        direct = G.sun_color.rgb * ndl * sun_reaching(in.rel, n, beyond) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    } else if (foliage && G.sun_color.w > 0.5) {
+        // A leaf with the sun behind it glows with the light that comes through, if
+        // the sun reaches the other side: thin crowns and the edges of thick ones.
+        let through = max(sun_reaching(in.rel + G.sun_dir.xyz * (1.1 * in.scale), G.sun_dir.xyz, beyond), select(0.0, 0.3, open));
+        direct = G.sun_color.rgb * vec3<f32>(0.85, 1.0, 0.45) * (0.45 * through * min(-facing * 2.0 + 0.35, 1.0));
+    }
     var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
+    if (!open) {
+        // Under a canopy the shade is not grey: it is lit by sun that has been through
+        // and bounced among the leaves overhead.
+        light += G.sun_color.rgb * vec3<f32>(0.045, 0.075, 0.028) * (max(G.sun_dir.y, 0.0) * ao * G.sun_color.w);
+    }
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
         light += vec3<f32>(mix(14.0, 1.2, G.sun_color.w));

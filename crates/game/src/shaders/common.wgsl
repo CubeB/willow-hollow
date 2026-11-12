@@ -254,41 +254,88 @@ fn sun_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
     return sun_reaching(rel, n, 1.0);
 }
 
-// Fraction of direct sunlight reaching a point: cascaded shadow maps with a small
-// filter, then cloud shadow. `beyond` is what to take it as past the last shadow map.
+const SHADOW_SIZE: f32 = 2048.0;
+// How wide the sun is taken to be: how far a shadow's edge spreads for each voxel
+// between what casts it and what it falls on. Wider than the real sun, for soft light.
+const SUN_WIDTH: f32 = 0.045;
+
+// What one shadow map says of a point. x: how much sun reaches it. y: 1 if the point
+// lies in the map at all.
+fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    let texel = S.texel[c];
+    // Push the lookup off the surface along its normal and toward the light so
+    // flat faces do not shadow themselves.
+    let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
+    let offset = rel + n * texel * 1.5 * (1.0 - ndl * 0.5) + G.sun_dir.xyz * texel * 0.5;
+    let lp = S.light_vp[c] * vec4<f32>(offset, 1.0);
+    let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
+        return vec2<f32>(1.0, 0.0);
+    }
+    // The depth the map spans, in voxels (see Renderer::cascade_matrix).
+    let span = texel * SHADOW_SIZE + 640.0 * VOXELS_PER_METRE;
+    // A shadow is sharp where it meets what casts it and spreads with distance from it:
+    // a trunk's is crisp at its foot, a high canopy's is soft. So look for what stands
+    // between this point and the sun, and how far off it is.
+    var radius = 1.0;
+    if (c < 2) {
+        let at = vec2<i32>(uv * SHADOW_SIZE);
+        var looks = array<vec2<i32>, 5>(
+            vec2<i32>(0, 0), vec2<i32>(3, 2), vec2<i32>(-2, 3), vec2<i32>(-3, -2), vec2<i32>(2, -3));
+        var gap = 0.0;
+        var found = 0.0;
+        for (var k = 0; k < 5; k++) {
+            let p = clamp(at + looks[k], vec2<i32>(0), vec2<i32>(2047));
+            let z = textureLoad(shadow_maps, p, c, 0);
+            if (z < lp.z) {
+                gap += lp.z - z;
+                found += 1.0;
+            }
+        }
+        if (found > 0.0) {
+            radius = clamp(gap / found * span * SUN_WIDTH / texel, 1.0, select(2.5, 5.0, c == 0));
+        }
+    }
+    // A wide filter on a face turned from the sun would reach under the face itself.
+    let slope = sqrt(1.0 - ndl * ndl) / max(ndl, 0.25);
+    let z = lp.z - (radius - 1.0) * texel * 0.5 * slope / span;
+    // Taps spread evenly over a disc, more of them where it is widest.
+    let taps = select(select(5, 8, c == 1), 12, c == 0);
+    var sum = 0.0;
+    for (var i = 0; i < taps; i++) {
+        let turn = f32(i) * 2.39996;
+        let out = sqrt((f32(i) + 0.5) / f32(taps)) * radius / SHADOW_SIZE;
+        sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + vec2<f32>(cos(turn), sin(turn)) * out, c, z);
+    }
+    return vec2<f32>(sum / f32(taps), 1.0);
+}
+
+// Fraction of direct sunlight reaching a point: cascaded shadow maps, filtered wider
+// the further the shadow has fallen, then cloud shadow. `beyond` is what to take it as
+// past the last shadow map.
 fn sun_reaching(rel: vec3<f32>, n: vec3<f32>, beyond: f32) -> f32 {
     let depth = dot(rel, G.cam_fwd.xyz);
     var vis = beyond;
     if (depth < G.cascades.z) {
-        vis = 1.0;
         var c = 0;
+        var end = G.cascades.x;
         if (depth >= G.cascades.y) {
             c = 2;
+            end = G.cascades.z;
         } else if (depth >= G.cascades.x) {
             c = 1;
+            end = G.cascades.y;
         }
-        let texel = S.texel[c];
-        // Push the lookup off the surface along its normal and toward the light so
-        // flat faces do not shadow themselves.
-        let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
-        let offset = rel + n * texel * 1.5 * (1.0 - ndl * 0.5) + G.sun_dir.xyz * texel * 0.5;
-        let lp = S.light_vp[c] * vec4<f32>(offset, 1.0);
-        let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
-        if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
-            // Softest up close; further off a texel is already wider than a voxel.
-            var sum = 0.0;
-            let step = 1.0 / 2048.0;
-            let taps = 3 - c;
-            let centre = f32(taps - 1) * 0.5;
-            for (var dy = 0; dy < taps; dy++) {
-                for (var dx = 0; dx < taps; dx++) {
-                    let o = (vec2<f32>(f32(dx), f32(dy)) - centre) * step;
-                    sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + o, c, lp.z);
-                }
-            }
-            vis = sum / f32(taps * taps);
+        let here = cascade_light(c, rel, n);
+        vis = mix(beyond, here.x, here.y);
+        if (c == 2) {
             // The last cascade fades out rather than ending in a line.
-            vis = mix(vis, beyond, smoothstep(G.cascades.z * 0.7, G.cascades.z, depth));
+            vis = mix(vis, beyond, smoothstep(end * 0.7, end, depth));
+        } else if (depth > end * 0.85) {
+            // Each map is coarser than the last: one fades into the next over the end
+            // of its reach, so the change is not a line across the ground.
+            let next = cascade_light(c + 1, rel, n);
+            vis = mix(vis, next.x, smoothstep(end * 0.85, end, depth) * next.y);
         }
     }
     return vis * cloud_light(rel);
