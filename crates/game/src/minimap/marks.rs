@@ -1,4 +1,4 @@
-//! Places worth walking to, found in a continent: waterfalls, lakes, peaks, springs,
+//! Places worth walking to, found in a continent: waterfalls, lakes, peaks, tors, springs,
 //! river mouths and confluences, landmarks and the larger bridges. The map shows each
 //! as a soft unlabelled mark until it has been visited, then by its icon and name.
 //!
@@ -22,6 +22,7 @@ pub enum Kind {
     Falls,
     Lake,
     Peak,
+    Tor,
     Spring,
     Mouth,
     Confluence,
@@ -70,6 +71,8 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
             // From the shore: the radius is the lake's as a circle of the same area.
             PlaceKind::Lake => (Kind::Lake, p.radius * 1.1 + NEAR),
             PlaceKind::Peak => (Kind::Peak, p.radius.max(NEAR)),
+            // A tor is reached by standing among its piles.
+            PlaceKind::Tor => (Kind::Tor, NEAR),
             _ => continue,
         };
         marks.push(Mark { kind, at: world(p.at), reach, name: Some(p.name.clone()) });

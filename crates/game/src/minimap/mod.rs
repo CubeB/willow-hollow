@@ -698,6 +698,8 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         Kind::Spring => (gpu::CIRCLE, [0.30, 0.62, 0.66, 1.0], 0.8),
         Kind::Mouth | Kind::Confluence => (gpu::CIRCLE, [0.36, 0.58, 0.78, 1.0], 0.75),
         Kind::Peak => (gpu::TRIANGLE, [0.46, 0.39, 0.33, 1.0], 1.1),
+        // Granite grey, and smaller than a peak.
+        Kind::Tor => (gpu::TRIANGLE, [0.50, 0.50, 0.48, 1.0], 0.85),
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
         Kind::Bridge => (gpu::BAR, [0.52, 0.40, 0.28, 1.0], 1.0),
     };
