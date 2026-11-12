@@ -63,11 +63,19 @@ fn voxel_snow(g0: vec4<u32>, g1: vec4<u32>, t: vec2<f32>, world_xz: vec2<f32>, h
     return biome_snow(grid_biome(g0, g1, (i.y + step.y) * 5u + i.x + step.x));
 }
 
+// The share of the snow lying at sea level that low ground keeps, the height in metres
+// up to which it keeps no more, and the height from which all of it lies.
+const LOWLAND_SNOW: f32 = 0.34;
+const LOWLAND_TOP: f32 = 35.0;
+const HILL_FOOT: f32 = 110.0;
+
 // Snow settles thicker the higher the ground: a little more of what lies for each metre of
 // height, hills that hold some through a winter thaw, and summits above the snowline that
 // keep a cap through the summer.
 fn snow_depth(alt_m: f32, snow: vec4<f32>) -> f32 {
-    let lying = snow.x * (1.0 + max(alt_m, 0.0) * 0.01);
+    // Low ground holds only a dusting of what has fallen, in patches where it drifts;
+    // it lies whole from the hills up.
+    let lying = snow.x * (1.0 + max(alt_m, 0.0) * 0.01) * mix(LOWLAND_SNOW, 1.0, smoothstep(LOWLAND_TOP, HILL_FOOT, alt_m));
     let hills = snow.z * max(alt_m - 25.0, 0.0) * 0.003;
     return lying + hills + max(alt_m - snow.w, 0.0) * 0.008;
 }
@@ -107,7 +115,9 @@ fn ground_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, h: f32, foliage: b
             return mix(o, SNOW_COLOUR * 0.6, buried * 0.12);
         }
         let cold = o * vec3<f32>(0.72, 0.64, 0.58) + vec3<f32>(0.02, 0.018, 0.02);
-        let lip = smoothstep(0.6, 0.92, edge) * 0.75;
+        // No lip on a face that points down: it lies on a voxel boundary, where `edge`
+        // rounds to the top of one voxel or the bottom of the next from pixel to pixel.
+        let lip = smoothstep(0.6, 0.92, edge) * 0.75 * step(-0.5, n.y);
         return mix(o, mix(cold, SNOW_COLOUR * 0.8, lip), buried);
     }
     let cover = snow_cover(alt_m, world_xz, h, snow) * smoothstep(0.6, 0.95, n.y) * select(1.0, 0.85, foliage);
@@ -146,7 +156,9 @@ fn block_weather(c: vec3<f32>, n: vec3<f32>, rel: vec3<f32>, centre: vec3<f32>, 
         let top = mix(o, SNOW_COLOUR * (0.9 + 0.1 * h), quarters * 0.25);
         let cold = o * vec3<f32>(0.72, 0.64, 0.58) + vec3<f32>(0.02, 0.018, 0.02);
         o = mix(o, cold, cold_amount);
-        let lip = select(0.0, 0.8, edge > 1.0 - 0.06 * quarters) * step(0.5, quarters);
+        // No lip on a face that points down: it lies on a voxel boundary, where `edge`
+        // rounds to the top of one voxel or the bottom of the next from pixel to pixel.
+        let lip = select(0.0, 0.8, edge > 1.0 - 0.06 * quarters) * step(0.5, quarters) * step(-0.5, n.y);
         return mix(mix(o, SNOW_COLOUR * 0.8, lip), top, far * 0.6);
     }
     if (quarters <= 0.0) {
