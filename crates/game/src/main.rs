@@ -925,6 +925,7 @@ impl Running {
             wind: self.particles.wind.lagged * OLD_VOXEL,
             ground,
             lamps: &lamps,
+            shafts: self.settings.shafts,
         };
         // The scene is drawn into the renderer's own textures and handed to the GPU
         // before waiting for the window's next image, which is not free until the last
