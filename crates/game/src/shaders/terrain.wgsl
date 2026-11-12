@@ -219,8 +219,9 @@ fn shade(in: VOut) -> vec4<f32> {
     let ndl = select(max(facing, 0.0), max((facing + 0.25) / 1.25, 0.0), foliage);
     // Past the shadow maps, ground and trunks under a canopy are taken to be in its
     // shade, so a far forest does not light up where the maps end.
+    // And hills shade it at low sun, by their skylines, as they do the far view.
     let open = (in.flags & FLAG_SKY) != 0u;
-    let beyond = select(0.3, 1.0, open);
+    let beyond = select(0.3, 1.0, open) * skyline_side_light(grid_skyline(in.grid1, in.local.xz / 32.0));
     var direct = vec3<f32>(0.0);
     // The shadow maps are drawn with every leaf where it grows, not where the wind has
     // it: a leaf looked up where it sways to would slide in and out of its own shadow.

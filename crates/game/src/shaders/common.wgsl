@@ -245,7 +245,11 @@ fn cloud_light(rel: vec3<f32>) -> f32 {
 // sunset are known (farview::Skylines, each byte as 0..1): dark once the sun is below
 // the hills on its side, with an edge that is softer the higher the hills.
 fn skyline_light(skylines: vec2<f32>) -> f32 {
-    let packed = select(skylines.y, skylines.x, G.sun_dir.x > 0.0);
+    return skyline_side_light(select(skylines.y, skylines.x, G.sun_dir.x > 0.0));
+}
+
+// The same for the one skyline on the sun's side, as its byte, 0..1.
+fn skyline_side_light(packed: f32) -> f32 {
     let skyline = packed * packed * 1.5;
     let sun = G.sun_dir.y / max(length(G.sun_dir.xz), 1e-3);
     let soft = 0.025 + skyline * 0.12;

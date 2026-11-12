@@ -37,6 +37,9 @@ pub struct GpuChunk {
     /// (shared with the neighbours), x fastest, a byte each, for the snow lying there
     /// (see `season::Places` and `grid_snow` in ground.wgsl).
     pub biomes: [u32; 8],
+    /// The skylines toward sunrise and toward sunset (`farview::Skylines`) at the four
+    /// corners of the column, x fastest, so hills shade it beyond the shadow maps.
+    pub skylines: [[u8; 2]; 4],
 }
 
 /// Levels of detail, the first being full-size voxels.
@@ -453,6 +456,7 @@ impl Streamer {
             let (dx, dz) = ((k % 5) as i32 * size / 4, (k / 5) as i32 * size / 4);
             biomes[k / 4] |= (crate::farview::biome_at(&self.world, x + dx, z + dz) as u32) << (8 * (k % 4));
         }
+        let skylines = [(0, 0), (size, 0), (0, size), (size, size)].map(|(dx, dz)| crate::farview::skylines_at(&self.world, x + dx, z + dz));
         for (cy, mesh) in meshes {
             let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
                 release(&mut self.arena, &chunks);
@@ -460,6 +464,7 @@ impl Streamer {
                 return None;
             };
             chunk.biomes = biomes;
+            chunk.skylines = skylines;
             chunks.push(chunk);
         }
         Some(chunks)
@@ -482,6 +487,7 @@ impl Streamer {
             water,
             faces: mesh.faces,
             biomes: [0; 8],
+            skylines: [[0; 2]; 4],
         })
     }
 

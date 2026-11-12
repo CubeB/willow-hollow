@@ -170,7 +170,9 @@ struct Instance {
     scale: f32,
     /// The range of horizontal distances this chunk's ring is drawn in.
     band: [f32; 2],
-    /// Terrain: a grid of the biomes over it, for the snow (see `GpuChunk::biomes`).
+    /// Terrain: a grid of the biomes over it, for the snow (see `GpuChunk::biomes`),
+    /// and in the last word the skyline on the sun's side at its four corners (see
+    /// `GpuChunk::skylines` and grid_skyline in ground.wgsl).
     biomes: [u32; 8],
 }
 
@@ -1463,6 +1465,9 @@ impl Renderer {
         let sweep = -env.sun_dir * (m(120.0) / env.sun_dir.y.clamp(0.15, 1.0));
         let chunk_size = CHUNK as f32;
         let mut instances: Vec<Instance> = Vec::new();
+        // Which of a chunk's skylines the sun (or moon) is on the side of: toward
+        // sunrise, or toward sunset (as skyline_light in common.wgsl chooses).
+        let sun_side = if scene.env.sun_dir.x > 0.0 { 0 } else { 1 };
         let mut opaque: Vec<ChunkDraw> = Vec::new();
         let mut opaque_edge: Vec<ChunkDraw> = Vec::new();
         let mut casters: [Vec<ChunkDraw>; CASCADES] = Default::default();
@@ -1506,12 +1511,14 @@ impl Renderer {
                 continue;
             }
             let index = instances.len() as u32;
+            let mut biomes = chunk.biomes;
+            biomes[7] = u32::from_le_bytes(chunk.skylines.map(|s| s[sun_side]));
             instances.push(Instance {
                 offset: offset.to_array(),
                 origin: origin.to_array(),
                 scale: scale as f32,
                 band,
-                biomes: chunk.biomes,
+                biomes,
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);

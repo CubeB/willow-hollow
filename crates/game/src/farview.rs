@@ -155,6 +155,19 @@ impl Skylines {
         made
     }
 
+    /// The skylines at a place on the continent, blended between the grid's points.
+    pub fn blended(&self, lx: f32, lz: f32) -> [u8; 2] {
+        let top = self.size as f32 - 1.001;
+        let (x, z) = ((lx / self.cell).clamp(0.0, top), (lz / self.cell).clamp(0.0, top));
+        let (i, j) = (x as usize, z as usize);
+        let (fx, fz) = (x - i as f32, z - j as f32);
+        [0, 1].map(|k| {
+            let at = |i: usize, j: usize| self.angles[j * self.size + i][k] as f32;
+            let row = |j: usize| at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+            (row(j) * (1.0 - fz) + row(j + 1) * fz).round() as u8
+        })
+    }
+
     /// The skylines at a place on the continent (voxels from its origin corner).
     pub fn at(&self, lx: f32, lz: f32) -> [u8; 2] {
         let i = ((lx / self.cell) as usize).min(self.size - 1);
@@ -522,6 +535,15 @@ pub fn biome_in(c: &Continent, lx: f32, lz: f32) -> u8 {
 /// The biome (as u8) at world voxel column `(x, z)`, exactly as the voxel terrain has
 /// it, or `Biome::Ocean`, which stands for wherever the camera is, while its continent
 /// has not been simulated. Never blocks.
+/// The skylines toward sunrise and sunset at a world position, in voxels; level where
+/// the continent is not made yet.
+pub fn skylines_at(world: &GameWorld, x: i32, z: i32) -> [u8; 2] {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or([0; 2], |c| {
+        Skylines::get(&c).blended((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32)
+    })
+}
+
 pub fn biome_at(world: &GameWorld, x: i32, z: i32) -> u8 {
     let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
     world.continent_if_ready(mx, mz).map_or(Biome::Ocean as u8, |c| {

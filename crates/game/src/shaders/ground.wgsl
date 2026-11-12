@@ -25,6 +25,15 @@ fn grid_biome(g0: vec4<u32>, g1: vec4<u32>, k: u32) -> u32 {
     return (w >> (8u * (k % 4u))) & 255u;
 }
 
+// The skyline on the sun's side at a point of a terrain chunk, as its byte, 0..1 (see
+// skyline_side_light): the four corners of the chunk ride in the last word of its grid,
+// x fastest, and neighbouring chunks share them. `t` is 0..1 across the chunk.
+fn grid_skyline(g1: vec4<u32>, t: vec2<f32>) -> f32 {
+    let f = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0));
+    let c = vec4<f32>(vec4<u32>(g1.w, g1.w >> 8u, g1.w >> 16u, g1.w >> 24u) & vec4<u32>(255u)) / 255.0;
+    return mix(mix(c.x, c.y, f.x), mix(c.z, c.w, f.x), f.y);
+}
+
 // The ground at a point of a terrain chunk, blended across the grid's points, so that
 // neighbouring chunks, which share their edge points, meet without a seam. `t` is 0..1
 // across the chunk.
