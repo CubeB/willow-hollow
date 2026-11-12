@@ -452,7 +452,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
             lie = normalize(slope * sign(slope.y));
         }
         let n = normalize(mix(ripple_normal(world_xz, flow, t), up, calm) + lie - up);
-        let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
+        let fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, n), 0.0, 1.0), 5.0);
         let reflected = sky_color(reflect(view, n));
         // Clear and bright-bedded in the shallows, deep blue-green further out.
         let shallow = in.color * 1.35;
@@ -482,7 +482,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Further out, water looks the way the far view paints it: opaque, with no bed
         // showing through to mark the rings.
         let far = smoothstep(150.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
-        let far_fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
+        let far_fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, up), 0.0, 1.0), 5.0);
         let far_body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
         alpha = mix(alpha, 1.0, far);
@@ -508,7 +508,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         if (dot(n, view) > 0.0) {
             n = -n;
         }
-        let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, n), 0.0), 5.0);
+        let fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, n), 0.0, 1.0), 5.0);
         let body = in.color * 1.2 * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(up));
         color = mix(body, sky_color(reflect(view, n)), fresnel);
         alpha = mix(0.3, 1.0, fresnel);

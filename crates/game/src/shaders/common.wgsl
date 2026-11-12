@@ -49,8 +49,10 @@ struct Globals {
 
 struct Shadows {
     light_vp: array<mat4x4<f32>, 3>,
-    // Shadow-map texel size in voxels for each cascade.
+    // For each cascade, how wide its texels are as the sun sees them, and how far along
+    // the sun's rays its depth runs, both in voxels (see Renderer::cascade_matrix).
     texel: vec4<f32>,
+    span: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;
@@ -265,15 +267,16 @@ fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     let texel = S.texel[c];
     // Push the lookup off the surface along its normal and toward the light so
     // flat faces do not shadow themselves.
-    let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
+    // No more than 1: a normal that is the sun's own direction (light through a leaf)
+    // rounds to a hair over it on some frames, and the slope below would have no value.
+    let ndl = clamp(dot(n, G.sun_dir.xyz), 0.0, 1.0);
     let offset = rel + n * texel * 1.5 * (1.0 - ndl * 0.5) + G.sun_dir.xyz * texel * 0.5;
     let lp = S.light_vp[c] * vec4<f32>(offset, 1.0);
     let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
         return vec2<f32>(1.0, 0.0);
     }
-    // The depth the map spans, in voxels (see Renderer::cascade_matrix).
-    let span = texel * SHADOW_SIZE + 640.0 * VOXELS_PER_METRE;
+    let span = S.span[c];
     // A shadow is sharp where it meets what casts it and spreads with distance from it:
     // a trunk's is crisp at its foot, a high canopy's is soft. So look for what stands
     // between this point and the sun, and how far off it is.
