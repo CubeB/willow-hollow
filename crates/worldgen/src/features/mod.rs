@@ -231,28 +231,35 @@ fn flora(biome: Biome) -> Flora {
         Biome::Taiga => f!(
             [(TallPine, 1.0)],
             0.12,
-            [(Spruce, 10.0), (Birch, 1.0), (DeadSnag, 0.4)],
+            [(Spruce, 10.0), (ScotsPine, 1.5), (Birch, 1.0), (DeadSnag, 0.4)],
             0.62,
             [(Boulder, 2.0), (MossyBoulder, 2.0), (FallenLog, 2.0), (Bush, 1.0), (Stump, 0.5)],
             0.14
         ),
-        Biome::Heath => f!([], 0.0, [(Birch, 2.0), (Spruce, 1.0), (DeadSnag, 0.5)], 0.05, [(Boulder, 3.0), (Bush, 2.0)], 0.1),
-        Biome::Grassland => f!([(ElderOak, 1.0)], 0.02, [(Oak, 3.0), (Birch, 1.0)], 0.04, [(Bush, 2.0), (Boulder, 1.0)], 0.07),
+        Biome::Heath => f!(
+            [],
+            0.0,
+            [(Birch, 2.0), (ScotsPine, 1.6), (Juniper, 1.6), (Spruce, 0.6), (DeadSnag, 0.5)],
+            0.06,
+            [(Boulder, 3.0), (Gorse, 3.5), (Bush, 1.5)],
+            0.14
+        ),
+        Biome::Grassland => f!([(ElderOak, 1.0)], 0.02, [(Oak, 3.0), (Birch, 1.0)], 0.04, [(Bush, 2.0), (Boulder, 1.0), (HollyBush, 0.6)], 0.08),
         Biome::Deciduous => f!(
             [(ElderOak, 1.0)],
             0.05,
             [(Oak, 7.0), (Birch, 2.5), (Maple, 1.5), (Cherry, 0.4)],
             0.58,
-            [(Bush, 4.0), (FallenLog, 1.5), (Stump, 0.6), (MossyBoulder, 0.8), (Boulder, 0.4)],
-            0.16
+            [(Bush, 4.0), (FallenLog, 1.5), (Stump, 0.6), (MossyBoulder, 0.8), (Boulder, 0.4), (HollyBush, 1.6)],
+            0.195
         ),
         Biome::OldGrowth => f!(
             [(Redwood, 1.0)],
             0.6,
-            [(Spruce, 2.0), (Oak, 1.0), (Birch, 0.5)],
-            0.2,
-            [(Fern, 5.0), (MossyBoulder, 2.0), (FallenLog, 2.5), (Stump, 0.8)],
-            0.24
+            [(Spruce, 2.0), (Oak, 1.0), (Birch, 0.5), (Yew, 0.6), (Holly, 0.5)],
+            0.24,
+            [(Fern, 5.0), (MossyBoulder, 2.0), (FallenLog, 2.5), (Stump, 0.8), (HollyBush, 1.0)],
+            0.26
         ),
         Biome::Desert => f!([], 0.0, [(Cactus, 1.0)], 0.03, [(Boulder, 2.0), (Cactus, 1.0)], 0.05),
         Biome::Savanna => f!([(Baobab, 1.0)], 0.1, [(Acacia, 1.0)], 0.07, [(Bush, 3.0), (Boulder, 1.0)], 0.08),
@@ -261,8 +268,8 @@ fn flora(biome: Biome) -> Flora {
             0.03,
             [(Oak, 5.0), (Cherry, 2.0), (Birch, 1.5), (Acacia, 0.5)],
             0.4,
-            [(Bush, 4.0), (FallenLog, 1.0), (Boulder, 0.6)],
-            0.14
+            [(Bush, 4.0), (FallenLog, 1.0), (Boulder, 0.6), (HollyBush, 1.4)],
+            0.175
         ),
         Biome::Rainforest => f!(
             [(Kapok, 1.0)],
@@ -278,10 +285,10 @@ fn flora(biome: Biome) -> Flora {
             0.0,
             [(Birch, 12.0), (Spruce, 0.6), (Oak, 0.4)],
             0.55,
-            [(Fern, 3.0), (Bush, 2.0), (FallenLog, 1.0), (MossyBoulder, 0.6)],
-            0.16
+            [(Fern, 3.0), (Bush, 2.0), (FallenLog, 1.0), (MossyBoulder, 0.6), (HollyBush, 0.8)],
+            0.18
         ),
-        Biome::AlpineMeadow => f!([], 0.0, [(Spruce, 1.0), (DeadSnag, 0.3)], 0.01, [(Boulder, 3.0), (MossyBoulder, 1.0)], 0.08),
+        Biome::AlpineMeadow => f!([], 0.0, [(Spruce, 1.0), (Juniper, 0.9), (DeadSnag, 0.3)], 0.016, [(Boulder, 3.0), (MossyBoulder, 1.0)], 0.08),
         Biome::SnowyPine => f!(
             [(TallPine, 1.0)],
             0.1,
@@ -290,8 +297,15 @@ fn flora(biome: Biome) -> Flora {
             [(Boulder, 2.0), (FallenLog, 1.0), (Stump, 0.5)],
             0.08
         ),
-        Biome::Bog => f!([], 0.0, [(DeadSnag, 2.0), (Spruce, 1.5), (Birch, 0.6)], 0.06, [(Bush, 3.0), (MossyBoulder, 1.0), (Stump, 1.0)], 0.1),
-        Biome::Steppe => f!([(ElderOak, 1.0)], 0.006, [(Oak, 1.0), (Acacia, 0.3)], 0.006, [(Bush, 2.0), (Boulder, 1.5)], 0.05),
+        Biome::Bog => f!(
+            [],
+            0.0,
+            [(DeadSnag, 2.0), (Spruce, 1.5), (ScotsPine, 0.8), (Birch, 0.6)],
+            0.07,
+            [(Bush, 3.0), (MossyBoulder, 1.0), (Stump, 1.0)],
+            0.1
+        ),
+        Biome::Steppe => f!([(ElderOak, 1.0)], 0.006, [(Oak, 1.0), (Juniper, 0.6), (Acacia, 0.3)], 0.009, [(Bush, 2.0), (Boulder, 1.5)], 0.05),
         Biome::DuneSea => f!([], 0.0, [], 0.0, [(Boulder, 1.0)], 0.004),
         Biome::RedRock => f!([], 0.0, [(Cactus, 1.0)], 0.015, [(Boulder, 3.0), (Bush, 1.0), (Cactus, 1.0)], 0.06),
         Biome::Mangrove => f!([], 0.0, [(Willow, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
@@ -310,6 +324,8 @@ pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
         Species::Jungle | Species::Kapok => mat::LEAVES_JUNGLE,
         Species::Acacia | Species::Baobab => mat::LEAVES_ACACIA,
         Species::Birch => mat::LEAVES_BIRCH,
+        Species::ScotsPine => mat::NEEDLES_PINE,
+        Species::Juniper => mat::NEEDLES_JUNIPER,
         Species::Cactus | Species::DeadSnag => return None,
         _ => mat::LEAVES_OAK,
     };
@@ -328,6 +344,127 @@ pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
 pub fn canopy_tree(biome: Biome) -> Option<Species> {
     let fl = flora(biome);
     fl.trees.iter().chain(fl.giants).max_by(|a, b| a.1.total_cmp(&b.1)).map(|t| t.0)
+}
+
+/// How the evergreens are mixed into a biome's broadleaf trees: the share of its oaks,
+/// birches, maples and cherries that each kind takes the place of on ordinary ground,
+/// and how much further each goes where the ground suits it (see [`winter_green_tree`]).
+struct Mix {
+    /// Scots pine, on poor sandy ground: its share anywhere, and what a stretch of the
+    /// poorest ground adds.
+    pine: (f32, f32),
+    /// Holly, in the shade of a close wood: its share in the open, and what shade adds.
+    holly: (f32, f32),
+    /// Yew, in shade: its share on ordinary ground, and what rich limy ground adds.
+    yew: (f32, f32),
+    /// Holm oak, toward the warm end of the biome.
+    holm: f32,
+    /// Juniper, on open poor ground.
+    juniper: f32,
+    /// Spruce, toward the cold end of the biome.
+    spruce: f32,
+    /// About how much of the wood they come to between them, over a broad stretch of it:
+    /// what the far view keeps green of the forest in winter. Checked against the rest in
+    /// the tests.
+    share: f32,
+}
+
+fn mix(biome: Biome) -> Option<Mix> {
+    Some(match biome {
+        Biome::Deciduous => Mix { pine: (0.025, 0.32), holly: (0.015, 0.075), yew: (0.02, 0.09), holm: 0.05, juniper: 0.0, spruce: 0.08, share: 0.16 },
+        Biome::BirchGrove => Mix { pine: (0.04, 0.25), holly: (0.01, 0.035), yew: (0.0, 0.0), holm: 0.0, juniper: 0.06, spruce: 0.0, share: 0.11 },
+        // Warm woods have the evergreen oak where the temperate ones have holly and yew.
+        Biome::Woodland => Mix { pine: (0.03, 0.12), holly: (0.0, 0.02), yew: (0.0, 0.0), holm: 0.15, juniper: 0.0, spruce: 0.0, share: 0.17 },
+        Biome::Grassland => Mix { pine: (0.06, 0.2), holly: (0.05, 0.0), yew: (0.02, 0.0), holm: 0.08, juniper: 0.08, spruce: 0.0, share: 0.22 },
+        _ => return None,
+    })
+}
+
+/// How poor the soil is, about -1 (deep, rich, limy) to 1 (thin, sandy, acid), in
+/// stretches a few hundred metres across. Pine, juniper and gorse take the poor ground;
+/// yew the rich.
+fn poor_soil(seed: u32, x: i32, z: i32) -> f32 {
+    fbm2(seed ^ 0x50_11ed, x as f64 / m64(150.0), z as f64 / m64(150.0), 2, 2.0, 0.5)
+}
+
+fn ramp(a: f32, b: f32, x: f32) -> f32 {
+    ((x - a) / (b - a)).clamp(0.0, 1.0)
+}
+
+/// The evergreen that stands in place of a broadleaf tree at a column, if one does:
+/// always a minority, and each kind where the ground and the shade suit it. `shade` is
+/// how close the wood stands there, 0 in a clearing to 1 in its depths.
+fn winter_green_tree(col: &Column, shade: f32, x: i32, z: i32, seed: u32) -> Option<Species> {
+    let mix = mix(col.biome)?;
+    let poor = poor_soil(seed, x, z);
+    let sandy = ramp(0.12, 0.42, poor);
+    let rich = ramp(-0.12, -0.42, poor);
+    let deep = ramp(0.55, 0.95, shade);
+    // Where in the biome's own span of climates the column is: Woodland is the warm one.
+    let warm = ramp(0.42, 0.56, col.temperature);
+    let cool = ramp(0.36, 0.26, col.temperature);
+    let shares = [
+        (Species::ScotsPine, mix.pine.0 + mix.pine.1 * sandy),
+        (Species::Holly, mix.holly.0 + mix.holly.1 * deep),
+        (Species::Yew, (mix.yew.0 + mix.yew.1 * rich) * deep),
+        (Species::HolmOak, mix.holm * if col.biome == Biome::Woodland { 1.0 } else { warm }),
+        (Species::Juniper, mix.juniper * (1.0 - deep) * (0.4 + 0.6 * sandy)),
+        (Species::Spruce, mix.spruce * cool),
+    ];
+    let mut roll = unit(hash2(seed ^ 0xe7e2_9a, x, z));
+    for (species, share) in shares {
+        if roll < share {
+            return Some(species);
+        }
+        roll -= share;
+    }
+    None
+}
+
+/// Which evergreen shrub grows at a column where the biome's table calls for one: holly
+/// in the shade, gorse on poor ground in the open, and laurel on good ground and in the
+/// warm woods.
+fn winter_green_shrub(col: &Column, shade: f32, x: i32, z: i32, seed: u32) -> Species {
+    let poor = poor_soil(seed, x, z);
+    let roll = unit(hash2(seed ^ 0xe7e2_9b, x, z));
+    let deep = ramp(0.45, 0.85, shade);
+    // Gorse wants light and does not mind poor ground; the wet old forest has none.
+    let gorse = match col.biome {
+        Biome::OldGrowth => 0.0,
+        _ => (1.0 - deep) * (0.35 + 0.6 * ramp(0.0, 0.35, poor)),
+    };
+    let laurel = match col.biome {
+        Biome::Woodland => 0.6,
+        Biome::Grassland => 0.1,
+        _ => 0.12 + 0.3 * ramp(-0.05, -0.4, poor),
+    };
+    if roll < gorse {
+        Species::Gorse
+    } else if roll < gorse + laurel * (1.0 - gorse) {
+        Species::Laurel
+    } else {
+        Species::HollyBush
+    }
+}
+
+/// About how much of a biome's forest keeps its leaves through the winter, 0 to 1: its
+/// conifers and the evergreens mixed into its broadleaves, by their weights. The far view
+/// keeps that much green in a bare winter forest, as the trees themselves do close to.
+pub fn winter_green_share(biome: Biome) -> f32 {
+    let fl = flora(biome);
+    let mixed = mix(biome).map_or(0.0, |m| m.share);
+    let (mut green, mut all) = (0.0, 0.0);
+    for &(species, weight) in fl.trees {
+        let keeps = match species {
+            Species::DeadSnag | Species::Cactus => continue,
+            Species::Oak | Species::Birch | Species::Maple | Species::Cherry => mixed,
+            Species::Willow | Species::Acacia => 0.0,
+            _ => 1.0,
+        };
+        green += weight * keeps;
+        all += weight;
+    }
+    if all > 0.0 { green / all } else { 0.0 }
 }
 
 fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
@@ -608,6 +745,12 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
             _ => species,
         };
     }
+    // Some of a broadleaf wood is evergreen: a holly in the shade, a pine on a sandy rise.
+    if layer.salt == TREES.salt && matches!(species, Species::Oak | Species::Birch | Species::Maple | Species::Cherry) {
+        species = winter_green_tree(col, clearing, x, z, seed).unwrap_or(species);
+    } else if species == Species::HollyBush {
+        species = winter_green_shrub(col, clearing, x, z, seed);
+    }
     // Bare tidal sand grows nothing: only boulders and driftwood lie on it.
     let bare = col.cover == Cover::Bank && !col.biome.arid() && crate::surface::flat_is_sand(col.ground, crate::surface::ground_patch(seed, x as f64, z as f64));
     if bare && !matches!(species, Species::Boulder | Species::FallenLog) {
@@ -783,12 +926,90 @@ mod tests {
             Species::FallenLog,
             Species::Stump,
             Species::Cactus,
+            Species::HollyBush,
+            Species::Laurel,
+            Species::Gorse,
         ];
         for species in small {
             for variant in 0..species.variants() {
                 let reach = lib.get(species, variant).reach;
                 assert!(reach <= SMALL.reach, "{species:?} reaches {reach}, chunks only look {}", SMALL.reach);
             }
+        }
+    }
+
+    /// What `choose` grows in one layer over a broad stretch of level ground in a biome,
+    /// species by species.
+    fn census(biome: Biome, layer: &Layer, temperature: f32) -> HashMap<Species, u32> {
+        let col = Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature, river: f32::MAX, clear: f32::MAX };
+        let mut counts = HashMap::new();
+        for cx in 0..260 {
+            for cz in 0..260 {
+                let cell = Cell::new(5, layer, cx, cz);
+                if let Some(species) = choose(&col, layer, cell.roll(3), cell.roll(4), cell.x, cell.z, 5) {
+                    *counts.entry(species).or_insert(0) += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn evergreens_are_a_minority_among_broadleaves_and_each_has_its_place() {
+        for (biome, temperature) in [(Biome::Deciduous, 0.4), (Biome::BirchGrove, 0.4), (Biome::Woodland, 0.7), (Biome::Grassland, 0.4)] {
+            let trees = census(biome, &TREES, temperature);
+            let total: u32 = trees.values().sum();
+            let green: u32 = trees.iter().filter(|(s, _)| s.winter_green() || **s == Species::Spruce).map(|(_, n)| n).sum();
+            let share = green as f32 / total as f32;
+            assert!(total > 500, "{biome:?} grew {total} trees");
+            assert!(share > 0.06 && share < 0.3, "{biome:?}: {share} of its trees are evergreen");
+            // The far view is told the same share, so a wood looks alike far and near.
+            let told = winter_green_share(biome);
+            assert!((told - share).abs() < 0.06, "{biome:?}: the far view keeps {told} green, the trees {share}");
+        }
+        let wood = census(Biome::Deciduous, &TREES, 0.4);
+        for species in [Species::Holly, Species::Yew, Species::ScotsPine] {
+            assert!(wood.get(&species).copied().unwrap_or(0) > 20, "a temperate wood grew too few of {species:?}");
+        }
+        // Holm oak keeps to the warm end of the temperate woods, spruce to the cold.
+        assert!(!wood.contains_key(&Species::HolmOak) && !wood.contains_key(&Species::Spruce));
+        assert!(census(Biome::Deciduous, &TREES, 0.56).contains_key(&Species::HolmOak));
+        assert!(census(Biome::Deciduous, &TREES, 0.26).contains_key(&Species::Spruce));
+        assert!(census(Biome::Woodland, &TREES, 0.7).get(&Species::HolmOak).copied().unwrap_or(0) > 100);
+        // The evergreen shrubs: all three kinds under a wood, gorse above all on a heath.
+        let shrubs = census(Biome::Deciduous, &SMALL, 0.4);
+        for species in [Species::HollyBush, Species::Laurel, Species::Gorse] {
+            assert!(shrubs.get(&species).copied().unwrap_or(0) > 20, "a temperate wood grew too few of {species:?}");
+        }
+        assert!(shrubs[&Species::Bush] > shrubs[&Species::HollyBush] + shrubs[&Species::Laurel] + shrubs[&Species::Gorse]);
+        let heath = census(Biome::Heath, &SMALL, 0.4);
+        assert!(heath[&Species::Gorse] > heath[&Species::Bush]);
+        // Conifer forest counts as all green; a savanna of acacias as none.
+        assert!(winter_green_share(Biome::Taiga) > 0.9);
+        assert_eq!(winter_green_share(Biome::Savanna), 0.0);
+    }
+
+    #[test]
+    fn evergreen_trees_fit_within_the_reach_chunks_look_for() {
+        let lib = Library::build();
+        for species in [Species::Holly, Species::Yew, Species::HolmOak, Species::ScotsPine, Species::Juniper] {
+            for variant in 0..species.variants() {
+                let reach = lib.get(species, variant).reach;
+                assert!(reach <= TREES.reach, "{species:?} {variant} reaches {reach}, chunks only look {}", TREES.reach);
+            }
+        }
+    }
+
+    #[test]
+    fn evergreen_leaves_read_as_evergreen_from_afar() {
+        // season.wgsl's `season_evergreen`, which the far tree models are told apart by:
+        // their colour alone must say they keep their leaves.
+        let mats = mat::build();
+        for v in [mat::LEAVES_HOLLY, mat::LEAVES_YEW, mat::LEAVES_HOLM, mat::NEEDLES_PINE, mat::NEEDLES_JUNIPER, mat::LEAVES_LAUREL, mat::GORSE] {
+            let m = mats.get(v);
+            assert_eq!(m.plant, voxel::plant::EVERGREEN);
+            let q = m.color.map(|c| (c as f32 / 255.0).powf(1.1));
+            assert!(q[2] > q[1] * 0.56 || q[0] < q[1] * 0.36, "{v} would turn and fall with the broadleaves in the far view: {:?}", m.color);
         }
     }
 
