@@ -112,7 +112,8 @@ pub fn ground_of(v: Voxel) -> Ground {
         mat::SNOW => Ground::Snow,
         mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED | mat::WOOD_DEAD
         | mat::BARK_OAK | mat::BARK_BIRCH | mat::BARK_PINE | mat::BARK_REDWOOD | mat::BARK_JUNGLE
-        | mat::BARK_PALM | mat::BARK_WILLOW | mat::BARK_ACACIA | mat::BARK_BAOBAB => Ground::Wood,
+        | mat::BARK_PALM | mat::BARK_WILLOW | mat::BARK_ACACIA | mat::BARK_BAOBAB
+        | mat::BARK_HOLLY | mat::BARK_YEW | mat::BARK_SCOTS => Ground::Wood,
         _ => Ground::Grass,
     }
 }

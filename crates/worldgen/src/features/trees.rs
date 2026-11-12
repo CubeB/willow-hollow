@@ -34,10 +34,20 @@ pub enum Species {
     MossyBoulder,
     FallenLog,
     Stump,
+    // The evergreens come last, so the kinds before them keep their numbers, and with
+    // them the shapes their variants are built from.
+    Holly,
+    Yew,
+    HolmOak,
+    ScotsPine,
+    Juniper,
+    HollyBush,
+    Laurel,
+    Gorse,
 }
 
 impl Species {
-    pub const ALL: [Species; 22] = [
+    pub const ALL: [Species; 30] = [
         Species::Oak,
         Species::Birch,
         Species::Maple,
@@ -60,7 +70,24 @@ impl Species {
         Species::MossyBoulder,
         Species::FallenLog,
         Species::Stump,
+        Species::Holly,
+        Species::Yew,
+        Species::HolmOak,
+        Species::ScotsPine,
+        Species::Juniper,
+        Species::HollyBush,
+        Species::Laurel,
+        Species::Gorse,
     ];
+
+    /// Whether it keeps its leaves through the winter and grows among broadleaves or on
+    /// open ground: the kinds mixed into other woods as a minority.
+    pub fn winter_green(self) -> bool {
+        matches!(
+            self,
+            Species::Holly | Species::Yew | Species::HolmOak | Species::ScotsPine | Species::Juniper | Species::HollyBush | Species::Laurel | Species::Gorse
+        )
+    }
 
     /// How many variants to pre-build. Big trees are costly to build and rarely
     /// side by side, so they get fewer.
@@ -101,6 +128,14 @@ impl Species {
             Species::MossyBoulder => boulder(&mut s, &mut rng, true),
             Species::FallenLog => fallen_log(&mut s, &mut rng),
             Species::Stump => stump(&mut s, &mut rng),
+            Species::Holly => holly(&mut s, &mut rng),
+            Species::Yew => yew(&mut s, &mut rng),
+            Species::HolmOak => holm_oak(&mut s, &mut rng),
+            Species::ScotsPine => scots_pine(&mut s, &mut rng),
+            Species::Juniper => juniper(&mut s, &mut rng),
+            Species::HollyBush => holly_bush(&mut s, &mut rng),
+            Species::Laurel => laurel(&mut s, &mut rng),
+            Species::Gorse => gorse(&mut s, &mut rng),
         }
         s.build()
     }
@@ -530,4 +565,215 @@ fn fallen_log(s: &mut Shape, rng: &mut Rng) {
 fn stump(s: &mut Shape, rng: &mut Rng) {
     let h = rng.range(1.0, 2.5);
     s.limb(Vec3::new(0.5, -2.0, 0.5), Vec3::new(0.5, h, 0.5), rng.range(1.0, 1.6), 1.0, mat::BARK_OAK);
+}
+
+// --- Evergreens: trees and shrubs that keep their leaves through the winter. ---
+
+/// A stack of leaf masses up a stem, each as wide as `radius` says for its share of the
+/// way up (0 at the foot of the crown, 1 at its tip) and nudged off the stem a little, so
+/// the crown is one dense body with a lumpy outline rather than a turned shape.
+#[allow(clippy::too_many_arguments)]
+fn column_crown(s: &mut Shape, rng: &mut Rng, foot: Vec3, tip: Vec3, step: f32, wobble: f32, leaves: Voxel, ragged: f32, radius: impl Fn(f32) -> f32) {
+    let n = ((tip.y - foot.y) / step).ceil().max(1.0) as i32;
+    for i in 0..=n {
+        let t = i as f32 / n as f32;
+        let r = radius(t);
+        let off = Vec3::new(rng.range(-wobble, wobble), 0.0, rng.range(-wobble, wobble)) * (1.0 - t);
+        s.blob(foot.lerp(tip, t) + off, Vec3::new(r, step * 1.1, r), leaves, rng.next_u32(), ragged);
+    }
+}
+
+fn holly(s: &mut Shape, rng: &mut Rng) {
+    // An understorey tree: a smooth grey stem lost inside a dense dark crown that comes
+    // nearly to the ground, widest low down and drawn up to a point.
+    let h = rng.range(7.0, 11.5);
+    let lean = rng.range(0.0, 0.8);
+    let top = trunk(s, rng, h * 0.9, 0.5, 0.3, lean, mat::BARK_HOLLY);
+    let skirt = rng.range(1.0, 1.8);
+    let r = rng.range(1.9, 2.7);
+    let foot = Vec3::new(0.5, skirt, 0.5).lerp(top, skirt / h);
+    column_crown(s, rng, foot, top + Vec3::Y * (h * 0.1), 0.9, 0.5, mat::LEAVES_HOLLY, 0.45, |t| {
+        // Quickly out to full width, then a long taper.
+        let rise = (t / 0.22).min(1.0);
+        r * (0.55 + 0.45 * rise) * (1.0 - 0.8 * ((t - 0.22).max(0.0) / 0.78).powf(1.3)) + 0.25
+    });
+    // A bough or two pushing out of the outline low down.
+    for _ in 0..rng.int(1, 3) {
+        let (dir, _) = rng.heading();
+        let at = foot.lerp(top, rng.range(0.1, 0.45));
+        let end = at + dir * (r * rng.range(0.8, 1.1)) + Vec3::Y * rng.range(-0.3, 0.4);
+        s.limb(at, end, 0.34, 0.3, mat::BARK_HOLLY);
+        let b = rng.range(1.0, 1.5);
+        s.blob(end, Vec3::new(b, b * 0.8, b), mat::LEAVES_HOLLY, rng.next_u32(), 0.5);
+    }
+}
+
+fn yew(s: &mut Shape, rng: &mut Rng) {
+    // Old, dark and squat: a short trunk of several fused stems, and a crown broader than
+    // it is tall, in heavy layers that sweep down almost to the ground at their tips.
+    let h = rng.range(7.5, 10.5);
+    let fork = Vec3::new(0.5, h * rng.range(0.3, 0.38), 0.5);
+    let stems = rng.int(2, 4);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    let mut tops = Vec::new();
+    for i in 0..stems {
+        let angle = a0 + i as f32 / stems as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        // The stems stand shoulder to shoulder at the foot, making one fluted bole.
+        let base = Vec3::new(0.5, -3.0, 0.5) + out * 0.7;
+        let top = fork + out * rng.range(1.2, 2.2) + Vec3::Y * rng.range(0.0, 1.5);
+        s.limb(base, top, rng.range(0.85, 1.15), 0.6, mat::BARK_YEW);
+        tops.push((top, out));
+    }
+    // The skirt: long level boughs, each a wide flat mass drooping at the tip.
+    let boughs = rng.int(6, 8);
+    for i in 0..boughs {
+        let angle = a0 + 0.4 + i as f32 / boughs as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let start = fork + Vec3::Y * rng.range(-0.5, 1.0);
+        let len = rng.range(4.4, 6.0);
+        let end = start + out * len - Vec3::Y * rng.range(0.5, 1.6);
+        s.limb(start, end, 0.6, 0.35, mat::BARK_YEW);
+        let r = rng.range(2.8, 3.6);
+        s.blob(start.lerp(end, 0.55) + Vec3::Y * 0.4, Vec3::new(r, 1.1, r), mat::LEAVES_YEW, rng.next_u32(), 0.4);
+        s.blob(end, Vec3::new(r * 0.85, 1.2, r * 0.85), mat::LEAVES_YEW, rng.next_u32(), 0.45);
+    }
+    // Over it, the stems carry on up into a low dome with a flat top, never a point.
+    for (top, out) in tops {
+        let end = top + out * rng.range(1.5, 2.5) + Vec3::Y * rng.range(1.6, 2.6);
+        s.limb(top, end, 0.6, 0.35, mat::BARK_YEW);
+        let r = rng.range(3.0, 4.0);
+        s.blob(end, Vec3::new(r, r * 0.5, r), mat::LEAVES_YEW, rng.next_u32(), 0.4);
+    }
+    let r = rng.range(3.8, 4.8);
+    s.blob(fork + Vec3::Y * (h * 0.36), Vec3::new(r, r * 0.55, r), mat::LEAVES_YEW, rng.next_u32(), 0.4);
+    let r = rng.range(2.6, 3.4);
+    s.blob(Vec3::new(0.5, h - 1.2, 0.5), Vec3::new(r, 1.3, r), mat::LEAVES_YEW, rng.next_u32(), 0.45);
+}
+
+fn holm_oak(s: &mut Shape, rng: &mut Rng) {
+    // The evergreen oak: a short stout trunk under one tight, rounded head of grey-green,
+    // dense to the edge, where the summer oak is a loose gathering of separate masses.
+    let h = rng.range(11.0, 16.0);
+    let r0 = rng.range(0.95, 1.35);
+    let lean = rng.range(0.0, 1.0);
+    let top = trunk(s, rng, h * 0.34, r0, 0.85, lean, mat::BARK_OAK);
+    let r = h * rng.range(0.36, 0.42);
+    let heart = top + Vec3::Y * (r * 0.78);
+    // Heavy limbs rising steeply through the head, which hides all but their feet.
+    let limbs = rng.int(3, 5);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..limbs {
+        let angle = a0 + i as f32 / limbs as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let end = top + out * (r * rng.range(0.5, 0.7)) + Vec3::Y * (r * rng.range(0.6, 1.0));
+        s.limb(top - Vec3::Y * rng.range(0.0, 1.0), end, 0.7, 0.4, mat::BARK_OAK);
+        // The head billows: a smaller dome on the shoulder over each limb.
+        let b = r * rng.range(0.5, 0.62);
+        let at = heart + out * (r * rng.range(0.55, 0.7)) + Vec3::Y * (r * rng.range(-0.3, 0.25));
+        s.blob(at, Vec3::new(b, b * 0.85, b), mat::LEAVES_HOLM, rng.next_u32(), 0.3);
+    }
+    s.blob(heart, Vec3::new(r, r * 0.82, r), mat::LEAVES_HOLM, rng.next_u32(), 0.3);
+}
+
+fn scots_pine(s: &mut Shape, rng: &mut Rng) {
+    // A tall bare trunk, grey and plated below and flaking to orange above, carrying a
+    // flat, open top of a few level plates of needles on crooked limbs.
+    let h = rng.range(19.0, 29.0);
+    let r0 = rng.range(0.85, 1.2);
+    let (lean_dir, _) = rng.heading();
+    let lean = rng.range(0.0, 1.5);
+    let axis = |y: f32| Vec3::new(0.5, y, 0.5) + lean_dir * lean * (y / h).max(0.0).powi(2);
+    let turn = h * rng.range(0.4, 0.52);
+    let r_turn = r0 * 0.78;
+    s.limb(axis(-3.0), axis(turn), r0, r_turn, mat::BARK_PINE);
+    let mut prev = (axis(turn), r_turn);
+    for i in 1..=3 {
+        let y = turn + (h - turn) * i as f32 / 3.0;
+        let r = r_turn + (0.45 - r_turn) * i as f32 / 3.0;
+        s.limb(prev.0, axis(y), prev.1, r, mat::BARK_SCOTS);
+        prev = (axis(y), r);
+    }
+    // The stubs of branches it shaded out on the way up.
+    for _ in 0..rng.int(1, 3) {
+        let (dir, _) = rng.heading();
+        let at = axis(h * rng.range(0.35, 0.6));
+        s.limb(at, at + dir * rng.range(1.2, 2.2) + Vec3::Y * rng.range(0.0, 0.6), 0.36, 0.3, mat::WOOD_DEAD);
+    }
+    let limbs = rng.int(4, 6);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..limbs {
+        let t = 0.64 + 0.3 * i as f32 / (limbs - 1) as f32 + rng.range(-0.02, 0.02);
+        let angle = a0 + i as f32 * 2.4 + rng.range(-0.4, 0.4);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let start = axis(h * t);
+        // Longest low in the crown, each kinked upward at its elbow.
+        let len = rng.range(3.0, 4.6) * (1.2 - 0.55 * (t - 0.64) / 0.3);
+        let elbow = start + out * (len * 0.55) + Vec3::Y * rng.range(0.2, 0.8);
+        let end = elbow + out * (len * 0.45) + Vec3::Y * rng.range(0.8, 1.8);
+        s.limb(start, elbow, 0.5, 0.4, mat::BARK_SCOTS);
+        s.limb(elbow, end, 0.4, 0.32, mat::BARK_SCOTS);
+        let r = rng.range(2.4, 3.2);
+        s.blob(end + Vec3::Y * 0.5, Vec3::new(r, rng.range(0.9, 1.25), r), mat::NEEDLES_PINE, rng.next_u32(), 0.45);
+    }
+    let r = rng.range(3.0, 4.2);
+    s.blob(axis(h) + Vec3::Y * 0.6, Vec3::new(r, 1.4, r), mat::NEEDLES_PINE, rng.next_u32(), 0.45);
+}
+
+fn juniper(s: &mut Shape, rng: &mut Rng) {
+    // A narrow blue-grey flame on open ground, often two or three spires from one root.
+    let spires = if rng.unit() < 0.45 { 1 } else { rng.int(2, 3) };
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..spires {
+        let h = rng.range(4.0, 8.0) * if i == 0 { 1.0 } else { rng.range(0.5, 0.8) };
+        let angle = a0 + i as f32 * 2.3;
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let foot = Vec3::new(0.5, 0.0, 0.5) + out * if i == 0 { 0.0 } else { rng.range(0.9, 1.4) };
+        let tip = foot + Vec3::Y * h + out * rng.range(0.0, 0.5);
+        s.limb(foot - Vec3::Y * 3.0, foot.lerp(tip, 0.6), 0.34, 0.3, mat::BARK_YEW);
+        let r = rng.range(1.1, 1.5) * (0.75 + 0.04 * h);
+        column_crown(s, rng, foot + Vec3::Y * 0.5, tip, 0.8, 0.25, mat::NEEDLES_JUNIPER, 0.3, |t| {
+            r * (0.6 + 0.4 * (t / 0.3).min(1.0)) * (1.0 - 0.85 * ((t - 0.3).max(0.0) / 0.7).powf(1.6)) + 0.2
+        });
+    }
+}
+
+fn holly_bush(s: &mut Shape, rng: &mut Rng) {
+    // A dense dark mound, taller than it is wide.
+    let r = rng.range(1.2, 1.9);
+    let h = r * rng.range(1.25, 1.6);
+    s.limb(Vec3::new(0.5, -1.0, 0.5), Vec3::new(0.5, h, 0.5), 0.32, 0.3, mat::BARK_HOLLY);
+    s.blob(Vec3::new(0.5, h * 0.8, 0.5), Vec3::new(r, h, r), mat::LEAVES_HOLLY, rng.next_u32(), 0.45);
+    if rng.unit() < 0.6 {
+        let (dir, _) = rng.heading();
+        let r2 = r * rng.range(0.55, 0.75);
+        s.blob(Vec3::new(0.5, r2 * 0.8, 0.5) + dir * r * 0.9, Vec3::new(r2, r2 * 1.1, r2), mat::LEAVES_HOLLY, rng.next_u32(), 0.5);
+    }
+}
+
+fn laurel(s: &mut Shape, rng: &mut Rng) {
+    // Broad and low, in glossy overlapping domes: a thicket more than a bush.
+    let r = rng.range(1.8, 2.6);
+    s.blob(Vec3::new(0.5, r * 0.45, 0.5), Vec3::new(r, r * 0.62, r), mat::LEAVES_LAUREL, rng.next_u32(), 0.35);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..rng.int(2, 3) {
+        let angle = a0 + i as f32 * 2.2 + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let r2 = r * rng.range(0.6, 0.85);
+        s.blob(Vec3::new(0.5, r2 * 0.45, 0.5) + out * r * rng.range(0.7, 1.0), Vec3::new(r2, r2 * 0.65, r2), mat::LEAVES_LAUREL, rng.next_u32(), 0.35);
+    }
+}
+
+fn gorse(s: &mut Shape, rng: &mut Rng) {
+    // A ragged thicket of spiny shoots: several small upright masses, open and prickly at
+    // the edge. Its flowers are grown as fine pieces (features::tree_detail), not voxels.
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    let n = rng.int(3, 5);
+    for i in 0..n {
+        let angle = a0 + i as f32 / n as f32 * std::f32::consts::TAU + rng.range(-0.5, 0.5);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin()) * if i == 0 { 0.0 } else { rng.range(0.8, 1.7) };
+        let r = rng.range(0.8, 1.3);
+        let h = r * rng.range(1.0, 1.5);
+        s.blob(Vec3::new(0.5, h * 0.7, 0.5) + out, Vec3::new(r, h, r), mat::GORSE, rng.next_u32(), 0.65);
+    }
 }

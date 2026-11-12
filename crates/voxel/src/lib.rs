@@ -112,7 +112,8 @@ pub mod plant {
     pub const NONE: u8 = 0;
     /// Broadleaf trees: bud in spring, turn in autumn, fall in winter.
     pub const DECIDUOUS: u8 = 1;
-    /// Needles, jungle, palm: green all year, and carry snow.
+    /// Needles, jungle, palm, and the evergreens of temperate woods and heaths (holly,
+    /// yew, gorse, ferns, heather): green all year, and carry snow.
     pub const EVERGREEN: u8 = 2;
     /// Maples: modelled in autumn colours, green until their autumn.
     pub const AUTUMN: u8 = 3;

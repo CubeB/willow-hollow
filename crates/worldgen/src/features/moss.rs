@@ -54,7 +54,7 @@ pub enum Host {
 pub fn host_of(v: Voxel) -> Option<Host> {
     Some(match v {
         mat::GRASS | mat::GRASS_LUSH | mat::GRASS_JUNGLE | mat::GRASS_TAIGA | mat::GRASS_WOODLAND | mat::DIRT | mat::MUD | mat::MOSS => Host::Ground,
-        mat::BARK_OAK | mat::BARK_PINE | mat::BARK_REDWOOD | mat::BARK_JUNGLE | mat::BARK_WILLOW | mat::BARK_BIRCH | mat::WOOD_DEAD => Host::Bark,
+        mat::BARK_OAK | mat::BARK_PINE | mat::BARK_REDWOOD | mat::BARK_JUNGLE | mat::BARK_WILLOW | mat::BARK_BIRCH | mat::WOOD_DEAD | mat::BARK_HOLLY | mat::BARK_YEW => Host::Bark,
         mat::STONE | mat::ROCK_DARK => Host::Rock,
         mat::MOSSY_STONE | mat::SANDSTONE | mat::SANDSTONE_DARK | mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED => Host::Built,
         _ => return None,
