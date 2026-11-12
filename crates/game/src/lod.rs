@@ -121,15 +121,7 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
         Cover::Spring => (mat::MOSSY_STONE, mat::STONE),
-        Cover::Trail => (
-            match col.biome.parent() {
-                Biome::Desert | Biome::Savanna => mat::PATH_SAND,
-                Biome::Alpine | Biome::Tundra | Biome::Ocean => mat::PATH_GRAVEL,
-                Biome::OldGrowth | Biome::Rainforest | Biome::Taiga => mat::PATH_DARK,
-                _ => mat::PATH_DIRT,
-            },
-            mat::DIRT,
-        ),
+        Cover::Trail => (worldgen::trails::tread::far(col), mat::DIRT),
         // Tidal flats: wet sand where barely above the sea, as the voxel world has them.
         Cover::Bank if !col.biome.arid() && worldgen::surface::flat_is_sand(col.ground, 0.5) => (mat::SAND, mat::SAND),
         Cover::Bank | Cover::Land if slope > 0.95 => {

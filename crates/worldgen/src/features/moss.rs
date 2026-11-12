@@ -560,7 +560,7 @@ pub mod tally {
 /// The share of columns of open, dry ground that end up with moss.
 #[cfg(test)]
 fn sunny_ground_coverage(biome: Biome, canopy: u32, cover: Cover, host: Voxel) -> f32 {
-    let col = Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX };
+    let col = Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX, worn: None };
     let cols = vec![col; voxel::PAD * voxel::PAD];
     let mut grown = 0;
     let total = 2000;
@@ -580,7 +580,7 @@ mod tests {
     use crate::{World, continent::SimConfig, features::attach::Voxels, materials::build, world::GameWorld};
 
     fn column(biome: Biome) -> Column {
-        Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX }
+        Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX, worn: None }
     }
 
     /// A chunk column holding the five kinds of place moss should grow on: a trunk under

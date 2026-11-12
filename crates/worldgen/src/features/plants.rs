@@ -547,6 +547,7 @@ mod tests {
             temperature: 0.5,
             river: f32::MAX,
             clear: f32::MAX,
+            worn: None,
         }
     }
 

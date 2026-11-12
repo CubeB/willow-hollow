@@ -2775,7 +2775,7 @@ mod tests {
 
     #[test]
     fn dry_cold_places_get_no_climbers_and_damp_woods_do() {
-        let col = |biome, temp: f32| Column { ground: 40.0, water: None, cover: crate::surface::Cover::Land, biome, temperature: temp, river: f32::MAX, clear: f32::MAX };
+        let col = |biome, temp: f32| Column { ground: 40.0, water: None, cover: crate::surface::Cover::Land, biome, temperature: temp, river: f32::MAX, clear: f32::MAX, worn: None };
         assert_eq!(place_chance(&col(Biome::Desert, 0.8)), 0.0);
         assert_eq!(place_chance(&col(Biome::Deciduous, 0.1)), 0.0);
         assert!(place_chance(&col(Biome::Rainforest, 0.8)) > place_chance(&col(Biome::Heath, 0.5)));

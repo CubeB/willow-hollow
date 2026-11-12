@@ -274,6 +274,12 @@ palette! {
     TURF              = (108, 134,  74), Solid, 2;
     BRACKEN           = ( 96, 138,  58), Foliage, 2;
     BRACKEN_DEAD      = (150,  86,  48), Foliage, 2;
+    // Paths worn into particular ground (world::trail_surface): leaf litter trodden into
+    // the earth of a broadleaf wood, the rust of fallen needles under conifers, and snow
+    // packed and dirtied by feet.
+    PATH_LITTER       = (120,  92,  64), Solid, 3;
+    PATH_NEEDLES      = (102,  80,  62), Solid, 3;
+    PATH_SNOW         = (198, 196, 192), Solid, 2;
 }
 
 /// Thickness of one rock layer, in voxels.

@@ -313,6 +313,11 @@ fn print_trail_stats(c: &Continent) {
         *kinds.entry(format!("{:?}", x.kind)).or_insert(0) += 1;
     }
     println!("  trails: {}   crossings: {kinds:?}", classes.join(", "));
+    let mut markers = std::collections::BTreeMap::new();
+    for (kind, _) in &c.trails.markers {
+        *markers.entry(format!("{kind:?}")).or_insert(0) += 1;
+    }
+    println!("  beside the trails: {markers:?}, lanterns {}", c.trails.lanterns.len());
 }
 
 /// Smallest discharge drawn as a stream.
@@ -365,6 +370,51 @@ fn print_stats(c: &Continent) {
         streams as f32 / land.len() as f32 * 100.0,
         Continent::river_width(max_q),
     );
+}
+
+/// Points along the trails every 200 m or so, with what the trail is like there: its
+/// class, the biome, the ground under it and how steeply it climbs, for finding views of
+/// paths of every kind.
+fn print_trail_poi(c: &Continent, seed: u32) {
+    use worldgen::{surface::Sampler, trails::build::class_of};
+    let local = |x: f32, z: f32| (c.desc.mx * MACRO_SIZE + x as i32, c.desc.mz * MACRO_SIZE + z as i32);
+    let column = |x: f32, z: f32| Sampler::new(c, seed, x as i32, z as i32, 1).column(x as i32, z as i32);
+    for (kind, at) in &c.trails.markers {
+        let (x, z) = local(at.x as f32, at.z as f32);
+        // A place to look at it from: on its trail, a few metres back along it.
+        let (mx, mz) = (at.x as f32 + 0.5, at.z as f32 + 0.5);
+        let mut best = (f32::MAX, 0, 0);
+        for (n, line) in c.trails.lines.iter().enumerate() {
+            for (k, p) in line.iter().enumerate() {
+                let d = (p.x - mx).hypot(p.y - mz);
+                if d < best.0 {
+                    best = (d, n, k);
+                }
+            }
+        }
+        let line = &c.trails.lines[best.1];
+        let back = line[best.2.saturating_sub(1)];
+        let (vx, vz) = local(back.x, back.y);
+        let yaw = (mz - back.y).atan2(mx - back.x).to_degrees();
+        println!("  poi marker     {x},{z}  {kind:?}  view {vx},{vz} yaw {yaw:.0}");
+    }
+    for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
+        for k in (4..line.len().saturating_sub(4)).step_by(32) {
+            let (a, b) = (column(line[k - 1].x, line[k - 1].y), column(line[k + 1].x, line[k + 1].y));
+            let col = column(line[k].x, line[k].y);
+            let grade = (b.ground - a.ground).abs() / (line[k + 1] - line[k - 1]).length();
+            let d = line[k + 1] - line[k - 1];
+            let (x, z) = local(line[k].x, line[k].y);
+            println!(
+                "  poi trail      {x},{z}  {:?} {:?} {:?} under {:?}, grade {grade:.2}, heading {:.0}",
+                class_of(widths[k]),
+                col.biome,
+                col.cover,
+                col.worn.map(|w| w.under),
+                d.y.atan2(d.x).to_degrees()
+            );
+        }
+    }
 }
 
 /// Lists places worth looking at, with world voxel coordinates for `game --over`.
@@ -640,6 +690,7 @@ fn main() -> Result<()> {
     print_stats(&c);
     if o.poi {
         print_poi(&c);
+        print_trail_poi(&c, o.seed);
     }
 
     std::fs::create_dir_all(&o.out)?;

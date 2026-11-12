@@ -328,7 +328,7 @@ mod tests {
     use crate::surface::Cover;
 
     fn flat(_: i32, _: i32) -> Column {
-        Column { ground: 40.0, water: None, cover: Cover::Land, biome: Biome::Moor, temperature: 0.35, river: f32::MAX, clear: f32::MAX }
+        Column { ground: 40.0, water: None, cover: Cover::Land, biome: Biome::Moor, temperature: 0.35, river: f32::MAX, clear: f32::MAX, worn: None }
     }
 
     #[test]
