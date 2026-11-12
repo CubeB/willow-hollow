@@ -456,6 +456,8 @@ struct Running {
     walking: bool,
     player: Player,
     voxels: WorldVoxels,
+    /// How shut in by rock the eye has grown used to being (`player::enclosure`).
+    shut_in: f32,
     fly: FlyController,
     keys: HashSet<KeyCode>,
     /// Whether the mouse is currently captured for looking around.
@@ -556,6 +558,7 @@ impl Running {
             walking: !flying,
             player,
             voxels: WorldVoxels::new(world.clone()),
+            shut_in: 0.0,
             far: FarView::new(&gpu, world.clone()),
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
@@ -912,6 +915,12 @@ impl Running {
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
+        // The eye takes a couple of seconds to open up in the dark, and less to close
+        // again in the light.
+        let shut_in = player::enclosure(self.camera.pos, &mut self.voxels.lazily());
+        let rate = if shut_in > self.shut_in { 0.6 } else { 2.0 };
+        self.shut_in += (shut_in - self.shut_in) * (1.0 - (-rate * dt).exp());
+        lit.adapt(self.shut_in);
         lit.mist_floor = self.mist_floor.unwrap_or(self.camera.pos.y as f32 - m(12.0));
         let ground = self.weather.places(self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         let scene = render::Scene {
@@ -1258,6 +1267,7 @@ fn main() -> Result<()> {
         let warmth = season::warmth(biome);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
+        env.adapt(player::enclosure(camera.pos, &mut voxels));
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
         let springs: Vec<_> = streamer.springs_near(camera.pos, m(40.0)).copied().collect();
         let surf: Vec<_> = streamer.surf_near(camera.pos, m(60.0)).copied().collect();

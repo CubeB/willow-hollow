@@ -27,6 +27,41 @@ pub trait Voxels {
     }
 }
 
+/// How far the rays of [`enclosure`] reach.
+const ENCLOSED_REACH: f64 = m64(14.0);
+
+/// How shut in by solid ground a point is: 0 in the open, 1 with rock overhead and all
+/// round, as deep in a cave. Rays go straight up, steeply up and nearly level, and those
+/// that climb count for most, and nowhere under open sky is more than half shut in, so
+/// standing in a ravine or against a cliff is still open. Leaves do not count: a wood is not a cave.
+pub fn enclosure(pos: DVec3, v: &mut impl Voxels) -> f32 {
+    let mut rays = vec![(DVec3::Y, 3.0f32)];
+    for i in 0..6 {
+        // 50 degrees up, and 15, turned half a step from one another.
+        let a = i as f64 * std::f64::consts::TAU / 6.0;
+        rays.push((DVec3::new(a.cos() * 0.643, 0.766, a.sin() * 0.643), 1.5));
+        let b = a + std::f64::consts::TAU / 12.0;
+        rays.push((DVec3::new(b.cos() * 0.966, 0.259, b.sin() * 0.966), 0.5));
+    }
+    let (mut shut, mut all, mut roofed) = (0.0, 0.0, false);
+    for (dir, weight) in rays {
+        all += weight;
+        let mut t = 1.0;
+        while t < ENCLOSED_REACH {
+            let p = (pos + dir * t).floor().as_ivec3();
+            if v.kind(p.x, p.y, p.z) == Kind::Solid {
+                shut += weight;
+                roofed |= dir == DVec3::Y;
+                break;
+            }
+            t += 1.0;
+        }
+    }
+    // With open sky straight overhead the place is lit from above, however close the
+    // walls stand.
+    shut / all * if roofed { 1.0 } else { 0.5 }
+}
+
 /// Character size.
 pub const HEIGHT: f64 = m64(1.76);
 pub const EYE_HEIGHT: f64 = m64(1.52);
@@ -675,6 +710,24 @@ mod tests {
             wish: Vec3::X,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn only_a_roof_shuts_the_sky_out() {
+        let eye = DVec3::new(0.5, 12.0, 0.5);
+        // Open ground.
+        let mut open = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Air });
+        assert_eq!(enclosure(eye, &mut open), 0.0);
+        // A tunnel five voxels wide and high, running along x.
+        let mut tunnel = Fake(|_, y: i32, z: i32| if (10..15).contains(&y) && z.abs() <= 2 { Kind::Air } else { Kind::Solid });
+        assert!(enclosure(eye, &mut tunnel) > 0.95);
+        // The same slot with no roof: a ravine, lit from above.
+        let mut ravine = Fake(|_, y: i32, z: i32| if y >= 10 && z.abs() <= 2 { Kind::Air } else { Kind::Solid });
+        let e = enclosure(eye, &mut ravine);
+        assert!(e > 0.0 && e <= 0.5, "{e}");
+        // Under a canopy of leaves.
+        let mut wood = Fake(|_, y, _| if y < 10 { Kind::Solid } else if y > 20 { Kind::Foliage } else { Kind::Air });
+        assert_eq!(enclosure(eye, &mut wood), 0.0);
     }
 
     #[test]
