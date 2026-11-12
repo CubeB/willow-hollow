@@ -40,7 +40,7 @@ Here's the same world from above: the biomes of the starting continent, and the 
 
 ## Playing it
 
-You need stable Rust (edition 2024), plus the MSVC build tools on Windows. There's nothing to download beyond that, because the game has no asset files. So far it has only been run on Windows.
+You need stable Rust (edition 2024), plus the MSVC build tools on Windows. There's nothing to download beyond that, because the game has no asset files. So far it has only been run on Windows. To work on the game rather than just play it, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ```sh
 cargo run --release -p game               # start on a river bank
