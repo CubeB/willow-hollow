@@ -26,9 +26,17 @@ const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Light shafts: how much lit air lies along the view, and the depth it was found for.
 const SHAFTS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 const SHADOW_SIZE: u32 = 2048;
-/// How far the sun moves (as a change in its direction) before the shadow maps follow
-/// it: a 20 m tree's shadow then steps about 4 cm.
+/// How far a low sun moves (as a change in its direction) before the shadow maps follow
+/// it: a 20 m tree's shadow then steps about 4 cm. A higher sun is followed every frame
+/// (see `Renderer::cascade_matrix`).
 const SHADOW_SUN_STEP: f32 = 0.002;
+/// The sun height below which the shadow maps are laid square to the sun rather than
+/// over the ground, where they would be drawn out too long.
+const LOW_SUN: f32 = 0.2;
+/// The level the shadow maps are laid over comes in steps of this, and follows the low
+/// ground near the camera once that is further than `GROUND_SLACK` from it.
+const GROUND_STEP: f32 = m(16.0);
+const GROUND_SLACK: f32 = m(12.0);
 const CASCADES: usize = 3;
 /// View-depth at which each shadow cascade ends.
 const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
@@ -88,7 +96,10 @@ const _: () = assert!(worldgen::biome::Biome::ALL.len() <= SNOW_SLOTS);
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Shadows {
     light_vp: [[[f32; 4]; 4]; CASCADES],
+    /// How wide each cascade's texels are as the sun sees them, in voxels.
     texel: [f32; 4],
+    /// How far along the sun's rays each cascade's depth runs, in voxels.
+    span: [f32; 4],
 }
 
 #[repr(C)]
@@ -104,6 +115,7 @@ struct CascadeView {
     /// Camera-relative, for the camera as it was then.
     light_vp: Mat4,
     texel: f32,
+    span: f32,
     camera: DVec3,
     fwd: Vec3,
 }
@@ -336,6 +348,8 @@ pub struct Renderer {
     /// the maps' texels are fixed in the world only while it holds still, and a sun
     /// that crept every frame would set every shadow's edge crawling.
     shadow_sun: Vec3,
+    /// The level the shadow maps are laid over, in voxels above sea level.
+    shadow_ground: Option<f32>,
     frame: u64,
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
@@ -1146,6 +1160,7 @@ impl Renderer {
             multi_draw: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             cascade_views: [None; CASCADES],
             shadow_sun: Vec3::ZERO,
+            shadow_ground: None,
             frame: 0,
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
@@ -1220,9 +1235,10 @@ impl Renderer {
         self.shafts_bind = Self::shafts_bind_group(device, &self.shafts_layout, &self.depth.view, &self.shafts.view);
     }
 
-    /// Light view-projection for one cascade, in camera-relative space, and its texel
-    /// size in voxels.
-    fn cascade_matrix(camera: &Camera, aspect: f32, sun: Vec3, near: f32, far: f32) -> (Mat4, f32) {
+    /// Light view-projection for one cascade, in camera-relative space, the width of its
+    /// texels as the sun sees them and the depth it spans, both in voxels. `ground` is
+    /// the level to lay the map over, in voxels above sea level.
+    fn cascade_matrix(camera: &Camera, aspect: f32, sun: Vec3, near: f32, far: f32, ground: f32) -> (Mat4, f32, f32) {
         // Bounding sphere of this slice of the view frustum.
         let fwd = camera.forward();
         let right = camera.right();
@@ -1241,6 +1257,45 @@ impl Renderer {
         let center = fwd * ((near + far) * 0.5);
         let radius = corners.iter().map(|c| (*c - center).length()).fold(0.0, f32::max) * 1.05;
         let texel = 2.0 * radius / SHADOW_SIZE as f32;
+        // Casters well outside the slice (tall trees, hills toward the sun) still count.
+        let reach = radius + m(320.0);
+        // Depth 0..1 over [0, 2 * reach] along the sun's rays, toward the ground.
+        let depth_range = reach * 2.0;
+
+        if sun.y >= LOW_SUN {
+            // The map is laid over the ground, not square to the sun: a point is drawn
+            // where the sun's ray through it meets a level plane, at that spot's own
+            // world x and z. Texels are then squares of ground that never move, whatever
+            // the sun does, so the sun can be followed every frame and a shadow glides
+            // across them as it does across the ground. A map square to the sun turns
+            // with it, and every turn slid all its texels to new places at once: every
+            // shadow's edge twitched each time the maps caught up with the sun.
+            let lean = Vec2::new(sun.x, sun.z) / sun.y;
+            let level = (ground as f64 - camera.pos.y) as f32;
+            // The slice's sphere, thrown onto the ground along the sun's rays, is longer
+            // the lower the sun. The map grows to hold it in steps of a fifth, since each
+            // change of size moves the texels.
+            let grown = |lean: f32| 2f32.powf(((1.0 + lean * lean).sqrt().log2() * 4.0 - 0.001).ceil() / 4.0);
+            let half = Vec2::new(grown(lean.x), grown(lean.y)) * radius;
+            let cell = half * 2.0 / SHADOW_SIZE as f32;
+            let snap = |at: f32, camera_at: f64, cell: f32| (((camera_at + at as f64) / cell as f64).floor() * cell as f64 - camera_at) as f32;
+            let mid = Vec2::new(center.x, center.z) - lean * (center.y - level);
+            let mid = Vec2::new(snap(mid.x, camera.pos.x, cell.x), snap(mid.y, camera.pos.z, cell.y));
+            let matrix = Mat4::from_cols(
+                Vec4::new(1.0 / half.x, 0.0, -sun.x / depth_range, 0.0),
+                Vec4::new(-lean.x / half.x, -lean.y / half.y, -sun.y / depth_range, 0.0),
+                Vec4::new(0.0, 1.0 / half.y, -sun.z / depth_range, 0.0),
+                Vec4::new(
+                    (lean.x * level - mid.x) / half.x,
+                    (lean.y * level - mid.y) / half.y,
+                    (reach + center.dot(sun)) / depth_range,
+                    1.0,
+                ),
+            );
+            // A texel of ground is narrower seen from the sun, the more along its rays it lies.
+            let seen = (cell.x * (1.0 - sun.x * sun.x).sqrt()).max(cell.y * (1.0 - sun.z * sun.z).sqrt());
+            return (matrix, seen, depth_range);
+        }
 
         // Light view looking along the sun direction; snap the centre to texels so
         // the map does not shimmer as the camera moves. The texels are fixed in the
@@ -1255,8 +1310,6 @@ impl Renderer {
             ((at / texel as f64).floor() * texel as f64 - camera_at) as f32
         };
         let snapped = s * snap(s) + u * snap(u) + sun * center.dot(sun);
-        // Casters well outside the slice (tall trees, hills toward the sun) still count.
-        let reach = radius + m(320.0);
         let eye = snapped + sun * reach;
         let view = Mat4::from_cols(
             Vec4::new(s.x, u.x, sun.x, 0.0),
@@ -1264,15 +1317,13 @@ impl Renderer {
             Vec4::new(s.z, u.z, sun.z, 0.0),
             Vec4::new(-eye.dot(s), -eye.dot(u), -eye.dot(sun), 1.0),
         );
-        // Orthographic, depth 0..1 over [0, 2 * reach] along -z (toward the ground).
-        let depth_range = reach * 2.0;
         let proj = Mat4::from_cols(
             Vec4::new(1.0 / radius, 0.0, 0.0, 0.0),
             Vec4::new(0.0, 1.0 / radius, 0.0, 0.0),
             Vec4::new(0.0, 0.0, -1.0 / depth_range, 0.0),
             Vec4::new(0.0, 0.0, 0.0, 1.0),
         );
-        (proj * view, texel)
+        (proj * view, texel, depth_range)
     }
 
     /// Renders the scene and writes the tonemapped image to `target`.
@@ -1311,15 +1362,23 @@ impl Renderer {
         let mut light_vp = [[[0.0; 4]; 4]; CASCADES];
         let mut light = Vec::with_capacity(CASCADES);
         let mut texels = [0.0; 4];
+        let mut spans = [0.0; 4];
         let mut fresh = [false; CASCADES];
         let mut near = 0.1;
         let frame = self.frame;
         self.frame += 1;
-        if self.shadow_sun.distance(env.sun_dir) > SHADOW_SUN_STEP {
+        // A low sun's maps are square to it, and follow it in steps: their texels are
+        // fixed in the world only while it holds still.
+        if env.sun_dir.y >= LOW_SUN || self.shadow_sun.distance(env.sun_dir) > SHADOW_SUN_STEP {
             self.shadow_sun = env.sun_dir;
         }
+        let ground = match self.shadow_ground {
+            Some(g) if (g - env.mist_floor).abs() <= GROUND_SLACK => g,
+            _ => (env.mist_floor / GROUND_STEP).round() * GROUND_STEP,
+        };
+        self.shadow_ground = Some(ground);
         for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
-            let (m, texel) = Self::cascade_matrix(camera, aspect, self.shadow_sun, near, far_end);
+            let (m, texel, span) = Self::cascade_matrix(camera, aspect, self.shadow_sun, near, far_end, ground);
             light.push(Frustum::new(m));
             near = far_end;
             fresh[i] = self.cascade_views[i].is_none_or(|v| {
@@ -1329,6 +1388,7 @@ impl Renderer {
                 self.cascade_views[i] = Some(CascadeView {
                     light_vp: m,
                     texel,
+                    span,
                     camera: camera.pos,
                     fwd,
                 });
@@ -1344,9 +1404,10 @@ impl Renderer {
             let moved = (camera.pos - view.camera).as_vec3();
             light_vp[i] = (view.light_vp * Mat4::from_translation(moved)).to_cols_array_2d();
             texels[i] = view.texel;
+            spans[i] = view.span;
         }
         gpu.queue
-            .write_buffer(&self.shadows, 0, bytemuck::bytes_of(&Shadows { light_vp, texel: texels }));
+            .write_buffer(&self.shadows, 0, bytemuck::bytes_of(&Shadows { light_vp, texel: texels, span: spans }));
 
         let cam_wrapped = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
         let globals = Globals {

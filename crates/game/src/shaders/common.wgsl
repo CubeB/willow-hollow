@@ -49,8 +49,10 @@ struct Globals {
 
 struct Shadows {
     light_vp: array<mat4x4<f32>, 3>,
-    // Shadow-map texel size in voxels for each cascade.
+    // For each cascade, how wide its texels are as the sun sees them, and how far along
+    // the sun's rays its depth runs, both in voxels (see Renderer::cascade_matrix).
     texel: vec4<f32>,
+    span: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> G: Globals;
@@ -274,8 +276,7 @@ fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) {
         return vec2<f32>(1.0, 0.0);
     }
-    // The depth the map spans, in voxels (see Renderer::cascade_matrix).
-    let span = texel * SHADOW_SIZE + 640.0 * VOXELS_PER_METRE;
+    let span = S.span[c];
     // A shadow is sharp where it meets what casts it and spreads with distance from it:
     // a trunk's is crisp at its foot, a high canopy's is soft. So look for what stands
     // between this point and the sun, and how far off it is.
