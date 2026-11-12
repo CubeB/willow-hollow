@@ -36,6 +36,12 @@ struct VOut {
     // 1 at the lip of a fall; on the falling sheet, how far below the surface it fell
     // from, in voxels of its chunk's mesh.
     @location(13) spill: vec2<f32>,
+    // Where this point is with no wind: `rel` before leaf_sway. The shadow maps draw every
+    // leaf and plant standing still, so shadows are looked up here. It is passed down
+    // rather than worked out again per pixel, because only the vertex shader knows which
+    // corners sway (a grass blade's foot stays put while its tip moves) and the chunk's
+    // origin in voxels, so any per-pixel guess slid in and out of its own shadow.
+    @location(14) still: vec3<f32>,
 };
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
@@ -114,6 +120,7 @@ fn vs(in: VIn) -> VOut {
     out.grid1 = in.grid1;
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
+    out.still = rel;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
         rel += leaf_sway(in.origin, local, in.scale);
     }
@@ -217,10 +224,7 @@ fn shade(in: VOut) -> vec4<f32> {
     var direct = vec3<f32>(0.0);
     // The shadow maps are drawn with every leaf where it grows, not where the wind has
     // it: a leaf looked up where it sways to would slide in and out of its own shadow.
-    var still = in.rel;
-    if (foliage) {
-        still -= leaf_sway(in.origin, in.local, in.scale);
-    }
+    let still = in.still;
     if (ndl > 0.0) {
         direct = G.sun_color.rgb * ndl * sun_reaching(still, n, beyond) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
     } else if (foliage && G.sun_color.w > 0.5) {
@@ -327,6 +331,7 @@ fn vs_water(in: VIn) -> VOut {
     // Water surfaces sit a little below the top of their voxel, and falls start there.
     rel.y -= 0.125;
     out.rel = rel;
+    out.still = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
