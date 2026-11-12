@@ -18,7 +18,9 @@ struct VIn {
     // a: how far standing water rises above the ground, 128/255 at the shore.
     @location(4) far: vec4<f32>,
     // x: the biome, for the snow lying there. y: the plant kind of its forest's canopy
-    // (voxel::plant), 0 with none. zw: its skylines toward sunrise and sunset.
+    // (voxel::plant) in its low three bits, 0 with none, and above them how much of the
+    // forest keeps its leaves in winter, in 31sts. zw: its skylines toward sunrise and
+    // sunset.
     @location(5) place: vec4<u32>,
 };
 
@@ -33,7 +35,7 @@ struct VOut {
     @location(5) wet: f32,
     // The ground here: its biome's row of G.snow.
     @location(6) snow: vec4<f32>,
-    // The plant kind of the canopy (voxel::plant), 0 with none.
+    // The plant kind of the canopy and the share of it that is evergreen, as in `place.y`.
     @location(7) @interpolate(flat) plant: u32,
     // The skylines toward sunrise and sunset (see skyline_light).
     @location(8) skylines: vec2<f32>,
@@ -128,13 +130,17 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // While the tree models stand on it, the ground is seen between them; out beyond,
         // the forest they drew is seen as its canopy, over the same reach the surface
         // rises to the canopy's height.
-        var base = season_far_ground(in.color, false, world, G.season.x);
+        var base = season_far_ground(in.color, false, 0.0, world, G.season.x);
         let canopy = smoothstep(G.cam_wrapped.w * 0.85, G.cam_wrapped.w, length(in.rel.xz));
         if (canopy > 0.0) {
             // A canopy of palms or needles keeps its leaves, whatever its colour says.
-            let evergreen = in.plant != 0u && in.plant != PLANT_DECIDUOUS && in.plant != PLANT_AUTUMN;
+            let plant = in.plant & 7u;
+            let evergreen = plant != 0u && plant != PLANT_DECIDUOUS && plant != PLANT_AUTUMN;
             let forest = in.kind > 0.002 && !evergreen;
-            base = mix(base, select(season_far_ground(in.far, forest, world, G.season.x), in.far, evergreen), canopy);
+            // The hollies, yews and pines among a broadleaf forest's trees keep it partly
+            // green when the rest is bare.
+            let keeps = f32(in.plant >> 3u) / 31.0;
+            base = mix(base, select(season_far_ground(in.far, forest, keeps, world, G.season.x), in.far, evergreen), canopy);
         }
         base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0, in.snow);
         color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));

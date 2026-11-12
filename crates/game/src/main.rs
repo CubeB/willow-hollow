@@ -265,7 +265,8 @@ const BOARD_REACH: f64 = m64(4.8);
 type Spots = Vec<(DVec3, [f32; 3])>;
 type Leaves = Vec<particles::LeafSite>;
 
-/// Which shape of leaf a tree's foliage sheds; plants and vines shed none.
+/// Which shape of leaf a tree's foliage sheds; plants and vines shed none, and nor do
+/// holly, yew and the other winter evergreens, which are left out here.
 fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
     use particles::LeafShape::*;
     use worldgen::materials as mat;

@@ -28,7 +28,15 @@ use worldgen::{
 pub fn stands_tall(species: Species) -> bool {
     !matches!(
         species,
-        Species::Bush | Species::Fern | Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump
+        Species::Bush
+            | Species::Fern
+            | Species::Boulder
+            | Species::MossyBoulder
+            | Species::FallenLog
+            | Species::Stump
+            | Species::HollyBush
+            | Species::Laurel
+            | Species::Gorse
     )
 }
 
