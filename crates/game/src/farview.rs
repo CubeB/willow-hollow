@@ -605,14 +605,13 @@ fn land_y(h: f32) -> f32 {
     (h - SINK).max(h.min(SEA_LEVEL + 0.2))
 }
 
-/// Each grid cell of `c` as a map shows it, sRGB: the far view's land seen from above
-/// (forests as their canopy), lakes, the sea and the rivers it draws as ribbons.
-pub fn map_colors(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
+/// The colour of each grid cell of `c` on a map (sRGB): the land as the far surface has
+/// it, its forests seen as a canopy, under its lakes and rivers too; the sea plain.
+pub fn map_land(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
     let canopies = canopies(world);
     let mats = world.materials();
     let size = c.size;
     let cs = c.cell_size();
-    let water = mats.get(mat::WATER).color.map(f32::from);
     let sea = [32.0, 78.0, 128.0];
     (0..size * size)
         .map(|i| {
@@ -620,15 +619,17 @@ pub fn map_colors(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
             if c.ocean[i] {
                 return sea;
             }
-            if ribbon_at(c, i) || wetness(c, x, z, 1).1 > 0.0 {
-                return water;
-            }
             let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
             let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
             let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
             look(c, mats, &canopies, i, gx.hypot(gz)).far
         })
         .collect()
+}
+
+/// Whether the far surface floods grid cell `(x, z)` with a lake.
+pub fn lake_at(c: &Continent, x: usize, z: usize) -> bool {
+    wetness(c, x, z, 1).1 > 0.0
 }
 
 /// Whether grid cell `i` carries a river drawn as a ribbon.

@@ -87,7 +87,10 @@ pub fn settings_menu(ctx: &egui::Context, s: &mut Settings, held: Option<i32>, w
                 ui.end_row();
 
                 ui.label("");
-                ui.checkbox(&mut s.shafts, "Light shafts");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.shafts, "Light shafts");
+                    ui.checkbox(&mut s.minimap, "Map in the corner");
+                });
                 ui.end_row();
             });
             ui.add_space(8.0);
@@ -142,46 +145,100 @@ impl Overlay {
         let input = self.state.take_egui_input(window);
         self.ctx.begin_pass(input);
         build(&self.ctx);
-        let out = self.ctx.end_pass();
-        let mut textures = out.textures_delta;
-        self.state.handle_platform_output(window, out.platform_output);
+        let mut out = self.ctx.end_pass();
+        self.state.handle_platform_output(window, std::mem::take(&mut out.platform_output));
+        paint(&self.ctx, &mut self.renderer, gpu, encoder, target, size, out);
+    }
+}
 
-        let prims = self.ctx.tessellate(out.shapes, out.pixels_per_point);
-        let screen = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: size,
-            pixels_per_point: out.pixels_per_point,
-        };
-        for (id, deltas) in textures.set.drain() {
-            for delta in &deltas {
-                self.renderer
-                    .update_texture(&gpu.device, &gpu.queue, id, delta);
-            }
-        }
-        self.renderer
-            .update_buffers(&gpu.device, &gpu.queue, encoder, &prims, &screen);
-        {
-            let mut pass = encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("overlay"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                })
-                .forget_lifetime();
-            self.renderer.render(&mut pass, &prims, &screen);
-        }
-        for id in textures.free.drain() {
-            self.renderer.free_texture(&id);
+/// Hands what egui drew to the GPU, over `target`.
+fn paint(
+    ctx: &egui::Context,
+    renderer: &mut egui_wgpu::Renderer,
+    gpu: &Gpu,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    size: [u32; 2],
+    out: egui::FullOutput,
+) {
+    let mut textures = out.textures_delta;
+    let prims = ctx.tessellate(out.shapes, out.pixels_per_point);
+    let screen = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: size,
+        pixels_per_point: out.pixels_per_point,
+    };
+    for (id, deltas) in textures.set.drain() {
+        for delta in &deltas {
+            renderer.update_texture(&gpu.device, &gpu.queue, id, delta);
         }
     }
+    renderer.update_buffers(&gpu.device, &gpu.queue, encoder, &prims, &screen);
+    {
+        let mut pass = encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            })
+            .forget_lifetime();
+        renderer.render(&mut pass, &prims, &screen);
+    }
+    for id in textures.free.drain() {
+        renderer.free_texture(&id);
+    }
+}
+
+/// Draws the map's names, given in pixels, with a soft halo so they read on any ground.
+pub fn map_labels(ctx: &egui::Context, labels: &[crate::minimap::Label]) {
+    let ppp = ctx.pixels_per_point();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("map labels")));
+    for l in labels {
+        let [r, g, b, a] = l.color;
+        let dark = (r as u32 + g as u32 + b as u32) < 384;
+        let halo = if dark {
+            egui::Color32::from_rgba_unmultiplied(246, 242, 232, 140)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(20, 20, 22, 140)
+        };
+        let font = egui::FontId::proportional(l.size / ppp);
+        let at = egui::pos2(l.pos[0] / ppp, l.pos[1] / ppp);
+        let align = if l.left { egui::Align2::LEFT_CENTER } else { egui::Align2::CENTER_CENTER };
+        let step = 1.0 / ppp;
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            painter.text(at + egui::vec2(dx * step, dy * step), align, &l.text, font.clone(), halo);
+        }
+        painter.text(at, align, &l.text, font, egui::Color32::from_rgba_unmultiplied(r, g, b, a));
+    }
+}
+
+/// Draws egui over a frame without a window, for screenshots.
+pub fn draw_headless(
+    gpu: &Gpu,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    format: wgpu::TextureFormat,
+    size: (u32, u32),
+    build: impl FnOnce(&egui::Context),
+) {
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32))),
+        ..Default::default()
+    };
+    ctx.begin_pass(input);
+    build(&ctx);
+    let out = ctx.end_pass();
+    let mut renderer = egui_wgpu::Renderer::new(&gpu.device, format, Default::default());
+    paint(&ctx, &mut renderer, gpu, encoder, target, [size.0, size.1], out);
 }

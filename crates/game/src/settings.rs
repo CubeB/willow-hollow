@@ -43,6 +43,8 @@ pub struct Settings {
     /// Window size in pixels, once it is anything but the default.
     pub window: Option<(u32, u32)>,
     pub show_debug: bool,
+    /// The small map in the corner of the screen.
+    pub minimap: bool,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             shafts: true,
             window: None,
             show_debug: true,
+            minimap: true,
         }
     }
 }
@@ -81,6 +84,7 @@ impl Settings {
             let _ = writeln!(t, "window = {w}x{h}");
         }
         let _ = writeln!(t, "show_debug = {}", self.show_debug);
+        let _ = writeln!(t, "minimap = {}", self.minimap);
         t
     }
 
@@ -102,6 +106,7 @@ impl Settings {
             shafts: f.get("shafts").unwrap_or(d.shafts),
             window: f.size("window"),
             show_debug: f.get("show_debug").unwrap_or(d.show_debug),
+            minimap: f.get("minimap").unwrap_or(d.minimap),
         }
     }
 }
@@ -269,6 +274,11 @@ impl Store {
         self.report(write_whole(&self.dir, &path, &progress.to_text()))
     }
 
+    /// Where the map of what has been seen of each world is kept.
+    pub fn map_dir(&self, seed: u32) -> PathBuf {
+        self.dir.join(format!("map-{seed}"))
+    }
+
     /// Each world has its own save, so trying another seed doesn't lose your place.
     fn progress_path(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("world-{seed}.txt"))
@@ -323,6 +333,7 @@ mod tests {
             shafts: false,
             window: Some((1920, 1080)),
             show_debug: false,
+            minimap: false,
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);
         assert_eq!(Settings::from_text(&Settings::default().to_text()), Settings::default());
