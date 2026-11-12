@@ -31,6 +31,7 @@ fn the_word_lists_are_complete() {
         PlaceKind::Falls,
         PlaceKind::Hamlet,
         PlaceKind::Town,
+        PlaceKind::Tor,
     ]);
     for k in kinds {
         assert!(w.kinds.get(k.key()).is_some_and(|k| !k.pattern.is_empty()), "no patterns for {}", k.key());

@@ -41,6 +41,8 @@ pub struct GameWorld {
     caves: features::cave::Cache,
     /// Trees and other features placed lately.
     placed: features::PlaceCache,
+    /// The moor's tors and stonework laid out lately, by world cell.
+    tors: features::tor::Cache,
 }
 
 impl GameWorld {
@@ -58,6 +60,7 @@ impl GameWorld {
             climbers: Default::default(),
             caves: Default::default(),
             placed: Default::default(),
+            tors: Default::default(),
         }
     }
 
@@ -67,6 +70,12 @@ impl GameWorld {
 
     pub fn library(&self) -> &Library {
         self.library.get_or_init(Library::build)
+    }
+
+    /// The tors and moor stonework of continent `c` that reach the world square from
+    /// `(x0, z0)`, `span` voxels wide.
+    pub fn tors_near(&self, c: &Continent, x0: i32, z0: i32, span: i32) -> Vec<Arc<features::tor::Tor>> {
+        self.tors.near(self.seed, c, x0, z0, span)
     }
 
     /// The simulated macro-cell `(mx, mz)`, generating it if needed (about 3 seconds).
@@ -425,6 +434,24 @@ impl GameWorld {
             }
         }
 
+        // Tors and the moor's old stonework: nothing grows under their rock, and short
+        // turf grows at their feet.
+        let tors = self.tors.near(self.seed, &continent, wx0, wz0, PAD as i32);
+        let mut rock = Vec::new();
+        for t in &tors {
+            t.raster(wx0, wz0, PAD as i32, |q, v| rock.push((q, v)));
+        }
+        // The columns with rock standing just above their ground.
+        let mut rocky = vec![false; if rock.is_empty() { 0 } else { PAD * PAD }];
+        for &(q, v) in &rock {
+            lo = lo.min(q.y);
+            hi = hi.max(q.y);
+            let i = (q.x - wx0) as usize * PAD + (q.z - wz0) as usize;
+            if v != AIR && (0..=2).contains(&(q.y - columns[i].top())) {
+                rocky[i] = true;
+            }
+        }
+
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         let mut plants = Vec::new();
@@ -442,7 +469,12 @@ impl GameWorld {
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = crate::surface::ground_patch(self.seed, wx, wz);
                 let col = &columns[px * PAD + pz];
-                let skin = surface_materials(col, steep, roll, patch);
+                let mut skin = surface_materials(col, steep, roll, patch);
+                let (cx_, cz_) = (wx as i32, wz as i32);
+                if !tors.is_empty() && col.cover == Cover::Land && skin.0 == mat::ground_cover(col.biome) && tors.iter().any(|t| t.turf(cx_, cz_)) {
+                    skin.0 = mat::TURF;
+                }
+                let rocky = rocky.get(px * PAD + pz).copied().unwrap_or(false);
                 let mut growing = skin.0;
                 if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
                     && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
@@ -450,7 +482,7 @@ impl GameWorld {
                     growing = f;
                 }
                 // The border columns belong to neighbouring chunk columns.
-                if planted && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
+                if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     if plants.len() == grown {
@@ -486,6 +518,9 @@ impl GameWorld {
                     && p.pos.z - t.reach < wz0 + PAD as i32
             })
             .collect();
+        if !tors.is_empty() {
+            placements.retain(|p| !tors.iter().any(|t| t.crowds(p.pos)));
+        }
         for p in &placements {
             hi = hi.max(p.top(lib));
             lo = lo.min(p.bottom());
@@ -713,6 +748,9 @@ impl GameWorld {
         };
         for p in &placements {
             features::stamp(lib, &self.materials, p, &mut put);
+        }
+        for &(q, v) in &rock {
+            put(q, v, true);
         }
         // Built things go last: they clear whatever grew or stood in their way.
         let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);

@@ -76,7 +76,7 @@ pub fn host_of(v: Voxel) -> Option<Host> {
     Some(match v {
         mat::GRASS | mat::GRASS_LUSH | mat::GRASS_JUNGLE | mat::GRASS_TAIGA | mat::GRASS_WOODLAND | mat::DIRT | mat::MUD | mat::MOSS => Host::Ground,
         mat::BARK_OAK | mat::BARK_PINE | mat::BARK_REDWOOD | mat::BARK_JUNGLE | mat::BARK_WILLOW | mat::BARK_BIRCH | mat::WOOD_DEAD | mat::BARK_HOLLY | mat::BARK_YEW => Host::Bark,
-        mat::STONE | mat::ROCK_DARK => Host::Rock,
+        mat::STONE | mat::ROCK_DARK | mat::GRANITE | mat::GRANITE_GREY | mat::GRANITE_PALE => Host::Rock,
         mat::MOSSY_STONE | mat::SANDSTONE | mat::SANDSTONE_DARK | mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED => Host::Built,
         _ => return None,
     })
@@ -154,6 +154,8 @@ fn moisture(col: &Column) -> f32 {
     let base = match col.biome {
         Biome::Marsh | Biome::Bog | Biome::Mangrove => 0.9,
         Biome::RedRock | Biome::DuneSea | Biome::Volcanic => 0.0,
+        // Wet upland: lichen and moss crust the granite, though the open ground is windy.
+        Biome::Moor => 0.62,
         b => match b.parent() {
             Biome::Rainforest | Biome::OldGrowth => 1.0,
             Biome::Taiga => 0.8,

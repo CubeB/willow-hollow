@@ -397,6 +397,35 @@ fn print_poi(c: &Continent) {
         let (wx, wz) = local(x.x, x.z);
         println!("  poi crossing   {wx},{wz}  {:?}, span {}", x.kind, x.span);
     }
+    // Tors on the moor, the great ones first.
+    {
+        use worldgen::features::tor;
+        let cells = MACRO_SIZE / tor::CELL;
+        let mut tors = Vec::new();
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                tors.extend(tor::site(c.desc.world_seed, c, gx, gz));
+            }
+        }
+        tors.sort_by(|a, b| (b.class as u8).cmp(&(a.class as u8)).then(b.dominance.total_cmp(&a.dominance)));
+        for t in tors.iter().take(40) {
+            let (x, z) = local(t.at.x as i32, t.at.y as i32);
+            println!("  poi tor        {x},{z}  {:?}, {:.0} m from higher ground", t.class, t.dominance / 2.5);
+        }
+        // The moor's old stonework, laid out with the tors.
+        let mut works = 0;
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                for (w, p) in tor::plan(c.desc.world_seed, c, gx, gz).works {
+                    works += 1;
+                    if works <= 30 {
+                        println!("  poi stones     {},{}  {w:?}", p.x, p.z);
+                    }
+                }
+            }
+        }
+        println!("  {works} pieces of moor stonework");
+    }
     let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
     // Highest-scoring cells that are at least `spacing` cells apart.
     let top = |mut v: Vec<(f32, usize)>, count: usize, spacing: f32| -> Vec<(f32, usize)> {

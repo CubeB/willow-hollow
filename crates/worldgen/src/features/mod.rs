@@ -11,6 +11,7 @@ pub mod attach;
 pub mod cave;
 pub mod climber;
 pub mod landmarks;
+pub mod moorstones;
 pub mod moss;
 pub mod parts;
 pub mod pebbles;
@@ -18,6 +19,7 @@ pub mod plants;
 pub mod props;
 pub mod roots;
 pub mod shape;
+pub mod tor;
 pub mod tree_detail;
 pub mod trees;
 
@@ -310,6 +312,16 @@ fn flora(biome: Biome) -> Flora {
         Biome::RedRock => f!([], 0.0, [(Cactus, 1.0)], 0.015, [(Boulder, 3.0), (Bush, 1.0), (Cactus, 1.0)], 0.06),
         Biome::Mangrove => f!([], 0.0, [(Willow, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
         Biome::Volcanic => f!([], 0.0, [(Palm, 1.0), (DeadSnag, 0.5)], 0.02, [(Fern, 2.0), (Boulder, 3.0)], 0.08),
+        // Almost no trees: a lone rowan-like birch or a juniper here and there. Gorse in
+        // clumps and boulders in the grass; the tors and their clitter are features::tor.
+        Biome::Moor => f!(
+            [],
+            0.0,
+            [(Birch, 1.0), (Juniper, 0.8), (DeadSnag, 0.2)],
+            0.0025,
+            [(Gorse, 3.0), (Boulder, 2.0), (MossyBoulder, 0.8), (Bush, 0.4)],
+            0.05
+        ),
     }
 }
 
@@ -899,6 +911,7 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         Biome::BirchGrove => (&[mat::FLOWER_WHITE, mat::FLOWER_BLUE], 0.14),
         Biome::Steppe => (&[mat::FLOWER_YELLOW, mat::FLOWER_PURPLE], 0.06),
         Biome::Bog => (&[mat::FLOWER_WHITE], 0.06),
+        Biome::Moor => (&[mat::HEATHER, mat::HEATHER, mat::HEATHER, mat::FLOWER_YELLOW], 0.42),
         _ => return None,
     };
     // A fast noise marks the drifts; a slow one chooses what grows in each.

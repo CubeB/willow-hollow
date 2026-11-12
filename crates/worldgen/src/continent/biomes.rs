@@ -54,6 +54,9 @@ const WET_REACH: f32 = 700.0;
 const COAST_REACH: f32 = 420.0;
 /// Half-width, in metres, of the country weighed to judge how sheltered a coast is.
 const SHELTER_REACH: f32 = 2400.0;
+/// Half-width, in metres, of the country whose mean height and slope say whether it is a
+/// broad upland (see [`Site::broad_slope`]).
+const BROAD_REACH: f32 = 250.0;
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -93,6 +96,12 @@ pub(super) fn classify(
     let open = super::box_mean(&sea, w, (SHELTER_REACH / metres).round().max(2.0) as usize);
     let mut coast = sea;
     spread(w, &mut coast, metres / COAST_REACH);
+    // The lie of the country around, for telling a broad upland from a lone ridge.
+    let broad = (BROAD_REACH / metres).round().max(1.0) as usize;
+    let slopes: Vec<f32> = (0..n).map(|i| if level.ocean[i] { 1.0 } else { slope(level, height, i % w, i / w) }).collect();
+    let broad_slope = super::box_mean(&slopes, w, broad);
+    let heights: Vec<f32> = height.iter().map(|h| h.max(0.0)).collect();
+    let broad_height = super::box_mean(&heights, w, broad);
 
     let mut out = vec![Biome::Ocean as u8; n];
     for z in 0..w {
@@ -115,6 +124,8 @@ pub(super) fn classify(
                 shelter: if ring { 0.0 } else { 1.0 - smoothstep(0.36, 0.56, open[i]) },
                 variety: variety(shape, px, pz),
                 volcanic: shape.volcanic(px, pz),
+                broad_height: if ring { 0.0 } else { broad_height[i] },
+                broad_slope: if ring { 1.0 } else { broad_slope[i] },
             };
             out[i] = Biome::select(&site) as u8;
         }
