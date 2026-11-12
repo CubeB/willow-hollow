@@ -30,9 +30,12 @@ const SHADOW_SIZE: u32 = 2048;
 /// it: a 20 m tree's shadow then steps about 4 cm. A higher sun is followed every frame
 /// (see `Renderer::cascade_matrix`).
 const SHADOW_SUN_STEP: f32 = 0.002;
-/// The sun height below which the shadow maps are laid square to the sun rather than
-/// over the ground, where they would be drawn out too long.
-const LOW_SUN: f32 = 0.2;
+/// The sun height below which each shadow map is laid square to the sun rather than
+/// over the ground, where it would be drawn out too long. The nearest holds the detail
+/// of shadows close by and gives up the ground early. The farther ones keep to it for
+/// longer: on the ground their texels do not move as the sun does, so the long shadows
+/// of evening glide. Lower than this they are drawn out so far that shadows wash out.
+const LOW_SUN: [f32; CASCADES] = [0.2, 0.11, 0.11];
 /// The level the shadow maps are laid over comes in steps of this, and follows the low
 /// ground near the camera once that is further than `GROUND_SLACK` from it.
 const GROUND_STEP: f32 = m(16.0);
@@ -174,6 +177,9 @@ struct Instance {
     /// and in the last word the skyline on the sun's side at its four corners (see
     /// `GpuChunk::skylines` and grid_skyline in ground.wgsl).
     biomes: [u32; 8],
+    /// Terrain: the lie of the land at its four corners (see `GpuChunk::slopes`), the
+    /// normal's x of each in the first word and its z in the second, as signed bytes.
+    slopes: [u32; 2],
 }
 
 /// The camera's position for the far trees' whole-voxel placement.
@@ -644,7 +650,7 @@ impl Renderer {
 
         let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
-        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32x4, 7 => Uint32x4];
+        let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32x4, 7 => Uint32x4, 8 => Uint32x2];
         let terrain_buffers = [
             Some(wgpu::VertexBufferLayout {
                 array_stride: size_of::<Vertex>() as u64,
@@ -1240,7 +1246,7 @@ impl Renderer {
     /// Light view-projection for one cascade, in camera-relative space, the width of its
     /// texels as the sun sees them and the depth it spans, both in voxels. `ground` is
     /// the level to lay the map over, in voxels above sea level.
-    fn cascade_matrix(camera: &Camera, aspect: f32, sun: Vec3, near: f32, far: f32, ground: f32) -> (Mat4, f32, f32) {
+    fn cascade_matrix(camera: &Camera, aspect: f32, sun: Vec3, low_sun: f32, near: f32, far: f32, ground: f32) -> (Mat4, f32, f32) {
         // Bounding sphere of this slice of the view frustum.
         let fwd = camera.forward();
         let right = camera.right();
@@ -1264,7 +1270,7 @@ impl Renderer {
         // Depth 0..1 over [0, 2 * reach] along the sun's rays, toward the ground.
         let depth_range = reach * 2.0;
 
-        if sun.y >= LOW_SUN {
+        if sun.y >= low_sun {
             // The map is laid over the ground, not square to the sun: a point is drawn
             // where the sun's ray through it meets a level plane, at that spot's own
             // world x and z. Texels are then squares of ground that never move, whatever
@@ -1369,9 +1375,11 @@ impl Renderer {
         let mut near = 0.1;
         let frame = self.frame;
         self.frame += 1;
-        // A low sun's maps are square to it, and follow it in steps: their texels are
-        // fixed in the world only while it holds still.
-        if env.sun_dir.y >= LOW_SUN || self.shadow_sun.distance(env.sun_dir) > SHADOW_SUN_STEP {
+        // The nearest map, once it is square to a low sun, follows it in steps: its
+        // texels are fixed in the world only while the sun holds still, and close by a
+        // step is too small to see. The farther maps follow the sun every frame, or the
+        // long shadows cast from far off would jump a metre at each step.
+        if env.sun_dir.y >= LOW_SUN[0] || self.shadow_sun.distance(env.sun_dir) > SHADOW_SUN_STEP {
             self.shadow_sun = env.sun_dir;
         }
         let ground = match self.shadow_ground {
@@ -1380,7 +1388,8 @@ impl Renderer {
         };
         self.shadow_ground = Some(ground);
         for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
-            let (m, texel, span) = Self::cascade_matrix(camera, aspect, self.shadow_sun, near, far_end, ground);
+            let sun = if i == 0 { self.shadow_sun } else { env.sun_dir };
+            let (m, texel, span) = Self::cascade_matrix(camera, aspect, sun, LOW_SUN[i], near, far_end, ground);
             light.push(Frustum::new(m));
             near = far_end;
             fresh[i] = self.cascade_views[i].is_none_or(|v| {
@@ -1519,6 +1528,7 @@ impl Renderer {
                 scale: scale as f32,
                 band,
                 biomes,
+                slopes: [0, 1].map(|k| u32::from_le_bytes(chunk.slopes.map(|s| s[k] as u8))),
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
@@ -1564,6 +1574,7 @@ impl Renderer {
                 scale: 1.0,
                 band: [0.0; 2],
                 biomes: [0; 8],
+                slopes: [0; 2],
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -1582,6 +1593,7 @@ impl Renderer {
             scale: 1.0,
             band: [0.0; 2],
             biomes: [0; 8],
+                slopes: [0; 2],
         });
         stats.far_tiles = far_tiles.len() as u32;
 

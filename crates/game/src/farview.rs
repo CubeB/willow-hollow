@@ -544,6 +544,28 @@ pub fn skylines_at(world: &GameWorld, x: i32, z: i32) -> [u8; 2] {
     })
 }
 
+/// The lie of the land at a world position, in voxels: the x and z of the unit normal of
+/// the continent's ground, taken over a grid cell each way (about 50 m), each as a signed
+/// byte. Level where the continent is not made yet, and over the sea.
+pub fn slope_at(world: &GameWorld, x: i32, z: i32) -> [i8; 2] {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or([0; 2], |c| {
+        let (size, cell) = (c.size, c.cell_size());
+        let (gx, gz) = ((x - mx * MACRO_SIZE) as f32 / cell, (z - mz * MACRO_SIZE) as f32 / cell);
+        // Ground or sea, in voxels, between the grid's points.
+        let at = |x: f32, z: f32| {
+            let (x, z) = (x.clamp(0.0, size as f32 - 1.001), z.clamp(0.0, size as f32 - 1.001));
+            let (i, j) = (x as usize, z as usize);
+            let (fx, fz) = (x - i as f32, z - j as f32);
+            let h = |i: usize, j: usize| (c.height[j * size + i] * OLD_VOXEL).max(0.0);
+            let row = |j: usize| h(i, j) * (1.0 - fx) + h(i + 1, j) * fx;
+            row(j) * (1.0 - fz) + row(j + 1) * fz
+        };
+        let n = glam::Vec3::new(at(gx - 1.0, gz) - at(gx + 1.0, gz), 2.0 * cell, at(gx, gz - 1.0) - at(gx, gz + 1.0)).normalize();
+        [(n.x * 127.0).round() as i8, (n.z * 127.0).round() as i8]
+    })
+}
+
 pub fn biome_at(world: &GameWorld, x: i32, z: i32) -> u8 {
     let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
     world.continent_if_ready(mx, mz).map_or(Biome::Ocean as u8, |c| {

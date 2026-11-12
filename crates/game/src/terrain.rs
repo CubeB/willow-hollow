@@ -40,6 +40,9 @@ pub struct GpuChunk {
     /// The skylines toward sunrise and toward sunset (`farview::Skylines`) at the four
     /// corners of the column, x fastest, so hills shade it beyond the shadow maps.
     pub skylines: [[u8; 2]; 4],
+    /// The lie of the land (`farview::slope_at`) at the same four corners, to light it by
+    /// once its voxels are too small to tell apart.
+    pub slopes: [[i8; 2]; 4],
 }
 
 /// Levels of detail, the first being full-size voxels.
@@ -457,6 +460,7 @@ impl Streamer {
             biomes[k / 4] |= (crate::farview::biome_at(&self.world, x + dx, z + dz) as u32) << (8 * (k % 4));
         }
         let skylines = [(0, 0), (size, 0), (0, size), (size, size)].map(|(dx, dz)| crate::farview::skylines_at(&self.world, x + dx, z + dz));
+        let slopes = [(0, 0), (size, 0), (0, size), (size, size)].map(|(dx, dz)| crate::farview::slope_at(&self.world, x + dx, z + dz));
         for (cy, mesh) in meshes {
             let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
                 release(&mut self.arena, &chunks);
@@ -465,6 +469,7 @@ impl Streamer {
             };
             chunk.biomes = biomes;
             chunk.skylines = skylines;
+            chunk.slopes = slopes;
             chunks.push(chunk);
         }
         Some(chunks)
@@ -488,6 +493,7 @@ impl Streamer {
             faces: mesh.faces,
             biomes: [0; 8],
             skylines: [[0; 2]; 4],
+            slopes: [[0; 2]; 4],
         })
     }
 

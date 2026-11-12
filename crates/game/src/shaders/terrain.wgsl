@@ -10,6 +10,9 @@ struct VIn {
     // Per chunk: a grid of the biomes over it, for the snow (see grid_snow in ground.wgsl).
     @location(6) grid0: vec4<u32>,
     @location(7) grid1: vec4<u32>,
+    // Per chunk: the lie of the land at its four corners, x fastest (terrain::GpuChunk::
+    // slopes): the x of each normal in the first word, the z in the second, signed bytes.
+    @location(8) slopes: vec2<u32>,
 };
 
 struct VOut {
@@ -42,7 +45,20 @@ struct VOut {
     // corners sway (a grass blade's foot stays put while its tip moves) and the chunk's
     // origin in voxels, so any per-pixel guess slid in and out of its own shadow.
     @location(14) still: vec3<f32>,
+    // The x and z of the normal of the land this point is part of (see chunk_slope).
+    @location(15) slope: vec2<f32>,
 };
+
+// The lie of the land at a point of a terrain chunk: the x and z of its unit normal,
+// blended between the chunk's corners, which its neighbours share. `t` is 0..1 across it.
+fn chunk_slope(slopes: vec2<u32>, t: vec2<f32>) -> vec2<f32> {
+    let f = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0));
+    let shifts = vec4<u32>(0u, 8u, 16u, 24u);
+    // Shifted up and back down as signed, to bring each byte's sign with it.
+    let x = vec4<f32>((vec4<i32>(vec4<u32>(slopes.x) >> shifts) << vec4<u32>(24u)) >> vec4<u32>(24u)) / 127.0;
+    let z = vec4<f32>((vec4<i32>(vec4<u32>(slopes.y) >> shifts) << vec4<u32>(24u)) >> vec4<u32>(24u)) / 127.0;
+    return vec2<f32>(mix(mix(x.x, x.y, f.x), mix(x.z, x.w, f.x), f.y), mix(mix(z.x, z.y, f.x), mix(z.z, z.w, f.x), f.y));
+}
 
 // A vertex's position in its chunk, in voxels (see `Vertex` in voxel/src/mesh.rs): whole
 // voxels, quarters `q`, and per axis a bit that, with `q` set, moves the corner an eighth
@@ -118,6 +134,7 @@ fn vs(in: VIn) -> VOut {
     out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
     out.grid0 = in.grid0;
     out.grid1 = in.grid1;
+    out.slope = chunk_slope(in.slopes, local.xz / 32.0);
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
     out.still = rel;
@@ -208,10 +225,23 @@ fn shade(in: VOut) -> vec4<f32> {
     base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
 
     let ao = mix(in.ao * in.ao * 0.75 + 0.25, 0.85, far);
-    // Far sides are lit partly as the slope they make up, which faces up more.
+    // Far off, where tops and sides are too small to tell apart, the ground is lit as
+    // the slope it is part of: a hillside facing the sun is bright and one turned from
+    // it is dim, where every top lit alike and every side lit alike made the land all
+    // one brightness. Leaves keep to the level: a crown stands clear of the slope.
     var lit_n = n;
-    if (far > 0.0 && abs(n.y) < 0.5) {
-        lit_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), far * 0.65));
+    if (far > 0.0 && n.y > -0.5) {
+        var land = vec3<f32>(0.0, 1.0, 0.0);
+        if ((in.flags & FLAG_FOLIAGE) == 0u) {
+            land = vec3<f32>(in.slope.x, sqrt(max(1.0 - dot(in.slope, in.slope), 0.04)), in.slope.y);
+        }
+        if (abs(n.y) < 0.5) {
+            lit_n = normalize(mix(n, land, far * 0.65));
+        } else if ((in.flags & FLAG_FOLIAGE) == 0u) {
+            // Not all the way: the tops are level, and lit wholly as the slope a hillside
+            // turned from the sun would go black, and brighten as it was walked up to.
+            lit_n = normalize(mix(n, land, far * 0.7));
+        }
     }
     let facing = dot(lit_n, G.sun_dir.xyz);
     let foliage = (in.flags & FLAG_FOLIAGE) != 0u;
@@ -327,6 +357,7 @@ fn vs_water(in: VIn) -> VOut {
     out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
     out.grid0 = in.grid0;
     out.grid1 = in.grid1;
+    out.slope = chunk_slope(in.slopes, local.xz / 32.0);
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
     // Water surfaces sit a little below the top of their voxel, and falls start there.
