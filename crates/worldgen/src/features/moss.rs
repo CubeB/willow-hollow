@@ -4,8 +4,12 @@
 //! there a cell raised to a full 0.1 m, never a mound or a hanging strand. On a ceiling
 //! it is only skin, and only where the underside is well shaded.
 //!
-//! Each candidate face gets a score from shade, moisture, the way it faces and how old
-//! its host is, and a slow noise groups the winners into connected colonies. Everything
+//! Each candidate face gets a score from shade, moisture, the way it faces, how old its
+//! host is and how near the ground it is, and a slow noise groups the winners into
+//! connected colonies. Moss is thickest round the foot of a trunk and on top of logs,
+//! boulders and walls. Well inside a colony a face is covered edge to edge, so a colony
+//! is an unbroken mat with a ragged rim; a column with more moss than its budget gives
+//! up its lowest-scoring faces whole, and keeps the rest as they were. Everything
 //! is decided from the air voxel the moss occupies and the voxels next to it, through
 //! [`attach`], so chunk borders agree. `MOSS` and `MOSSY_STONE` stay as the painted
 //! voxels they always were: they carry the green into the distance, beyond where these
@@ -26,8 +30,8 @@ use crate::{
     surface::{Column, Cover},
 };
 
-/// Most boxes of moss in one chunk column: at 5 quads a box, about 80 KB of vertices.
-pub const COLUMN_BOXES: usize = 500;
+/// Most boxes of moss in one chunk column: at 5 quads a box, about 130 KB of vertices.
+pub const COLUMN_BOXES: usize = 800;
 /// Faces considered per chunk column before the budget is applied, most deserving first.
 const COLUMN_SITES: usize = 2400;
 /// How far an underside's score is held below a wall's.
@@ -40,6 +44,23 @@ const UNDERSIDE_CANOPY: u32 = 4;
 const GAP_CUT: f32 = -0.1;
 /// Size of the bare gaps.
 const GAP_SCALE: f32 = 3.5;
+
+/// How much better the top of a log, boulder or wall scores than its sides.
+const TOP_BONUS: f32 = 0.3;
+/// How much better the foot of a trunk scores, and how much worse it scores high up.
+const FOOT_BONUS: f32 = 0.2;
+const HEIGHT_PENALTY: f32 = 0.6;
+/// Moss is at its thickest up to here above the ground, and thinnest from `FOOT + FADE` up.
+const FOOT: f32 = 1.2;
+const FADE: f32 = 5.6;
+/// At this strength and over a face is covered edge to edge, so that a colony is one
+/// unbroken mat with a ragged rim, and neighbouring faces merge into a few boxes.
+const SOLID: f32 = 0.5;
+
+/// How far up from the damp at the foot of things a height is, 0 at the foot to 1 well up.
+fn rise(height: f32) -> f32 {
+    ((height - m(FOOT)) / m(FADE)).clamp(0.0, 1.0)
+}
 
 /// What a voxel is, as far as moss cares.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -154,7 +175,7 @@ fn moisture(col: &Column) -> f32 {
 
 /// The score above which a face grows moss, from its circumstances alone: shade (0..1),
 /// moisture (0..1), a wall's aspect and the age of what it grows on.
-fn appeal(host: Host, toward: Toward, shade: f32, wet: f32) -> f32 {
+fn appeal(host: Host, toward: Toward, shade: f32, wet: f32, height: f32) -> f32 {
     let (age, facing) = match host {
         Host::Bark => (0.6, 0.0),
         Host::Rock => (0.75, 0.0),
@@ -169,8 +190,16 @@ fn appeal(host: Host, toward: Toward, shade: f32, wet: f32) -> f32 {
             Toward::NegZ => 0.26,
             Toward::PosX | Toward::NegX => 0.10,
             Toward::PosZ => -0.1,
+            // The top of a log, a boulder or a wall holds the damp: that is where moss caps.
+            Toward::Below if host != Host::Ground => TOP_BONUS,
             Toward::Below => 0.05,
             Toward::Above => -UNDERSIDE_PENALTY,
+        }
+        + match host {
+            Host::Ground => 0.0,
+            // Thickest round the foot of a trunk, thinning out up it.
+            Host::Bark => FOOT_BONUS - HEIGHT_PENALTY * rise(height),
+            Host::Rock | Host::Built => (FOOT_BONUS - HEIGHT_PENALTY * rise(height)) * 0.5,
         };
     let (shade, wet) = (shade.clamp(0.0, 1.0), wet.clamp(0.0, 1.0));
     match host {
@@ -210,6 +239,11 @@ impl Soil<'_> {
 
 /// Grows the moss for a chunk column.
 pub fn grow(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, out: &mut Vec<PlantBox>) {
+    grow_within(voxels, mats, soil, COLUMN_BOXES, out)
+}
+
+/// [`grow`], with at most `budget` boxes.
+fn grow_within(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, budget: usize, out: &mut Vec<PlantBox>) {
     // Nothing grows on a column that is under water or not open ground (see `judge`).
     let grows = |c: &Column| matches!(c.cover, Cover::Land | Cover::Bank | Cover::Spring) && c.water_surface().is_none() && moisture(c) > 0.0;
     if !soil.columns.iter().any(grows) {
@@ -226,21 +260,37 @@ pub fn grow(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, out: &mut Vec<
             }
         },
     );
-    if patches.len() > COLUMN_SITES {
-        patches.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
-        patches.truncate(COLUMN_SITES);
-    }
-    let mut raster = Raster::new();
-    for p in &patches {
-        plant(p, soil.seed, &mut raster);
-    }
+    // The most deserving first, in an order that does not depend on how they were found.
+    patches.sort_unstable_by(|a, b| b.score.total_cmp(&a.score).then_with(|| (a.site.air.to_array(), a.site.toward as u8).cmp(&(b.site.air.to_array(), b.site.toward as u8))));
+    patches.truncate(COLUMN_SITES);
+    // A column that overspends gives up its least deserving faces, whole: what is left is
+    // still unbroken colonies in the best places, where dropping boxes at random left specks.
     let start = out.len();
-    raster.finish(out, |_| (false, false));
+    let mut keep = patches.len();
+    for attempt in 0..4 {
+        out.truncate(start);
+        let mut raster = Raster::new();
+        for p in &patches[..keep] {
+            plant(p, soil.seed, &mut raster);
+        }
+        raster.finish(out, |_| (false, false));
+        let boxes = out.len() - start;
+        #[cfg(test)]
+        if attempt == 0 {
+            tally::record(&patches, boxes);
+        }
+        if boxes <= budget {
+            break;
+        }
+        keep = (keep as f32 * budget as f32 / boxes as f32 * 0.92) as usize;
+    }
+    #[cfg(test)]
+    tally::kept(keep, patches.len());
     // If it still overspends, thin it evenly so no part of the column is left bare.
-    if out.len() - start > COLUMN_BOXES {
+    if out.len() - start > budget {
         let mut mine: Vec<PlantBox> = out.drain(start..).collect();
         mine.sort_unstable_by_key(|b| hash3(soil.seed ^ 0xb0c5, b.lo[0], b.lo[1], b.lo[2]));
-        mine.truncate(COLUMN_BOXES);
+        mine.truncate(budget);
         out.append(&mut mine);
     }
 }
@@ -279,7 +329,7 @@ fn judge_with(site: &Site, soil: &Soil, gap_cut: f32) -> Option<Patch> {
     // Bigger colonies, with a noisy edge.
     let colony = perlin3(soil.seed ^ 0x3055, x / m(5.6) as f64, y / m(5.6) as f64, z / m(5.6) as f64)
         + 0.45 * perlin3(soil.seed ^ 0x3056, x / m(1.4) as f64, y / m(1.4) as f64, z / m(1.4) as f64);
-    let score = appeal(host, site.toward, shade, wet) + colony * 0.55;
+    let score = appeal(host, site.toward, shade, wet, site.air.y as f32 - col.ground) + colony * 0.55;
     // Thinning toward the edge of a gap as toward the edge of a colony.
     let strength = (score * 2.5).min((gap - gap_cut) * 6.0).clamp(0.0, 1.0);
     (score > 0.0).then_some(Patch { site: *site, host, strength, score })
@@ -359,18 +409,21 @@ fn raise(face: &mut Face, rng: &mut Rng, n: i32, voxel: Voxel) {
 
 /// A flat mat, ragged where the colony thins, with a lighter spot or two raised.
 fn carpet(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
-    let solid = strength > 0.85;
+    let solid = strength >= SOLID;
     let mut face = [[Cell::Bare; 4]; 4];
+    // Where the colony thins, one lobe that shrinks with it: a rim, not a scatter of flakes.
+    let (cu, cv) = (rng.range(0.5, 2.5), rng.range(0.5, 2.5));
+    let reach = 1.0 + strength / SOLID * 2.2;
     for (v, row) in face.iter_mut().enumerate() {
         for (u, cell) in row.iter_mut().enumerate() {
-            let edge = u == 0 || v == 0 || u == 3 || v == 3;
-            let chance = if solid { 1.0 } else if edge { strength * 0.75 } else { (strength + 0.25).min(1.0) };
-            if rng.unit() < chance {
+            let d = ((u as f32 - cu).powi(2) + (v as f32 - cv).powi(2)).sqrt();
+            if solid || d + rng.range(-0.3, 0.3) < reach {
                 *cell = Cell::Skin(main);
             }
         }
     }
-    let n = rng.int(0, 2) - 1;
+    // A raised cell breaks the mat round it into several boxes, so only now and then.
+    let n = (rng.unit() < 0.2) as i32;
     raise(&mut face, rng, n, tip);
     face
 }
@@ -397,7 +450,7 @@ fn cushion(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
     let mut crowns: Vec<(f32, usize, usize)> = Vec::new();
     for (v, row) in height.iter().enumerate() {
         for (u, &h) in row.iter().enumerate() {
-            if h >= 0.5 {
+            if h >= 0.5 || strength >= SOLID {
                 face[v][u] = Cell::Skin(main);
                 if h >= 1.5 {
                     crowns.push((h, u, v));
@@ -406,7 +459,8 @@ fn cushion(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
         }
     }
     crowns.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-    for &(_, u, v) in crowns.iter().take(RAISED_PER_FACE) {
+    let high = (rng.unit() < 0.6) as usize + (rng.unit() < 0.25) as usize;
+    for &(_, u, v) in crowns.iter().take(high.min(RAISED_PER_FACE)) {
         face[v][u] = Cell::Raised(if rng.unit() < 0.6 { tip } else { main });
     }
     face
@@ -459,6 +513,46 @@ fn lichen(rng: &mut Rng, strength: f32, main: Voxel, tip: Voxel) -> Face {
         }
     }
     face
+}
+
+#[cfg(test)]
+pub mod tally {
+    use super::*;
+    use std::sync::Mutex;
+    /// Patches by host and by top, side or underside; columns; boxes before the budget; columns over it.
+    #[derive(Default, Debug, Clone)]
+    pub struct Tally {
+        pub patches: std::collections::BTreeMap<String, usize>,
+        pub columns: usize,
+        pub boxes: usize,
+        pub over: usize,
+        pub most: usize,
+        pub kept: usize,
+        pub judged: usize,
+    }
+    pub(super) fn kept(kept: usize, judged: usize) {
+        if let Some(t) = TALLY.lock().unwrap().as_mut() {
+            t.kept += kept;
+            t.judged += judged;
+        }
+    }
+    pub static TALLY: Mutex<Option<Tally>> = Mutex::new(None);
+    pub(super) fn record(patches: &[Patch], boxes: usize) {
+        if let Some(t) = TALLY.lock().unwrap().as_mut() {
+            for p in patches {
+                let way = match p.site.toward {
+                    Toward::Below => "top",
+                    Toward::Above => "under",
+                    _ => "side",
+                };
+                *t.patches.entry(format!("{:?} {way}", p.host)).or_default() += 1;
+            }
+            t.columns += 1;
+            t.boxes += boxes;
+            t.over += (boxes > COLUMN_BOXES) as usize;
+            t.most = t.most.max(boxes);
+        }
+    }
 }
 
 /// The share of columns of open, dry ground that end up with moss.
@@ -564,6 +658,88 @@ mod tests {
             mat::LICHEN_YELLOW | mat::LICHEN_GREY => Moss::Lichen,
             _ => return None,
         })
+    }
+
+    /// Counts what moss grows on around given places:
+    /// `MOSS_AT="x,z;x,z" cargo test -p worldgen --release moss_census -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn moss_census() {
+        let seed = std::env::var("MOSS_SEED").map_or(1, |s| s.parse().unwrap());
+        let w = GameWorld::new(seed);
+        let span: i32 = std::env::var("MOSS_SPAN").map_or(3, |s| s.parse().unwrap());
+        let given = std::env::var("MOSS_AT").unwrap_or_else(|_| "27808,14368;38944,13600;48544,47008;43168,33952".into());
+        for at in given.split(';').filter(|s| !s.is_empty()) {
+            let (x, z) = at.split_once(',').unwrap();
+            let (x, z): (i32, i32) = (x.parse().unwrap(), z.parse().unwrap());
+            *tally::TALLY.lock().unwrap() = Some(Default::default());
+            for cx in -span..=span {
+                for cz in -span..=span {
+                    w.generate_column(x.div_euclid(CHUNK) + cx, z.div_euclid(CHUNK) + cz);
+                }
+            }
+            let t = tally::TALLY.lock().unwrap().take().unwrap();
+            println!("{:?} at {x},{z}: {} columns, {} boxes a column, most {}, {} over budget, {}% of faces kept", w.column(x, z).biome, t.columns, t.boxes / t.columns.max(1), t.most, t.over, t.kept * 100 / t.judged.max(1));
+            for (k, n) in &t.patches {
+                println!("    {k}: {} a column", n / t.columns.max(1));
+            }
+        }
+    }
+
+    #[test]
+    fn moss_is_thickest_at_the_foot_of_a_trunk_and_on_top_of_logs_and_boulders() {
+        // Somewhere only middling damp and lightly shaded, where not everything is mossy.
+        let faces = |biome: Biome, canopy: u32, host: Voxel, toward: Toward, y: i32| {
+            let cols = vec![column(biome); voxel::PAD * voxel::PAD];
+            (0..4000)
+                .filter(|&i| {
+                    let site = Site { air: IVec3::new(i * 3, y, i * 7 % 900), toward, host, canopy };
+                    let soil = Soil { columns: &cols, x0: site.air.x, z0: site.air.z, seed: 13, taken: &HashSet::new() };
+                    judge(&site, &soil).is_some()
+                })
+                .count()
+        };
+        let count = |host: Voxel, toward: Toward, y: i32| faces(Biome::Woodland, 1, host, toward, y);
+        // The ground is at 40: a trunk's foot, and the same trunk 8 m up.
+        let (foot, high) = (count(mat::BARK_OAK, Toward::PosX, 41), count(mat::BARK_OAK, Toward::PosX, 61));
+        assert!(foot > high * 2, "{foot} faces at the foot, {high} high up");
+        // In a dark, wet wood it still climbs.
+        assert!(faces(Biome::OldGrowth, 5, mat::BARK_OAK, Toward::PosX, 61) > 400, "a trunk in old growth is bare above its foot");
+        for host in [mat::BARK_OAK, mat::STONE] {
+            let (top, side) = (count(host, Toward::Below, 43), count(host, Toward::PosX, 43));
+            assert!(top as f32 > side as f32 * 1.25, "{host}: {top} on top, {side} on the side");
+        }
+    }
+
+    #[test]
+    fn a_column_over_its_budget_gives_up_whole_faces_and_keeps_the_rest_unbroken() {
+        let (chunks, origin) = scene(64);
+        let voxels = ColumnVoxels::new(&chunks, origin - 1, origin - 1);
+        let cols = vec![column(Biome::OldGrowth); voxel::PAD * voxel::PAD];
+        let soil = Soil { columns: &cols, x0: origin - 1, z0: origin - 1, seed: 5, taken: &HashSet::new() };
+        let cells_of = |budget: usize| {
+            let mut out = Vec::new();
+            grow_within(&voxels, &build(), &soil, budget, &mut out);
+            assert!(out.len() <= budget, "{} boxes of {budget}", out.len());
+            let mut cells = HashSet::new();
+            for b in &out {
+                for x in b.lo[0]..b.hi[0] {
+                    for y in b.lo[1]..b.hi[1] {
+                        for z in b.lo[2]..b.hi[2] {
+                            cells.insert((x, y, z, b.voxel, b.thin));
+                        }
+                    }
+                }
+            }
+            (out.len(), cells)
+        };
+        let (all_boxes, all) = cells_of(usize::MAX);
+        let (few_boxes, few) = cells_of(all_boxes / 3);
+        assert!(!few.is_empty() && few.len() < all.len());
+        // What is kept is exactly what would have grown there anyway.
+        assert!(few.is_subset(&all), "moss changed where it was kept");
+        // Whole faces go, so the boxes left are no smaller than before: no specks.
+        assert!(few.len() as f32 / few_boxes as f32 >= all.len() as f32 / all_boxes as f32 * 0.8, "{} cells in {few_boxes} boxes, {} in {all_boxes}", few.len(), all.len());
     }
 
     #[test]
