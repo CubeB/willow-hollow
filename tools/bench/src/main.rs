@@ -6,14 +6,17 @@
 //! cargo run --release -p bench -- --seed 1
 //! ```
 
+mod overlaps;
+
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use glam::IVec3;
 use voxel::{
     CHUNK,
-    mesh::{Falls, mesh_chunk_under_sky},
+    mesh::{CELLS, Falls, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees},
 };
-use worldgen::{ColumnOutput, World, world::GameWorld};
+use worldgen::{ColumnOutput, World, features::LeafTags, world::GameWorld};
 
 struct Options {
     seed: u32,
@@ -21,6 +24,8 @@ struct Options {
     size: i32,
     /// Extra patches, by the world voxel at their middle.
     at: Vec<(i32, i32)>,
+    /// Also count plant faces lying in one plane with another (see `overlaps`).
+    overlaps: bool,
 }
 
 const HELP: &str = "\
@@ -29,12 +34,14 @@ Usage: bench [options]
   --seed N     world seed (default 1)
   --size N     columns along each side of a patch (default 12)
   --at X,Z     also time a patch around this world voxel (may be repeated)
+  --overlaps   also count plant faces that lie in one plane with another face turned
+               the same way and overlap it, where the two would flicker
 
 Always times a patch at the spawn point, and one each on a coast, in the hills and
 at sea, found from the continent.";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { seed: 1, size: 12, at: Vec::new() };
+    let mut o = Options { seed: 1, size: 12, at: Vec::new(), overlaps: false };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
@@ -46,6 +53,7 @@ fn parse() -> Result<Options> {
                 let (x, z) = v.split_once(',').context("--at takes X,Z")?;
                 o.at.push((x.trim().parse()?, z.trim().parse()?));
             }
+            "--overlaps" => o.overlaps = true,
             "--help" | "-h" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -108,21 +116,36 @@ impl Sum {
 }
 
 /// Generates and meshes the patch of columns around world voxel `(x, z)`.
-fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32) {
+fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32, overlaps: bool) {
     let (cx, cz) = (x.div_euclid(CHUNK) - size / 2, z.div_euclid(CHUNK) - size / 2);
     let mut sum = Sum(0xcbf2_9ce4_8422_2325);
     let (mut generate, mut mesh, mut slowest, mut bare) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     let mut bare_sum = Sum(0xcbf2_9ce4_8422_2325);
     let (mut plants, mut quads) = (0usize, 0usize);
+    let (mut planting, mut tagging) = (0.0f64, 0.0f64);
+    let mut tally = overlaps::Tally::default();
     for dz in 0..size {
         for dx in 0..size {
             let t0 = Instant::now();
             let out = world.generate_column(cx + dx, cz + dz);
             let t1 = Instant::now();
+            // Meshed as the game does it: from the top down, each chunk under what the
+            // chunks above cover, then its plants, then each tree's leaves told apart.
             let mut falls = Falls::default();
-            let roof = vec![false; voxel::PAD * voxel::PAD];
-            for (_, chunk) in out.chunks.iter().rev() {
-                let m = mesh_chunk_under_sky(chunk, world.materials(), &out.currents, &roof, &mut falls);
+            let mut roof = vec![false; voxel::PAD * voxel::PAD];
+            let (lib, mats) = (world.library(), world.materials());
+            for (cy, chunk) in out.chunks.iter().rev() {
+                let mut m = mesh_chunk_under_sky(chunk, mats, &out.currents, &roof, &mut falls);
+                cover_columns(chunk, mats, &mut roof);
+                let corner = [(cx + dx) * CHUNK, *cy * CHUNK, (cz + dz) * CHUNK];
+                let t = Instant::now();
+                let inside = out.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
+                add_plants(&mut m, inside, chunk, corner.map(|v| v * CELLS), mats);
+                planting += t.elapsed().as_secs_f64() * 1000.0;
+                let t = Instant::now();
+                let mut tags = LeafTags::new(lib, mats, &out.trees, IVec3::from_array(corner));
+                tag_trees(&mut m, corner, |q| tags.tag(IVec3::from_array(q)));
+                tagging += t.elapsed().as_secs_f64() * 1000.0;
                 quads += (m.opaque.len() + m.water.len()) / 4;
             }
             let t2 = Instant::now();
@@ -132,6 +155,9 @@ fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32) {
             mesh += (t2 - t1).as_secs_f64() * 1000.0;
             plants += out.plants.len();
             sum.column(&out);
+            if overlaps {
+                overlaps::count(&out, world.materials(), cx + dx, cz + dz, &mut tally);
+            }
             let t3 = Instant::now();
             let unplanted = world.generate_column_bare(cx + dx, cz + dz);
             bare += t3.elapsed().as_secs_f64() * 1000.0;
@@ -140,15 +166,20 @@ fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32) {
     }
     let n = (size * size) as f64;
     println!(
-        "{name:<8} at {x:>6},{z:<6} generate {:6.2} ms (slowest {slowest:6.1}), bare {:5.2} ms, mesh {:5.2} ms, {:6.0} plant boxes, {:6.0} quads a column, checksums {:016x} {:016x}",
+        "{name:<8} at {x:>6},{z:<6} generate {:6.2} ms (slowest {slowest:6.1}), bare {:5.2} ms, mesh {:5.2} ms (plants {:4.2}, leaf tags {:4.2}), {:6.0} plant boxes, {:6.0} quads a column, checksums {:016x} {:016x}",
         generate / n,
         bare / n,
         mesh / n,
+        planting / n,
+        tagging / n,
         plants as f64 / n,
         quads as f64 / n,
         sum.0,
         bare_sum.0
     );
+    if overlaps {
+        overlaps::report(&tally, world.materials());
+    }
 }
 
 fn main() -> Result<()> {
@@ -177,14 +208,14 @@ fn main() -> Result<()> {
     let hills = order().find(|&i| inland(i) && !c.ocean[i] && c.height[i] > highest * 0.55);
     let sea = order().find(|&i| inland(i) && c.ocean[i] && c.ocean[i + 3] && c.ocean[i - 3] && c.ocean[i + 3 * n] && c.ocean[i - 3 * n]);
 
-    patch(&world, "spawn", (spawn.x, spawn.z), o.size);
+    patch(&world, "spawn", (spawn.x, spawn.z), o.size, o.overlaps);
     for (name, found) in [("coast", coast), ("hills", hills), ("sea", sea)] {
         if let Some(i) = found {
-            patch(&world, name, cell(i), o.size);
+            patch(&world, name, cell(i), o.size, o.overlaps);
         }
     }
     for at in &o.at {
-        patch(&world, "chosen", *at, o.size);
+        patch(&world, "chosen", *at, o.size, o.overlaps);
     }
     Ok(())
 }

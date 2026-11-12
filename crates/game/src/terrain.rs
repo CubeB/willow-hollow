@@ -621,12 +621,11 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
-            add_plants(&mut mesh, inside, origin, world.materials());
+            add_plants(&mut mesh, inside, chunk, origin, world.materials());
             // Each tree's leaves go on its own date.
-            let (lib, mats) = (world.library(), world.materials());
-            tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
-                features::leaf_tag(lib, mats, &output.trees, IVec3::from_array(q))
-            });
+            let corner = [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK];
+            let mut tags = features::LeafTags::new(world.library(), world.materials(), &output.trees, IVec3::from_array(corner));
+            tag_trees(&mut mesh, corner, |q| tags.tag(IVec3::from_array(q)));
             (*cy, mesh)
         })
         .filter(|(_, mesh)| !mesh.is_empty())

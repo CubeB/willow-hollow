@@ -684,6 +684,46 @@ pub fn leaf_tag(lib: &Library, mats: &Materials, placements: &[Placement], q: IV
     nearest.1
 }
 
+/// [`leaf_tag`] for the faces of one chunk's mesh. A leaf voxel is asked about once for
+/// each of its faces, and each answer means looking through every tree that reaches the
+/// column, so the answers are kept, voxel by voxel.
+pub struct LeafTags<'a> {
+    lib: &'a Library,
+    mats: &'a Materials,
+    placements: &'a [Placement],
+    /// The voxel at the corner of the chunk's border.
+    corner: IVec3,
+    /// A tag for each voxel of the chunk, border included, or `UNKNOWN`. Empty until the
+    /// first is asked for: most chunks hold no leaves.
+    known: Vec<u8>,
+}
+
+impl<'a> LeafTags<'a> {
+    const UNKNOWN: u8 = u8::MAX;
+    const SIDE: i32 = voxel::PAD as i32;
+
+    /// For the chunk whose own first voxel is world voxel `origin`.
+    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], origin: IVec3) -> Self {
+        Self { lib, mats, placements, corner: origin - IVec3::ONE, known: Vec::new() }
+    }
+
+    /// The tag of the tree whose leaf is at world voxel `q`.
+    pub fn tag(&mut self, q: IVec3) -> u8 {
+        let d = q - self.corner;
+        if d.min_element() < 0 || d.max_element() >= Self::SIDE {
+            return leaf_tag(self.lib, self.mats, self.placements, q);
+        }
+        if self.known.is_empty() {
+            self.known = vec![Self::UNKNOWN; voxel::PAD * voxel::PAD * voxel::PAD];
+        }
+        let i = ((d.x * Self::SIDE + d.y) * Self::SIDE + d.z) as usize;
+        if self.known[i] == Self::UNKNOWN {
+            self.known[i] = leaf_tag(self.lib, self.mats, self.placements, q);
+        }
+        self.known[i]
+    }
+}
+
 /// How high a feature's top can be above its origin, over all templates. Chunk
 /// columns use it to know how far up to generate.
 pub fn max_top(lib: &Library) -> i32 {

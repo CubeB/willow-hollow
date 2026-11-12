@@ -877,11 +877,6 @@ impl Running {
         }
 
         self.cpu.lap(2);
-        let Some(frame) = self.surface.acquire(&self.gpu) else {
-            return;
-        };
-        self.cpu.lap(3);
-        let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         let mut lit = self.env.clone();
@@ -899,8 +894,20 @@ impl Running {
             ground,
             lamps: &lamps,
         };
-        self.renderer.render(&self.gpu, &mut encoder, &view, &scene);
+        // The scene is drawn into the renderer's own textures and handed to the GPU
+        // before waiting for the window's next image, which is not free until the last
+        // frame is done with: the GPU then draws this frame through the wait, rather
+        // than standing idle until the frame has been put together after it.
+        self.renderer.draw(&self.gpu, &mut encoder, &scene);
+        self.gpu.queue.submit([encoder.finish()]);
         self.cpu.lap(4);
+        let Some(frame) = self.surface.acquire(&self.gpu) else {
+            return;
+        };
+        self.cpu.lap(3);
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
+        self.renderer.finish(&self.gpu, &mut encoder, &view);
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;

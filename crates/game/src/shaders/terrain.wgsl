@@ -81,6 +81,9 @@ const FLAG_SKY: u32 = 1u;
 const FLAG_FOLIAGE: u32 = 8u;
 const FLAG_EMISSIVE: u32 = 16u;
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
+// How far in from a face its voxel is looked for, in voxels: less than the thinnest
+// thing drawn (a skin an eighth of a voxel thick), and well clear of rounding.
+const INWARD: f32 = 0.0625;
 
 @vertex
 fn vs(in: VIn) -> VOut {
@@ -111,6 +114,10 @@ fn vs(in: VIn) -> VOut {
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
+    // Two things with faces in one plane (a blade of grass standing in a clump of moss)
+    // would flicker there, each winning some pixels. Each colour is drawn a hair nearer
+    // than the last instead, up to 3 mm in 100 m, so that one of them wins them all.
+    out.clip.z *= 1.0 + f32((in.b * 2654435761u) >> 27u) * 1e-6;
     // Plants that are gone this season (fallen leaves, dead flowers, tufts under snow) are
     // dropped here: every corner of the face names the same voxel, so the whole face goes.
     // Everything the choice rests on must come from that voxel alone, never from where the
@@ -169,8 +176,12 @@ fn distant(rel: vec3<f32>, scale: f32) -> f32 {
 fn shade(in: VOut) -> vec4<f32> {
     let n = face_normal(in.face);
     let far = distant(in.rel, in.scale);
-    // The voxel this fragment belongs to: step half a voxel inward from the face.
-    let voxel = vec3<i32>(floor(in.local - n * 0.5)) + in.origin;
+    // The voxel this fragment belongs to: a step inward from the face. A short one: the
+    // faces of small plants stand at eighths of a voxel, and half a voxel in from one in
+    // the middle of its voxel is the very edge of the next, where rounding would give
+    // each pixel one voxel or the other and the face would be speckled with both.
+    let cell = floor(in.local - n * INWARD);
+    let voxel = vec3<i32>(cell) + in.origin;
     let jitter = f32((in.flags >> 1u) & 3u);
     let h = hash3(voxel);
     let h2 = hash3(voxel.zxy + vec3<i32>(17, 31, 59));
@@ -180,7 +191,6 @@ fn shade(in: VOut) -> vec4<f32> {
     // The season: leaf colour and fall, dry or wintry grass.
     base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, in.flags >> 8u);
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
-    let cell = floor(in.local - n * 0.5);
     let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
     let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
     base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
