@@ -267,7 +267,7 @@ fn grow_within(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, budget: usi
     // still unbroken colonies in the best places, where dropping boxes at random left specks.
     let start = out.len();
     let mut keep = patches.len();
-    for attempt in 0..4 {
+    for _ in 0..4 {
         out.truncate(start);
         let mut raster = Raster::new();
         for p in &patches[..keep] {
@@ -276,7 +276,7 @@ fn grow_within(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, budget: usi
         raster.finish(out, |_| (false, false));
         let boxes = out.len() - start;
         #[cfg(test)]
-        if attempt == 0 {
+        if keep == patches.len() {
             tally::record(&patches, boxes);
         }
         if boxes <= budget {
