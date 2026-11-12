@@ -1258,6 +1258,9 @@ pub fn climbable(v: Voxel) -> bool {
             | mat::BARK_WILLOW
             | mat::BARK_ACACIA
             | mat::BARK_BAOBAB
+            | mat::BARK_HOLLY
+            | mat::BARK_YEW
+            | mat::BARK_SCOTS
             | mat::WOOD_DEAD
             | mat::STONE
             | mat::ROCK_DARK
@@ -1275,10 +1278,10 @@ pub fn climbable(v: Voxel) -> bool {
 fn tree_chance(species: Species) -> f32 {
     match species {
         Species::ElderOak | Species::Kapok | Species::Redwood => 0.95,
-        Species::Oak | Species::Maple | Species::Willow | Species::Baobab => 0.55,
-        Species::Jungle | Species::Cherry | Species::DeadSnag => 0.34,
+        Species::Oak | Species::Maple | Species::Willow | Species::Baobab | Species::HolmOak | Species::Yew => 0.55,
+        Species::Jungle | Species::Cherry | Species::DeadSnag | Species::Holly => 0.34,
         Species::Birch | Species::Acacia => 0.16,
-        Species::Spruce | Species::TallPine | Species::Palm => 0.06,
+        Species::Spruce | Species::TallPine | Species::Palm | Species::ScotsPine => 0.06,
         Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump => 0.2,
         _ => 0.0,
     }
@@ -1288,7 +1291,7 @@ fn tree_chance(species: Species) -> f32 {
 fn host_age(species: Species) -> f32 {
     match species {
         Species::ElderOak | Species::Redwood | Species::Kapok => 1.0,
-        Species::Oak | Species::Maple | Species::Willow | Species::Baobab => 0.7,
+        Species::Oak | Species::Maple | Species::Willow | Species::Baobab | Species::HolmOak | Species::Yew => 0.7,
         Species::Jungle | Species::Cherry | Species::Birch => 0.45,
         Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump => 0.35,
         _ => 0.3,
