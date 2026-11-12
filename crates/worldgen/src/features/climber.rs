@@ -1335,7 +1335,10 @@ impl RootFinder<'_> {
                 continue;
             }
             let col = self.world.column(p.pos.x, p.pos.z);
-            if let Some(root) = tree_root(p, self.world, self.mats, self.seed, chance) {
+            let found = tree_root(p, self.world, self.mats, self.seed, chance);
+            #[cfg(test)]
+            census::note(census::Seen { pos: p.pos, species: p.species, biome: col.biome, seed: hash3(self.seed ^ 0xa55e, p.pos.x, p.pos.y, p.pos.z), rooted: found.is_some() });
+            if let Some(root) = found {
                 let low = matches!(p.species, Species::FallenLog | Species::Boulder | Species::MossyBoulder | Species::Stump);
                 let wet = matches!(col.biome, Biome::Rainforest | Biome::OldGrowth | Biome::Deciduous);
                 if low && wet {
@@ -1514,6 +1517,11 @@ pub fn grow_column(
     let start = out.len();
     combined.finish(out, sway);
     if out.len() - start > COLUMN_BOXES {
+        #[cfg(test)]
+        census::CUT.with(|c| {
+            let mut c = c.borrow_mut();
+            *c = (c.0 + out.len() - start - COLUMN_BOXES, c.1 + 1);
+        });
         let mut mine: Vec<_> = out.drain(start..).collect();
         mine.sort_unstable_by_key(|b| hash3(seed ^ 0x1eaf, b.lo[0], b.lo[1], b.lo[2]));
         mine.truncate(COLUMN_BOXES);
@@ -1524,6 +1532,32 @@ pub fn grow_column(
 /// Sway flags for finished boxes: lianas swing, everything else barely moves.
 pub fn sway(voxel: Voxel) -> (bool, bool) {
     if voxel == mat::LIANA_STEM { (true, false) } else { (false, false) }
+}
+
+/// What became of each tree a root search looked at, for counting how many carry ivy.
+#[cfg(test)]
+pub(crate) mod census {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Seen {
+        pub pos: IVec3,
+        pub species: Species,
+        pub biome: Biome,
+        /// The seed its plant would have.
+        pub seed: u32,
+        pub rooted: bool,
+    }
+
+    thread_local! {
+        pub static TREES: RefCell<Vec<Seen>> = const { RefCell::new(Vec::new()) };
+        /// Boxes cut from columns that went over [`COLUMN_BOXES`], and how many columns.
+        pub static CUT: RefCell<(usize, usize)> = const { RefCell::new((0, 0)) };
+    }
+
+    pub fn note(seen: Seen) {
+        TREES.with(|t| t.borrow_mut().push(seen));
+    }
 }
 
 #[cfg(test)]
@@ -1861,6 +1895,144 @@ mod tests {
             }
         }
         println!("plants {plants} cells {cells} leaf cells {leaf_cells} lone cells {lone} boxes {boxes} quads<= {faces}");
+    }
+
+    /// Counts how many trees carry a climber worth seeing, by biome and species, and
+    /// where the rest were lost:
+    /// `IVY_CENSUS=seed cargo test -p worldgen --release ivy_census -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn ivy_census() {
+        use crate::world::GameWorld;
+        let seed = std::env::var("IVY_CENSUS").map_or(1, |s| s.parse().unwrap());
+        let w = GameWorld::new(seed);
+        let spawn = w.spawn_point();
+        // A few spots of each wooded biome, out from the spawn.
+        let mut spots: Vec<(Biome, i32, i32)> = Vec::new();
+        // `IVY_AT=x,z;x,z` counts around those places instead, `IVY_SPAN` columns each way.
+        let span: i32 = std::env::var("IVY_SPAN").map_or(2, |s| s.parse().unwrap());
+        let given = std::env::var("IVY_AT").unwrap_or_default();
+        for at in given.split(';').filter(|s| !s.is_empty()) {
+            let (x, z) = at.split_once(',').unwrap();
+            let (x, z) = (x.parse().unwrap(), z.parse().unwrap());
+            spots.push((w.column(x, z).biome, x, z));
+        }
+        let rings = if given.is_empty() { 200..24000 } else { 0..0 };
+        for r in rings.step_by(160) {
+            let n = (r / 40).max(24);
+            for k in 0..n {
+                let a = k as f32 / n as f32 * std::f32::consts::TAU;
+                let (x, z) = (spawn.x + (a.cos() * r as f32) as i32, spawn.z + (a.sin() * r as f32) as i32);
+                if crate::macro_layout::cell_of(x, z) != (0, 0) {
+                    continue;
+                }
+                let col = w.column(x, z);
+                let wanted = matches!(col.biome, Biome::Deciduous | Biome::Woodland | Biome::OldGrowth | Biome::Taiga);
+                if !wanted || col.cover != Cover::Land || spots.iter().filter(|s| s.0 == col.biome).count() >= 4 || spots.iter().any(|s| (s.1 - x).abs() + (s.2 - z).abs() <= 400) {
+                    continue;
+                }
+                // Well inside the biome, on dry land.
+                let inside = [(70, 0), (-70, 0), (0, 70), (0, -70)].iter().all(|&(dx, dz)| {
+                    let c = w.column(x + dx, z + dz);
+                    c.biome == col.biome && c.cover == Cover::Land
+                });
+                if inside {
+                    println!("{:?} at {x},{z} ground {} temperature {:.2}", col.biome, col.top(), col.temperature);
+                    spots.push((col.biome, x, z));
+                }
+            }
+        }
+        #[derive(Default, Clone)]
+        struct Row {
+            trees: usize,
+            rooted: usize,
+            grew: usize,
+            seen: usize,
+            rises: Vec<i32>,
+            leaves: Vec<usize>,
+            boxes: usize,
+        }
+        let mut rows: std::collections::BTreeMap<(String, String), Row> = Default::default();
+        let (mut columns, mut ms, mut all_boxes) = (0usize, 0.0f64, 0usize);
+        for &(biome, x, z) in &spots {
+            let (cx0, cz0) = (x.div_euclid(voxel::CHUNK), z.div_euclid(voxel::CHUNK));
+            census::TREES.with(|t| t.borrow_mut().clear());
+            // Each plant: rise in voxels, leaf cells, boxes.
+            let mut plants: HashMap<u32, (i32, usize, usize)> = HashMap::new();
+            for cz in cz0 - span..=cz0 + span {
+                for cx in cx0 - span..=cx0 + span {
+                    let t = std::time::Instant::now();
+                    let out = w.generate_column_with(cx, cz, &mut |root, raster| {
+                        if plants.contains_key(&root.seed) {
+                            return;
+                        }
+                        let cells = raster.cells();
+                        let rise = cells.iter().map(|c| c.0.y).max().unwrap_or(root.cell.y) - root.cell.y;
+                        let leaves = cells.iter().filter(|(_, v)| IVY.leaves.contains(v) || VIRGINIA_CREEPER.leaves.contains(v) || TRAILING_CREEPER.leaves.contains(v) || *v == mat::CREEPER_SCARLET).count();
+                        plants.insert(root.seed, (rise / CELLS, leaves, box_count(raster)));
+                    });
+                    ms += t.elapsed().as_secs_f64() * 1000.0;
+                    columns += 1;
+                    all_boxes += out.plants.len();
+                }
+            }
+            let mut seen: HashMap<IVec3, census::Seen> = HashMap::new();
+            census::TREES.with(|t| {
+                for s in t.borrow().iter() {
+                    seen.insert(s.pos, *s);
+                }
+            });
+            for s in seen.values() {
+                let inside = (s.pos.x.div_euclid(voxel::CHUNK) - cx0).abs() <= span && (s.pos.z.div_euclid(voxel::CHUNK) - cz0).abs() <= span;
+                if !inside || matches!(s.species, Species::Bush | Species::Fern | Species::Cactus) {
+                    continue;
+                }
+                let low = matches!(s.species, Species::Boulder | Species::MossyBoulder | Species::FallenLog | Species::Stump);
+                for key in [(format!("{biome:?}"), format!("{:?}", s.species)), (format!("{biome:?}"), "~all trees".to_string())] {
+                    let total = key.1.starts_with('~');
+                    if total && low {
+                        continue;
+                    }
+                    let row = rows.entry(key).or_default();
+                    row.trees += 1;
+                    row.rooted += s.rooted as usize;
+                    if std::env::var("IVY_LIST").is_ok() && s.species == Species::ElderOak && !total {
+                        println!("  {biome:?} elder oak at {},{},{} rooted {}", s.pos.x, s.pos.y, s.pos.z, s.rooted);
+                    }
+                    if let Some(&(rise, leaves, boxes)) = plants.get(&s.seed).filter(|_| s.rooted) {
+                        row.grew += 1;
+                        // Worth seeing: up past head height and in leaf.
+                        row.seen += (rise >= 6 && leaves >= 600) as usize;
+                        if std::env::var("IVY_LIST").is_ok() && !total {
+                            println!("  {biome:?} {:?} at {},{},{} rises {rise} leaf cells {leaves} boxes {boxes}", s.species, s.pos.x, s.pos.y, s.pos.z);
+                        }
+                        row.rises.push(rise);
+                        row.leaves.push(leaves);
+                        row.boxes += boxes;
+                    }
+                }
+            }
+        }
+        println!("{:<12} {:<13} {:>5} {:>6} {:>5} {:>5} {:>6}  {:>9} {:>11} {:>9}", "biome", "species", "trees", "rooted", "grew", "seen", "share", "med rise", "med leaves", "boxes/pl");
+        for ((biome, species), mut r) in rows {
+            r.rises.sort_unstable();
+            r.leaves.sort_unstable();
+            let rise = r.rises.get(r.rises.len() / 2).copied().unwrap_or(0);
+            let leaves = r.leaves.get(r.leaves.len() / 2).copied().unwrap_or(0);
+            println!(
+                "{biome:<12} {species:<13} {:>5} {:>6} {:>5} {:>5} {:>5.0}%  {:>9} {:>11} {:>9}",
+                r.trees,
+                r.rooted,
+                r.grew,
+                r.seen,
+                100.0 * r.seen as f32 / r.trees.max(1) as f32,
+                rise,
+                leaves,
+                r.boxes / r.grew.max(1)
+            );
+        }
+        let cut = census::CUT.with(|c| *c.borrow());
+        println!("{columns} columns, {:.1} ms and {} plant boxes a column; {} boxes cut from {} columns over the budget", ms / columns as f64, all_boxes / columns.max(1), cut.0, cut.1);
     }
 
     /// Prints rainforest spots near the spawn of a seed, for finding lianas:
