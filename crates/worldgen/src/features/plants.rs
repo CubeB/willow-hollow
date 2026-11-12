@@ -13,7 +13,7 @@ use super::shape::Rng;
 use crate::{
     biome::Biome,
     materials as mat,
-    noise::{hash3, perlin2, unit},
+    noise::{fbm2, hash3, perlin2, unit},
     scale::{BLOCK, m, m64},
     surface::{Column, Cover},
 };
@@ -112,13 +112,76 @@ fn grass_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Grass, Sward)> {
     Some((kind, sward))
 }
 
+/// The small plants that stay green through the winter, and show against the snow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wintergreen {
+    /// A shuttlecock of fronds, in beds on the floor of a wood.
+    Fern,
+    /// Wood-rush: a dark tussock of broad arching blades, in shade.
+    Rush,
+    /// A low cushion of heather, rusty with last year's flowers.
+    Heather,
+}
+
+/// The most of a wood's floor, in the thick of a bed, that grows any one wintergreen.
+const BED_SHARE: f32 = 0.45;
+
+/// The wintergreen that grows at this column, if one does. `a` is the column's roll of
+/// the dice. Ferns and wood-rush grow in beds a few metres across, thickest where the
+/// wood stands close overhead (the noise `features::choose` thins the trees by); heather
+/// in broad drifts on open ground.
+fn wintergreen_at(col: &Column, seed: u32, x: i32, z: i32, a: f32) -> Option<Wintergreen> {
+    // How much of the ground each takes, over the whole biome: fern, wood-rush, heather.
+    let (fern, rush, heather) = match col.biome {
+        Biome::Deciduous => (0.035, 0.02, 0.0),
+        Biome::OldGrowth => (0.06, 0.02, 0.0),
+        Biome::BirchGrove => (0.03, 0.02, 0.008),
+        Biome::Woodland => (0.02, 0.012, 0.0),
+        Biome::Taiga => (0.015, 0.008, 0.012),
+        Biome::Grassland => (0.0, 0.006, 0.0),
+        Biome::Heath => (0.0, 0.0, 0.05),
+        Biome::Bog => (0.0, 0.008, 0.03),
+        Biome::Tundra => (0.0, 0.0, 0.015),
+        _ => return None,
+    };
+    // Most columns grow none, and are turned away before any noise is worked out.
+    if a >= BED_SHARE {
+        return None;
+    }
+    // A bed fills up from nothing at its edge to `BED_SHARE` at its heart, and beds take
+    // up about a tenth of the ground, so the shares above come out over the whole.
+    let bed = |salt: u32, metres: f64, share: f32| {
+        let n = patch(seed, salt, x, z, metres) + patch(seed, salt ^ 0x77, x, z, metres / 4.0) * 0.25;
+        (share * 12.0).min(1.0) * BED_SHARE * ((n - 0.22) / 0.2).clamp(0.0, 1.0)
+    };
+    if heather > 0.0 && a < bed(0x4ea7, 16.0, heather) {
+        return Some(Wintergreen::Heather);
+    }
+    if fern == 0.0 && rush == 0.0 {
+        return None;
+    }
+    let (ferns, rushes) = (bed(0xfe21, 9.0, fern), bed(0x2054, 6.0, rush));
+    if a >= ferns.max(rushes) {
+        return None;
+    }
+    let openness = fbm2(seed ^ 0xc1ea, x as f64 / m64(76.0), z as f64 / m64(76.0), 3, 2.0, 0.5);
+    let shade = 0.25 + 0.75 * ((openness + 0.35) / 0.5).clamp(0.0, 1.0);
+    if a < ferns * shade {
+        Some(Wintergreen::Fern)
+    } else if a < rushes * shade {
+        Some(Wintergreen::Rush)
+    } else {
+        None
+    }
+}
+
 /// The petals that go with a flowering ground voxel.
 fn bloom(surface: Voxel) -> Option<Voxel> {
     Some(match surface {
         mat::FLOWER_RED => mat::BLOOM_RED,
         mat::FLOWER_YELLOW => mat::BLOOM_YELLOW,
         mat::FLOWER_WHITE => mat::BLOOM_WHITE,
-        mat::FLOWER_PURPLE | mat::HEATHER => mat::BLOOM_PURPLE,
+        mat::FLOWER_PURPLE => mat::BLOOM_PURPLE,
         mat::FLOWER_BLUE => mat::BLOOM_BLUE,
         mat::FLOWER_PINK => mat::BLOOM_PINK,
         _ => return None,
@@ -283,6 +346,65 @@ fn flower(p: &mut Plot, rng: &mut Rng, petals: Voxel) {
     p.add([x, height + 1, z], [x + 1, height + 2, z + 1], eye, (true, true));
 }
 
+fn fern(p: &mut Plot, rng: &mut Rng) {
+    // Four fronds rise from the crown in the middle, and each arches over to the side
+    // next round from the last, where its paler tip hangs: a shuttlecock, seen from above
+    // a pinwheel.
+    for (x, z, tx, tz) in [(1, 1, 0, 1), (2, 1, 2, 0), (2, 2, 3, 2), (1, 2, 1, 3)] {
+        if rng.unit() < 0.1 {
+            continue;
+        }
+        let height = rng.int(3, 6);
+        p.stem(x, z, height, mat::FERN);
+        let droop = rng.int(1, 2).min(height - 2);
+        p.add([tx, height - droop, tz], [tx + 1, height, tz + 1], mat::FERN_TIP, (true, true));
+    }
+    // A young frond or two low in the corners.
+    for (x, z) in [(0, 0), (3, 0), (0, 3), (3, 3)] {
+        if rng.unit() < 0.35 {
+            p.add([x, 0, z], [x + 1, rng.int(1, 2), z + 1], mat::FERN_TIP, (false, true));
+        }
+    }
+}
+
+fn rush(p: &mut Plot, rng: &mut Rng) {
+    // A rosette: broad dark blades, two cells wide, lying low around the edge and turning
+    // one way round it, with a stem or two standing up out of the open middle.
+    for (lo, hi) in [([0, 0], [2, 1]), ([3, 0], [4, 2]), ([2, 3], [4, 4]), ([0, 2], [1, 4])] {
+        if rng.unit() < 0.2 {
+            continue;
+        }
+        p.add([lo[0], 0, lo[1]], [hi[0], rng.int(1, 3), hi[1]], mat::WOODRUSH, (false, true));
+    }
+    let middle = shuffled_quarters(rng);
+    for &(qx, qz) in &middle[..rng.int(1, 2) as usize] {
+        p.stem(1 + qx / 2, 1 + qz / 2, rng.int(3, 5), mat::WOODRUSH);
+    }
+}
+
+/// A cushion of heather: woody and green all year, with sprigs standing out of it that
+/// are purple in flower (where the ground says it is `flowering`) and rust once spent.
+fn heather(p: &mut Plot, rng: &mut Rng, flowering: bool) {
+    for (qx, qz) in QUARTERS {
+        if rng.unit() < 0.15 {
+            continue;
+        }
+        let height = rng.int(1, 3);
+        // Most fill their quarter; some only half of it, so the edge is ragged.
+        let (w, d) = match rng.int(0, 5) {
+            0 => (1, 2),
+            1 => (2, 1),
+            _ => (2, 2),
+        };
+        p.add([qx, 0, qz], [qx + w, height, qz + d], mat::HEATHER_GREEN, (false, true));
+        if rng.unit() < 0.75 {
+            let (x, z) = (qx + rng.int(0, w - 1), qz + rng.int(0, d - 1));
+            let sprig = if flowering && rng.unit() < 0.65 { mat::BLOOM_PURPLE } else { mat::HEATHER_RUST };
+            p.add([x, height, z], [x + 1, height + rng.int(1, 2), z + 1], sprig, (true, true));
+        }
+    }
+}
+
 fn reeds(p: &mut Plot, rng: &mut Rng) {
     // Each stem has a quarter of the voxel to itself, room for a head around it.
     let mut quarters = [(0, 0), (2, 0), (0, 2), (2, 2)];
@@ -366,6 +488,11 @@ pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut V
             }
         }
         Cover::Land if col.clear >= m(0.8) && col.water_surface().is_none() => {
+            // Flowering heather ground carries the heather itself, not a flower.
+            if surface == mat::HEATHER {
+                heather(&mut plot, &mut rng, true);
+                return;
+            }
             if let Some(petals) = bloom(surface) {
                 flower(&mut plot, &mut rng, petals);
                 return;
@@ -373,6 +500,16 @@ pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut V
             let forest = matches!(col.biome, Biome::OldGrowth | Biome::Rainforest | Biome::Taiga);
             if forest && a < 0.012 && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
                 mushroom(&mut plot, &mut rng);
+                return;
+            }
+            if surface == mat::ground_cover(col.biome)
+                && let Some(kind) = wintergreen_at(col, seed, x, z, a)
+            {
+                match kind {
+                    Wintergreen::Fern => fern(&mut plot, &mut rng),
+                    Wintergreen::Rush => rush(&mut plot, &mut rng),
+                    Wintergreen::Heather => heather(&mut plot, &mut rng, false),
+                }
                 return;
             }
             if let Some((kind, sward)) = grass_at(col, seed, x, z)
@@ -478,6 +615,9 @@ mod tests {
             (column(Cover::Land, Biome::Grassland), mat::GRASS_MEADOW),
             (column(Cover::Land, Biome::Grassland), mat::FLOWER_YELLOW),
             (column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath)),
+            (column(Cover::Land, Biome::Heath), mat::HEATHER),
+            (column(Cover::Land, Biome::Deciduous), mat::ground_cover(Biome::Deciduous)),
+            (column(Cover::Land, Biome::Bog), mat::ground_cover(Biome::Bog)),
             (column(Cover::Land, Biome::Tundra), mat::ground_cover(Biome::Tundra)),
             (column(Cover::Land, Biome::Savanna), mat::ground_cover(Biome::Savanna)),
         ];
@@ -508,6 +648,31 @@ mod tests {
         assert!(!all.is_empty());
         for b in &all {
             assert!(b.hi[0] - b.lo[0] < CELLS && b.hi[2] - b.lo[2] < CELLS, "{b:?} is a voxel wide");
+        }
+    }
+
+    #[test]
+    fn wintergreens_grow_in_their_places_and_keep_their_leaves() {
+        let mats = mat::build();
+        let wood = grown(&column(Cover::Land, Biome::Deciduous), mat::ground_cover(Biome::Deciduous));
+        let heath = grown(&column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath));
+        let count = |boxes: &[PlantBox], v: Voxel| boxes.iter().filter(|b| b.voxel == v).count();
+        assert!(count(&wood, mat::FERN) > 100 && count(&wood, mat::WOODRUSH) > 50, "a wood grows ferns and wood-rush");
+        assert_eq!(count(&wood, mat::HEATHER_GREEN), 0, "no heather under trees");
+        assert!(count(&heath, mat::HEATHER_GREEN) > 100 && count(&heath, mat::FERN) == 0, "a heath grows heather, not ferns");
+        // They are a small part of what grows, so the summer floor is still grass.
+        assert!(count(&wood, mat::FERN) + count(&wood, mat::WOODRUSH) < wood.len() / 2);
+        // Heather in flower is purple over the flowering ground, and green under it all year.
+        let drift = grown(&column(Cover::Land, Biome::Heath), mat::HEATHER);
+        assert!(count(&drift, mat::BLOOM_PURPLE) > 100 && count(&drift, mat::HEATHER_GREEN) > count(&drift, mat::BLOOM_PURPLE));
+        for v in [mat::FERN, mat::FERN_TIP, mat::WOODRUSH, mat::HEATHER_GREEN, mat::HEATHER_RUST] {
+            assert_eq!(mats.get(v).plant, voxel::plant::EVERGREEN, "{v} must stay through the winter");
+        }
+        for b in wood.iter().chain(&heath).chain(&drift) {
+            assert!(b.hi[0] - b.lo[0] < CELLS && b.hi[2] - b.lo[2] < CELLS, "{b:?} is a voxel wide");
+            for axis in [0, 2] {
+                assert_eq!(b.lo[axis].div_euclid(CELLS), (b.hi[axis] - 1).div_euclid(CELLS), "{b:?} leaves its column");
+            }
         }
     }
 
