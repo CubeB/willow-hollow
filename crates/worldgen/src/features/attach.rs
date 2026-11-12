@@ -20,9 +20,10 @@
 //! To add a new surface growth (#59 bark, say): call `for_each_site`, decide from the
 //! [`Site`], plot boxes through [`Site::plot`], and finish with [`Raster::finish`].
 
-use std::collections::HashMap;
+use std::cell::OnceCell;
 
 use glam::IVec3;
+use crate::noise::CellMap;
 use voxel::{
     AIR, CHUNK, Kind, Materials, PAD, PaddedChunk, Voxel,
     mesh::{CELLS, PlantBox},
@@ -121,14 +122,61 @@ pub struct ColumnVoxels<'a> {
     /// World position of padded (0, 0) horizontally.
     x0: i32,
     z0: i32,
+    /// See [`ColumnVoxels::masks`]. Worked out once, for all that grows on the column.
+    masks: OnceCell<Vec<Masks>>,
 }
+
+/// For each padded column of a chunk (`[x][z]`), a bit per padded height for each of:
+/// solid voxels (hosts), opaque ones (shade), and air.
+pub(super) type Masks = [[(u64, u64, u64); PAD]; PAD];
 
 impl<'a> ColumnVoxels<'a> {
     /// `chunks` are lowest first with none skipped, and `x0`, `z0` the world position of
     /// the border's corner.
     pub fn new(chunks: &'a [(i32, PaddedChunk)], x0: i32, z0: i32) -> Self {
         let cy_min = chunks.first().map_or(0, |c| c.0);
-        Self { chunks, cy_min, x0, z0 }
+        Self { chunks, cy_min, x0, z0, masks: OnceCell::new() }
+    }
+
+    /// The solid, opaque and air voxels of each chunk, as bits, borders included.
+    pub(super) fn masks(&self, mats: &Materials) -> &[Masks] {
+        self.masks.get_or_init(|| {
+            // Bit 0 for solid, bit 1 for opaque.
+            let kinds: Vec<u8> = (0..mats.len())
+                .map(|i| {
+                    let kind = mats.get(i as Voxel).kind;
+                    (kind == Kind::Solid) as u8 | (kind.is_opaque() as u8) << 1
+                })
+                .collect();
+            self.chunks
+                .iter()
+                .map(|(_, chunk)| {
+                    let mut m = [[(0u64, 0u64, 0u64); PAD]; PAD];
+                    // Voxels are stored a column at a time, in this same order.
+                    let mut columns = chunk.voxels().as_chunks::<PAD>().0.iter();
+                    for cell in m.iter_mut().flatten() {
+                        let column = columns.next().expect("a chunk has PAD * PAD columns");
+                        for (y, &v) in column.iter().enumerate() {
+                            let kind = kinds[v as usize] as u64;
+                            cell.0 |= (kind & 1) << y;
+                            cell.1 |= (kind >> 1) << y;
+                            cell.2 |= ((v == AIR) as u64) << y;
+                        }
+                    }
+                    m
+                })
+                .collect()
+        })
+    }
+
+    /// World position of the border's corner (at height 0).
+    pub(super) fn corner(&self) -> IVec3 {
+        IVec3::new(self.x0, 0, self.z0)
+    }
+
+    /// The column's chunks, lowest first.
+    pub(super) fn chunks(&self) -> &'a [(i32, PaddedChunk)] {
+        self.chunks
     }
 
     /// Whether world voxel height `y` has a chunk here, so a box starting there can be
@@ -188,37 +236,9 @@ const INTERIOR: u64 = ((1u64 << CHUNK) - 1) << 1;
 /// face. `host_ok` says which voxels can carry growth at all, and is the cheap way to
 /// skip a column's worth of things that can't.
 pub fn for_each_site(voxels: &ColumnVoxels, mats: &Materials, host_ok: impl Fn(Voxel) -> bool, mut visit: impl FnMut(&Site)) {
-    let (solid_bit, opaque_bit): (Vec<bool>, Vec<bool>) = (0..mats.len())
-        .map(|i| {
-            let kind = mats.get(i as Voxel).kind;
-            (kind == Kind::Solid, kind.is_opaque())
-        })
-        .unzip();
+    let solid_bit: Vec<bool> = (0..mats.len()).map(|i| mats.get(i as Voxel).kind == Kind::Solid).collect();
     let chunks = voxels.chunks;
-    // Solid (host) and opaque (shade) bits per chunk and column, borders included.
-    let masks: Vec<[[(u64, u64, u64); PAD]; PAD]> = chunks
-        .iter()
-        .map(|(_, chunk)| {
-            let mut m = [[(0u64, 0u64, 0u64); PAD]; PAD];
-            for (x, row) in m.iter_mut().enumerate() {
-                for (z, cell) in row.iter_mut().enumerate() {
-                    for y in 0..PAD {
-                        let v = chunk.get(x, y, z);
-                        if solid_bit[v as usize] {
-                            cell.0 |= 1 << y;
-                        }
-                        if opaque_bit[v as usize] {
-                            cell.1 |= 1 << y;
-                        }
-                        if v == AIR {
-                            cell.2 |= 1 << y;
-                        }
-                    }
-                }
-            }
-            m
-        })
-        .collect();
+    let masks = voxels.masks(mats);
     let n = CHUNK as usize;
     for x in 1..=n {
         for z in 1..=n {
@@ -336,7 +356,7 @@ fn grid_local(i: usize) -> IVec3 {
 /// and the result never has two boxes in the same place.
 #[derive(Default)]
 pub struct Raster {
-    grids: HashMap<IVec3, Grid>,
+    grids: CellMap<Grid>,
 }
 
 impl Raster {

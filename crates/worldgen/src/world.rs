@@ -39,6 +39,8 @@ pub struct GameWorld {
     climbers: features::climber::PlantCache,
     /// Caves laid out lately, by world cell.
     caves: features::cave::Cache,
+    /// Trees and other features placed lately.
+    placed: features::PlaceCache,
 }
 
 impl GameWorld {
@@ -55,6 +57,7 @@ impl GameWorld {
             continents: Mutex::new(HashMap::new()),
             climbers: Default::default(),
             caves: Default::default(),
+            placed: Default::default(),
         }
     }
 
@@ -186,7 +189,7 @@ pub struct Spawn {
 /// The overhanging rock over each padded column of a chunk column (see
 /// [`surface::overhang`]), indexed like `columns`.
 pub(crate) fn overhangs(seed: u32, sampler: &Sampler, columns: &[Column], (lx0, lz0): (i32, i32), (wx0, wz0): (i32, i32)) -> Vec<Option<(i32, i32)>> {
-    use surface::overhang::{REACH, Spot, slab};
+    use surface::overhang::{REACH, Spot, reach, slab};
     // Every column the pass looks at: the padded ones and a ring around them.
     let ring = REACH + 1;
     let n = PAD as i32 + 2 * ring;
@@ -196,21 +199,24 @@ pub(crate) fn overhangs(seed: u32, sampler: &Sampler, columns: &[Column], (lx0, 
         open: c.water_surface().is_none() && c.cover != Cover::Trail && c.clear > m(1.5),
         grown: matches!(c.cover, Cover::Land | Cover::Bank),
     };
-    let mut spots = Vec::with_capacity((n * n) as usize);
-    for x in -ring..PAD as i32 + ring {
-        for z in -ring..PAD as i32 + ring {
-            spots.push(if (0..PAD as i32).contains(&x) && (0..PAD as i32).contains(&z) {
+    // The ring is sampled only where a slab is found to need it, which is seldom.
+    let spots: Vec<std::cell::OnceCell<Spot>> = (0..n * n).map(|_| std::cell::OnceCell::new()).collect();
+    let at = |wx: i32, wz: i32| {
+        let (x, z) = (wx - wx0, wz - wz0);
+        *spots[((x + ring) * n + z + ring) as usize].get_or_init(|| {
+            if (0..PAD as i32).contains(&x) && (0..PAD as i32).contains(&z) {
                 spot(&columns[x as usize * PAD + z as usize])
             } else {
                 spot(&sampler.column(lx0 + x, lz0 + z))
-            });
-        }
-    }
-    let at = |wx: i32, wz: i32| spots[((wx - wx0 + ring) * n + wz - wz0 + ring) as usize];
+            }
+        })
+    };
+    let reaches: Vec<std::cell::OnceCell<i32>> = (0..n * n).map(|_| std::cell::OnceCell::new()).collect();
+    let reach_at = |wx: i32, wz: i32| *reaches[((wx - wx0 + ring) * n + wz - wz0 + ring) as usize].get_or_init(|| reach(seed, wx, wz));
     let mut out = Vec::with_capacity(PAD * PAD);
     for px in 0..PAD as i32 {
         for pz in 0..PAD as i32 {
-            out.push(slab(seed, wx0 + px, wz0 + pz, &at));
+            out.push(slab(wx0 + px, wz0 + pz, &at, &reach_at));
         }
     }
     out
@@ -323,7 +329,7 @@ impl GameWorld {
         // Features up to MAX_REACH from anything a plant might touch.
         let margin = MARGIN + features::MAX_REACH + 1;
         let sampler = Sampler::new(run.continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
-        let placements = features::place(self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
         // Landmarks anywhere a plant here could reach, visited once each and applied in
         // a fixed order, so overlaps resolve the same way every time.
         let (mcx, mcz) = (run.macro_origin.0.div_euclid(CHUNK), run.macro_origin.1.div_euclid(CHUNK));
@@ -381,8 +387,21 @@ impl World for GameWorld {
 }
 
 impl GameWorld {
+    /// [`World::generate_column`] without the small plants: the same voxels, currents,
+    /// trees and so on, and `plants` left empty. Growing the plants is most of the work
+    /// of a column, so this is several times quicker, for whoever only needs the shape
+    /// of the world: collision, or terrain too far off for its plants to be drawn. (The
+    /// topmost chunks may be missing where only plants reached into them.)
+    pub fn generate_column_bare(&self, cx: i32, cz: i32) -> ColumnOutput {
+        self.generate(cx, cz, false, &mut |_, _| {})
+    }
+
     /// [`World::generate_column`], showing `inspect` every climbing plant whole.
     pub(crate) fn generate_column_with(&self, cx: i32, cz: i32, inspect: &mut Inspect) -> ColumnOutput {
+        self.generate(cx, cz, true, inspect)
+    }
+
+    fn generate(&self, cx: i32, cz: i32, planted: bool, inspect: &mut Inspect) -> ColumnOutput {
         // A chunk never straddles macro-cells. Its one-voxel border reaches into the
         // uniform deep sea between them, or onto a range held to the same height on
         // both sides of the border (see `continent::border`).
@@ -431,7 +450,7 @@ impl GameWorld {
                     growing = f;
                 }
                 // The border columns belong to neighbouring chunk columns.
-                if (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
+                if planted && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     if plants.len() == grown {
@@ -446,7 +465,8 @@ impl GameWorld {
         }
 
         let lib = self.library();
-        let placements = features::place(
+        let placements = features::place_cached(
+            &self.placed,
             self.seed,
             lib,
             &sampler,
@@ -701,6 +721,19 @@ impl GameWorld {
                 put(p + origin, v, true);
             }
         }
+        if !planted {
+            // Whatever the caves grew goes with the rest of the plants.
+            plants.clear();
+            return ColumnOutput {
+                chunks: out,
+                cascades,
+                springs,
+                surf,
+                currents,
+                plants,
+                trees: placements,
+            };
+        }
         // Their fine parts, each box grown by the chunk column its corner is in, so a part
         // straddling a border is drawn once. Before the moss, which keeps off them.
         let cells = IVec3::splat(CELLS);
@@ -764,7 +797,7 @@ impl GameWorld {
                 seed: self.seed,
                 taken: &standing,
             };
-            features::tree_detail::grow(&out, &voxels, &self.materials, &grove, &mut plants);
+            features::tree_detail::grow(&voxels, &self.materials, &grove, &mut plants);
         }
         ColumnOutput {
             chunks: out,

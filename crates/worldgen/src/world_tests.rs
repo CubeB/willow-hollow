@@ -277,3 +277,28 @@ fn overhangs_hang_from_faces_and_agree_across_chunks() {
     eprintln!("{found} chunk columns with overhangs, {slabs} slab columns");
     assert!(found > 0, "no overhangs near any cliff");
 }
+
+#[test]
+fn a_bare_column_is_the_planted_one_without_its_plants() {
+    let w = world();
+    let spawn = w.spawn_point();
+    let (cx, cz) = (spawn.x.div_euclid(CHUNK), spawn.z.div_euclid(CHUNK));
+    let mut planted = 0;
+    for (dx, dz) in (-3..3).flat_map(|dz| (-3..3).map(move |dx| (dx, dz))) {
+        let (full, bare) = (w.generate_column(cx + dx, cz + dz), w.generate_column_bare(cx + dx, cz + dz));
+        planted += full.plants.len();
+        assert!(bare.plants.is_empty());
+        assert!(bare.chunks.len() <= full.chunks.len());
+        for (i, (cy, chunk)) in full.chunks.iter().enumerate() {
+            match bare.chunks.get(i) {
+                Some((by, b)) => assert!(by == cy && b.voxels() == chunk.voxels(), "chunk {cy} of column {dx},{dz} differs"),
+                // Only plants reached up here.
+                None => assert!(chunk.voxels().iter().all(|&v| v == voxel::AIR), "chunk {cy} of column {dx},{dz} is missing"),
+            }
+        }
+        assert_eq!(full.currents, bare.currents);
+        assert_eq!(full.trees.len(), bare.trees.len());
+        assert_eq!((full.cascades.len(), full.springs.len(), full.surf.len()), (bare.cascades.len(), bare.springs.len(), bare.surf.len()));
+    }
+    assert!(planted > 0, "nothing grows around the spawn point");
+}

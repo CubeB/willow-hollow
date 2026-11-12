@@ -1,11 +1,17 @@
 //! First-person character: walking, stepping, jumping and swimming over voxel terrain.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        mpsc::{Receiver, Sender, channel},
+    },
+};
 
 use glam::{DVec3, IVec3, Vec2, Vec3};
 use voxel::{CHUNK, Kind, PAD, PaddedChunk, mesh::Current};
 use worldgen::{
-    World,
+    ColumnOutput, World,
     scale::{m, m64},
     world::GameWorld,
 };
@@ -432,8 +438,13 @@ impl Player {
 /// Voxel lookups for collision, generated on demand around the player.
 ///
 /// Collision needs only the handful of chunk columns the player is touching, and a
-/// column takes well under a millisecond to generate, so this regenerates them rather
-/// than keeping voxel data for every chunk that has been meshed.
+/// column without its small plants takes a millisecond or two to generate, so this
+/// regenerates them rather than keeping voxel data for every chunk that has been meshed.
+///
+/// The player's own lookups generate a missing column there and then: the ground must
+/// be under their feet. Things that can wait a frame or two (falling leaves, rain) look
+/// through [`WorldVoxels::lazily`], which has a thread generate what is missing and
+/// answers air until it arrives, so that they never hold up a frame.
 pub struct WorldVoxels {
     world: Arc<GameWorld>,
     columns: HashMap<(i32, i32), Vec<(i32, PaddedChunk)>>,
@@ -442,6 +453,41 @@ pub struct WorldVoxels {
     /// The trees reaching into the same columns (see `ColumnOutput::trees`), to tell
     /// whose leaf is whose.
     trees: HashMap<(i32, i32), Vec<worldgen::features::Placement>>,
+    /// Generates columns asked for through [`WorldVoxels::lazily`], once one has been.
+    loader: Option<Loader>,
+    /// The column the lookups were last trimmed around.
+    centre: (i32, i32),
+}
+
+/// Columns are kept this far from the middle, in columns each way, and those a lazy
+/// lookup asks for beyond it are not generated at all: they would only be dropped again.
+const KEEP: i32 = 4;
+
+/// A thread generating columns for [`WorldVoxels::lazily`].
+struct Loader {
+    ask: Sender<(i32, i32)>,
+    answer: Receiver<((i32, i32), ColumnOutput)>,
+    /// Columns asked for and not back yet.
+    asked: HashSet<(i32, i32)>,
+}
+
+impl Loader {
+    fn new(world: Arc<GameWorld>) -> Self {
+        let (ask, questions) = channel::<(i32, i32)>();
+        let (reply, answer) = channel();
+        std::thread::Builder::new()
+            .name("collision".into())
+            .spawn(move || {
+                // Ends when the game drops `ask`.
+                while let Ok(col) = questions.recv() {
+                    if reply.send((col, world.generate_column_bare(col.0, col.1))).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("collision thread");
+        Self { ask, answer, asked: HashSet::new() }
+    }
 }
 
 /// The chunks of column `col`, generating it if it is not held yet.
@@ -453,11 +499,27 @@ fn load<'a>(
     col: (i32, i32),
 ) -> &'a [(i32, PaddedChunk)] {
     columns.entry(col).or_insert_with(|| {
-        let out = world.generate_column(col.0, col.1);
+        let out = world.generate_column_bare(col.0, col.1);
         currents.insert(col, out.currents);
         trees.insert(col, out.trees);
         out.chunks
     })
+}
+
+/// What is at height `y` of a column's chunks. Columns hold every chunk from just under
+/// the ground to the top of anything on it: outside that range it is rock below and air
+/// above.
+fn voxel_in(chunks: &[(i32, PaddedChunk)], x: i32, y: i32, z: i32) -> voxel::Voxel {
+    let cy = y.div_euclid(CHUNK);
+    match chunks.iter().find(|(c, _)| *c == cy) {
+        Some((_, chunk)) => chunk.get(
+            x.rem_euclid(CHUNK) as usize + 1,
+            y.rem_euclid(CHUNK) as usize + 1,
+            z.rem_euclid(CHUNK) as usize + 1,
+        ),
+        None if chunks.first().is_some_and(|(lowest, _)| cy < *lowest) => worldgen::materials::STONE,
+        None => voxel::AIR,
+    }
 }
 
 impl WorldVoxels {
@@ -467,21 +529,81 @@ impl WorldVoxels {
             columns: HashMap::new(),
             currents: HashMap::new(),
             trees: HashMap::new(),
+            loader: None,
+            centre: (0, 0),
         }
     }
 
-    /// Drops columns far from `pos`. Call occasionally.
+    /// Drops columns far from `pos`, and takes in those generated in the background
+    /// since the last call. Call every frame.
     pub fn trim(&mut self, pos: DVec3) {
-        if self.columns.len() > 64 {
-            let (cx, cz) = (
-                (pos.x / CHUNK as f64).floor() as i32,
-                (pos.z / CHUNK as f64).floor() as i32,
-            );
-            self.columns
-                .retain(|&(x, z), _| (x - cx).abs() <= 2 && (z - cz).abs() <= 2);
+        let (cx, cz) = (
+            (pos.x / CHUNK as f64).floor() as i32,
+            (pos.z / CHUNK as f64).floor() as i32,
+        );
+        let near = |&(x, z): &(i32, i32)| (x - cx).abs() <= KEEP && (z - cz).abs() <= KEEP;
+        if let Some(loader) = &mut self.loader {
+            while let Ok((col, out)) = loader.answer.try_recv() {
+                loader.asked.remove(&col);
+                if near(&col) && !self.columns.contains_key(&col) {
+                    self.columns.insert(col, out.chunks);
+                    self.currents.insert(col, out.currents);
+                    self.trees.insert(col, out.trees);
+                }
+            }
+        }
+        if self.centre != (cx, cz) {
+            self.centre = (cx, cz);
+            self.columns.retain(|c, _| near(c));
             self.currents.retain(|c, _| self.columns.contains_key(c));
             self.trees.retain(|c, _| self.columns.contains_key(c));
         }
+    }
+
+    /// Lookups that never generate anything themselves: a column not held yet is asked
+    /// for in the background and is air until it arrives, and one too far from the
+    /// middle to be kept is simply air.
+    pub fn lazily(&mut self) -> Lazily<'_> {
+        Lazily(self)
+    }
+
+    /// The chunks of `col` if they are held, asking for them in the background if not.
+    fn peek(&mut self, col: (i32, i32)) -> Option<&[(i32, PaddedChunk)]> {
+        if !self.columns.contains_key(&col) {
+            let (cx, cz) = self.centre;
+            if (col.0 - cx).abs() <= KEEP && (col.1 - cz).abs() <= KEEP {
+                let loader = self.loader.get_or_insert_with(|| Loader::new(self.world.clone()));
+                if loader.asked.insert(col) {
+                    let _ = loader.ask.send(col);
+                }
+            }
+            return None;
+        }
+        self.columns.get(&col).map(Vec::as_slice)
+    }
+}
+
+/// See [`WorldVoxels::lazily`].
+pub struct Lazily<'a>(&'a mut WorldVoxels);
+
+impl Voxels for Lazily<'_> {
+    fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind {
+        let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        match self.0.peek(col) {
+            Some(chunks) => {
+                let v = voxel_in(chunks, x, y, z);
+                self.0.world.materials().get(v).kind
+            }
+            None => Kind::Air,
+        }
+    }
+
+    fn current(&mut self, x: i32, z: i32) -> Vec2 {
+        let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        if self.0.peek(col).is_none() {
+            return Vec2::ZERO;
+        }
+        self.0.current(x, z)
     }
 }
 
@@ -490,16 +612,7 @@ impl WorldVoxels {
     pub fn voxel(&mut self, x: i32, y: i32, z: i32) -> voxel::Voxel {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
         let chunks = load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
-        let cy = y.div_euclid(CHUNK);
-        match chunks.iter().find(|(c, _)| *c == cy) {
-            Some((_, chunk)) => chunk.get(
-                x.rem_euclid(CHUNK) as usize + 1,
-                y.rem_euclid(CHUNK) as usize + 1,
-                z.rem_euclid(CHUNK) as usize + 1,
-            ),
-            None if chunks.first().is_some_and(|(lowest, _)| cy < *lowest) => worldgen::materials::STONE,
-            None => voxel::AIR,
-        }
+        voxel_in(chunks, x, y, z)
     }
 }
 
@@ -520,21 +633,8 @@ impl Voxels for WorldVoxels {
     fn kind(&mut self, x: i32, y: i32, z: i32) -> Kind {
         let col = (x.div_euclid(CHUNK), z.div_euclid(CHUNK));
         let chunks = load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
-        let cy = y.div_euclid(CHUNK);
-        match chunks.iter().find(|(c, _)| *c == cy) {
-            Some((_, chunk)) => {
-                let v = chunk.get(
-                    x.rem_euclid(CHUNK) as usize + 1,
-                    y.rem_euclid(CHUNK) as usize + 1,
-                    z.rem_euclid(CHUNK) as usize + 1,
-                );
-                self.world.materials().get(v).kind
-            }
-            // Columns hold every chunk from just under the ground to the top of
-            // anything on it: outside that range it is rock below and air above.
-            None if chunks.first().is_some_and(|(lowest, _)| cy < *lowest) => Kind::Solid,
-            None => Kind::Air,
-        }
+        let v = voxel_in(chunks, x, y, z);
+        self.world.materials().get(v).kind
     }
 
     fn current(&mut self, x: i32, z: i32) -> Vec2 {

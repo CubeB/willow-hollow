@@ -31,7 +31,7 @@ pub struct Spot {
 
 /// How far, in voxels, the lip at world column `(wx, wz)` juts out: 0 on most faces,
 /// and on the minority that overhang it comes and goes along the lip.
-fn reach(seed: u32, wx: i32, wz: i32) -> i32 {
+pub fn reach(seed: u32, wx: i32, wz: i32) -> i32 {
     let (fx, fz) = (wx as f64, wz as f64);
     let gate = smoothstep(0.2, 0.4, perlin2(seed ^ 0x0e41, fx / m64(45.0), fz / m64(45.0)));
     if gate <= 0.0 {
@@ -44,8 +44,9 @@ fn reach(seed: u32, wx: i32, wz: i32) -> i32 {
 
 /// The rock, as an inclusive range of voxel heights, hanging over the column at world
 /// `(wx, wz)` from a lip behind it, if any. `at` describes any column within
-/// [`REACH`] of it.
-pub fn slab(seed: u32, wx: i32, wz: i32, at: &impl Fn(i32, i32) -> Spot) -> Option<(i32, i32)> {
+/// [`REACH`] + 1 of it, and `reach` is [`reach`] there: the caller's to remember, each
+/// column's being asked for by all those around it.
+pub fn slab(wx: i32, wz: i32, at: &impl Fn(i32, i32) -> Spot, reach: &impl Fn(i32, i32) -> i32) -> Option<(i32, i32)> {
     let p = at(wx, wz);
     if !p.open {
         return None;
@@ -53,6 +54,13 @@ pub fn slab(seed: u32, wx: i32, wz: i32, at: &impl Fn(i32, i32) -> Spot) -> Opti
     let headroom = if p.grown { 4 } else { 2 };
     let mut best: Option<(i32, i32)> = None;
     'dirs: for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        // How far a lip at each distance behind this column would jut out. Most reach
+        // nowhere near it, and then what the columns back there are need not be asked,
+        // which for those beyond the chunk's own would mean sampling them.
+        let reaches: [i32; REACH as usize] = std::array::from_fn(|i| reach(wx - dx * (i as i32 + 1), wz - dz * (i as i32 + 1)));
+        if reaches.iter().zip(1..).all(|(r, d)| *r < d) {
+            continue;
+        }
         for d in 1..=REACH {
             // The lip, `d` columns behind this one.
             let (qx, qz) = (wx - dx * d, wz - dz * d);
@@ -60,7 +68,7 @@ pub fn slab(seed: u32, wx: i32, wz: i32, at: &impl Fn(i32, i32) -> Spot) -> Opti
             if !q.cliff {
                 continue;
             }
-            let r = reach(seed, qx, qz);
+            let r = reaches[d as usize - 1];
             if r < d {
                 continue 'dirs;
             }

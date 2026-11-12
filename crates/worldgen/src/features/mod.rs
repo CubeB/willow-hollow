@@ -21,7 +21,7 @@ pub mod shape;
 pub mod tree_detail;
 pub mod trees;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 
 use glam::{IVec2, IVec3, Vec2};
 use voxel::{Kind, Materials, Voxel};
@@ -29,7 +29,7 @@ use voxel::{Kind, Materials, Voxel};
 use crate::{
     biome::Biome,
     materials as mat,
-    noise::{fbm2, hash3, unit},
+    noise::{fbm2, hash2, hash3, unit},
     scale::{BLOCK, m, m64},
     surface::{Column, Cover, Sampler},
 };
@@ -38,7 +38,9 @@ use trees::Species;
 
 /// Every species' pre-built variants. Built once per process.
 pub struct Library {
-    templates: HashMap<Species, Vec<Template>>,
+    /// Each species' variants, by the species' number: looked up for every voxel read
+    /// out of a model, so by index and not by hashing.
+    templates: Vec<Vec<Template>>,
 }
 
 impl Default for Library {
@@ -49,20 +51,18 @@ impl Default for Library {
 
 impl Library {
     pub fn build() -> Self {
-        let templates = Species::ALL
-            .iter()
-            .map(|&sp| {
-                let variants = (0..sp.variants())
-                    .map(|i| sp.build(0x51_7e3d ^ (i as u32).wrapping_mul(0x9e37_79b9)))
-                    .collect();
-                (sp, variants)
-            })
-            .collect();
+        let mut templates: Vec<Vec<Template>> = Species::ALL.iter().map(|_| Vec::new()).collect();
+        for sp in Species::ALL {
+            templates[sp as usize] = (0..sp.variants())
+                .map(|i| sp.build(0x51_7e3d ^ (i as u32).wrapping_mul(0x9e37_79b9)))
+                .collect();
+        }
         Self { templates }
     }
 
+    #[inline]
     pub fn get(&self, species: Species, variant: usize) -> &Template {
-        let v = &self.templates[&species];
+        let v = &self.templates[species as usize];
         &v[variant % v.len()]
     }
 }
@@ -342,9 +342,80 @@ fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
     list[list.len() - 1].0
 }
 
+/// What one cell of a layer came to.
+#[derive(Clone)]
+struct Grown {
+    /// Whether something was chosen to stand here, whatever the ground then made of it:
+    /// a giant chosen keeps trees from under it even if it never grew.
+    chosen: bool,
+    feature: Option<Box<Placement>>,
+}
+
+/// Which cell of which layer, in which macro-cell (by its origin): cells run across the
+/// borders between macro-cells, and each side reads its own continent.
+type CellKey = ((i32, i32), u32, i32, i32);
+
+/// Remembers what the cells of each layer came to. A chunk column asks about every cell
+/// that could reach it, and the climbers on it about those a good way further out, so
+/// neighbouring columns ask about the same cells many times over.
+pub struct PlaceCache {
+    shards: [Mutex<HashMap<CellKey, Grown>>; Self::SHARDS],
+}
+
+impl Default for PlaceCache {
+    fn default() -> Self {
+        Self { shards: std::array::from_fn(|_| Mutex::default()) }
+    }
+}
+
+impl PlaceCache {
+    const SHARDS: usize = 16;
+    /// Cells a shard holds before it is emptied to start again: between them, enough
+    /// for all the ground in view at full detail a few times over.
+    const SHARD_CELLS: usize = 8192;
+
+    fn shard(&self, key: &CellKey) -> &Mutex<HashMap<CellKey, Grown>> {
+        &self.shards[hash2(key.1, key.2, key.3) as usize % Self::SHARDS]
+    }
+
+    fn get(&self, key: &CellKey) -> Option<Grown> {
+        self.shard(key).lock().expect("placement cache poisoned").get(key).cloned()
+    }
+
+    fn insert(&self, key: CellKey, grown: Grown) {
+        let mut shard = self.shard(&key).lock().expect("placement cache poisoned");
+        if shard.len() >= Self::SHARD_CELLS {
+            shard.clear();
+        }
+        shard.insert(key, grown);
+    }
+}
+
 /// Features overlapping the square of columns at continent-local `(lx0, lz0)`, `span`
 /// wide. `sampler` must cover that square plus the largest reach.
-pub fn place(
+pub fn place(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin)
+}
+
+/// [`place`], remembering each cell in `cache` for the next to ask. A cache must only
+/// ever be used with one seed and library.
+#[allow(clippy::too_many_arguments)]
+pub fn place_cached(
+    cache: &PlaceCache,
+    world_seed: u32,
+    lib: &Library,
+    sampler: &Sampler,
+    lx0: i32,
+    lz0: i32,
+    span: i32,
+    macro_origin: (i32, i32),
+) -> Vec<Placement> {
+    place_in(Some(cache), world_seed, lib, sampler, lx0, lz0, span, macro_origin)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_in(
+    cache: Option<&PlaceCache>,
     world_seed: u32,
     lib: &Library,
     sampler: &Sampler,
@@ -354,89 +425,128 @@ pub fn place(
     macro_origin: (i32, i32),
 ) -> Vec<Placement> {
     let mut out = Vec::new();
-    let mut giants: Vec<IVec3> = Vec::new();
+    // Where giants were chosen to stand, across the ground.
+    let mut giants: Vec<(i32, i32)> = Vec::new();
     for layer in [GIANTS, TREES, SMALL] {
         let (wx0, wz0) = (macro_origin.0 + lx0, macro_origin.1 + lz0);
         let (c0x, c1x) = ((wx0 - layer.reach).div_euclid(layer.cell), (wx0 + span + layer.reach).div_euclid(layer.cell));
         let (c0z, c1z) = ((wz0 - layer.reach).div_euclid(layer.cell), (wz0 + span + layer.reach).div_euclid(layer.cell));
         for cz in c0z..=c1z {
             for cx in c0x..=c1x {
-                let h = hash3(world_seed ^ layer.salt, cx, cz, 0);
-                let roll = |k: u32| unit(h.rotate_left(k * 5).wrapping_mul(0x2c1b_3c6d ^ k));
-                // Position within the cell, keeping a margin so neighbours do not touch.
-                let x = cx * layer.cell + BLOCK + (roll(1) * (layer.cell - 2 * BLOCK) as f32) as i32;
-                let z = cz * layer.cell + BLOCK + (roll(2) * (layer.cell - 2 * BLOCK) as f32) as i32;
-                let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
-                let col = sampler.column(lx, lz);
-                let Some(species) = choose(&col, &layer, roll(3), roll(4), x, z, world_seed) else {
-                    continue;
-                };
-                let mut pos = IVec3::new(x, col.top() + 1, z);
-                if layer.salt == GIANTS.salt {
-                    giants.push(pos);
-                } else if layer.salt == TREES.salt
-                    && giants.iter().any(|g| (g.x - x).abs() < 6 * BLOCK && (g.z - z).abs() < 6 * BLOCK)
-                {
+                let cell = Cell::new(world_seed, &layer, cx, cz);
+                // Nothing grows under a giant, whether it would have or not.
+                if layer.salt == TREES.salt && giants.iter().any(|g| (g.0 - cell.x).abs() < 6 * BLOCK && (g.1 - cell.z).abs() < 6 * BLOCK) {
                     continue;
                 }
-                // Steep ground: nothing roots there but the rock itself.
-                let rise = (sampler.column(lx + 1, lz).ground - sampler.column(lx - 1, lz).ground)
-                    .abs()
-                    .max((sampler.column(lx, lz + 1).ground - sampler.column(lx, lz - 1).ground).abs());
-                if rise > 1.6 && !matches!(species, Species::Boulder | Species::MossyBoulder) {
-                    continue;
-                }
-                let variant = (roll(5) * 64.0) as usize;
-                let turns = (roll(6) * 4.0) as u32;
-                let mut lie = None;
-                if layer.salt == SMALL.salt {
-                    let model = lib.get(species, variant);
-                    if let Some(axis) = model.axis {
-                        // A log needs clear, dry ground along its whole length.
-                        let bed = |dx: i32, dz: i32| {
-                            let c = sampler.column(lx + dx, lz + dz);
-                            let dry = matches!(c.cover, Cover::Land | Cover::Bank) && c.water_surface().is_none();
-                            (dry && c.clear >= m(1.2)).then_some(c.top() + 1)
-                        };
-                        let far = rotate(axis, turns);
-                        lie = fit_log(IVec2::new(far.x, far.z), pos.y, bed);
-                        if lie.is_none() {
-                            continue;
+                let key = (macro_origin, layer.salt, cx, cz);
+                let grown = match cache.and_then(|c| c.get(&key)) {
+                    Some(grown) => grown,
+                    None => {
+                        let grown = cell.grow(world_seed, lib, sampler, &layer, macro_origin);
+                        // Kept only if the sampler covers all the ground the cell looked at,
+                        // so that the next to ask gets what it would have worked out itself.
+                        if let Some(cache) = cache
+                            && sampler.covers(cell.x - macro_origin.0, cell.z - macro_origin.1, layer.reach + 1)
+                        {
+                            cache.insert(key, grown.clone());
                         }
-                        // Bedded in a little, so neither end shows daylight.
-                        pos.y -= 1;
-                    } else {
-                        let surface = |dx: i32, dz: i32| {
-                            let c = sampler.column(lx + dx, lz + dz);
-                            c.water_surface().is_none().then_some(c.top() + 1)
-                        };
-                        let Some(y) = settle(species, model.base, pos.y, surface) else {
-                            continue;
-                        };
-                        pos.y = y;
+                        grown
                     }
-                }
-                let roots = if layer.salt == SMALL.salt {
-                    None
-                } else {
-                    let ground = |x: i32, z: i32| {
-                        let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
-                        c.water_surface().is_none().then_some(c.top())
-                    };
-                    roots::find(lib, species, variant, turns, pos, world_seed, ground)
                 };
-                out.push(Placement {
-                    pos,
-                    species,
-                    variant,
-                    turns,
-                    lie,
-                    roots,
-                });
+                if layer.salt == GIANTS.salt && grown.chosen {
+                    giants.push((cell.x, cell.z));
+                }
+                out.extend(grown.feature.map(|p| *p));
             }
         }
     }
     out
+}
+
+/// One cell of a layer: where in it a feature would stand, and its rolls of the dice.
+struct Cell {
+    hash: u32,
+    /// World column.
+    x: i32,
+    z: i32,
+}
+
+impl Cell {
+    fn new(world_seed: u32, layer: &Layer, cx: i32, cz: i32) -> Self {
+        let mut cell = Self { hash: hash3(world_seed ^ layer.salt, cx, cz, 0), x: 0, z: 0 };
+        // Position within the cell, keeping a margin so neighbours do not touch.
+        cell.x = cx * layer.cell + BLOCK + (cell.roll(1) * (layer.cell - 2 * BLOCK) as f32) as i32;
+        cell.z = cz * layer.cell + BLOCK + (cell.roll(2) * (layer.cell - 2 * BLOCK) as f32) as i32;
+        cell
+    }
+
+    fn roll(&self, k: u32) -> f32 {
+        unit(self.hash.rotate_left(k * 5).wrapping_mul(0x2c1b_3c6d ^ k))
+    }
+
+    /// What grows in the cell, if anything, reading the ground no further than the
+    /// layer's reach from where it stands.
+    fn grow(&self, world_seed: u32, lib: &Library, sampler: &Sampler, layer: &Layer, macro_origin: (i32, i32)) -> Grown {
+        let (x, z) = (self.x, self.z);
+        let roll = |k: u32| self.roll(k);
+        let nothing = |chosen: bool| Grown { chosen, feature: None };
+        let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
+        let col = sampler.column(lx, lz);
+        let Some(species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
+            return nothing(false);
+        };
+        let mut pos = IVec3::new(x, col.top() + 1, z);
+        // Steep ground: nothing roots there but the rock itself.
+        let rise = (sampler.column(lx + 1, lz).ground - sampler.column(lx - 1, lz).ground)
+            .abs()
+            .max((sampler.column(lx, lz + 1).ground - sampler.column(lx, lz - 1).ground).abs());
+        if rise > 1.6 && !matches!(species, Species::Boulder | Species::MossyBoulder) {
+            return nothing(true);
+        }
+        let variant = (roll(5) * 64.0) as usize;
+        let turns = (roll(6) * 4.0) as u32;
+        let mut lie = None;
+        if layer.salt == SMALL.salt {
+            let model = lib.get(species, variant);
+            if let Some(axis) = model.axis {
+                // A log needs clear, dry ground along its whole length.
+                let bed = |dx: i32, dz: i32| {
+                    let c = sampler.column(lx + dx, lz + dz);
+                    let dry = matches!(c.cover, Cover::Land | Cover::Bank) && c.water_surface().is_none();
+                    (dry && c.clear >= m(1.2)).then_some(c.top() + 1)
+                };
+                let far = rotate(axis, turns);
+                lie = fit_log(IVec2::new(far.x, far.z), pos.y, bed);
+                if lie.is_none() {
+                    return nothing(true);
+                }
+                // Bedded in a little, so neither end shows daylight.
+                pos.y -= 1;
+            } else {
+                let surface = |dx: i32, dz: i32| {
+                    let c = sampler.column(lx + dx, lz + dz);
+                    c.water_surface().is_none().then_some(c.top() + 1)
+                };
+                let Some(y) = settle(species, model.base, pos.y, surface) else {
+                    return nothing(true);
+                };
+                pos.y = y;
+            }
+        }
+        let roots = if layer.salt == SMALL.salt {
+            None
+        } else {
+            let ground = |x: i32, z: i32| {
+                let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
+                c.water_surface().is_none().then_some(c.top())
+            };
+            roots::find(lib, species, variant, turns, pos, world_seed, ground)
+        };
+        Grown {
+            chosen: true,
+            feature: Some(Box::new(Placement { pos, species, variant, turns, lie, roots })),
+        }
+    }
 }
 
 /// Decides whether a feature grows at a column and which, or None.
@@ -574,11 +684,51 @@ pub fn leaf_tag(lib: &Library, mats: &Materials, placements: &[Placement], q: IV
     nearest.1
 }
 
+/// [`leaf_tag`] for the faces of one chunk's mesh. A leaf voxel is asked about once for
+/// each of its faces, and each answer means looking through every tree that reaches the
+/// column, so the answers are kept, voxel by voxel.
+pub struct LeafTags<'a> {
+    lib: &'a Library,
+    mats: &'a Materials,
+    placements: &'a [Placement],
+    /// The voxel at the corner of the chunk's border.
+    corner: IVec3,
+    /// A tag for each voxel of the chunk, border included, or `UNKNOWN`. Empty until the
+    /// first is asked for: most chunks hold no leaves.
+    known: Vec<u8>,
+}
+
+impl<'a> LeafTags<'a> {
+    const UNKNOWN: u8 = u8::MAX;
+    const SIDE: i32 = voxel::PAD as i32;
+
+    /// For the chunk whose own first voxel is world voxel `origin`.
+    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], origin: IVec3) -> Self {
+        Self { lib, mats, placements, corner: origin - IVec3::ONE, known: Vec::new() }
+    }
+
+    /// The tag of the tree whose leaf is at world voxel `q`.
+    pub fn tag(&mut self, q: IVec3) -> u8 {
+        let d = q - self.corner;
+        if d.min_element() < 0 || d.max_element() >= Self::SIDE {
+            return leaf_tag(self.lib, self.mats, self.placements, q);
+        }
+        if self.known.is_empty() {
+            self.known = vec![Self::UNKNOWN; voxel::PAD * voxel::PAD * voxel::PAD];
+        }
+        let i = ((d.x * Self::SIDE + d.y) * Self::SIDE + d.z) as usize;
+        if self.known[i] == Self::UNKNOWN {
+            self.known[i] = leaf_tag(self.lib, self.mats, self.placements, q);
+        }
+        self.known[i]
+    }
+}
+
 /// How high a feature's top can be above its origin, over all templates. Chunk
 /// columns use it to know how far up to generate.
 pub fn max_top(lib: &Library) -> i32 {
     lib.templates
-        .values()
+        .iter()
         .flatten()
         .map(|t| t.top)
         .max()

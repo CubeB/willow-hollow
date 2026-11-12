@@ -303,6 +303,8 @@ pub fn pool_level(seed: u32, level: f32) -> i32 {
 pub struct Sampler<'a> {
     c: &'a Continent,
     world_seed: u32,
+    /// The square it was made for: its corner and width, in continent-local voxels.
+    area: (i32, i32, i32),
     pieces: Vec<Piece>,
     /// Waterfalls whose cliff can reach the area.
     falls: Vec<Fall>,
@@ -374,6 +376,7 @@ impl<'a> Sampler<'a> {
         let mut s = Self {
             c,
             world_seed,
+            area: (lx0, lz0, span),
             pieces,
             falls,
             springs,
@@ -430,6 +433,13 @@ impl<'a> Sampler<'a> {
             }
         }
         out
+    }
+
+    /// Whether the square it was made for holds every column within `reach` of
+    /// continent-local `(lx, lz)`.
+    pub fn covers(&self, lx: i32, lz: i32, reach: i32) -> bool {
+        let (x0, z0, span) = self.area;
+        lx - reach >= x0 && lz - reach >= z0 && lx + reach < x0 + span && lz + reach < z0 + span
     }
 
     /// How far in from its wall continent-local column `(lx, lz)` is, if it lies in a

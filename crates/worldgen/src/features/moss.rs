@@ -210,7 +210,9 @@ impl Soil<'_> {
 
 /// Grows the moss for a chunk column.
 pub fn grow(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, out: &mut Vec<PlantBox>) {
-    if !soil.columns.iter().any(|c| moisture(c) > 0.0) {
+    // Nothing grows on a column that is under water or not open ground (see `judge`).
+    let grows = |c: &Column| matches!(c.cover, Cover::Land | Cover::Bank | Cover::Spring) && c.water_surface().is_none() && moisture(c) > 0.0;
+    if !soil.columns.iter().any(grows) {
         return;
     }
     let mut patches: Vec<Patch> = Vec::new();
@@ -250,9 +252,6 @@ fn judge(site: &Site, soil: &Soil) -> Option<Patch> {
 
 /// [`judge`], with the gaps cut where their noise is below `gap_cut`.
 fn judge_with(site: &Site, soil: &Soil, gap_cut: f32) -> Option<Patch> {
-    if soil.taken.contains(&site.air) {
-        return None;
-    }
     let host = host_of(site.host)?;
     let col = soil.column(site.air.x, site.air.z);
     if !matches!(col.cover, Cover::Land | Cover::Bank | Cover::Spring) || col.water_surface().is_some() {
@@ -266,6 +265,10 @@ fn judge_with(site: &Site, soil: &Soil, gap_cut: f32) -> Option<Patch> {
     let shade = (site.canopy as f32 / 5.0).min(1.0);
     let wet = moisture(col);
     if wet == 0.0 {
+        return None;
+    }
+    // Asked after the cheaper questions: most sites never get this far.
+    if soil.taken.contains(&site.air) {
         return None;
     }
     let (x, y, z) = (site.air.x as f64, site.air.y as f64, site.air.z as f64);

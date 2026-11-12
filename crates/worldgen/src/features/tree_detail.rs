@@ -21,7 +21,7 @@ use std::collections::HashSet;
 
 use glam::IVec3;
 use voxel::{
-    AIR, CHUNK, Materials, PAD, PaddedChunk, Voxel,
+    CHUNK, Materials, PAD, Voxel,
     mesh::{CELLS, PlantBox},
 };
 
@@ -238,9 +238,8 @@ struct Job {
     key: i32,
 }
 
-/// Grows the detail on the trees of a chunk column. `chunks` are the column's voxels,
-/// which `voxels` reads.
-pub fn grow(chunks: &[(i32, PaddedChunk)], voxels: &ColumnVoxels, mats: &Materials, grove: &Grove, out: &mut Vec<PlantBox>) {
+/// Grows the detail on the trees of a chunk column, whose voxels `voxels` reads.
+pub fn grow(voxels: &ColumnVoxels, mats: &Materials, grove: &Grove, out: &mut Vec<PlantBox>) {
     let seed = grove.seed;
     // Bark on lower trunks, twigs on limbs.
     let (mut bark, mut limb_twigs) = (Vec::new(), Vec::new());
@@ -304,7 +303,7 @@ pub fn grow(chunks: &[(i32, PaddedChunk)], voxels: &ColumnVoxels, mats: &Materia
 
     // Leaf clusters, and twigs in evergreen foliage.
     let mut leaves = Vec::new();
-    leaf_sites(chunks, grove.x0, grove.z0, |site| {
+    leaf_sites(voxels, mats, |site| {
         if grove.taken.contains(&site.air) || used.contains(&site.air) {
             return;
         }
@@ -384,22 +383,26 @@ const INTERIOR: u64 = ((1u64 << CHUNK) - 1) << 1;
 /// Visits each air voxel of a chunk column on the outside of tree foliage, once, as a
 /// site on the leaf it touches: the leaf overhead if there is one, then the sides, then
 /// below. Air shut in on the far side, inside a canopy, is passed over.
-fn leaf_sites(chunks: &[(i32, PaddedChunk)], x0: i32, z0: i32, mut visit: impl FnMut(Site)) {
+fn leaf_sites(voxels: &ColumnVoxels, mats: &Materials, mut visit: impl FnMut(Site)) {
     const ORDER: [Toward; 6] = [Toward::Above, Toward::PosX, Toward::NegX, Toward::PosZ, Toward::NegZ, Toward::Below];
     let n = CHUNK as usize;
-    for (cy, chunk) in chunks {
+    let IVec3 { x: x0, z: z0, .. } = voxels.corner();
+    for ((cy, chunk), masks) in voxels.chunks().iter().zip(voxels.masks(mats)) {
         let mut leaf = [[0u64; PAD]; PAD];
         let mut air = [[0u64; PAD]; PAD];
         let mut any = false;
-        for (x, (leaf_row, air_row)) in leaf.iter_mut().zip(air.iter_mut()).enumerate() {
+        for x in 0..PAD {
             for z in 0..PAD {
-                for y in 0..PAD {
-                    let v = chunk.get(x, y, z);
-                    if is_leaf(v) {
-                        leaf_row[z] |= 1 << y;
+                let (solid, opaque, open) = masks[x][z];
+                air[x][z] = open;
+                // Leaves are foliage: opaque but not solid. Only those need looking at.
+                let mut bits = opaque & !solid;
+                while bits != 0 {
+                    let y = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if is_leaf(chunk.get(x, y, z)) {
+                        leaf[x][z] |= 1 << y;
                         any = true;
-                    } else if v == AIR {
-                        air_row[z] |= 1 << y;
                     }
                 }
             }
@@ -454,7 +457,7 @@ pub fn occupied(boxes: &[PlantBox], into: &mut HashSet<IVec3>) {
 mod tests {
     use std::collections::HashMap;
 
-    use voxel::Kind;
+    use voxel::{AIR, Kind, PaddedChunk};
 
     use super::*;
     use crate::{
@@ -519,7 +522,7 @@ mod tests {
         let cols = vec![col; PAD * PAD];
         let grove = Grove { columns: &cols, x0: origin - 1, z0: origin - 1, seed, taken: &HashSet::new() };
         let mut out = Vec::new();
-        grow(&chunks, &voxels, &build(), &grove, &mut out);
+        grow(&voxels, &build(), &grove, &mut out);
         out
     }
 

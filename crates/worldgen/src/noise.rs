@@ -20,6 +20,49 @@ pub fn hash3(seed: u32, x: i32, y: i32, z: i32) -> u32 {
     hash2(seed ^ (z as u32).wrapping_mul(0xcb1a_b31f), x, y)
 }
 
+/// A quick hasher for maps and sets keyed by voxel positions, which the generator fills
+/// and reads by the hundred thousand. Not for keys an outsider chooses.
+#[derive(Clone, Copy, Default)]
+pub struct CellHasher(u64);
+
+impl CellHasher {
+    #[inline]
+    fn add(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for CellHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(b as u64);
+        }
+    }
+
+    #[inline]
+    fn write_i32(&mut self, v: i32) {
+        self.add(v as u32 as u64);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        // The multiply leaves its best bits at the top; tables index by the bottom.
+        self.0 ^ (self.0 >> 29)
+    }
+}
+
+/// Builds [`CellHasher`]s, as the third parameter of a `HashMap` or second of a `HashSet`.
+pub type CellHash = std::hash::BuildHasherDefault<CellHasher>;
+/// A set of voxel positions.
+pub type CellSet = std::collections::HashSet<glam::IVec3, CellHash>;
+/// A map keyed by voxel position.
+pub type CellMap<V> = std::collections::HashMap<glam::IVec3, V, CellHash>;
+
 /// Uniform in [0, 1).
 #[inline]
 pub fn unit(h: u32) -> f32 {

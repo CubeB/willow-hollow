@@ -1159,6 +1159,14 @@ impl Renderer {
 
     /// Renders the scene and writes the tonemapped image to `target`.
     pub fn render(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, scene: &Scene) {
+        self.draw(gpu, encoder, scene);
+        self.finish(gpu, encoder, target);
+    }
+
+    /// Renders the scene into the renderer's own textures: all of a frame's work but
+    /// the last pass, and none of it needing the window's next image. A game submits
+    /// this before it waits for that image, so that the GPU is drawing while it waits.
+    pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, scene: &Scene) {
         let Scene { camera, env, far, .. } = *scene;
         let device = &gpu.device;
         // Horizontal distances out to which each ring of voxel terrain is fully loaded.
@@ -1617,27 +1625,6 @@ impl Renderer {
         }
 
         // --- Bloom and tonemap ---------------------------------------------------
-        let fullscreen = |encoder: &mut wgpu::CommandEncoder, label: &str, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, target: &wgpu::TextureView| {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.draw(0..3, 0..1);
-        };
         // The third slot of each bind group must not be the pass's own target, so an
         // unused texture is bound there.
         let hdr_bind = self.image_bind_group(device, &self.hdr.view, &self.bloom_b.view);
@@ -1649,13 +1636,40 @@ impl Renderer {
         if let Some(t) = &self.timer {
             t.mark(encoder, 8);
         }
-        let final_bind = self.image_bind_group(device, &self.hdr.view, &self.bloom_a.view);
+    }
+
+    /// Writes the tonemapped image of what [`Renderer::draw`] drew to `target`.
+    pub fn finish(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let final_bind = self.image_bind_group(&gpu.device, &self.hdr.view, &self.bloom_a.view);
         fullscreen(encoder, "tonemap", &self.tonemap, &final_bind, target);
         if let Some(t) = &mut self.timer {
             t.mark(encoder, 9);
             t.resolve(encoder);
         }
     }
+}
+
+/// Draws one triangle over the whole of `target` with `pipeline`.
+fn fullscreen(encoder: &mut wgpu::CommandEncoder, label: &str, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, target: &wgpu::TextureView) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 /// View frustum in camera-relative space. With an infinite reverse-Z projection there
