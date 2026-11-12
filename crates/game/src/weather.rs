@@ -306,6 +306,8 @@ impl Weather {
         let s = self.now;
         let o = s.overcast.clamp(0.0, 1.0);
         env.sun_color *= 1.0 - 0.8 * o;
+        // What does come through thick cloud has lost the low sun's colour.
+        env.sun_color = env.sun_color.lerp(Vec3::splat(env.sun_color.dot(Vec3::new(0.3, 0.59, 0.11))), o * 0.8);
         let grey = |c: Vec3, k: f32| c.lerp(Vec3::splat(c.dot(Vec3::new(0.3, 0.59, 0.11)) * k), o * 0.8);
         env.sky_zenith = grey(env.sky_zenith, 0.85);
         env.sky_horizon = grey(env.sky_horizon, 0.95);

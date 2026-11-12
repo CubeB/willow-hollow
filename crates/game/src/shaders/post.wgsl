@@ -57,7 +57,11 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 fn fs_tonemap(in: VOut) -> @location(0) vec4<f32> {
     let c = textureLoad(src, vec2<i32>(in.clip.xy), 0).rgb
         + textureSample(bloom, src_sampler, in.uv).rgb * 0.35;
-    var o = aces(c * 0.9);
+    // The grade: shade leans a little cool and bright light a little warm, which
+    // gives depth between sunlit ground and what lies in shadow.
+    let lum = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+    let graded = c * mix(vec3<f32>(0.94, 0.99, 1.08), vec3<f32>(1.03, 1.0, 0.96), smoothstep(0.02, 0.6, lum));
+    var o = aces(graded * 0.9);
     if (ENCODE_SRGB) {
         o = linear_to_srgb(o);
     }

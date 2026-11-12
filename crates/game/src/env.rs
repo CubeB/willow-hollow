@@ -83,7 +83,7 @@ impl Environment {
 
         let daylight = elev > -0.06;
         let (sun_dir, sun_color) = if daylight {
-            let warm = smoothstep(0.45, 0.0, elev);
+            let warm = smoothstep(0.6, 0.03, elev);
             let col = Vec3::new(1.0, 0.95, 0.86).lerp(Vec3::new(1.0, 0.50, 0.22), warm);
             (sun, col * 1.35 * smoothstep(-0.06, 0.12, elev))
         } else {
