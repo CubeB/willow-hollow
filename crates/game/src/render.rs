@@ -340,6 +340,8 @@ pub struct Renderer {
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
     start: std::time::Instant,
+    /// Seconds to take the time as, in place of the real clock (see `screenshot`).
+    pub clock: Option<f32>,
 }
 
 fn shader(device: &wgpu::Device, label: &str, source: String) -> wgpu::ShaderModule {
@@ -1148,6 +1150,7 @@ impl Renderer {
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
             start: std::time::Instant::now(),
+            clock: None,
         }
     }
 
@@ -1293,7 +1296,7 @@ impl Renderer {
         let fwd = camera.forward();
         let right = camera.right();
         let up = right.cross(fwd);
-        let time = self.start.elapsed().as_secs_f32();
+        let time = self.clock.unwrap_or_else(|| self.start.elapsed().as_secs_f32());
         let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
         // Light shafts want the sun up and something in the air to catch it: they fade
         // out, and their passes are left out, as the sun sets and in thin dry air.
@@ -1959,6 +1962,7 @@ pub fn screenshot(
         pixels.extend_from_slice(&data[start..start + (width * 4) as usize]);
     }
     drop(data);
+    buffer.unmap();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -1975,6 +1979,64 @@ pub fn screenshot(
         renderer.stats.impostor_boxes,
         impostors.boxes
     );
+    // The frames that follow, as a game would draw them a sixtieth of a second apart, each
+    // saved beside the first: VOXEL_SEQUENCE=N, with VOXEL_SEQUENCE_MOVES naming what
+    // moves between them (any of sun, wind, walk, turn, shuttle). For finding flicker.
+    if let Some(n) = std::env::var("VOXEL_SEQUENCE").ok().and_then(|s| s.parse::<usize>().ok()) {
+        let moves = std::env::var("VOXEL_SEQUENCE_MOVES").unwrap_or_default();
+        let has = |what: &str| moves.split(',').any(|m| m == what);
+        let clock = renderer.start.elapsed().as_secs_f32();
+        renderer.clock = Some(clock);
+        let ahead = (camera.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize_or_zero();
+        for k in 1..=n {
+            let dt = k as f32 / 60.0;
+            if has("wind") {
+                renderer.clock = Some(clock + dt);
+            }
+            let mut env = env.clone();
+            if has("sun") {
+                let later = Environment::at(env.time + dt / (40.0 * 60.0) * 24.0, env.date);
+                (env.sun_dir, env.sun_pos, env.sun_elevation) = (later.sun_dir, later.sun_pos, later.sun_elevation);
+            }
+            let mut camera = Camera { pos: camera.pos, ..*camera };
+            if has("walk") {
+                camera.pos += (ahead * m(1.5) * dt).as_dvec3();
+            }
+            if has("turn") {
+                camera.yaw += 0.6 * dt;
+            }
+            // Away and back again: every other frame is drawn from where the first was.
+            if has("shuttle") && k % 2 == 1 {
+                camera.pos += (ahead * m(1.5) * dt).as_dvec3();
+                camera.yaw += 0.6 * dt;
+            }
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let scene = Scene { camera: &camera, env: &env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts: true };
+            renderer.render(gpu, &mut encoder, &view, &scene);
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(height) },
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            gpu.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |r| {
+                r.expect("screenshot buffer map failed");
+            });
+            gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
+            let data = buffer.slice(..).get_mapped_range()?;
+            let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+            for y in 0..height {
+                let start = (y * row) as usize;
+                pixels.extend_from_slice(&data[start..start + (width * 4) as usize]);
+            }
+            drop(data);
+            buffer.unmap();
+            image::save_buffer(path.with_extension(format!("{k:03}.png")), &pixels, width, height, image::ColorType::Rgba8)?;
+        }
+    }
     // Headless frame timing without a window: VOXEL_TIME_FRAMES=N renders the same
     // view N more times, waiting for the GPU after each, and logs how long they took.
     if let Some(n) = std::env::var("VOXEL_TIME_FRAMES").ok().and_then(|s| s.parse::<usize>().ok()) {

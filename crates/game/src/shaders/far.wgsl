@@ -91,7 +91,7 @@ fn vs(in: VIn) -> VOut {
 fn water_shade(c: vec3<f32>, rel: vec3<f32>, frozen: f32) -> vec3<f32> {
     let up = vec3<f32>(0.0, 1.0, 0.0);
     let view = normalize(rel);
-    let fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(-view, up), 0.0), 5.0);
+    let fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, up), 0.0, 1.0), 5.0);
     let body = c * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
     let color = mix(body, sky_color(reflect(view, up)), fresnel);
     // Still water freezes over (rivers too: there is no flow to tell them apart).

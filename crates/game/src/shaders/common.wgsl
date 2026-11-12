@@ -265,7 +265,9 @@ fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     let texel = S.texel[c];
     // Push the lookup off the surface along its normal and toward the light so
     // flat faces do not shadow themselves.
-    let ndl = max(dot(n, G.sun_dir.xyz), 0.0);
+    // No more than 1: a normal that is the sun's own direction (light through a leaf)
+    // rounds to a hair over it on some frames, and the slope below would have no value.
+    let ndl = clamp(dot(n, G.sun_dir.xyz), 0.0, 1.0);
     let offset = rel + n * texel * 1.5 * (1.0 - ndl * 0.5) + G.sun_dir.xyz * texel * 0.5;
     let lp = S.light_vp[c] * vec4<f32>(offset, 1.0);
     let uv = lp.xy * vec2<f32>(0.5, -0.5) + 0.5;
