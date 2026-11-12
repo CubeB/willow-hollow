@@ -68,6 +68,9 @@ impl Species {
         match self {
             Species::Redwood | Species::Kapok | Species::ElderOak | Species::TallPine => 5,
             Species::Boulder | Species::MossyBoulder | Species::Stump | Species::Cactus => 6,
+            // The trees most often met in stands of their own: enough that a short one, a
+            // tall one, a sparse one and a full one all turn up in the same wood.
+            Species::Oak | Species::Birch => 16,
             _ => 8,
         }
     }
@@ -192,25 +195,33 @@ fn forks(s: &mut Shape, rng: &mut Rng, at: Vec3, out: Vec3, len: f32, r: f32, ba
 }
 
 fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
-    let h = rng.range(12.0, 20.0) * scale;
-    let r0 = rng.range(0.9, 1.5) * scale;
+    // A wood holds trees of every age: squat young ones with a few limbs beside tall old
+    // ones with many. `size` is this tree against the middling one of its kind.
+    let h = rng.range(10.5, 23.0) * scale;
+    let size = (h / (16.0 * scale)).sqrt();
+    // A tall tree's crown is carried higher, not wider: its neighbours are no further off.
+    let spread = size.min(1.0) * scale;
+    let r0 = rng.range(0.9, 1.5) * scale * size;
     let lean = rng.range(0.0, 1.5);
     let top = trunk(s, rng, h * 0.6, r0, 0.7, lean, mat::BARK_OAK);
-    // Main limbs fan out from the top of the trunk, each ending in a mass of leaves.
-    let limbs = rng.int(4, 6);
+    // Main limbs fan out from the top of the trunk, each ending in a mass of leaves. The
+    // taller the tree the more of them, give or take.
+    let limbs = (rng.int(3, 6) + ((size - 0.8) * 4.0) as i32).clamp(3, 8);
     let base_angle = rng.range(0.0, std::f32::consts::TAU);
     for i in 0..limbs {
         let angle = base_angle + i as f32 / limbs as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
         let out = Vec3::new(angle.cos(), 0.0, angle.sin());
-        let start = top - Vec3::Y * rng.range(0.0, h * 0.15);
-        let end = start + out * rng.range(3.5, 6.5) * scale + Vec3::Y * rng.range(2.0, 5.0) * scale;
+        // Where there are many, they leave the trunk at different heights and not in a ring.
+        let drop = if limbs > 5 && i % 2 == 1 { rng.range(0.12, 0.3) } else { rng.range(0.0, 0.15) };
+        let start = top - Vec3::Y * h * drop;
+        let end = start + out * rng.range(3.5, 6.2) * spread + Vec3::Y * rng.range(2.0, 5.0) * scale * size;
         s.limb(start, end, 0.65 * scale, 0.4, mat::BARK_OAK);
         let fork = rng.range(1.8, 2.8) * scale;
         forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
-        let r = rng.range(3.0, 4.4) * scale;
+        let r = rng.range(3.0, 4.4) * spread;
         s.blob(end + Vec3::Y * 0.5, Vec3::new(r, r * 0.72, r), leaves, rng.next_u32(), 0.4);
     }
-    let r = rng.range(3.8, 5.2) * scale;
+    let r = rng.range(3.8, 5.2) * spread;
     s.blob(top + Vec3::Y * (h * 0.22), Vec3::new(r, r * 0.75, r), leaves, rng.next_u32(), 0.4);
 }
 
@@ -245,21 +256,26 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
 }
 
 fn birch(s: &mut Shape, rng: &mut Rng) {
-    let h = rng.range(13.0, 20.0);
+    // From saplings a little over head height in the crown to tall old poles.
+    let h = rng.range(10.5, 23.0);
+    let size = (h / 16.0).sqrt();
     let lean = rng.range(0.0, 2.0);
-    let top = trunk(s, rng, h, 0.75, 0.45, lean, mat::BARK_BIRCH);
+    let top = trunk(s, rng, h, 0.75 * size, 0.45, lean, mat::BARK_BIRCH);
     // A light, open crown: slender branches climb steeply out of the upper half of the
     // trunk, turning a golden angle each, every one carrying its own small cluster, so the
     // leaves hang from wood and a bare winter birch is a fan of thin branches.
-    let n = rng.int(5, 7);
+    // A short one carries a few, a tall one many, and the crown starts higher or lower
+    // up the trunk from tree to tree.
+    let n = (rng.int(4, 7) + ((size - 0.8) * 6.0) as i32).clamp(4, 10);
+    let low = rng.range(0.34, 0.52);
     let a0 = rng.range(0.0, std::f32::consts::TAU);
     for i in 0..n {
-        let t = 0.42 + 0.48 * i as f32 / (n - 1) as f32 + rng.range(-0.03, 0.03);
+        let t = low + (0.9 - low) * i as f32 / (n - 1) as f32 + rng.range(-0.03, 0.03);
         let start = Vec3::new(0.5, 0.0, 0.5).lerp(top, t);
         let angle = a0 + i as f32 * 2.4 + rng.range(-0.4, 0.4);
         let out = Vec3::new(angle.cos(), 0.0, angle.sin());
         // Longer low down, shorter toward the top.
-        let len = rng.range(2.6, 4.2) * (1.15 - 0.6 * (t - 0.42));
+        let len = rng.range(2.6, 4.2) * (1.15 - 0.6 * (t - low));
         let end = start + out * len + Vec3::Y * len * rng.range(0.7, 1.1);
         s.limb(start, end, 0.4, 0.34, mat::BARK_BIRCH);
         if rng.unit() < 0.6 {
@@ -530,4 +546,23 @@ fn fallen_log(s: &mut Shape, rng: &mut Rng) {
 fn stump(s: &mut Shape, rng: &mut Rng) {
     let h = rng.range(1.0, 2.5);
     s.limb(Vec3::new(0.5, -2.0, 0.5), Vec3::new(0.5, h, 0.5), rng.range(1.0, 1.6), 1.0, mat::BARK_OAK);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oaks_and_birches_come_short_and_tall() {
+        for species in [Species::Oak, Species::Birch] {
+            let models: Vec<Template> = (0..species.variants()).map(|i| species.build(0x51_7e3d ^ (i as u32).wrapping_mul(0x9e37_79b9))).collect();
+            let tops: Vec<i32> = models.iter().map(|t| t.top).collect();
+            let reach: Vec<i32> = models.iter().map(|t| t.reach).collect();
+            let (short, tall) = (*tops.iter().min().unwrap(), *tops.iter().max().unwrap());
+            assert!(tall * 10 >= short * 16, "{species:?} only spans {short} to {tall} voxels in height");
+            // Chunks only look this far for trees: wider, and a crown is cut off at a border.
+            let widest = *reach.iter().max().unwrap();
+            assert!(widest <= super::super::TREES.reach, "{species:?} reaches {widest}");
+        }
+    }
 }
