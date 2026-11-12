@@ -3,7 +3,8 @@
 // midsummer, 0.5 autumn equinox, 0.75 midwinter); see season.rs.
 //
 // Every plant vertex carries a plant kind (voxel::plant) in its flags, so a maple, a tuft
-// of grass and a pine each follow their own year. Deciduous and maple leaves are meshed
+// of grass and a pine each follow their own year. Holly, yew, ferns and the other winter
+// evergreens are PLANT_EVERGREEN with the pines: never recoloured, dropped or buried. Deciduous and maple leaves are meshed
 // one voxel to a quad, and each corner says which voxel it belongs to, so a leaf that has
 // fallen is dropped in the vertex shader (all four corners agree) and costs no fragment
 // work. Each tree turns and drops at its own date, from its tree tag (season_tree), each
@@ -188,12 +189,15 @@ fn season_far_leaf(c: vec3<f32>, world: vec2<f32>, s: f32) -> vec4<f32> {
 }
 
 // The far ground: grass dries and yellows, and a far forest of broadleaves turns, then goes
-// to bare brown branches.
-fn season_far_ground(c: vec3<f32>, forest: bool, world: vec2<f32>, s: f32) -> vec3<f32> {
+// to bare brown branches, but for the share `keeps` of it that is evergreen (the hollies,
+// yews and pines among its trees), which shows dark green between them.
+fn season_far_ground(c: vec3<f32>, forest: bool, keeps: f32, world: vec2<f32>, s: f32) -> vec3<f32> {
     let q = sqrt(c);
     if (forest) {
         let leaf = season_far_leaf(c, world, s);
-        return mix(vec3<f32>(0.09, 0.07, 0.06), leaf.rgb, leaf.a);
+        // Seen from above an evergreen hides more of the wood than its share of the trunks.
+        let bare = mix(vec3<f32>(0.09, 0.07, 0.06), vec3<f32>(0.022, 0.075, 0.038), min(keeps * 1.5, 1.0));
+        return mix(bare, leaf.rgb, leaf.a);
     }
     if (season_green(q)) {
         return season_grass(c, s);

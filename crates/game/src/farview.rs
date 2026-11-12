@@ -58,8 +58,9 @@ pub struct FarVertex {
     /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
     pub far: [u8; 4],
     /// The biome (as u8), for the snow lying there (see `season::Places`); then the plant
-    /// kind (voxel::plant) of its forest's canopy, 0 with none; then its [`Skylines`]
-    /// toward sunrise and sunset.
+    /// kind (voxel::plant) of its forest's canopy, 0 with none, with how much of that
+    /// forest keeps its leaves in winter in the five bits above it (see [`pack_plant`]);
+    /// then its [`Skylines`] toward sunrise and sunset.
     pub place: [u8; 4],
 }
 
@@ -386,6 +387,15 @@ struct Canopy {
     height: f32,
     /// Their crowns' plant kind (voxel::plant), 0 if unknown.
     plant: u8,
+    /// How much of the forest keeps its leaves through the winter, 0..1: the hollies,
+    /// yews and pines among its broadleaves (`features::winter_green_share`).
+    winter_green: f32,
+}
+
+/// A canopy's plant kind with, above its three bits, the share of the forest that stays
+/// green in winter in 31sts: what far.wgsl reads back from a vertex's `place.y`.
+fn pack_plant(plant: u8, winter_green: f32) -> u8 {
+    (plant & 7) | (((winter_green.clamp(0.0, 1.0) * 31.0).round() as u8) << 3)
 }
 
 /// Each biome's forest, indexed by biome, or None where too few trees grow to tell.
@@ -406,6 +416,7 @@ fn canopies(world: &GameWorld) -> Vec<Option<Canopy>> {
                 color: crown.map(f32::from),
                 // Palms and pines stay green through the winter, whatever their colour.
                 plant: top.map_or(0, |m| m.plant),
+                winter_green: features::winter_green_share(biome),
                 cover,
                 height: height * OLD_VOXEL,
             })
@@ -428,7 +439,8 @@ struct Look {
     ground: [f32; 3],
     /// The ground under its forest's canopy, as seen from beyond the tree models.
     far: [f32; 3],
-    /// The plant kind of the canopy (voxel::plant), 0 with none.
+    /// The plant kind of the canopy (voxel::plant), 0 with none, and how much of it stays
+    /// green in winter, as [`pack_plant`] puts them in one byte.
     plant: u8,
     /// How high that canopy stands above the ground, in voxels.
     lift: f32,
@@ -469,7 +481,7 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     Look {
         ground,
         far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),
-        plant: canopy.plant,
+        plant: pack_plant(canopy.plant, canopy.winter_green),
         lift: canopy.cover * canopy.height * 0.6 * grows,
     }
 }
