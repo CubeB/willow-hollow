@@ -99,6 +99,31 @@ pub struct Column {
     /// Distance to the edge of the nearest trail or landmark, or `f32::MAX` with none
     /// nearby. Nothing grows where this is small.
     pub clear: f32,
+    /// On a trail column, the ground the trail was worn into and where the column lies
+    /// on it; `None` everywhere else.
+    pub worn: Option<Worn>,
+}
+
+/// What a trail column was before the trail, and where it lies on the trail: what its
+/// surface is worn from (see `world::trail_surface`).
+#[derive(Clone, Copy, Debug)]
+pub struct Worn {
+    /// The cover the trail was laid over: land, bank, beach, scree or cliff.
+    pub under: Cover,
+    /// Steepness of the smooth land before the trail levelled it, in voxels of rise per
+    /// voxel.
+    pub slope: f32,
+    /// Half-width the trail is worn to here, in voxels: its traffic, narrowed over high
+    /// ground.
+    pub half_width: f32,
+    /// Distance from the centreline, in voxels.
+    pub offset: f32,
+    /// Which way the trail runs here (either way along it), as a unit vector.
+    pub dir: Vec2,
+    /// A hash of the nearest trail point, the same for every column that point owns. The
+    /// points lie 0.8 m apart, so the columns nearest each one make a strip across the
+    /// trail: a board, a stone, a step.
+    pub point: u32,
 }
 
 impl Column {
@@ -776,7 +801,7 @@ impl<'a> Sampler<'a> {
             }
         }
 
-        let clear = self.apply_trails(p, lx, lz, &mut ground, &mut cover, river, water, lake_level, near_sea);
+        let (clear, worn) = self.apply_trails(p, lx, lz, slope * OLD_VOXEL / cs, &mut ground, &mut cover, river, water, lake_level, near_sea);
 
         // Dry ground on the sea's side of the grid's coastline (flats, bars, the foot of
         // a beach) belongs to the land beside it. Left as the sea's it would be bare
@@ -794,6 +819,7 @@ impl<'a> Sampler<'a> {
             temperature: bilinear(&c.temperature),
             river,
             clear,
+            worn,
         }
     }
 
@@ -828,7 +854,8 @@ impl<'a> Sampler<'a> {
     }
 
     /// Levels the ground under landmarks and along trails. Returns the distance to the
-    /// nearest such thing.
+    /// nearest such thing, and on a trail column what the trail was worn into. `slope`
+    /// is the steepness of the smooth land, in voxels of rise per voxel.
     ///
     /// Water is never disturbed: only dry columns change, the ground right beside a
     /// channel is left exactly as the river made it, and nothing can sink below a
@@ -839,16 +866,18 @@ impl<'a> Sampler<'a> {
         p: Vec2,
         lx: i32,
         lz: i32,
+        slope: f32,
         ground: &mut f32,
         cover: &mut Cover,
         river: f32,
         water: Option<i32>,
         lake_level: Option<i32>,
         near_sea: bool,
-    ) -> f32 {
+    ) -> (f32, Option<Worn>) {
         if self.trail_points.is_empty() && self.pads.is_empty() {
-            return f32::MAX;
+            return (f32::MAX, None);
         }
+        let mut worn = None;
         let top = ground.floor() as i32;
         let dry = water.is_none_or(|k| top >= k - 1);
         let guard = if river == f32::MAX { 1.0 } else { smoothstep(m(1.6), m(4.8), river) };
@@ -858,11 +887,18 @@ impl<'a> Sampler<'a> {
         // nearest point on the curve.
         let mut any = f32::MAX;
         let mut paved: Option<(f32, &TrailPoint)> = None;
+        // The next nearest, which with the nearest gives the way the trail runs.
+        let mut second: Option<(f32, &TrailPoint)> = None;
         for t in &self.trail_points {
             let d2 = (t.x - p.x).powi(2) + (t.z - p.y).powi(2);
             any = any.min(d2);
-            if t.half_width > 0.0 && paved.is_none_or(|b| d2 < b.0) {
-                paved = Some((d2, t));
+            if t.half_width > 0.0 {
+                if paved.is_none_or(|b| d2 < b.0) {
+                    second = paved;
+                    paved = Some((d2, t));
+                } else if second.is_none_or(|b| d2 < b.0) {
+                    second = Some((d2, t));
+                }
             }
         }
         if any != f32::MAX {
@@ -873,13 +909,20 @@ impl<'a> Sampler<'a> {
             && dry
         {
             let d = d2.sqrt();
-            let rise = (t.y - *ground).abs();
-            let shoulder = (rise * 1.3).clamp(m(1.6), m(6.4));
-            if d < t.half_width + shoulder {
-                let w = (1.0 - smoothstep(t.half_width, t.half_width + shoulder, d)) * guard;
+            let w = shoulder_weight(t, *ground, d) * guard;
+            if w > 0.0 {
                 *ground += (t.y - *ground) * w;
                 let ragged = (unit(hash2(self.world_seed ^ 0x7a11, lx, lz)) - 0.5) * m(0.72);
                 if d < t.half_width + ragged && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Beach | Cover::Bank | Cover::Scree | Cover::Cliff) {
+                    let dir = second.map_or(Vec2::X, |(_, u)| vec2(u.x - t.x, u.z - t.z).normalize_or(Vec2::X));
+                    worn = Some(Worn {
+                        under: *cover,
+                        slope,
+                        half_width: t.half_width,
+                        offset: d,
+                        dir,
+                        point: hash2(self.world_seed ^ 0x7a12, (t.x * 4.0) as i32, (t.z * 4.0) as i32),
+                    });
                     *cover = Cover::Trail;
                 }
             }
@@ -906,8 +949,20 @@ impl<'a> Sampler<'a> {
                 *ground = ground.max(0.5);
             }
         }
-        clear
+        (clear, worn)
     }
+}
+
+/// How far ground `d` from the centreline is drawn to the height of the trail point `t`
+/// (from 1 on the worn strip to 0 beyond its shoulder), where the ground stands at
+/// `ground`. The shoulder is wider where the trail is cut deeper into the land.
+pub fn shoulder_weight(t: &TrailPoint, ground: f32, d: f32) -> f32 {
+    let rise = (t.y - ground).abs();
+    let shoulder = (rise * 1.3).clamp(m(1.6), m(6.4));
+    if d >= t.half_width + shoulder {
+        return 0.0;
+    }
+    1.0 - smoothstep(t.half_width, t.half_width + shoulder, d)
 }
 
 /// Adds the river pieces that pass node `i`.

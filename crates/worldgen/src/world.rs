@@ -246,7 +246,7 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::LakeBed => (if patch < 0.55 { mat::MUD } else { mat::SAND }, mat::MUD),
         Cover::Beach if col.biome == crate::biome::Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::SeaFloor | Cover::Beach => (mat::SAND, mat::SAND),
-        Cover::Trail => (trail_material(col, roll, patch), mat::DIRT),
+        Cover::Trail => trails::tread::surface(col, roll, patch),
         // Cliff faces take their colour from the rock layer at each height (see the fill
         // loop). The tops of ledges, which are nearly level, keep some soil.
         Cover::Cliff if steepness < 0.9 && roll < 0.55 => (cover, mat::STONE),
@@ -286,18 +286,46 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
     }
 }
 
-/// What a trail is surfaced with: whatever feet would wear the local ground down to.
-fn trail_material(col: &Column, roll: f32, patch: f32) -> Voxel {
-    use crate::biome::Biome::*;
-    let (main, other, mix) = match col.biome.parent() {
-        Desert | Savanna => (mat::PATH_SAND, mat::PATH_DIRT, 0.25),
-        Alpine | Tundra | Ocean => (mat::PATH_GRAVEL, mat::STONE, 0.3),
-        OldGrowth | Rainforest => (mat::PATH_DARK, mat::MOSS, 0.15),
-        Taiga => (mat::PATH_DARK, mat::PATH_GRAVEL, 0.3),
-        Heath | Grassland | Deciduous | Woodland => (mat::PATH_DIRT, mat::PATH_GRAVEL, 0.3),
-        other => unreachable!("{other:?} is not an original biome"),
-    };
-    if roll * 0.6 + patch * 0.4 < mix { other } else { main }
+/// Where a used trail climbs steeply, the edge of each step of the voxel ground (a trail
+/// column standing above the next trail column along) is a log or a stone laid across
+/// the way, so the climb reads as a flight of rough steps. The columns at one height on
+/// a levelled trail run across it, so each edge is a row. Returns the step and which way
+/// is down from it. Needs all four neighbours, so only for the inner columns, which are
+/// the ones a chunk column draws.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_nose(
+    columns: &[Column],
+    px: usize,
+    pz: usize,
+    steep: f32,
+    patch: f32,
+    seed: u32,
+    wx0: i32,
+    wz0: i32,
+) -> Option<trails::tread::StepAt> {
+    let col = &columns[px * PAD + pz];
+    let w = col.worn.as_ref()?;
+    if steep < trails::tread::STEP_GRADE || px == 0 || pz == 0 || px == PAD - 1 || pz == PAD - 1 {
+        return None;
+    }
+    let top = col.top();
+    // Down the trail first, so a step at a bend faces the way the trail runs.
+    let mut sides = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
+    if w.dir.y.abs() > w.dir.x.abs() {
+        sides.rotate_left(2);
+    }
+    let down = sides.into_iter().find(|&(dx, dz)| {
+        let n = &columns[(px as i32 + dx) as usize * PAD + (pz as i32 + dz) as usize];
+        n.cover == Cover::Trail && n.top() < top
+    })?;
+    let step = trails::tread::step(col, w, patch, seed, wx0 + px as i32, wz0 + pz as i32)?;
+    // The log ends on a side across the way where the step's edge does not go on.
+    let (ax, az) = (down.1.abs(), down.0.abs());
+    let open = [-1i32, 1].map(|s| {
+        let n = &columns[(px as i32 + ax * s) as usize * PAD + (pz as i32 + az * s) as usize];
+        n.cover != Cover::Trail || n.top() != top
+    });
+    Some((step, down, open))
 }
 
 /// Sees each whole climbing plant a chunk column grows, before it is cut to the column.
@@ -442,7 +470,11 @@ impl GameWorld {
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = crate::surface::ground_patch(self.seed, wx, wz);
                 let col = &columns[px * PAD + pz];
-                let skin = surface_materials(col, steep, roll, patch);
+                let mut skin = surface_materials(col, steep, roll, patch);
+                let step = step_nose(&columns, px, pz, steep, patch, self.seed, wx0, wz0);
+                if let Some((trails::tread::Step::Stone(v), _, _)) = step {
+                    skin.0 = v;
+                }
                 let mut growing = skin.0;
                 if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
                     && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
@@ -459,6 +491,7 @@ impl GameWorld {
                     if plants.len() == grown {
                         features::pebbles::scatter(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     }
+                    trails::tread::dress(col, step, wx as i32, wz as i32, self.seed, &mut plants);
                 }
                 skins.push(skin);
             }

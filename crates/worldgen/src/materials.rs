@@ -263,6 +263,12 @@ palette! {
     WOODRUSH          = ( 50,  96,  56), Foliage, 3;
     HEATHER_GREEN     = ( 74,  92,  64), Foliage, 3;
     HEATHER_RUST      = (122,  82,  78), Foliage, 2;
+    // Paths worn into particular ground (world::trail_surface): leaf litter trodden into
+    // the earth of a broadleaf wood, the rust of fallen needles under conifers, and snow
+    // packed and dirtied by feet.
+    PATH_LITTER       = (120,  92,  64), Solid, 3;
+    PATH_NEEDLES      = (102,  80,  62), Solid, 3;
+    PATH_SNOW         = (198, 196, 192), Solid, 2;
 }
 
 /// Thickness of one rock layer, in voxels.

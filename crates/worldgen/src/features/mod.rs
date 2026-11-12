@@ -941,7 +941,7 @@ mod tests {
     /// What `choose` grows in one layer over a broad stretch of level ground in a biome,
     /// species by species.
     fn census(biome: Biome, layer: &Layer, temperature: f32) -> HashMap<Species, u32> {
-        let col = Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature, river: f32::MAX, clear: f32::MAX };
+        let col = Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature, river: f32::MAX, clear: f32::MAX, worn: None };
         let mut counts = HashMap::new();
         for cx in 0..260 {
             for cz in 0..260 {

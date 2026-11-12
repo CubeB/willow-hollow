@@ -125,7 +125,7 @@ pub fn width_for(traffic: f32) -> f32 {
 }
 
 /// Ground height over which trails narrow to a mountain path, in voxels.
-const HIGH: (f32, f32) = (m(100.0), m(200.0));
+pub(crate) const HIGH: (f32, f32) = (m(100.0), m(200.0));
 /// Grade over which trails narrow, rising so much per step along.
 const STEEP: (f32, f32) = (0.2, 0.4);
 /// Half-width of a path over a peak or up a steep face: one voxel or two wide.
@@ -1112,7 +1112,8 @@ impl Layer<'_> {
         // Straightening barely changes the number of points, so they map across in order.
         let widths: Vec<f32> = (0..pts.len()).map(|i| widths[i * widths.len() / pts.len()]).collect();
         let mut cols = sample(self.c, self.seed, &pts);
-        let widths = narrow_high(&widths, &cols);
+        let traffic = widths;
+        let widths = narrow_high(&traffic, &cols);
         let runs = wet_runs(&cols);
 
         // Water too wide to bridge ends the trail on each side of it.
@@ -1186,6 +1187,28 @@ impl Layer<'_> {
         net.line_widths.push(widths.iter().step_by(8).copied().collect());
         cols.truncate(pts.len());
         self.furnish(&pts, &widths, &heights, &cols, &carried, salt, net);
+        // Milestones, benches, waymarks and cairns, held like a site's props until every
+        // trail is down.
+        let trail = super::roadside::Trail {
+            pts: &pts,
+            traffic: &traffic,
+            widths: &widths,
+            worn: &worn,
+            heights: &heights,
+            cols: &cols,
+            carried: &carried,
+            salt,
+        };
+        let taken: Vec<Vec2> = net
+            .lanterns
+            .iter()
+            .map(|l| l.at)
+            .chain(net.junctions.iter().copied())
+            .chain(net.held_props.iter().filter_map(|(_, _, foot)| foot.first().map(|c| c.as_vec2() + 0.5)))
+            .chain(net.held_markers.iter().map(|m| m.at))
+            .collect();
+        let chosen = super::roadside::choose(self.c, self.seed, &trail, &taken);
+        net.held_markers.extend(chosen);
     }
 
     /// How wide the trail is actually worn at point `i`: the width its traffic calls
@@ -1467,6 +1490,19 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         });
         if !on_way {
             net.add_stamp_with(voxels, fine);
+        }
+    }
+
+    // Trail markers, likewise.
+    for marker in std::mem::take(&mut net.held_markers) {
+        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(marker.at) < m(12.0).powi(2)).collect();
+        let on_way = marker.footprint.iter().any(|c| {
+            let c = c.as_vec2() + 0.5;
+            near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
+        });
+        if !on_way {
+            net.markers.push((marker.kind, marker.origin));
+            net.add_stamp_with(marker.voxels, marker.fine);
         }
     }
 

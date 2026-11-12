@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     fn column(cover: Cover, biome: Biome) -> Column {
-        Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX }
+        Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX, worn: None }
     }
 
     fn strewn(col: &Column, surface: Voxel, seed: u32) -> Vec<Vec<PlantBox>> {

@@ -8,8 +8,10 @@
 //! stamps the structures (landmarks, bridges, lanterns) that overlap each column.
 
 pub mod build;
+pub mod roadside;
 pub mod route;
 pub mod sites;
+pub mod tread;
 
 use std::collections::HashMap;
 
@@ -148,6 +150,11 @@ pub struct Network {
     held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
+    /// Every milestone, bench, waymark and cairn set beside a trail, and where: the
+    /// continent-local voxel its model's foot stands in, one above the ground.
+    pub markers: Vec<(roadside::Marker, IVec3)>,
+    /// Markers chosen but not yet built, held like the props for the same reason.
+    held_markers: Vec<roadside::Placed>,
 }
 
 impl Network {
@@ -164,7 +171,12 @@ impl Network {
 
     /// A stamp with fine parts, in continent-local cells.
     fn add_stamp_with(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
-        let Some(&(first, _)) = voxels.first() else { return };
+        // Bounds from the voxels, or for a model of fine parts alone, from those.
+        let first = match (voxels.first(), fine.first()) {
+            (Some(&(p, _)), _) => p,
+            (None, Some(b)) => IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)),
+            (None, None) => return,
+        };
         let (mut lo, mut hi) = (first, first);
         for (p, _) in &voxels {
             lo = lo.min(*p);

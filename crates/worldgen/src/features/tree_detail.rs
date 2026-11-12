@@ -561,7 +561,7 @@ mod tests {
     fn grown(origin: i32, bark: Voxel, leaves: Voxel, seed: u32) -> Vec<PlantBox> {
         let chunks = scene(origin, bark, leaves);
         let voxels = ColumnVoxels::new(&chunks, origin - 1, origin - 1);
-        let col = Column { ground: GROUND as f32, water: None, cover: Cover::Land, biome: Biome::Deciduous, temperature: 0.5, river: f32::MAX, clear: f32::MAX };
+        let col = Column { ground: GROUND as f32, water: None, cover: Cover::Land, biome: Biome::Deciduous, temperature: 0.5, river: f32::MAX, clear: f32::MAX, worn: None };
         let cols = vec![col; PAD * PAD];
         let grove = Grove { columns: &cols, x0: origin - 1, z0: origin - 1, seed, taken: &HashSet::new() };
         let mut out = Vec::new();
