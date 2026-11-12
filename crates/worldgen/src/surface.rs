@@ -41,6 +41,12 @@ const MIN_HALF_WIDTH: f32 = m(0.6);
 const SINUOSITY_CELLS: f32 = 4.0;
 /// Taken from the distance to a trail's centreline to give the distance to its edge.
 const TRAIL_CLEARANCE: f32 = m(1.2);
+/// A landmark's pad is terraced where the ground beside it differs from it by more than
+/// this; the step lies in a ring this many voxels wide just outside the pad; and within
+/// this distance of a trail's edge the trail ramps up to the pad instead.
+pub const TERRACE_STEP: f32 = m(0.6);
+pub const TERRACE_RING: f32 = 1.5;
+const TERRACE_TRAIL_GAP: f32 = m(2.0);
 /// Distance from a river channel within which cliffs, waterfalls and small ravines
 /// take the river into account, so none of them can dig a valley floor out beside it.
 const RIVER_GUARD: f32 = m(80.0);
@@ -327,6 +333,12 @@ impl<'a> Sampler<'a> {
     /// Prepares to sample columns in the square starting at continent-local voxel
     /// `(lx0, lz0)` and `span` voxels wide.
     pub fn new(c: &'a Continent, world_seed: u32, lx0: i32, lz0: i32, span: i32) -> Self {
+        Self::with_network(c, world_seed, lx0, lz0, span, &c.trails)
+    }
+
+    /// [`Self::new`], reading the trails and pads of `net` in place of the continent's
+    /// own: for sampling the finished ground while the network is still being built.
+    pub fn with_network(c: &'a Continent, world_seed: u32, lx0: i32, lz0: i32, span: i32, net: &crate::trails::Network) -> Self {
         let cs = c.cell_size();
         let widest = Continent::river_width(c.max_discharge.max(MIN_RIVER_Q)) * OLD_VOXEL;
         // A piece lies within a cell of its node, so gather nodes that close plus the
@@ -372,7 +384,7 @@ impl<'a> Sampler<'a> {
             a.x <= hi.x && b.x >= lo.x && a.y <= hi.y && b.y >= lo.y
         });
         heads.retain(|h| h.x >= lo.x && h.x <= hi.x && h.y >= lo.y && h.y <= hi.y);
-        let (trail_points, pads) = c.trails.gather(lo, hi);
+        let (trail_points, pads) = net.gather(lo, hi);
         let mut s = Self {
             c,
             world_seed,
@@ -810,6 +822,18 @@ impl<'a> Sampler<'a> {
         smoothstep(m(3.0), m(8.0), d)
     }
 
+    /// The landmark whose clearing reaches continent-local column `(lx, lz)`, if any: how
+    /// far the column is from the edge of its pad, and how neglected the place is.
+    pub fn site_clearing(&self, lx: i32, lz: i32) -> Option<(f32, f32)> {
+        let p = vec2(lx as f32 + 0.5, lz as f32 + 0.5);
+        self.pads
+            .iter()
+            .filter(|pad| pad.walled)
+            .map(|pad| ((p - vec2(pad.x, pad.z)).length() - pad.radius, pad.neglect))
+            .filter(|&(d, _)| d < crate::trails::CLEARING)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
     /// The river channel whose edge is nearest `p`, if one is within `RIVER_GUARD`:
     /// the distance to its edge, and its smooth water level there in voxels.
     fn river_beside(&self, p: Vec2) -> Option<(f32, f32)> {
@@ -889,9 +913,27 @@ impl<'a> Sampler<'a> {
         for pad in &self.pads {
             let d = (p - vec2(pad.x, pad.z)).length() - pad.radius;
             clear = clear.min(d);
-            if dry && d < m(4.8) {
+            if !dry || d >= m(4.8) {
+                continue;
+            }
+            // Where the ground beside a pad stands well above or below it, the pad is a
+            // terrace: cut into the slope or built out from it with a sharp edge, the
+            // step held by a wall stamped with the site. Not where a trail comes in: that
+            // ramps up to the pad as before.
+            let by_trail = paved.is_some_and(|(d2, t)| d2.sqrt() < t.half_width + TERRACE_TRAIL_GAP);
+            if pad.walled && guard >= 1.0 && (*ground - pad.y).abs() > TERRACE_STEP && !by_trail {
+                if d < 0.0 {
+                    *ground = pad.y;
+                } else if d < TERRACE_RING {
+                    *ground = ground.min(pad.y);
+                }
+            } else {
                 let w = (1.0 - smoothstep(0.0, m(4.8), d)) * guard;
                 *ground += (pad.y - *ground) * w;
+            }
+            // Bare where people walk about the place.
+            if d < 0.0 && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Bank | Cover::Scree) && pad.worn(self.world_seed, p, lx, lz) {
+                *cover = Cover::Trail;
             }
         }
 

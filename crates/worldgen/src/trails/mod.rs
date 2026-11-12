@@ -10,6 +10,7 @@
 pub mod build;
 pub mod route;
 pub mod sites;
+pub mod siting;
 
 use std::collections::HashMap;
 
@@ -37,6 +38,15 @@ pub struct TrailPoint {
     pub half_width: f32,
 }
 
+/// How far beyond the edge of its pad a landmark's clearing reaches: trees are thinned
+/// and felled out to here, and the surface sampler gathers pads this far out.
+pub const CLEARING: f32 = m(16.0);
+
+/// How much further than [`REACH`] pads are gathered, for their clearings.
+fn p_reach() -> f32 {
+    (CLEARING - REACH).max(0.0)
+}
+
 /// A levelled circle of ground under a landmark.
 #[derive(Clone, Copy, Debug)]
 pub struct Pad {
@@ -44,6 +54,118 @@ pub struct Pad {
     pub z: f32,
     pub radius: f32,
     pub y: f32,
+    /// Cut into a slope as a terrace, held by a dry-stone wall where the ground beside
+    /// it stands well above or below it (see [`build`]'s walls).
+    pub walled: bool,
+    /// How trodden the ground is, 0 (grassed over) to 1 (bare where people walk).
+    pub wear: f32,
+    /// How far the place has gone to ruin, from its [`History`](crate::features::landmarks::History):
+    /// a kept site has its trees felled back, a forgotten one fills in with young growth.
+    pub neglect: f32,
+    /// The way in: the direction from the middle to the door, radians in the x-z plane
+    /// (atan2 of z over x), and how far out the door's step is. No door: NaN.
+    pub front: f32,
+    pub door: f32,
+    /// The radius of the worn way round the building, from where each path arrives to
+    /// the door.
+    pub ring: f32,
+    /// A worn patch about the middle (a camp's fire, a cairn's foot), its radius.
+    pub hub: f32,
+    /// Directions the paths come in from, as `front`.
+    pub arrivals: [f32; 4],
+    pub arrival_count: u8,
+}
+
+impl Pad {
+    /// A plain levelled pad, before its history and paths are known.
+    pub fn plain(x: f32, z: f32, radius: f32, y: f32) -> Self {
+        Pad {
+            x,
+            z,
+            radius,
+            y,
+            walled: false,
+            wear: 0.0,
+            neglect: 0.0,
+            front: f32::NAN,
+            door: 0.0,
+            ring: 0.0,
+            hub: 0.0,
+            arrivals: [0.0; 4],
+            arrival_count: 0,
+        }
+    }
+
+    /// Whether the ground at continent-local `p` (inside the pad) is worn bare: along
+    /// the way from each path's arrival round to the door, in front of the door, and
+    /// about the hub, ragged at the edges and broken up the less the place is used.
+    pub fn worn(&self, seed: u32, p: Vec2, lx: i32, lz: i32) -> bool {
+        if self.wear <= 0.0 {
+            return false;
+        }
+        let rel = p - Vec2::new(self.x, self.z);
+        let r = rel.length();
+        // Patchy where little used: a slow noise decides which stretches still show.
+        let patch = crate::noise::perlin2(seed ^ 0x3017, p.x as f64 / m(2.4) as f64, p.y as f64 / m(2.4) as f64) * 0.5 + 0.5;
+        if patch > 0.25 + self.wear {
+            return false;
+        }
+        let ragged = (crate::noise::unit(crate::noise::hash2(seed ^ 0x3018, lx, lz)) - 0.5) * m(0.5);
+        let half = m(0.3) + m(0.45) * self.wear + ragged;
+        if r < self.hub + ragged {
+            return true;
+        }
+        if self.front.is_nan() {
+            return false;
+        }
+        let theta = rel.y.atan2(rel.x);
+        let diff = |a: f32, b: f32| (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        let ray = |a: f32| Vec2::new(a.cos(), a.sin());
+        // Before the door and out from it to the ring.
+        let door = ray(self.front) * self.door;
+        if (p - Vec2::new(self.x, self.z) - door).length() < m(0.9) + m(1.0) * self.wear + ragged {
+            return true;
+        }
+        let along = rel.dot(ray(self.front));
+        let across = (rel - ray(self.front) * along).length();
+        if along > self.door - m(0.4) && along < self.ring + half && across < half {
+            return true;
+        }
+        // Round the ring from each arrival to the door, and in from the edge to the ring.
+        for &a in &self.arrivals[..self.arrival_count as usize] {
+            let (to_front, here) = (diff(self.front, a), diff(theta, a));
+            let on_arc = if to_front >= 0.0 { (0.0..=to_front).contains(&here) } else { (to_front..=0.0).contains(&here) };
+            if on_arc && (r - self.ring).abs() < half {
+                return true;
+            }
+            let along = rel.dot(ray(a));
+            if along > self.ring - half && (rel - ray(a) * along).length() < half {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Why a landmark stands where it does.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Reason {
+    /// On a rise, with the land falling away below.
+    View,
+    /// Beside a spring.
+    Spring,
+    /// Near a stream or a lake shore.
+    Water,
+    /// Where a narrow stream can be waded.
+    Ford,
+    /// In the low gap of a ridge.
+    Pass,
+    /// Backed by rising ground.
+    Shelter,
+    /// On the coast, by open water.
+    Shore,
+    /// Nothing better near: the first good level ground.
+    Open,
 }
 
 /// Voxels to write into the world, in continent-local coordinates.
@@ -74,6 +196,8 @@ pub struct Site {
     /// First layer above the levelled ground.
     pub y: i32,
     pub mooring: Option<Mooring>,
+    /// What brought it here.
+    pub reason: Reason,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -197,10 +321,12 @@ impl Network {
                 }
             }
         }
+        // Pads further, out to the reach of their clearings.
+        let reach = p_reach();
         let pads = self
             .pads
             .iter()
-            .filter(|p| p.x + p.radius >= lo.x && p.x - p.radius <= hi.x && p.z + p.radius >= lo.y && p.z - p.radius <= hi.y)
+            .filter(|p| p.x + p.radius + reach >= lo.x && p.x - p.radius - reach <= hi.x && p.z + p.radius + reach >= lo.y && p.z - p.radius - reach <= hi.y)
             .copied()
             .collect();
         (points, pads)
@@ -227,3 +353,5 @@ impl Network {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod site_tests;
