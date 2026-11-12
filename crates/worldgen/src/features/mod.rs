@@ -629,9 +629,25 @@ impl Cell {
         let nothing = |chosen: bool| Grown { chosen, feature: None };
         let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
         let col = sampler.column(lx, lz);
-        let Some(species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
+        let Some(mut species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
             return nothing(false);
         };
+        // About a landmark the trees have been felled back, the nearer the more, leaving
+        // stumps; round a long-forgotten one, young growth is filling the clearing in.
+        let mut cleared = false;
+        if layer.salt != SMALL.salt
+            && let Some((d, neglect)) = sampler.site_clearing(lx, lz)
+        {
+            let near = 1.0 - (d / crate::trails::CLEARING).clamp(0.0, 1.0);
+            if roll(7) < near * (0.9 - 0.55 * neglect) {
+                if layer.salt != TREES.salt || roll(8) > 0.6 {
+                    return nothing(true);
+                }
+                (species, cleared) = (Species::Stump, true);
+            } else if neglect > 0.45 && roll(9) < near * neglect {
+                (species, cleared) = (Species::Bush, true);
+            }
+        }
         let mut pos = IVec3::new(x, col.top() + 1, z);
         // Steep ground: nothing roots there but the rock itself.
         let rise = (sampler.column(lx + 1, lz).ground - sampler.column(lx - 1, lz).ground)
@@ -643,7 +659,7 @@ impl Cell {
         let variant = (roll(5) * 64.0) as usize;
         let turns = (roll(6) * 4.0) as u32;
         let mut lie = None;
-        if layer.salt == SMALL.salt {
+        if layer.salt == SMALL.salt || cleared {
             let model = lib.get(species, variant);
             if let Some(axis) = model.axis {
                 // A log needs clear, dry ground along its whole length.
@@ -670,7 +686,7 @@ impl Cell {
                 pos.y = y;
             }
         }
-        let roots = if layer.salt == SMALL.salt {
+        let roots = if layer.salt == SMALL.salt || cleared {
             None
         } else {
             let ground = |x: i32, z: i32| {

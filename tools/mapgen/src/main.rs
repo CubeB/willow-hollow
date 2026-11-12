@@ -380,7 +380,7 @@ fn print_poi(c: &Continent) {
     for (k, s) in c.trails.sites.iter().enumerate() {
         let (x, z) = local(s.x, s.z);
         let name = c.trails.names.site(k).map_or("", |p| p.name.as_str());
-        println!("  poi site       {x},{z}  {:?}, ground {}  \"{name}\"", s.kind, s.y);
+        println!("  poi site       {x},{z}  {:?}, ground {}, for {:?}  \"{name}\"", s.kind, s.y, s.reason);
     }
     // Every named place, with the tongue spoken there.
     for p in &c.trails.names.places {
