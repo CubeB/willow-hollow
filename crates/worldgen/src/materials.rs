@@ -186,16 +186,16 @@ palette! {
     // Climber leaves and stems that read as leaves and lines, not moss: ivy a dark,
     // bluish, glossy green well apart from moss's yellow greens, and little per-voxel
     // jitter, so a leaf is one colour and its neighbours hardly jump.
-    IVY_GLOSS         = ( 42,  94,  52), Foliage, 1;
-    IVY_GLOSS_LIT     = ( 56, 114,  60), Foliage, 1;
-    IVY_GLOSS_NEW     = ( 70, 118,  64), Foliage, 1;
+    IVY_GLOSS         = ( 50, 124,  68), Foliage, 1;
+    IVY_GLOSS_LIT     = ( 78, 152,  86), Foliage, 1;
+    IVY_GLOSS_NEW     = (116, 174,  96), Foliage, 1;
     CREEPER_GREEN     = ( 82, 122,  50), Foliage, 1;
     CREEPER_GREEN_DARK = ( 62, 102,  46), Foliage, 1;
     CREEPER_SCARLET   = (172,  56,  42), Foliage, 1;
     VINE_GREEN        = ( 64, 114,  56), Foliage, 1;
-    IVY_TWIG          = ( 90,  80,  58), Foliage, 1;
-    IVY_ROPE          = (114, 102,  84), Foliage, 1;
-    IVY_ROPE_DARK     = ( 96,  86,  74), Foliage, 1;
+    IVY_TWIG          = (118, 104,  78), Foliage, 1;
+    IVY_ROPE          = (132, 118,  96), Foliage, 1;
+    IVY_ROPE_DARK     = (106,  94,  78), Foliage, 1;
     // Volcanic beaches: basalt ground to black sand by the surf.
     BLACK_SAND        = ( 46,  44,  48), Solid, 1;
     // The props left about landmarks (features::props): iron fittings and the rust they
