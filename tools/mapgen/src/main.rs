@@ -412,6 +412,19 @@ fn print_poi(c: &Continent) {
             let (x, z) = local(t.at.x as i32, t.at.y as i32);
             println!("  poi tor        {x},{z}  {:?}, {:.0} m from higher ground", t.class, t.dominance / 2.5);
         }
+        // The moor's old stonework, laid out with the tors.
+        let mut works = 0;
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                for (w, p) in tor::plan(c.desc.world_seed, c, gx, gz).works {
+                    works += 1;
+                    if works <= 30 {
+                        println!("  poi stones     {},{}  {w:?}", p.x, p.z);
+                    }
+                }
+            }
+        }
+        println!("  {works} pieces of moor stonework");
     }
     let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
     // Highest-scoring cells that are at least `spacing` cells apart.

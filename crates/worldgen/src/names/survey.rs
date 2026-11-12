@@ -28,6 +28,7 @@ pub fn survey(c: &Continent, world_seed: u32) -> Gazetteer {
     s.rivers(&mut g);
     s.falls(&mut g);
     s.peaks(&mut g);
+    s.tors(&mut g);
     s.bays(&mut g);
     s.landmarks(&mut g);
     g
@@ -626,6 +627,31 @@ impl<'a> Survey<'a> {
                 facts: &facts,
                 salt: 0x9eac ^ i as u32,
             });
+        }
+    }
+
+    /// The tors of the moor: the great ones and the middling, not the small outcrops.
+    fn tors(&self, g: &mut Gazetteer) {
+        use crate::features::tor::{self, Class};
+        let c = self.c;
+        let cells = MACRO_SIZE / tor::CELL;
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                let Some(s) = tor::site(self.world_seed, c, gx, gz) else { continue };
+                if s.class == Class::Outcrop {
+                    continue;
+                }
+                let facts = self.facts(s.cell, &["tor"]);
+                g.add(Request {
+                    kind: PlaceKind::Tor,
+                    at: s.at,
+                    radius: m(25.0),
+                    line: Vec::new(),
+                    importance: if s.class == Class::Great { 6.5 } else { 4.0 },
+                    facts: &facts,
+                    salt: 0x7042 ^ s.cell as u32,
+                });
+            }
         }
     }
 

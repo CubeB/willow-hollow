@@ -138,6 +138,7 @@ valley = Low Dell Hollow Deep Shade Glen Combe Dingle
 range = Grey Storm Iron White Blue Long Cloud Thunder High Old Red
 fault = Long Broken Great High Grey Iron Sheer
 rift = Deep Black Long Dark Hollow Split Narrow
+tor = Hound Hay Mis Bel Yes Vixen Hen Sharp Bench Leather Saddle Rough Fox Bell Wind Hare Raven Combe Pew Lynch Sheeps Crow Kite Rook
 
 # --- Kinds of place ---------------------------------------------------------------------
 
@@ -181,6 +182,11 @@ pattern = The Long {type} | The {word} {type} | {root} {type} | The {root} Reach
 type = Peak | Crag | Pike | Top | Horn
 adj = Lone | Old | Grey | Bald | High | Sleeping
 pattern = Mount {root} | {root} {type} | The {word} {type} | {word} {type} | The {adj} {type}
+
+[kind tor]
+type = Tor
+adj = Great | Little | High | Black | Grey | West | East | Long
+pattern = {word} {type} | {word} {type} | {word} {type} | {adj} {word} {type} | {root} {type} | {adj} {type}
 
 [kind falls]
 type = Falls | Falls | Force | Cascade | Leap

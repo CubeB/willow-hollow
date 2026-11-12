@@ -219,11 +219,13 @@ pub struct Tor {
     piles: Vec<(Vec2, f32)>,
     turf: Vec<(Vec2, f32)>,
     salt: u32,
+    /// The old stonework laid out with it, and where each piece stands (world).
+    pub works: Vec<(super::moorstones::Work, IVec3)>,
 }
 
 impl Tor {
     fn empty(origin: IVec3, salt: u32) -> Self {
-        Self { origin, class: None, blocks: Vec::new(), lo: IVec3::MAX, hi: IVec3::MIN, basins: Vec::new(), piles: Vec::new(), turf: Vec::new(), salt }
+        Self { origin, class: None, blocks: Vec::new(), lo: IVec3::MAX, hi: IVec3::MIN, basins: Vec::new(), piles: Vec::new(), turf: Vec::new(), salt, works: Vec::new() }
     }
 
     pub(super) fn push(&mut self, b: Block) {

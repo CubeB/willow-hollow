@@ -80,8 +80,11 @@ pub enum PlaceKind {
     Falls,
     Landmark(Landmark),
     /// Settlements, once there are any; nothing places them yet.
+    /// (Appended after them: a tor on the moor, see `features::tor`.)
     Hamlet,
     Town,
+    /// A tor on the moor (see [`crate::features::tor`]).
+    Tor,
 }
 
 impl PlaceKind {
@@ -112,6 +115,7 @@ impl PlaceKind {
             },
             PlaceKind::Hamlet => "hamlet",
             PlaceKind::Town => "town",
+            PlaceKind::Tor => "tor",
         }
     }
 
@@ -124,7 +128,14 @@ impl PlaceKind {
     fn lends_name(self) -> bool {
         matches!(
             self,
-            PlaceKind::Island | PlaceKind::Lake | PlaceKind::River | PlaceKind::Bay | PlaceKind::Inlet | PlaceKind::Peak | PlaceKind::Falls
+            PlaceKind::Island
+                | PlaceKind::Lake
+                | PlaceKind::River
+                | PlaceKind::Bay
+                | PlaceKind::Inlet
+                | PlaceKind::Peak
+                | PlaceKind::Falls
+                | PlaceKind::Tor
         )
     }
 

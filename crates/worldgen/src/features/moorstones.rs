@@ -10,7 +10,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use glam::{Vec2, Vec3, vec2};
+use glam::{IVec3, Vec2, Vec3, vec2};
 
 use super::{
     shape::Rng,
@@ -107,28 +107,33 @@ pub fn lay_out(seed: u32, c: &Continent, gx: i32, gz: i32, mut tor: Tor) -> Tor 
     };
     let away = |k: &Column| tor::open(k) && k.clear > m(8.0);
     let mut stones = Vec::new();
+    let mut works = Vec::new();
     match work {
         Some(Work::Row) => {
             if let Some((x, z)) = spot(&mut rng, m(6.0), &away) {
                 // Toward the nearest tor of any size, if one is near; else any way.
                 let toward = nearest_tor(seed, c, gx, gz, vec2(x as f32, z as f32));
                 row(&mut rng, &col, &mut stones, x, z, toward);
+                works.push((Work::Row, x, z));
             }
         }
         Some(Work::Circle) => {
             if let Some((x, z)) = spot(&mut rng, m(14.0), &away) {
                 circle(&mut rng, &col, &mut stones, x, z);
+                works.push((Work::Circle, x, z));
             }
         }
         Some(Work::Huts) => {
             if let Some((x, z)) = spot(&mut rng, m(18.0), &away) {
                 huts(&mut rng, &col, &mut stones, x, z);
+                works.push((Work::Huts, x, z));
             }
         }
         Some(Work::Standing) => {
             if let Some((x, z)) = spot(&mut rng, m(2.0), &away) {
                 let tall = m(rng.range(1.8, 3.6));
                 standing(&mut rng, &col, &mut stones, x, z, tall);
+                works.push((Work::Standing, x, z));
             }
         }
         _ => {}
@@ -137,6 +142,10 @@ pub fn lay_out(seed: u32, c: &Continent, gx: i32, gz: i32, mut tor: Tor) -> Tor 
         && let Some((x, z)) = spot(&mut rng, m(1.0), &|k: &Column| tor::open(k) && (m(1.2)..m(3.5)).contains(&k.clear))
     {
         granite_cross(&mut rng, &col, &mut stones, x, z);
+        works.push((Work::Cross, x, z));
+    }
+    for (w, x, z) in works {
+        tor.works.push((w, IVec3::new(x, col(x, z).top(), z)));
     }
     for (c, e, yaw, part_round) in stones {
         let local = c - o.as_vec3();
