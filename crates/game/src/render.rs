@@ -1949,6 +1949,8 @@ pub fn screenshot(
     lamps: &[DVec3],
 ) -> anyhow::Result<()> {
     let (width, height) = size;
+    // VOXEL_NO_SHAFTS leaves the light shafts out, to see what they add.
+    let shafts = std::env::var_os("VOXEL_NO_SHAFTS").is_none();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = Renderer::new(gpu, format, width, height);
     streamer.wait_idle(gpu, camera.pos);
@@ -1991,7 +1993,7 @@ pub fn screenshot(
         wind,
         ground,
         lamps,
-        shafts: true,
+        shafts,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(
@@ -2072,7 +2074,7 @@ pub fn screenshot(
                 camera.yaw += 0.6 * dt;
             }
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let scene = Scene { camera: &camera, env: &env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts: true };
+            let scene = Scene { camera: &camera, env: &env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts };
             renderer.render(gpu, &mut encoder, &view, &scene);
             encoder.copy_texture_to_buffer(
                 target.as_image_copy(),
@@ -2105,7 +2107,7 @@ pub fn screenshot(
         for _ in 0..n {
             let t = std::time::Instant::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts: true };
+            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts };
             renderer.render(gpu, &mut encoder, &view, &scene);
             gpu.queue.submit([encoder.finish()]);
             gpu.device.poll(wgpu::PollType::wait_indefinitely())?;

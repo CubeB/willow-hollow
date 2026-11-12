@@ -8,6 +8,10 @@ const STEPS: i32 = 10;
 const FAR: f32 = 60000.0;
 // Lit air shows far more than its true thinness over so short a way would allow.
 const SHOW: f32 = 22.0;
+// The distance over which the air's share of a shaft falls to about a third. A shaft is
+// seen in the air near the eye; lit air a long way off, summed along the view, is only a
+// pale wash over whatever stands behind it.
+const NEARBY: f32 = 45.0 * VOXELS_PER_METRE;
 
 @group(1) @binding(0) var scene_depth: texture_depth_2d;
 @group(1) @binding(1) var marched: texture_2d<f32>;
@@ -62,11 +66,14 @@ fn fs_march(in: VOut) -> @location(0) vec4<f32> {
         let sun = textureSampleCompareLevel(shadow_maps, shadow_sampler, uv, c, lp.z);
         let haze = G.air.x * exp(-max(G.cam_wrapped.y + p.y, 0.0) / G.air.y);
         let mist = G.mist.x * exp(-max(p.y - G.mist.z, 0.0) / G.mist.y);
-        let air = (haze + mist) * (2.0 * f + 1.0);
+        let air = (haze + mist) * (2.0 * f + 1.0) * exp(-t / NEARBY);
         lit += sun * air;
         all += air;
     }
-    lit *= min(2.0 - 2.0 * lit / max(all, 1e-12), 1.0);
+    // A shaft shows from the shade: with the eye in the open and the sun on most of the
+    // air along the view, that air is only a pale wash over what stands behind it.
+    let shade = 1.0 - lit / max(all, 1e-12);
+    lit *= min(4.0 * shade * shade, 1.0);
     lit *= reach * length(ray) / (n * n) * cloud_light(ray * reach * 0.5);
     return vec4<f32>(lit, depth, 0.0, 1.0);
 }
@@ -82,22 +89,24 @@ fn fs_lay(in: VOut) -> @location(0) vec4<f32> {
     let near = vec2<i32>(round(at));
     var sum = 0.0;
     var weight = 0.0;
-    for (var j = -1; j <= 1; j++) {
-        for (var i = -1; i <= 1; i++) {
+    // Wide enough to smooth away the grain of so few steps along each ray.
+    for (var j = -2; j <= 2; j++) {
+        for (var i = -2; i <= 2; i++) {
             let q = near + vec2<i32>(i, j);
             let m = textureLoad(marched, clamp(q, vec2<i32>(0), size - 1), 0);
             let off = vec2<f32>(q) - at;
-            let w = exp(-dot(off, off) * 0.5) * (max(1.0 - abs(m.y - depth) / (depth * 0.12 + 1.0), 0.0) + 0.002);
+            let w = exp(-dot(off, off) * 0.22) * (max(1.0 - abs(m.y - depth) / (depth * 0.12 + 1.0), 0.0) + 0.002);
             sum += m.x * w;
             weight += w;
         }
     }
     let lit = sum / weight;
     let dir = normalize(G.cam_fwd.xyz + in.ndc.x * G.cam_right.xyz + in.ndc.y * G.cam_up.xyz);
-    // Haze throws most of its light onward, so shafts are brightest looking up them.
+    // Haze throws nearly all of its light onward, so shafts show looking up them toward
+    // the sun, and hardly at all across them or with the sun behind.
     let c = max(dot(dir, G.sun_dir.xyz), 0.0);
     let c2 = c * c;
-    let onward = 0.22 + 0.5 * c2 + 0.9 * c2 * c2 * c2 * c2;
+    let onward = 0.03 + 0.3 * c2 + 1.3 * c2 * c2 * c2 * c2;
     let shown = lit * SHOW;
     return vec4<f32>(G.sun_color.rgb * (shown / (1.0 + shown) * 0.42 * onward * G.air.z), 0.0);
 }
