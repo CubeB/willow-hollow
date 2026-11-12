@@ -64,6 +64,12 @@ struct Globals {
     season: [f32; 4],
     /// x: how wet the ground is. y: how much more snow the hills hold this winter.
     weather: [f32; 4],
+    /// rgb: the horizon toward the sun. w: how far into dusk or dawn the sky is.
+    sky_glow: [f32; 4],
+    /// xyz: toward the sun itself, by night too.
+    sun_pos: [f32; 4],
+    /// x: haze per voxel at sea level. y: the height it thins over. w: haziness, 0..1.
+    air: [f32; 4],
     /// Each biome's ground, by biome id: x snow at sea level, y ice on water, z how much
     /// more snow the hills hold, w the summit snowline in metres (see ground.wgsl).
     snow: [[f32; 4]; SNOW_SLOTS],
@@ -1232,7 +1238,8 @@ impl Renderer {
             fog: [env.fog_density, voxel_radius, env.clouds, time * m(4.8)],
             // w: how far the tree models reach, for the far view's forest height.
             cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, impostors::REACH],
-            mist: [env.mist, m(28.0), m(-12.0), 0.0],
+            // The mist is thickest up to a little over the low ground, and thins above.
+            mist: [env.mist, m(22.0), env.mist_floor + m(5.0) - camera.pos.y as f32, 0.0],
             cascades: [
                 CASCADE_ENDS[0],
                 CASCADE_ENDS[1],
@@ -1244,6 +1251,9 @@ impl Renderer {
             lamps: nearest_lamps(scene.lamps, camera.pos),
             season: [env.date, scene.ground.here.snow, scene.ground.here.frozen, scene.ground.here.snowline],
             weather: [scene.ground.here.wet, scene.ground.here.highland, 0.0, 0.0],
+            sky_glow: v4(env.sky_glow, env.glow),
+            sun_pos: v4(env.sun_pos, 0.0),
+            air: [env.haze, env.haze_height, 0.0, env.haziness()],
             snow: std::array::from_fn(|k| {
                 let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
                 [g.snow, g.frozen, g.highland, g.snowline]

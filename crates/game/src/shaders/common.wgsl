@@ -18,7 +18,8 @@ struct Globals {
     // xyz: camera world position, wrapped to keep it small. Adding it to a
     // camera-relative position gives a stable world-anchored coordinate.
     cam_wrapped: vec4<f32>,
-    // Ground mist: x strength, y height falloff, z level (camera-relative y), w unused.
+    // Ground mist: x strength, y height falloff, z the level it is thickest below
+    // (camera-relative y), w unused.
     mist: vec4<f32>,
     // Cascade far distances (view depth) in xyz; w = cloud layer height, camera-relative.
     cascades: vec4<f32>,
@@ -34,6 +35,13 @@ struct Globals {
     // x: how wet the ground is (0..1). y: how much more snow the hills hold this winter.
     // (season.yzw and weather.y are the ground where the camera is.)
     weather: vec4<f32>,
+    // rgb: the horizon toward the sun. w: how far into dusk or dawn the sky is.
+    sky_glow: vec4<f32>,
+    // xyz: toward the sun itself, by night too (sun_dir is then the moon).
+    sun_pos: vec4<f32>,
+    // Haze: x density per voxel at sea level, y the height it thins over, w how hazy
+    // the air is (0..1), for the sun's glow in it.
+    air: vec4<f32>,
     // Each biome's ground, by biome id: x snow at sea level, y ice on still water, z how
     // much more snow the hills hold, w the summit snowline (see ground.wgsl).
     snow: array<vec4<f32>, 24>,
@@ -112,31 +120,80 @@ fn beyond_voxels(rel: vec3<f32>) -> bool {
     return length(rel.xz) >= G.fog.y;
 }
 
-// Sky radiance without the sun disc. Also used as the fog colour so distant terrain
-// dissolves into exactly the sky behind it.
-fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+// How far round toward the sun a direction lies: 1 facing it, 0 with it behind.
+fn sunward(dir: vec3<f32>) -> f32 {
+    let d = dir.xz / max(length(dir.xz), 1e-4);
+    let s = G.sun_pos.xz / max(length(G.sun_pos.xz), 1e-4);
+    return dot(d, s) * 0.5 + 0.5;
+}
+
+// The glow of hazy air around the sun (or moon), for the cosine of the angle from it.
+fn sun_haze(s: f32) -> vec3<f32> {
+    let c = max(s, 0.0);
+    let c4 = c * c * c * c;
+    let c32 = c4 * c4 * c4 * c4 * c4 * c4 * c4 * c4;
+    return G.sun_color.rgb * (c4 * 0.05 + c32 * 0.20) * G.air.w;
+}
+
+// The sky without the sun disc or the glow of haze near the horizon.
+fn sky_base(dir: vec3<f32>) -> vec3<f32> {
     let up = clamp(dir.y, -1.0, 1.0);
     let t = pow(1.0 - max(up, 0.0), 3.0);
-    var c = mix(G.sky_zenith.rgb, G.sky_horizon.rgb, t);
+    // The horizon is warm round the sun at dusk and dawn, and cool opposite it.
+    let toward = sunward(dir);
+    let horizon = mix(G.sky_horizon.rgb, G.sky_glow.rgb, toward * toward);
+    var c = mix(G.sky_zenith.rgb, horizon, t);
     if (up < 0.0) {
-        c = mix(c, G.sky_horizon.rgb * 0.7, clamp(-up * 4.0, 0.0, 1.0));
+        c = mix(c, horizon * 0.7, clamp(-up * 4.0, 0.0, 1.0));
     }
     let s = max(dot(dir, G.sun_dir.xyz), 0.0);
     c += G.sun_color.rgb * (pow(s, 6.0) * 0.03 + pow(s, 48.0) * 0.12);
     return c;
 }
 
+// Sky radiance without the sun disc. Its horizon is what the far distance fades to
+// (see apply_fog), so land dissolves into exactly the sky behind it.
+fn sky_color(dir: vec3<f32>) -> vec3<f32> {
+    let low = 1.0 - max(dir.y, 0.0);
+    let low2 = low * low;
+    return sky_base(dir) + sun_haze(dot(dir, G.sun_dir.xyz)) * low2 * low2 * low2;
+}
+
+// Clear air scatters blue most, so it is the blue of a distant thing that goes first.
+const AIR_TINT: vec3<f32> = vec3<f32>(0.45, 0.9, 1.7);
+
+// The mean along a straight path of a layer that is 1 up to height 0 and falls off as
+// exp(-y) above it, between heights y0 and y1 (in units of its falloff).
+fn layer_mean(y0: f32, y1: f32) -> f32 {
+    let lo = min(y0, y1);
+    let hi = max(y0, y1);
+    if (hi - lo < 0.01) {
+        return exp(-max(lo, 0.0));
+    }
+    // Below the level the layer is full; above it, the integral of exp(-y).
+    let under = max(min(hi, 0.0) - lo, 0.0);
+    let over = exp(-max(lo, 0.0)) - exp(-max(hi, 0.0));
+    return (under + over) / (hi - lo);
+}
+
+// How much haze and mist lie between the camera and a point. Both thin with height, so
+// a valley fills while the ridge above stands clear, and seen from above the mist is a
+// thin sheet lying in the low ground.
+fn haze_depth(rel: vec3<f32>, dist: f32) -> f32 {
+    let haze = G.air.x * layer_mean(G.cam_wrapped.y / G.air.y, (G.cam_wrapped.y + rel.y) / G.air.y);
+    let mist = G.mist.x * layer_mean(-G.mist.z / G.mist.y, (rel.y - G.mist.z) / G.mist.y);
+    return (haze + mist) * dist;
+}
+
 fn apply_fog(color: vec3<f32>, rel: vec3<f32>) -> vec3<f32> {
     let dist = length(rel);
-    // Ground mist: densest below the mist level, thinning upward. Averaged between
-    // the camera and the point.
-    let m0 = exp(-max(0.0 - G.mist.z, 0.0) / G.mist.y);
-    let m1 = exp(-max(rel.y - G.mist.z, 0.0) / G.mist.y);
-    let density = G.fog.x + G.mist.x * (m0 + m1) * 0.5;
-    let amount = 1.0 - exp(-dist * density);
-    // Fog takes the colour of the sky at the horizon in that direction.
+    let haze = haze_depth(rel, dist);
+    let through = exp(-(dist * G.fog.x * AIR_TINT + haze));
+    // What the air adds is the sky at the horizon in that direction, and where there
+    // is haze, the sun's glow in it.
     let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
-    return mix(color, sky_color(dir), amount);
+    let glow = sun_haze(dot(rel, G.sun_dir.xyz) / max(dist, 1e-4)) * (1.0 - exp(-haze));
+    return color * through + (sky_base(dir) + glow) * (1.0 - through);
 }
 
 // Warm light from nearby fireflies, falling off over about eight metres.
@@ -166,7 +223,7 @@ fn local_lights(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
 }
 
 fn ambient(n: vec3<f32>) -> vec3<f32> {
-    let sky = mix(G.sky_horizon.rgb, G.sky_zenith.rgb, 0.6) * (0.55 + 0.45 * n.y) * 0.8;
+    let sky = mix(mix(G.sky_horizon.rgb, G.sky_glow.rgb, 0.4), G.sky_zenith.rgb, 0.6) * (0.55 + 0.45 * n.y) * 0.8;
     // Light bounced off the ground, tinted warm, scaled by how much sun there is.
     // Reaches sideways and downward faces, which the sky lights least.
     let bounce = G.sun_color.rgb * vec3<f32>(0.20, 0.17, 0.12) * (0.65 - 0.35 * n.y)

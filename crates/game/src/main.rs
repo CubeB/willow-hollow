@@ -286,7 +286,7 @@ fn scan_surroundings(
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
-) -> (worldgen::biome::Biome, Leaves, Spots) {
+) -> Scan {
     use worldgen::materials as mat;
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;
@@ -343,10 +343,23 @@ fn scan_surroundings(
             below = v;
         }
     }
-    (biome, leaves, flowers)
+    (biome, leaves, flowers, low_ground(world, cx, cz))
 }
 
-type Scan = (worldgen::biome::Biome, Leaves, Spots);
+/// The lowest ground or water within a short walk: where mist gathers. Standing in a
+/// valley that is underfoot; on a hill it is the valley below.
+fn low_ground(world: &GameWorld, cx: i32, cz: i32) -> f32 {
+    let mut low = surface_height(world, cx, cz);
+    for reach in [m(50.0) as i32, m(140.0) as i32] {
+        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            low = low.min(surface_height(world, cx + dx * reach, cz + dz * reach));
+        }
+    }
+    low as f32
+}
+
+/// The biome, leaves and flowers round the camera, and the low ground near it.
+type Scan = (worldgen::biome::Biome, Leaves, Spots, f32);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -409,6 +422,12 @@ struct Running {
     biome: worldgen::biome::Biome,
     /// How warm the biome underfoot is, eased as the player crosses into another.
     warmth: f32,
+    /// The haze of the air here (season::humidity), eased as the biome changes.
+    humidity: f32,
+    /// The low ground mist lies on near the camera, eased toward the last scan's answer.
+    /// None until the first scan is in.
+    mist_floor: Option<f32>,
+    mist_target: f32,
     weather: weather::Weather,
     audio: Option<Audio>,
     /// The settings in force.
@@ -548,6 +567,9 @@ impl Running {
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
             warmth: season::warmth(worldgen::biome::Biome::Grassland),
+            humidity: season::humidity(worldgen::biome::Biome::Grassland),
+            mist_floor: None,
+            mist_target: 0.0,
             weather: weather::Weather::new(opts.weather),
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
@@ -825,6 +847,11 @@ impl Running {
         self.save_timer -= dt;
         self.weather.update(dt, days, self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         self.warmth += (season::warmth(self.biome) - self.warmth) * (1.0 - (-0.4 * dt).exp());
+        // The air changes more slowly than the ground: haze does not end at a biome's edge.
+        self.humidity += (season::humidity(self.biome) - self.humidity) * (1.0 - (-0.08 * dt).exp());
+        if let Some(floor) = &mut self.mist_floor {
+            *floor += (self.mist_target - *floor) * (1.0 - (-0.25 * dt).exp());
+        }
 
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
@@ -833,7 +860,10 @@ impl Running {
             self.scanner.request(self.camera.pos, self.frame as u32);
         }
         if let Some(found) = self.scanner.poll() {
-            (self.biome, self.leaves, self.flowers) = found;
+            let low;
+            (self.biome, self.leaves, self.flowers, low) = found;
+            self.mist_floor.get_or_insert(low);
+            self.mist_target = low;
         }
         let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
@@ -881,6 +911,8 @@ impl Running {
         let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
+        lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
+        lit.mist_floor = self.mist_floor.unwrap_or(self.camera.pos.y as f32 - m(12.0));
         let ground = self.weather.places(self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         let scene = render::Scene {
             camera: &self.camera,
@@ -1219,10 +1251,12 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
+        let (biome, leaves, flowers, low) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
+        env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
+        env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
         let springs: Vec<_> = streamer.springs_near(camera.pos, m(40.0)).copied().collect();
         let surf: Vec<_> = streamer.surf_near(camera.pos, m(60.0)).copied().collect();

@@ -49,8 +49,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let dist = length(vec3<f32>(hit.x, plane_y, hit.y));
         let density = cloud_density(hit + G.cam_wrapped.xz);
         // Lit from above by the sun, with the underside in sky-coloured shade.
+        // At dusk and dawn the low sun catches the cloud on its own side of the sky.
+        let toward = sunward(dir);
         let lit = G.sun_color.rgb * (0.9 + 0.3 * max(G.sun_dir.y, 0.0)) * (1.0 - density * 0.5)
-            + G.sky_zenith.rgb * 0.8;
+            + G.sky_zenith.rgb * 0.8
+            + G.sky_glow.rgb * (G.sky_glow.w * 0.7 * toward * toward);
         let fade = exp(-dist * G.fog.x * 2.5) * smoothstep(0.0, 0.03, abs(dir.y));
         c = mix(c, lit, clamp(density * 1.4, 0.0, 1.0) * fade);
     }
