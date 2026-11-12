@@ -450,6 +450,8 @@ struct Running {
     props: Vec<particles::ParticleInstance>,
     /// Glider key pressed since the last frame.
     deploy: bool,
+    /// Space was pressed: opens the glider too, but only well clear of the ground.
+    deploy_clear: bool,
     last_yaw: f32,
     world: Arc<GameWorld>,
     camera: Camera,
@@ -589,6 +591,7 @@ impl Running {
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
             deploy: false,
+            deploy_clear: false,
             world,
             fly: FlyController { speed: m(16.0) },
             keys: HashSet::new(),
@@ -825,6 +828,7 @@ impl Running {
                 jump: self.keys.contains(&KeyCode::Space),
                 sprint: self.keys.contains(&KeyCode::ShiftLeft),
                 deploy: std::mem::take(&mut self.deploy),
+                deploy_clear: std::mem::take(&mut self.deploy_clear),
                 look: self.camera.forward(),
                 turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
@@ -1038,7 +1042,7 @@ impl Running {
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}   seed {seed}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
-                        ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
+                        ui.label("G in the air, or Space when high up = glider. E = board or leave a boat at a landing");
                     });
             });
         if time != self.env.time || date != self.env.date {
@@ -1141,9 +1145,14 @@ impl ApplicationHandler for App {
                         } else if code == KeyCode::KeyE && !event.repeat {
                             r.interact();
                         } else if r.grabbed {
-                            // A fresh press of Space in mid-air opens the glider.
-                            if !event.repeat && matches!(code, KeyCode::KeyG | KeyCode::Space) {
+                            // G opens the glider anywhere in the air. A fresh press of Space
+                            // does too, but only high up: Space is also the jump key, and
+                            // hopping up a hill must not open it.
+                            if !event.repeat && code == KeyCode::KeyG {
                                 r.deploy = true;
+                            }
+                            if !event.repeat && code == KeyCode::Space {
+                                r.deploy_clear = true;
                             }
                             r.keys.insert(code);
                         }

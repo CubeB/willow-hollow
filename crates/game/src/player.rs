@@ -96,6 +96,9 @@ const GLIDE_GRAVITY: f32 = m(11.2);
 const GLIDE_DRAG: f32 = 0.55;
 const GLIDE_MIN_SPEED: f32 = m(4.0);
 const GLIDE_MAX_SPEED: f32 = m(27.2);
+/// How far above the ground the feet must be before the jump key opens the glider: more
+/// than any jump reaches over rising ground, and too low to be worth flying from anyway.
+const GLIDE_CLEARANCE: f32 = m(2.4);
 /// Steepest the glider follows the view, down and up, in radians.
 const GLIDE_DIVE: f32 = 0.85;
 const GLIDE_CLIMB: f32 = 0.30;
@@ -122,6 +125,10 @@ pub struct Controls {
     pub sprint: bool,
     /// Pressed this frame: open the glider if in the air, or fold it away.
     pub deploy: bool,
+    /// The jump key pressed this frame: as `deploy`, but it opens the glider only well
+    /// clear of the ground ([`GLIDE_CLEARANCE`]), so jumping again a moment before
+    /// landing, as when hopping up a hill, is only ever a jump.
+    pub deploy_clear: bool,
     /// Where the camera is looking; the glider follows it.
     pub look: Vec3,
     /// How fast the view is turning, radians per second.
@@ -265,6 +272,16 @@ impl Player {
         }
     }
 
+    /// Whether there is nothing but air for [`GLIDE_CLEARANCE`] under the feet, and under
+    /// where they will be a moment on: ground rising ahead counts as ground below.
+    fn clear_of_ground(&self, v: &mut impl Voxels) -> bool {
+        let ahead = DVec3::new(self.vel.x as f64, 0.0, self.vel.z as f64) * 0.25;
+        [self.pos, self.pos + ahead].iter().all(|at| {
+            let foot = at.floor().as_ivec3();
+            (0..=GLIDE_CLEARANCE.ceil() as i32).all(|down| v.kind(foot.x, foot.y - down, foot.z) == Kind::Air)
+        })
+    }
+
     /// Glider flight: a calm exchange of height for speed. Looking down dives and gains
     /// speed; looking up spends it. Lift only ever comes out of speed, so however it is
     /// flown the glider comes down in the end.
@@ -388,10 +405,10 @@ impl Player {
         let head = (self.pos + DVec3::new(0.0, EYE_HEIGHT, 0.0)).floor().as_ivec3();
         let head_under = v.kind(head.x, head.y, head.z) == Kind::Water;
 
-        if controls.deploy {
+        if controls.deploy || controls.deploy_clear {
             if self.mode == Mode::Glide {
                 self.mode = Mode::Walk;
-            } else if !self.on_ground && !self.swimming {
+            } else if !self.on_ground && !self.swimming && (controls.deploy || self.clear_of_ground(v)) {
                 self.mode = Mode::Glide;
                 self.airspeed = Vec3::new(self.vel.x, 0.0, self.vel.z).length().max(9.0);
             }
@@ -902,6 +919,32 @@ mod tests {
         assert_eq!(p.mode, Mode::Glide);
         let flying = Controls { look, ..Default::default() };
         (p, flying)
+    }
+
+    #[test]
+    fn the_jump_key_opens_the_glider_only_high_up() {
+        let mut world = Fake(|_, y, _| if y < 10 { Kind::Solid } else { Kind::Air });
+        let tap = Controls {
+            deploy_clear: true,
+            jump: true,
+            look: Vec3::X,
+            ..Default::default()
+        };
+        // A second press at the top of a hop is not a wish to fly.
+        let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
+        run(&mut p, &mut world, Controls::default(), 0.5);
+        p.update(&mut world, Controls { jump: true, ..Default::default() }, 1.0 / 120.0);
+        while p.vel.y > 0.0 {
+            p.update(&mut world, Controls::default(), 1.0 / 120.0);
+        }
+        assert!(!p.on_ground);
+        p.update(&mut world, tap, 1.0 / 120.0);
+        assert_eq!(p.mode, Mode::Walk, "opened {} voxels up, hopping", p.pos.y - 10.0);
+        // The same press well above the ground opens it.
+        let mut p = Player::new(DVec3::new(0.5, 30.0, 0.5));
+        p.update(&mut world, Controls::default(), 1.0 / 120.0);
+        p.update(&mut world, tap, 1.0 / 120.0);
+        assert_eq!(p.mode, Mode::Glide);
     }
 
     #[test]
