@@ -11,6 +11,7 @@ pub mod attach;
 pub mod cave;
 pub mod climber;
 pub mod landmarks;
+pub mod moorstones;
 pub mod moss;
 pub mod parts;
 pub mod pebbles;
@@ -18,6 +19,7 @@ pub mod plants;
 pub mod props;
 pub mod roots;
 pub mod shape;
+pub mod tor;
 pub mod tree_detail;
 pub mod trees;
 
@@ -310,6 +312,16 @@ fn flora(biome: Biome) -> Flora {
         Biome::RedRock => f!([], 0.0, [(Cactus, 1.0)], 0.015, [(Boulder, 3.0), (Bush, 1.0), (Cactus, 1.0)], 0.06),
         Biome::Mangrove => f!([], 0.0, [(Willow, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
         Biome::Volcanic => f!([], 0.0, [(Palm, 1.0), (DeadSnag, 0.5)], 0.02, [(Fern, 2.0), (Boulder, 3.0)], 0.08),
+        // Almost no trees: a lone rowan-like birch or a juniper here and there. Gorse in
+        // clumps and boulders in the grass; the tors and their clitter are features::tor.
+        Biome::Moor => f!(
+            [],
+            0.0,
+            [(Birch, 1.0), (Juniper, 0.8), (DeadSnag, 0.2)],
+            0.0025,
+            [(Gorse, 3.0), (Boulder, 2.0), (MossyBoulder, 0.8), (Bush, 0.4)],
+            0.05
+        ),
     }
 }
 
@@ -629,9 +641,25 @@ impl Cell {
         let nothing = |chosen: bool| Grown { chosen, feature: None };
         let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
         let col = sampler.column(lx, lz);
-        let Some(species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
+        let Some(mut species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
             return nothing(false);
         };
+        // About a landmark the trees have been felled back, the nearer the more, leaving
+        // stumps; round a long-forgotten one, young growth is filling the clearing in.
+        let mut cleared = false;
+        if layer.salt != SMALL.salt
+            && let Some((d, neglect)) = sampler.site_clearing(lx, lz)
+        {
+            let near = 1.0 - (d / crate::trails::CLEARING).clamp(0.0, 1.0);
+            if roll(7) < near * (0.9 - 0.55 * neglect) {
+                if layer.salt != TREES.salt || roll(8) > 0.6 {
+                    return nothing(true);
+                }
+                (species, cleared) = (Species::Stump, true);
+            } else if neglect > 0.45 && roll(9) < near * neglect {
+                (species, cleared) = (Species::Bush, true);
+            }
+        }
         let mut pos = IVec3::new(x, col.top() + 1, z);
         // Steep ground: nothing roots there but the rock itself.
         let rise = (sampler.column(lx + 1, lz).ground - sampler.column(lx - 1, lz).ground)
@@ -643,7 +671,7 @@ impl Cell {
         let variant = (roll(5) * 64.0) as usize;
         let turns = (roll(6) * 4.0) as u32;
         let mut lie = None;
-        if layer.salt == SMALL.salt {
+        if layer.salt == SMALL.salt || cleared {
             let model = lib.get(species, variant);
             if let Some(axis) = model.axis {
                 // A log needs clear, dry ground along its whole length.
@@ -670,7 +698,7 @@ impl Cell {
                 pos.y = y;
             }
         }
-        let roots = if layer.salt == SMALL.salt {
+        let roots = if layer.salt == SMALL.salt || cleared {
             None
         } else {
             let ground = |x: i32, z: i32| {
@@ -899,6 +927,7 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         Biome::BirchGrove => (&[mat::FLOWER_WHITE, mat::FLOWER_BLUE], 0.14),
         Biome::Steppe => (&[mat::FLOWER_YELLOW, mat::FLOWER_PURPLE], 0.06),
         Biome::Bog => (&[mat::FLOWER_WHITE], 0.06),
+        Biome::Moor => (&[mat::HEATHER, mat::HEATHER, mat::HEATHER, mat::FLOWER_YELLOW], 0.42),
         _ => return None,
     };
     // A fast noise marks the drifts; a slow one chooses what grows in each.
@@ -941,7 +970,7 @@ mod tests {
     /// What `choose` grows in one layer over a broad stretch of level ground in a biome,
     /// species by species.
     fn census(biome: Biome, layer: &Layer, temperature: f32) -> HashMap<Species, u32> {
-        let col = Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature, river: f32::MAX, clear: f32::MAX };
+        let col = Column { ground: 40.0, water: None, cover: Cover::Land, biome, temperature, river: f32::MAX, clear: f32::MAX, worn: None };
         let mut counts = HashMap::new();
         for cx in 0..260 {
             for cz in 0..260 {

@@ -85,6 +85,8 @@ pub fn warmth(biome: Biome) -> f32 {
         Biome::Savanna | Biome::Desert | Biome::Rainforest => 1.5,
         // Volcanic islands are warm ground; only their high summits see snow.
         Biome::Volcanic => 1.0,
+        // The moor is high ground: colder than the lowland heath, and snowed on most winters.
+        Biome::Moor => 0.05,
         // The other newer biomes (mangrove, dune sea, red rock, marsh, bog...) follow their parent.
         b => warmth(b.parent()),
     }
@@ -95,6 +97,8 @@ pub fn warmth(biome: Biome) -> f32 {
 pub fn humidity(biome: Biome) -> f32 {
     match biome {
         Biome::Rainforest | Biome::Mangrove | Biome::Marsh | Biome::Bog => 1.9,
+        // Low cloud and mist on the high wet moor, the tors showing through it.
+        Biome::Moor => 1.7,
         Biome::Woodland => 1.4,
         Biome::Ocean => 1.1,
         Biome::Deciduous | Biome::OldGrowth | Biome::BirchGrove | Biome::Volcanic => 1.0,

@@ -78,6 +78,8 @@ fn sward(biome: Biome) -> Option<Sward> {
         Biome::AlpineMeadow => s(mat::TUFT_ALPINE, mat::TUFT_MEADOW, 0.05, Grass::Alpine, Grass::Meadow),
         Biome::Steppe => s(mat::TUFT_STRAW, mat::TUFT_DRY, 0.05, Grass::Bunch, Grass::Meadow),
         Biome::Mangrove => s(mat::TUFT_LUSH, mat::TUFT_SEDGE, 0.03, Grass::Broad, Grass::Sedge),
+        // Rough, pale moor grass in tussocks, with shorter grazed grass between.
+        Biome::Moor => s(mat::TUFT_DRY, mat::TUFT_STRAW, 0.07, Grass::Bunch, Grass::Lawn),
         _ => return None,
     })
 }
@@ -142,6 +144,7 @@ fn wintergreen_at(col: &Column, seed: u32, x: i32, z: i32, a: f32) -> Option<Win
         Biome::Heath => (0.0, 0.0, 0.05),
         Biome::Bog => (0.0, 0.008, 0.03),
         Biome::Tundra => (0.0, 0.0, 0.015),
+        Biome::Moor => (0.0, 0.004, 0.06),
         _ => return None,
     };
     // Most columns grow none, and are turned away before any noise is worked out.
@@ -544,6 +547,7 @@ mod tests {
             temperature: 0.5,
             river: f32::MAX,
             clear: f32::MAX,
+            worn: None,
         }
     }
 

@@ -313,6 +313,11 @@ fn print_trail_stats(c: &Continent) {
         *kinds.entry(format!("{:?}", x.kind)).or_insert(0) += 1;
     }
     println!("  trails: {}   crossings: {kinds:?}", classes.join(", "));
+    let mut markers = std::collections::BTreeMap::new();
+    for (kind, _) in &c.trails.markers {
+        *markers.entry(format!("{kind:?}")).or_insert(0) += 1;
+    }
+    println!("  beside the trails: {markers:?}, lanterns {}", c.trails.lanterns.len());
 }
 
 /// Smallest discharge drawn as a stream.
@@ -367,6 +372,51 @@ fn print_stats(c: &Continent) {
     );
 }
 
+/// Points along the trails every 200 m or so, with what the trail is like there: its
+/// class, the biome, the ground under it and how steeply it climbs, for finding views of
+/// paths of every kind.
+fn print_trail_poi(c: &Continent, seed: u32) {
+    use worldgen::{surface::Sampler, trails::build::class_of};
+    let local = |x: f32, z: f32| (c.desc.mx * MACRO_SIZE + x as i32, c.desc.mz * MACRO_SIZE + z as i32);
+    let column = |x: f32, z: f32| Sampler::new(c, seed, x as i32, z as i32, 1).column(x as i32, z as i32);
+    for (kind, at) in &c.trails.markers {
+        let (x, z) = local(at.x as f32, at.z as f32);
+        // A place to look at it from: on its trail, a few metres back along it.
+        let (mx, mz) = (at.x as f32 + 0.5, at.z as f32 + 0.5);
+        let mut best = (f32::MAX, 0, 0);
+        for (n, line) in c.trails.lines.iter().enumerate() {
+            for (k, p) in line.iter().enumerate() {
+                let d = (p.x - mx).hypot(p.y - mz);
+                if d < best.0 {
+                    best = (d, n, k);
+                }
+            }
+        }
+        let line = &c.trails.lines[best.1];
+        let back = line[best.2.saturating_sub(1)];
+        let (vx, vz) = local(back.x, back.y);
+        let yaw = (mz - back.y).atan2(mx - back.x).to_degrees();
+        println!("  poi marker     {x},{z}  {kind:?}  view {vx},{vz} yaw {yaw:.0}");
+    }
+    for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
+        for k in (4..line.len().saturating_sub(4)).step_by(32) {
+            let (a, b) = (column(line[k - 1].x, line[k - 1].y), column(line[k + 1].x, line[k + 1].y));
+            let col = column(line[k].x, line[k].y);
+            let grade = (b.ground - a.ground).abs() / (line[k + 1] - line[k - 1]).length();
+            let d = line[k + 1] - line[k - 1];
+            let (x, z) = local(line[k].x, line[k].y);
+            println!(
+                "  poi trail      {x},{z}  {:?} {:?} {:?} under {:?}, grade {grade:.2}, heading {:.0}",
+                class_of(widths[k]),
+                col.biome,
+                col.cover,
+                col.worn.map(|w| w.under),
+                d.y.atan2(d.x).to_degrees()
+            );
+        }
+    }
+}
+
 /// Lists places worth looking at, with world voxel coordinates for `game --over`.
 fn print_poi(c: &Continent) {
     let n = c.size * c.size;
@@ -380,7 +430,7 @@ fn print_poi(c: &Continent) {
     for (k, s) in c.trails.sites.iter().enumerate() {
         let (x, z) = local(s.x, s.z);
         let name = c.trails.names.site(k).map_or("", |p| p.name.as_str());
-        println!("  poi site       {x},{z}  {:?}, ground {}  \"{name}\"", s.kind, s.y);
+        println!("  poi site       {x},{z}  {:?}, ground {}, for {:?}  \"{name}\"", s.kind, s.y, s.reason);
     }
     // Every named place, with the tongue spoken there.
     for p in &c.trails.names.places {
@@ -396,6 +446,35 @@ fn print_poi(c: &Continent) {
     for x in &c.trails.crossings {
         let (wx, wz) = local(x.x, x.z);
         println!("  poi crossing   {wx},{wz}  {:?}, span {}", x.kind, x.span);
+    }
+    // Tors on the moor, the great ones first.
+    {
+        use worldgen::features::tor;
+        let cells = MACRO_SIZE / tor::CELL;
+        let mut tors = Vec::new();
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                tors.extend(tor::site(c.desc.world_seed, c, gx, gz));
+            }
+        }
+        tors.sort_by(|a, b| (b.class as u8).cmp(&(a.class as u8)).then(b.dominance.total_cmp(&a.dominance)));
+        for t in tors.iter().take(40) {
+            let (x, z) = local(t.at.x as i32, t.at.y as i32);
+            println!("  poi tor        {x},{z}  {:?}, {:.0} m from higher ground", t.class, t.dominance / 2.5);
+        }
+        // The moor's old stonework, laid out with the tors.
+        let mut works = 0;
+        for gz in c.desc.mz * cells..(c.desc.mz + 1) * cells {
+            for gx in c.desc.mx * cells..(c.desc.mx + 1) * cells {
+                for (w, p) in tor::plan(c.desc.world_seed, c, gx, gz).works {
+                    works += 1;
+                    if works <= 30 {
+                        println!("  poi stones     {},{}  {w:?}", p.x, p.z);
+                    }
+                }
+            }
+        }
+        println!("  {works} pieces of moor stonework");
     }
     let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
     // Highest-scoring cells that are at least `spacing` cells apart.
@@ -611,6 +690,7 @@ fn main() -> Result<()> {
     print_stats(&c);
     if o.poi {
         print_poi(&c);
+        print_trail_poi(&c, o.seed);
     }
 
     std::fs::create_dir_all(&o.out)?;

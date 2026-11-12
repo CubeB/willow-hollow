@@ -1966,6 +1966,8 @@ pub fn screenshot(
     wind: Vec3,
     ground: crate::season::Places,
     lamps: &[DVec3],
+    // Drawn over each finished frame, as the map is in the game; with its text or not.
+    hud: &mut dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, bool),
 ) -> anyhow::Result<()> {
     let (width, height) = size;
     // VOXEL_NO_SHAFTS leaves the light shafts out, to see what they add.
@@ -2015,6 +2017,7 @@ pub fn screenshot(
         shafts,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
+    hud(&mut encoder, &view, true);
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -2128,6 +2131,7 @@ pub fn screenshot(
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts };
             renderer.render(gpu, &mut encoder, &view, &scene);
+            hud(&mut encoder, &view, false);
             gpu.queue.submit([encoder.finish()]);
             gpu.device.poll(wgpu::PollType::wait_indefinitely())?;
             times.push(t.elapsed().as_secs_f32() * 1000.0);

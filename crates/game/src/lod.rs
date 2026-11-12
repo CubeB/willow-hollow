@@ -121,15 +121,7 @@ fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
         Cover::Spring => (mat::MOSSY_STONE, mat::STONE),
-        Cover::Trail => (
-            match col.biome.parent() {
-                Biome::Desert | Biome::Savanna => mat::PATH_SAND,
-                Biome::Alpine | Biome::Tundra | Biome::Ocean => mat::PATH_GRAVEL,
-                Biome::OldGrowth | Biome::Rainforest | Biome::Taiga => mat::PATH_DARK,
-                _ => mat::PATH_DIRT,
-            },
-            mat::DIRT,
-        ),
+        Cover::Trail => (worldgen::trails::tread::far(col), mat::DIRT),
         // Tidal flats: wet sand where barely above the sea, as the voxel world has them.
         Cover::Bank if !col.biome.arid() && worldgen::surface::flat_is_sand(col.ground, 0.5) => (mat::SAND, mat::SAND),
         Cover::Bank | Cover::Land if slope > 0.95 => {
@@ -272,6 +264,11 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
         hi = hi.max(s.hi.y.div_euclid(step));
         lo = lo.min(s.lo.y.div_euclid(step));
     }
+    // The moor's tors, which are what is seen of it from far off.
+    let tors = world.tors_near(&continent, wx0, wz0, width);
+    for t in &tors {
+        hi = hi.max(t.hi.y.div_euclid(step));
+    }
 
     // Keep enough rock below for the slope's side faces.
     let cy_min = (lo - 2 * BLOCK).div_euclid(CHUNK);
@@ -342,6 +339,9 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
         for (offset, v) in models.get(world, p.species, p.variant, p.turns, level).iter() {
             put(at + *offset, *v, mats.get(*v).kind == Kind::Solid);
         }
+    }
+    for t in &tors {
+        t.raster_coarse(step, cx * CHUNK - 1, cz * CHUNK - 1, PAD as i32, |q, v| put(q, v, true));
     }
     for s in &stamps {
         for &(p, v) in &s.voxels {

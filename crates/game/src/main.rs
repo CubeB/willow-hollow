@@ -49,6 +49,7 @@ use env::Environment;
 use farview::FarView;
 use gfx::{Gpu, WindowSurface};
 use impostors::Impostors;
+use minimap::Minimap;
 use overlay::Overlay;
 use particles::{Particles, Surroundings};
 use player::{Controls, Mode, Player, WorldVoxels};
@@ -88,6 +89,11 @@ struct Options {
     drift: Option<f32>,
     /// Seconds of ambient life (leaves, birds, spray) simulated before a screenshot.
     ambient: f32,
+    /// Draw the map on a screenshot: the corner map, or the large map this many voxels
+    /// across.
+    shot_map: Option<Option<f64>>,
+    /// Where the player is taken to have walked before a screenshot, world x and z.
+    walked: Vec<glam::DVec2>,
 }
 
 impl Default for Options {
@@ -109,6 +115,8 @@ impl Default for Options {
             frames: None,
             drift: None,
             ambient: 8.0,
+            shot_map: None,
+            walked: Vec::new(),
         }
     }
 }
@@ -131,6 +139,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --map FILE            write a map of the continent around the start to a PNG, then exit
+  --minimap             draw the corner map on a screenshot
+  --bigmap KM           draw the large map, KM across, on a screenshot
+  --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
+                        to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
@@ -191,6 +203,14 @@ fn parse_args() -> Result<Options> {
             "--no-audio" => o.audio = false,
             "--screenshot" => o.screenshot = Some(value()?.into()),
             "--map" => o.map = Some(value()?.into()),
+            "--minimap" => o.shot_map = Some(None),
+            "--bigmap" => o.shot_map = Some(Some(m64(value()?.parse::<f64>()? * 1000.0))),
+            "--walked" => {
+                for p in value()?.split(';') {
+                    let v = list::<f64>(p, ',', 2)?;
+                    o.walked.push(glam::DVec2::new(v[0], v[1]));
+                }
+            }
             "--size" => {
                 let v = list::<u32>(&value()?, 'x', 2)?;
                 o.size = (v[0].max(1), v[1].max(1));
@@ -472,6 +492,8 @@ struct Running {
     /// (with the cursor re-centred each frame) drive the look instead.
     raw_motion_seen: bool,
     last_cursor: Option<(f64, f64)>,
+    /// Where the cursor was last seen, for dragging the map.
+    last_cursor_seen: Option<(f64, f64)>,
     last_frame: Instant,
     start: Instant,
     frame: u64,
@@ -481,6 +503,9 @@ struct Running {
     /// Every frame's length in milliseconds, kept only when measuring.
     frame_log: Option<Vec<f32>>,
     drift: Option<f32>,
+    map: Minimap,
+    /// The large map is being dragged with the mouse, from this cursor position.
+    drag: Option<(f64, f64)>,
 }
 
 /// Distance between footsteps.
@@ -552,7 +577,14 @@ impl Running {
         let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
         let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
         let date = opts.date.or(progress.map(|p| p.date)).unwrap_or(season::DEFAULT_DATE);
+        // What has been seen of this world is kept with the rest of its save; a visit to
+        // a place given by hand keeps nothing.
+        let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
+        let mut map = Minimap::new(&gpu, surface.config.format, world.clone(), map_dir);
+        map.corner = settings.minimap;
         Ok(Self {
+            map,
+            drag: None,
             window,
             overlay,
             renderer,
@@ -600,6 +632,7 @@ impl Running {
             want_grab: opts.frames.is_none(),
             raw_motion_seen: false,
             last_cursor: None,
+            last_cursor_seen: None,
             last_frame: Instant::now(),
             start: Instant::now(),
             frame: 0,
@@ -646,6 +679,14 @@ impl Running {
         if !open {
             self.save_timer = 0.0;
         }
+    }
+
+    /// Opens or closes the large map, which needs the mouse to move it.
+    fn set_map(&mut self, open: bool) {
+        self.map.set_open(open);
+        self.drag = None;
+        self.want_grab = !open;
+        self.set_grab(!open);
     }
 
     /// Puts into effect whatever changed in the settings since `was`.
@@ -701,6 +742,7 @@ impl Running {
         if overrides.keeps_position() {
             store.write_progress(self.settings.seed, self.progress());
         }
+        self.map.save(false);
     }
 
     fn centre_cursor(&mut self) {
@@ -914,6 +956,9 @@ impl Running {
             }
         }
 
+        self.map.corner = self.settings.minimap;
+        self.map.update(&self.gpu, self.camera.pos, self.camera.forward(), self.walking, dt);
+
         self.cpu.lap(2);
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
@@ -955,6 +1000,7 @@ impl Running {
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.renderer.finish(&self.gpu, &mut encoder, &view);
+        self.map.draw(&self.gpu, &mut encoder, &view, (self.surface.config.width, self.surface.config.height));
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;
@@ -983,11 +1029,13 @@ impl Running {
         let mut choice = overlay::MenuChoice::default();
         let held = Some(self.streamer.radius()).filter(|r| *r < settings.radius);
         let (show_debug, show_menu, grabbed) = (settings.show_debug, self.show_settings, self.grabbed);
+        let (labels, map_open) = (self.map.labels(), self.map.open);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
+                overlay::map_labels(ctx, labels);
                 if show_menu {
                     choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
-                } else if !grabbed {
+                } else if !grabbed && !map_open {
                     egui::Area::new(egui::Id::unique("hint"))
                         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
                         .show(ctx, |ui| {
@@ -1043,6 +1091,7 @@ impl Running {
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G in the air, or Space when high up = glider. E = board or leave a boat at a landing");
+                        ui.label("M = the map (wheel zooms, drag moves it). N = show or hide the corner map");
                     });
             });
         if time != self.env.time || date != self.env.date {
@@ -1090,7 +1139,11 @@ impl ApplicationHandler for App {
             && !key.repeat
             && key.physical_key == PhysicalKey::Code(KeyCode::Escape)
         {
-            r.set_menu(!r.show_settings);
+            if r.map.open {
+                r.set_map(false);
+            } else {
+                r.set_menu(!r.show_settings);
+            }
             return;
         }
         if !r.grabbed && r.overlay.on_event(&r.window, &event) {
@@ -1111,7 +1164,24 @@ impl ApplicationHandler for App {
                     r.set_grab(true);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => r.cursor_moved(position.x, position.y),
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some((x, y)) = r.drag {
+                    r.map.drag((position.x - x) as f32, (position.y - y) as f32);
+                    r.drag = Some((position.x, position.y));
+                }
+                r.last_cursor_seen = Some((position.x, position.y));
+                r.cursor_moved(position.x, position.y);
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if r.map.open && !r.show_settings => {
+                r.drag = (state == ElementState::Pressed).then_some(r.last_cursor_seen).flatten();
+            }
+            WindowEvent::MouseWheel { delta, .. } if r.map.open => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                r.map.zoom(lines);
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -1137,6 +1207,12 @@ impl ApplicationHandler for App {
                             r.window.set_fullscreen(fullscreen(r.settings.fullscreen));
                         } else if r.show_settings {
                             // The rest of the keyboard is for playing.
+                        } else if code == KeyCode::KeyM && !event.repeat {
+                            r.set_map(!r.map.open);
+                        } else if code == KeyCode::KeyN && !event.repeat {
+                            r.settings.minimap = !r.settings.minimap;
+                        } else if r.map.open {
+                            // The rest waits until the map is put away.
                         } else if code == KeyCode::Tab && !event.repeat {
                             r.want_grab = !r.grabbed;
                             r.set_grab(r.want_grab);
@@ -1224,6 +1300,7 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         if let Some(r) = self.run.as_mut() {
+            r.map.save(true);
             r.persist(&self.opts.overrides);
         }
     }
@@ -1314,6 +1391,28 @@ fn main() -> Result<()> {
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
         }
         let lamps: Vec<DVec3> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
+        // The map, as the player would have it after walking here.
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut map = opts.shot_map.map(|large| {
+            let mut map = Minimap::new(&gpu, format, world.clone(), None);
+            map.settle(&gpu, camera.pos, camera.forward());
+            let mut path = opts.walked.clone();
+            path.push(glam::DVec2::new(camera.pos.x, camera.pos.z));
+            map.walk(&path);
+            if let Some(span) = large {
+                map.set_open(true);
+                map.set_span(span);
+            }
+            map
+        });
+        let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
+            let Some(map) = &mut map else { return };
+            map.update(&gpu, camera.pos, camera.forward(), true, 0.0);
+            map.draw(&gpu, encoder, view, opts.size);
+            if text {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::map_labels(ctx, map.labels()));
+            }
+        };
         render::screenshot(
             &gpu,
             path,
@@ -1328,6 +1427,7 @@ fn main() -> Result<()> {
             particles.wind.lagged * OLD_VOXEL,
             weather.places(env.date, settings.year_days, warmth, settings.seed),
             &lamps,
+            &mut hud,
         )?;
         let s = streamer.stats;
         log::info!(

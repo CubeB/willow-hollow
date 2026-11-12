@@ -44,7 +44,19 @@ pub enum Biome {
     Mangrove,
     /// Black ash and basalt on volcanic islands.
     Volcanic,
+    /// Open, rolling upland of rough grass, heather and peat over granite, its summits
+    /// crowned with tors: high, cool and wet ground of low relief.
+    Moor,
 }
+
+/// The climate and ground a moor takes: temperature, least rainfall, least broad height
+/// (in simulation units) and steepest broad slope, and the least of the slow variety noise.
+const MOOR_COOL: f32 = 0.26;
+const MOOR_WARM: f32 = 0.44;
+const MOOR_RAIN: f32 = 0.75;
+const MOOR_HEIGHT: f32 = 45.0;
+const MOOR_SLOPE: f32 = 0.22;
+const MOOR_VARIETY: f32 = -0.35;
 
 /// What, beyond climate, decides a biome at a spot.
 #[derive(Clone, Copy, Debug)]
@@ -68,10 +80,14 @@ pub struct Site {
     pub variety: f32,
     /// 0..1, how much the spot belongs to a volcano.
     pub volcanic: f32,
+    /// The mean height and mean slope of the country for a few hundred metres around:
+    /// what tells a broad upland of low relief from a ridge between deep valleys.
+    pub broad_height: f32,
+    pub broad_slope: f32,
 }
 
 impl Biome {
-    pub const ALL: [Biome; 22] = [
+    pub const ALL: [Biome; 23] = [
         Biome::Ocean,
         Biome::Alpine,
         Biome::Tundra,
@@ -94,6 +110,7 @@ impl Biome {
         Biome::RedRock,
         Biome::Mangrove,
         Biome::Volcanic,
+        Biome::Moor,
     ];
 
     pub fn from_u8(v: u8) -> Biome {
@@ -130,7 +147,7 @@ impl Biome {
     /// Picks the biome for a spot: the climate decides the broad type, and the ground
     /// and a slow noise then choose among the kinds of country that climate allows.
     pub fn select(site: &Site) -> Biome {
-        let Site { temperature: t, rain: r, height: h, slope, wet, coast, shelter, variety: v, volcanic } = *site;
+        let Site { temperature: t, rain: r, height: h, slope, wet, coast, shelter, variety: v, volcanic, broad_height, broad_slope } = *site;
         let base = Self::classify(t, r);
         if base == Biome::Alpine {
             return base;
@@ -148,6 +165,16 @@ impl Biome {
         // Cold because it is high, not because it is far north: only there is there a
         // tree line with meadow above it rather than tundra all the way down.
         let alpine = h > 100.0 && t + h * LAPSE > treeline + 0.06;
+        // Moor: the cool, wet temperate uplands where the ground lies open and rolling
+        // rather than steep, a plateau above the lowland woods and below the mountains.
+        // Its valleys are moor too, all but the steepest of their sides.
+        let moor = (MOOR_COOL..MOOR_WARM).contains(&t)
+            && r > MOOR_RAIN
+            && broad_height > MOOR_HEIGHT
+            && broad_slope < MOOR_SLOPE
+            && h > MOOR_HEIGHT * 0.7
+            && slope < MOOR_SLOPE * 2.0
+            && v > MOOR_VARIETY;
         match base {
             // Warm, wet, low ground at sheltered coasts (bays, lagoons, estuaries) and
             // the mouths of big rivers; open coasts facing the sea stay beach and forest.
@@ -170,12 +197,16 @@ impl Biome {
             }
             Biome::Taiga if r > 1.05 && v > 0.05 => Biome::SnowyPine,
             Biome::Grassland | Biome::Deciduous | Biome::OldGrowth | Biome::Heath | Biome::Woodland
-                if sodden > wetland && h < 150.0 =>
+                if sodden > wetland && h < 150.0 && !moor =>
             {
                 Biome::Marsh
             }
             Biome::Taiga | Biome::Deciduous | Biome::Heath if (0.22..0.40).contains(&t) && r > 0.5 && v > 0.32 => {
                 Biome::BirchGrove
+            }
+            // Its waterlogged hollows are blanket bog and valley mire.
+            Biome::Grassland | Biome::Deciduous if moor => {
+                if sodden > wetland * 0.8 { Biome::Bog } else { Biome::Moor }
             }
             Biome::Heath | Biome::Grassland if t > 0.40 && r < 0.62 && v < -0.1 => Biome::Steppe,
             Biome::Desert | Biome::Savanna if h > 70.0 && v < -0.05 && r < 0.6 => Biome::RedRock,
@@ -202,6 +233,7 @@ impl Biome {
             Biome::DuneSea | Biome::RedRock => Biome::Desert,
             Biome::Mangrove => Biome::Rainforest,
             Biome::Volcanic => Biome::Tundra,
+            Biome::Moor => Biome::Heath,
             b => b,
         }
     }
@@ -231,6 +263,7 @@ impl Biome {
             Biome::RedRock => [180, 86, 58],
             Biome::Mangrove => [60, 96, 70],
             Biome::Volcanic => [62, 58, 62],
+            Biome::Moor => [132, 118, 100],
         }
     }
 }
@@ -240,7 +273,19 @@ mod tests {
     use super::*;
 
     fn site(temperature: f32, rain: f32, height: f32, slope: f32) -> Site {
-        Site { temperature, rain, height, slope, wet: 0.0, coast: 0.0, shelter: 0.0, variety: 0.0, volcanic: 0.0 }
+        Site {
+            temperature,
+            rain,
+            height,
+            slope,
+            wet: 0.0,
+            coast: 0.0,
+            shelter: 0.0,
+            variety: 0.0,
+            volcanic: 0.0,
+            broad_height: height,
+            broad_slope: slope,
+        }
     }
 
     #[test]
@@ -257,6 +302,8 @@ mod tests {
             (Site { coast: 1.0, shelter: 1.0, ..site(0.80, 1.6, 2.0, 0.01) }, Biome::Mangrove),
             (Site { coast: 0.5, wet: 0.9, ..site(0.80, 1.6, 2.0, 0.01) }, Biome::Mangrove),
             (Site { volcanic: 1.0, ..site(0.60, 1.0, 100.0, 0.2) }, Biome::Volcanic),
+            (site(0.36, 1.1, 80.0, 0.1), Biome::Moor),
+            (Site { wet: 0.9, ..site(0.36, 1.1, 80.0, 0.01) }, Biome::Bog),
         ];
         for (s, want) in cases {
             assert_eq!(Biome::select(&s), want, "{s:?}");
@@ -269,6 +316,9 @@ mod tests {
         // Climate alone still decides ordinary country.
         assert_eq!(Biome::select(&site(0.45, 1.0, 50.0, 0.1)), Biome::Deciduous);
         assert_eq!(Biome::select(&site(0.05, 1.0, 900.0, 0.3)), Biome::Alpine);
+        // Steep upland, or low ground, in the same climate is forest, not moor.
+        assert_eq!(Biome::select(&site(0.36, 1.1, 80.0, 0.5)), Biome::Deciduous);
+        assert_eq!(Biome::select(&site(0.36, 1.1, 20.0, 0.1)), Biome::Deciduous);
     }
 
     #[test]

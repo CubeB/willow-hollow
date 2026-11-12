@@ -308,6 +308,28 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
             }
         }
     }
+    // Tors stand out over the open moor and are what it is known by from afar: their
+    // stacks drawn as boxes of granite, each with the square its summit is in.
+    let granite = world.materials().get(worldgen::materials::GRANITE).color;
+    for t in world.tors_near(&continent, x0, z0, TILE) {
+        if !(x0..x0 + TILE).contains(&t.origin.x) || !(z0..z0 + TILE).contains(&t.origin.z) {
+            continue;
+        }
+        let (lx, lz) = ((t.origin.x - mx * MACRO_SIZE) as f32 + 0.5, (t.origin.z - mz * MACRO_SIZE) as f32 + 0.5);
+        let biome = farview::biome_in(&continent, lx, lz);
+        let [rise, set] = skylines.at(lx, lz);
+        for (lo, size) in t.far_boxes() {
+            let size = size.min(IVec3::splat(255));
+            boxes.push(BoxInstance {
+                lo: lo.to_array(),
+                size: [size.x as u8, size.y as u8, size.z as u8],
+                biome,
+                color: granite,
+                plant: 0,
+                tree: [0, rise, set, 0],
+            });
+        }
+    }
     Some(boxes)
 }
 

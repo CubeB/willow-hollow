@@ -56,7 +56,7 @@ fn field(col: &Column, surface: Voxel) -> Option<(f32, Rock)> {
         // Bare rock and scree: loose stones lie thickest on it.
         (_, mat::STONE | mat::ROCK_DARK) => (0.35, rock),
         // Heath and tundra: a few stones in the turf, some of them lichen-spotted.
-        (Cover::Land, s) if matches!(col.biome, Biome::Heath | Biome::Tundra) && s == mat::ground_cover(col.biome) => {
+        (Cover::Land, s) if matches!(col.biome, Biome::Heath | Biome::Tundra | Biome::Moor) && s == mat::ground_cover(col.biome) => {
             (0.035, Rock { main: rock.main, other: rock.main, fleck: mat::MOSSY_STONE })
         }
         _ => return None,
@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     fn column(cover: Cover, biome: Biome) -> Column {
-        Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX }
+        Column { ground: 40.0, water: None, cover, biome, temperature: 0.5, river: f32::MAX, clear: f32::MAX, worn: None }
     }
 
     fn strewn(col: &Column, surface: Voxel, seed: u32) -> Vec<Vec<PlantBox>> {
