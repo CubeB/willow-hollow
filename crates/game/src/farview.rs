@@ -58,8 +58,9 @@ pub struct FarVertex {
     /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
     pub far: [u8; 4],
     /// The biome (as u8), for the snow lying there (see `season::Places`); then the plant
-    /// kind (voxel::plant) of its forest's canopy, 0 with none; then its [`Skylines`]
-    /// toward sunrise and sunset.
+    /// kind (voxel::plant) of its forest's canopy, 0 with none, with how much of that
+    /// forest keeps its leaves in winter in the five bits above it (see [`pack_plant`]);
+    /// then its [`Skylines`] toward sunrise and sunset.
     pub place: [u8; 4],
 }
 
@@ -153,6 +154,19 @@ impl Skylines {
         let made = Arc::new(Self::of(c));
         kept.push((key, made.clone()));
         made
+    }
+
+    /// The skylines at a place on the continent, blended between the grid's points.
+    pub fn blended(&self, lx: f32, lz: f32) -> [u8; 2] {
+        let top = self.size as f32 - 1.001;
+        let (x, z) = ((lx / self.cell).clamp(0.0, top), (lz / self.cell).clamp(0.0, top));
+        let (i, j) = (x as usize, z as usize);
+        let (fx, fz) = (x - i as f32, z - j as f32);
+        [0, 1].map(|k| {
+            let at = |i: usize, j: usize| self.angles[j * self.size + i][k] as f32;
+            let row = |j: usize| at(i, j) * (1.0 - fx) + at(i + 1, j) * fx;
+            (row(j) * (1.0 - fz) + row(j + 1) * fz).round() as u8
+        })
     }
 
     /// The skylines at a place on the continent (voxels from its origin corner).
@@ -373,6 +387,15 @@ struct Canopy {
     height: f32,
     /// Their crowns' plant kind (voxel::plant), 0 if unknown.
     plant: u8,
+    /// How much of the forest keeps its leaves through the winter, 0..1: the hollies,
+    /// yews and pines among its broadleaves (`features::winter_green_share`).
+    winter_green: f32,
+}
+
+/// A canopy's plant kind with, above its three bits, the share of the forest that stays
+/// green in winter in 31sts: what far.wgsl reads back from a vertex's `place.y`.
+fn pack_plant(plant: u8, winter_green: f32) -> u8 {
+    (plant & 7) | (((winter_green.clamp(0.0, 1.0) * 31.0).round() as u8) << 3)
 }
 
 /// Each biome's forest, indexed by biome, or None where too few trees grow to tell.
@@ -393,6 +416,7 @@ fn canopies(world: &GameWorld) -> Vec<Option<Canopy>> {
                 color: crown.map(f32::from),
                 // Palms and pines stay green through the winter, whatever their colour.
                 plant: top.map_or(0, |m| m.plant),
+                winter_green: features::winter_green_share(biome),
                 cover,
                 height: height * OLD_VOXEL,
             })
@@ -415,7 +439,8 @@ struct Look {
     ground: [f32; 3],
     /// The ground under its forest's canopy, as seen from beyond the tree models.
     far: [f32; 3],
-    /// The plant kind of the canopy (voxel::plant), 0 with none.
+    /// The plant kind of the canopy (voxel::plant), 0 with none, and how much of it stays
+    /// green in winter, as [`pack_plant`] puts them in one byte.
     plant: u8,
     /// How high that canopy stands above the ground, in voxels.
     lift: f32,
@@ -456,7 +481,7 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     Look {
         ground,
         far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),
-        plant: canopy.plant,
+        plant: pack_plant(canopy.plant, canopy.winter_green),
         lift: canopy.cover * canopy.height * 0.6 * grows,
     }
 }
@@ -522,6 +547,37 @@ pub fn biome_in(c: &Continent, lx: f32, lz: f32) -> u8 {
 /// The biome (as u8) at world voxel column `(x, z)`, exactly as the voxel terrain has
 /// it, or `Biome::Ocean`, which stands for wherever the camera is, while its continent
 /// has not been simulated. Never blocks.
+/// The skylines toward sunrise and sunset at a world position, in voxels; level where
+/// the continent is not made yet.
+pub fn skylines_at(world: &GameWorld, x: i32, z: i32) -> [u8; 2] {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or([0; 2], |c| {
+        Skylines::get(&c).blended((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32)
+    })
+}
+
+/// The lie of the land at a world position, in voxels: the x and z of the unit normal of
+/// the continent's ground, taken over a grid cell each way (about 50 m), each as a signed
+/// byte. Level where the continent is not made yet, and over the sea.
+pub fn slope_at(world: &GameWorld, x: i32, z: i32) -> [i8; 2] {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or([0; 2], |c| {
+        let (size, cell) = (c.size, c.cell_size());
+        let (gx, gz) = ((x - mx * MACRO_SIZE) as f32 / cell, (z - mz * MACRO_SIZE) as f32 / cell);
+        // Ground or sea, in voxels, between the grid's points.
+        let at = |x: f32, z: f32| {
+            let (x, z) = (x.clamp(0.0, size as f32 - 1.001), z.clamp(0.0, size as f32 - 1.001));
+            let (i, j) = (x as usize, z as usize);
+            let (fx, fz) = (x - i as f32, z - j as f32);
+            let h = |i: usize, j: usize| (c.height[j * size + i] * OLD_VOXEL).max(0.0);
+            let row = |j: usize| h(i, j) * (1.0 - fx) + h(i + 1, j) * fx;
+            row(j) * (1.0 - fz) + row(j + 1) * fz
+        };
+        let n = glam::Vec3::new(at(gx - 1.0, gz) - at(gx + 1.0, gz), 2.0 * cell, at(gx, gz - 1.0) - at(gx, gz + 1.0)).normalize();
+        [(n.x * 127.0).round() as i8, (n.z * 127.0).round() as i8]
+    })
+}
+
 pub fn biome_at(world: &GameWorld, x: i32, z: i32) -> u8 {
     let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
     world.continent_if_ready(mx, mz).map_or(Biome::Ocean as u8, |c| {

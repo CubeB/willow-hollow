@@ -97,19 +97,22 @@ fn bark_of(v: Voxel) -> Option<Bark> {
         mat::BARK_PINE => Bark::Plates,
         mat::BARK_BIRCH => Bark::Peeling,
         mat::BARK_PALM => Bark::Rings,
+        // Yew flakes away in long plates; a pine's upper trunk in broad papery ones.
+        mat::BARK_YEW => furrowed(mat::BARK_YEW_FLAKE, 4, 2, 0.4),
+        mat::BARK_SCOTS => furrowed(mat::BARK_SCOTS, 4, 3, 0.5),
         _ => return None,
     })
 }
 
 /// Tree wood: what bark and limb twigs grow on.
 fn is_wood(v: Voxel) -> bool {
-    bark_of(v).is_some() || v == mat::BARK_BAOBAB
+    bark_of(v).is_some() || matches!(v, mat::BARK_BAOBAB | mat::BARK_HOLLY)
 }
 
 /// The twigs a wood grows.
 fn twig_of(wood: Voxel) -> Voxel {
     match wood {
-        mat::BARK_BIRCH | mat::WOOD_DEAD => mat::TWIG_PALE,
+        mat::BARK_BIRCH | mat::WOOD_DEAD | mat::BARK_HOLLY => mat::TWIG_PALE,
         _ => mat::TWIG,
     }
 }
@@ -130,12 +133,33 @@ fn is_leaf(v: Voxel) -> bool {
             | mat::LEAVES_MAPLE_RED
             | mat::LEAVES_CHERRY
             | mat::LEAVES_BAOBAB
+            | mat::LEAVES_HOLLY
+            | mat::LEAVES_YEW
+            | mat::LEAVES_HOLM
+            | mat::NEEDLES_PINE
+            | mat::NEEDLES_JUNIPER
+            | mat::LEAVES_LAUREL
+            | mat::GORSE
     )
 }
 
 /// Foliage that stays on all year, so a twig poking out of it never hangs in empty air.
 fn is_evergreen(v: Voxel) -> bool {
-    matches!(v, mat::NEEDLES | mat::NEEDLES_REDWOOD | mat::LEAVES_JUNGLE | mat::LEAVES_PALM | mat::LEAVES_BAOBAB)
+    matches!(
+        v,
+        mat::NEEDLES
+            | mat::NEEDLES_REDWOOD
+            | mat::LEAVES_JUNGLE
+            | mat::LEAVES_PALM
+            | mat::LEAVES_BAOBAB
+            | mat::LEAVES_HOLLY
+            | mat::LEAVES_YEW
+            | mat::LEAVES_HOLM
+            | mat::NEEDLES_PINE
+            | mat::NEEDLES_JUNIPER
+            | mat::LEAVES_LAUREL
+            | mat::GORSE
+    )
 }
 
 /// The cell at world cell `(wu, wy)` of a trunk face: how far it stands out and what of,
@@ -336,6 +360,8 @@ pub fn grow(voxels: &ColumnVoxels, mats: &Materials, grove: &Grove, out: &mut Ve
         if is_evergreen(site.host) && site.host != mat::LEAVES_PALM && site.toward != Toward::Below && rng.unit() < CANOPY_TWIGS {
             twig(&mut plot, &mut rng, mat::TWIG);
         } else {
+            // Laid first, as a cell once taken is kept: the leaves then gather round them.
+            garnish(&mut plot, &mut rng, site.host);
             cluster(&mut plot, &mut rng, site.toward == Toward::Above, site.host);
         }
         piece.clear();
@@ -358,6 +384,23 @@ fn twig(plot: &mut FacePlot, rng: &mut Rng, wood: Voxel) {
         let side = if rng.unit() < 0.5 { 1 } else { -1 };
         let (u2, v2) = if rng.unit() < 0.5 { (u + side, v) } else { (u, v + side) };
         plot.fill(u2, u2 + 1, v2, v2 + 1, at, at + 2, wood);
+    }
+}
+
+/// What shows among the leaves of some kinds: the red berries of a holly, the yellow
+/// flowers of gorse, each 0.1 m. Nothing, and no roll of the dice, for any other leaf.
+fn garnish(plot: &mut FacePlot, rng: &mut Rng, leaf: Voxel) {
+    let (piece, chance, most) = match leaf {
+        mat::LEAVES_HOLLY => (mat::HOLLY_BERRY, 0.3, 2),
+        mat::GORSE => (mat::GORSE_BLOOM, 0.6, 3),
+        _ => return,
+    };
+    if rng.unit() >= chance {
+        return;
+    }
+    for _ in 0..rng.int(1, most) {
+        let (u, v, d) = (rng.int(0, 3), rng.int(0, 3), rng.int(0, 1));
+        plot.fill(u, u + 1, v, v + 1, d, d + 1, piece);
     }
 }
 
@@ -645,6 +688,9 @@ mod tests {
                     | mat::BARK_PALM_RING
                     | mat::TWIG
                     | mat::TWIG_PALE
+                    | mat::BARK_YEW_FLAKE
+                    | mat::HOLLY_BERRY
+                    | mat::GORSE_BLOOM
             ) || is_leaf(p.voxel)
         };
         let (centre, stride) = (crate::macro_layout::MACRO_SIZE / CHUNK / 2, 3);

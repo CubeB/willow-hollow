@@ -822,23 +822,27 @@ mod tests {
     fn every_column_grows_a_climbing_plant_the_same_way() {
         // A plant near a chunk border is grown by each column it reaches, each reading
         // the world through its own wider window. They must all grow it identically, or
-        // stems would break off at the border.
+        // stems would break off at the border. That goes for the ones winding round a
+        // trunk as much as any: a stem that goes round the back of a tree comes out
+        // again in whichever column the front of it is in.
         let w = GameWorld::with_config(5, SimConfig { size: 256 });
         let centre = MACRO_SIZE / CHUNK / 2;
         let mut seen: HashMap<IVec3, Vec<(IVec3, Voxel)>> = HashMap::new();
-        let mut shared = 0;
+        let (mut shared, mut winding) = (0, 0);
         'search: for cz in (centre - 200..centre + 200).step_by(5) {
             for cx in (centre - 200..centre + 200).step_by(5) {
                 for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let mut grown = Vec::new();
                     // Each column grows its plants itself, not from the shared cache.
                     w.climbers.clear();
-                    w.generate_column_with(cx + dx, cz + dz, &mut |root, raster| grown.push((root.cell, raster.cells())));
-                    for (root, cells) in grown {
+                    w.generate_column_with(cx + dx, cz + dz, &mut |root, raster| grown.push((root.cell, root.wind, raster.cells())));
+                    for (root, wind, cells) in grown {
                         match seen.get(&root) {
                             Some(before) => {
                                 assert_eq!(before, &cells, "plant at {root} grew differently seen from column {},{}", cx + dx, cz + dz);
                                 shared += 1;
+                                // One worth the name: wound round, and big enough to show it.
+                                winding += (wind.abs() > 0.3 && cells.len() > 400) as u32;
                             }
                             None => {
                                 seen.insert(root, cells);
@@ -846,11 +850,12 @@ mod tests {
                         }
                     }
                 }
-                if shared >= 12 {
+                if shared >= 12 && winding >= 4 {
                     break 'search;
                 }
             }
         }
         assert!(shared >= 3, "only {shared} plants were seen from two columns");
+        assert!(winding >= 2, "only {winding} winding plants were seen from two columns");
     }
 }

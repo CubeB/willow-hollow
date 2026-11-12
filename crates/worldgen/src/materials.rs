@@ -186,16 +186,16 @@ palette! {
     // Climber leaves and stems that read as leaves and lines, not moss: ivy a dark,
     // bluish, glossy green well apart from moss's yellow greens, and little per-voxel
     // jitter, so a leaf is one colour and its neighbours hardly jump.
-    IVY_GLOSS         = ( 42,  94,  52), Foliage, 1;
-    IVY_GLOSS_LIT     = ( 56, 114,  60), Foliage, 1;
-    IVY_GLOSS_NEW     = ( 70, 118,  64), Foliage, 1;
+    IVY_GLOSS         = ( 50, 124,  68), Foliage, 1;
+    IVY_GLOSS_LIT     = ( 78, 152,  86), Foliage, 1;
+    IVY_GLOSS_NEW     = (116, 174,  96), Foliage, 1;
     CREEPER_GREEN     = ( 82, 122,  50), Foliage, 1;
     CREEPER_GREEN_DARK = ( 62, 102,  46), Foliage, 1;
     CREEPER_SCARLET   = (172,  56,  42), Foliage, 1;
     VINE_GREEN        = ( 64, 114,  56), Foliage, 1;
-    IVY_TWIG          = ( 90,  80,  58), Foliage, 1;
-    IVY_ROPE          = (114, 102,  84), Foliage, 1;
-    IVY_ROPE_DARK     = ( 96,  86,  74), Foliage, 1;
+    IVY_TWIG          = (118, 104,  78), Foliage, 1;
+    IVY_ROPE          = (132, 118,  96), Foliage, 1;
+    IVY_ROPE_DARK     = (106,  94,  78), Foliage, 1;
     // Volcanic beaches: basalt ground to black sand by the surf.
     BLACK_SAND        = ( 46,  44,  48), Solid, 1;
     // The props left about landmarks (features::props): iron fittings and the rust they
@@ -238,6 +238,31 @@ palette! {
     CAVE3_SANDSTONE_DARK= ( 67,  53,  37), Solid, 2;
     CAVE3_GRAVEL      = ( 58,  56,  53), Solid, 2;
     CAVE3_FLOWSTONE   = ( 82,  77,  66), Solid, 2;
+    // Evergreens (added last so existing ids keep their numbers): the leaves of trees and
+    // shrubs that stay on through the winter, and their barks. Every leaf here is dark
+    // and on the blue side of green, which is how the far view tells an evergreen from a
+    // broadleaf by its colour alone (season.wgsl's `season_evergreen`).
+    LEAVES_HOLLY      = ( 30,  78,  50), Foliage, 2;
+    LEAVES_YEW        = ( 36,  74,  50), Foliage, 2;
+    LEAVES_HOLM       = ( 70,  98,  68), Foliage, 3;
+    NEEDLES_PINE      = ( 52,  98,  66), Foliage, 3;
+    NEEDLES_JUNIPER   = ( 82, 114,  96), Foliage, 3;
+    LEAVES_LAUREL     = ( 44,  98,  60), Foliage, 2;
+    GORSE             = ( 62,  92,  56), Foliage, 3;
+    BARK_HOLLY        = (126, 124, 112), Solid, 1;
+    BARK_YEW          = (120,  76,  58), Solid, 2;
+    BARK_SCOTS        = (164, 108,  76), Solid, 2;
+    BARK_YEW_FLAKE    = (146,  92,  70), Foliage, 2;
+    // Their fine pieces: holly berries and gorse flowers among the leaves.
+    HOLLY_BERRY       = (204,  40,  36), Foliage, 1;
+    GORSE_BLOOM       = (240, 204,  56), Foliage, 1;
+    // Ground plants that stay green: fern fronds, wood-rush, and heather with the rust
+    // of its spent flowers.
+    FERN              = ( 46, 104,  58), Foliage, 2;
+    FERN_TIP          = ( 70, 128,  70), Foliage, 2;
+    WOODRUSH          = ( 50,  96,  56), Foliage, 3;
+    HEATHER_GREEN     = ( 74,  92,  64), Foliage, 3;
+    HEATHER_RUST      = (122,  82,  78), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -356,13 +381,22 @@ pub fn cave_rock(v: Voxel, tier: u8) -> Voxel {
 fn classify(m: &mut Materials) {
     use voxel::plant as pk;
     // Moss and lichen are left out: they keep their colour all year.
-    let kinds: [(&[Voxel], u8); 9] = [
+    let kinds: [(&[Voxel], u8); 10] = [
         (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
         // Virginia creeper turns and drops like a broadleaf tree.
         (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED, CREEPER_GREEN, CREEPER_GREEN_DARK, CREEPER_SCARLET], pk::DECIDUOUS),
         // Ivy is evergreen; vines and lianas keep their leaves.
         (&[IVY_LEAF_DARK, IVY_LEAF, IVY_LEAF_PALE, IVY_LEAF_RED, VINE_LEAF, IVY_GLOSS, IVY_GLOSS_LIT, IVY_GLOSS_NEW, VINE_GREEN], pk::VINE),
         (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB], pk::EVERGREEN),
+        // Holly, yew and the rest keep their leaves and carry snow as the conifers do; so
+        // do the ferns, wood-rush and heather under them, which the snow does not bury.
+        (
+            &[
+                LEAVES_HOLLY, LEAVES_YEW, LEAVES_HOLM, NEEDLES_PINE, NEEDLES_JUNIPER, LEAVES_LAUREL, GORSE, HOLLY_BERRY, GORSE_BLOOM, FERN,
+                FERN_TIP, WOODRUSH, HEATHER_GREEN, HEATHER_RUST,
+            ],
+            pk::EVERGREEN,
+        ),
         (&[LEAVES_MAPLE, LEAVES_MAPLE_RED], pk::AUTUMN),
         (
             &[
@@ -385,6 +419,7 @@ fn classify(m: &mut Materials) {
                 // Bark relief and twigs are wood: they keep their colour, and winter trees show them.
                 BARK_OAK_RIDGE, BARK_REDWOOD_RIDGE, BARK_PINE_PLATE, BARK_BIRCH_MARK, BARK_BIRCH_PEEL, BARK_PALM_RING, TWIG, TWIG_PALE,
                 IVY_TWIG, IVY_ROPE, IVY_ROPE_DARK,
+                BARK_HOLLY, BARK_YEW, BARK_SCOTS, BARK_YEW_FLAKE,
             ],
             pk::VINE,
         ),

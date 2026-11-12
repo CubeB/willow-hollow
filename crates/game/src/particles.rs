@@ -995,7 +995,7 @@ impl Particles {
             let scatter = if large {
                 Vec3::ZERO
             } else {
-                Vec3::new(self.range(-1.0, 1.0), self.range(-0.5, 0.5), self.range(-1.0, 1.0)) * 6.0 * vpm
+                Vec3::new(self.range(-1.0, 1.0), self.range(-0.5, 0.5), self.range(-1.0, 1.0)) * 8.0 * vpm
             };
             let place = side * slot.x - dir * slot.z + Vec3::Y * slot.y + scatter;
             birds.push(Bird {
@@ -1049,8 +1049,9 @@ impl Flock {
         let n = self.birds.len();
         let centre = self.birds.iter().map(|b| b.pos).sum::<DVec3>() / n.max(1) as f64;
         let mean_vel = self.birds.iter().map(|b| b.vel).sum::<Vec3>() / n.max(1) as f32;
-        // Personal space: a wingspan or two.
-        let room = self.span * 2.0 * vpm * if self.large { 1.6 } else { 3.0 };
+        // Personal space: a wingspan or two for big birds in their V, and more for
+        // small ones, or a flock of them is a clump with no birds to be seen in it.
+        let room = self.span * 2.0 * vpm * if self.large { 1.6 } else { 6.0 };
         for i in 0..n {
             let me = &self.birds[i];
             let mut apart = Vec3::ZERO;
@@ -1080,7 +1081,7 @@ impl Flock {
                     noise::perlin2(0x71, me.seed as f64, a * 0.7) as f32 * 0.4,
                     noise::perlin2(0x72, me.seed as f64, a * 0.7) as f32,
                 ) * 2.0 * vpm;
-                mean_vel + to_centre * 0.25 + to_lead * 0.12 + jitter
+                mean_vel + to_centre * 0.15 + to_lead * 0.12 + jitter
             };
             want += apart * self.speed * 1.2;
             let me = &mut self.birds[i];
@@ -1285,6 +1286,15 @@ mod leaf_tests {
                 for b in &f.birds[i + 1..] {
                     assert!(metres(a.pos - b.pos) > 0.15, "two birds in one place");
                 }
+            }
+            // Small birds keep a few wingspans of air between them.
+            if !f.large {
+                let mut nearest: Vec<f64> = f.birds.iter().enumerate().map(|(i, a)| {
+                    f.birds.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, b)| metres(a.pos - b.pos)).fold(f64::MAX, f64::min)
+                }).collect();
+                nearest.sort_by(f64::total_cmp);
+                let median = nearest[nearest.len() / 2];
+                assert!(median > 1.8, "small birds only {median} m apart");
             }
             // Wings went up and down.
             assert!(wings.1 - wings.0 > 0.8, "wings {wings:?}");

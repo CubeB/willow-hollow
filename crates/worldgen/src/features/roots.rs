@@ -77,6 +77,10 @@ fn rooted(species: Species) -> bool {
             | Species::Baobab
             | Species::Willow
             | Species::DeadSnag
+            | Species::Holly
+            | Species::Yew
+            | Species::HolmOak
+            | Species::ScotsPine
     )
 }
 
@@ -92,6 +96,8 @@ fn is_bark(v: Voxel) -> bool {
             | mat::BARK_ACACIA
             | mat::BARK_BAOBAB
             | mat::WOOD_DEAD
+            | mat::BARK_HOLLY
+            | mat::BARK_YEW
     )
 }
 

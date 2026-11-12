@@ -39,6 +39,9 @@ pub struct Environment {
 /// Haze at sea level in temperate air, per metre.
 const HAZE: f32 = 0.00030;
 
+/// How many times brighter everything is to an eye fully used to the dark of a cave.
+const SHUT_IN_GAIN: f32 = 6.0;
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -49,6 +52,17 @@ impl Environment {
     /// woodland), and ground still `wet` from rain that has stopped has washed the haze out.
     pub fn air(&mut self, humidity: f32, wet: f32) {
         self.haze *= humidity * (1.0 - 0.45 * wet.clamp(0.0, 1.0));
+    }
+
+    /// The eye opening up in the dark of a cave: `shut_in` is how enclosed by rock the
+    /// viewer is (`player::enclosure`). Every light is brighter for it, so the daylight
+    /// outside the mouth burns out as the walls come into view.
+    pub fn adapt(&mut self, shut_in: f32) {
+        let gain = 1.0 + (SHUT_IN_GAIN - 1.0) * smoothstep(0.4, 0.95, shut_in);
+        self.sun_color *= gain;
+        self.sky_zenith *= gain;
+        self.sky_horizon *= gain;
+        self.sky_glow *= gain;
     }
 
     /// How hazy the air is beside a temperate clear day, 0..1 (for the sun's glow in it).

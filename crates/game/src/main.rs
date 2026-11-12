@@ -265,7 +265,8 @@ const BOARD_REACH: f64 = m64(4.8);
 type Spots = Vec<(DVec3, [f32; 3])>;
 type Leaves = Vec<particles::LeafSite>;
 
-/// Which shape of leaf a tree's foliage sheds; plants and vines shed none.
+/// Which shape of leaf a tree's foliage sheds; plants and vines shed none, and nor do
+/// holly, yew and the other winter evergreens, which are left out here.
 fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
     use particles::LeafShape::*;
     use worldgen::materials as mat;
@@ -449,6 +450,8 @@ struct Running {
     props: Vec<particles::ParticleInstance>,
     /// Glider key pressed since the last frame.
     deploy: bool,
+    /// Space was pressed: opens the glider too, but only well clear of the ground.
+    deploy_clear: bool,
     last_yaw: f32,
     world: Arc<GameWorld>,
     camera: Camera,
@@ -456,6 +459,8 @@ struct Running {
     walking: bool,
     player: Player,
     voxels: WorldVoxels,
+    /// How shut in by rock the eye has grown used to being (`player::enclosure`).
+    shut_in: f32,
     fly: FlyController,
     keys: HashSet<KeyCode>,
     /// Whether the mouse is currently captured for looking around.
@@ -556,6 +561,7 @@ impl Running {
             walking: !flying,
             player,
             voxels: WorldVoxels::new(world.clone()),
+            shut_in: 0.0,
             far: FarView::new(&gpu, world.clone()),
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
@@ -585,6 +591,7 @@ impl Running {
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
             deploy: false,
+            deploy_clear: false,
             world,
             fly: FlyController { speed: m(16.0) },
             keys: HashSet::new(),
@@ -821,6 +828,7 @@ impl Running {
                 jump: self.keys.contains(&KeyCode::Space),
                 sprint: self.keys.contains(&KeyCode::ShiftLeft),
                 deploy: std::mem::take(&mut self.deploy),
+                deploy_clear: std::mem::take(&mut self.deploy_clear),
                 look: self.camera.forward(),
                 turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
@@ -912,6 +920,12 @@ impl Running {
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
+        // The eye takes a couple of seconds to open up in the dark, and less to close
+        // again in the light.
+        let shut_in = player::enclosure(self.camera.pos, &mut self.voxels.lazily());
+        let rate = if shut_in > self.shut_in { 0.6 } else { 2.0 };
+        self.shut_in += (shut_in - self.shut_in) * (1.0 - (-rate * dt).exp());
+        lit.adapt(self.shut_in);
         lit.mist_floor = self.mist_floor.unwrap_or(self.camera.pos.y as f32 - m(12.0));
         let ground = self.weather.places(self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         let scene = render::Scene {
@@ -1028,7 +1042,7 @@ impl Running {
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}   seed {seed}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
-                        ui.label("G or Space in the air = glider. E = board or leave a boat at a landing");
+                        ui.label("G in the air, or Space when high up = glider. E = board or leave a boat at a landing");
                     });
             });
         if time != self.env.time || date != self.env.date {
@@ -1131,9 +1145,14 @@ impl ApplicationHandler for App {
                         } else if code == KeyCode::KeyE && !event.repeat {
                             r.interact();
                         } else if r.grabbed {
-                            // A fresh press of Space in mid-air opens the glider.
-                            if !event.repeat && matches!(code, KeyCode::KeyG | KeyCode::Space) {
+                            // G opens the glider anywhere in the air. A fresh press of Space
+                            // does too, but only high up: Space is also the jump key, and
+                            // hopping up a hill must not open it.
+                            if !event.repeat && code == KeyCode::KeyG {
                                 r.deploy = true;
+                            }
+                            if !event.repeat && code == KeyCode::Space {
+                                r.deploy_clear = true;
                             }
                             r.keys.insert(code);
                         }
@@ -1258,6 +1277,7 @@ fn main() -> Result<()> {
         let warmth = season::warmth(biome);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
+        env.adapt(player::enclosure(camera.pos, &mut voxels));
         let cascades: Vec<_> = streamer.cascades_near(camera.pos, m(120.0)).copied().collect();
         let springs: Vec<_> = streamer.springs_near(camera.pos, m(40.0)).copied().collect();
         let surf: Vec<_> = streamer.surf_near(camera.pos, m(60.0)).copied().collect();

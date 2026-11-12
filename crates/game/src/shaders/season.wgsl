@@ -3,7 +3,8 @@
 // midsummer, 0.5 autumn equinox, 0.75 midwinter); see season.rs.
 //
 // Every plant vertex carries a plant kind (voxel::plant) in its flags, so a maple, a tuft
-// of grass and a pine each follow their own year. Deciduous and maple leaves are meshed
+// of grass and a pine each follow their own year. Holly, yew, ferns and the other winter
+// evergreens are PLANT_EVERGREEN with the pines: never recoloured, dropped or buried. Deciduous and maple leaves are meshed
 // one voxel to a quad, and each corner says which voxel it belongs to, so a leaf that has
 // fallen is dropped in the vertex shader (all four corners agree) and costs no fragment
 // work. Each tree turns and drops at its own date, from its tree tag (season_tree), each
@@ -108,13 +109,15 @@ fn season_leaf_colour(c: vec3<f32>, leaf: Leaf, maple: bool) -> vec3<f32> {
     return mix(o, tint, leaf.turn * 0.92);
 }
 
-// Grass: dry to a deep straw by late summer, flattened and brown through winter.
+// Grass: yellows a little in the dry end of summer, greens up again with the autumn rain
+// and stays green through winter, only a shade duller in the cold.
 fn season_grass(c: vec3<f32>, s: f32) -> vec3<f32> {
-    let dry = max(smoothstep(0.40, 0.56, s), 1.0 - smoothstep(0.0, 0.07, s));
-    let winter = max(smoothstep(0.72, 0.82, s), 1.0 - smoothstep(0.0, 0.05, s));
+    let dry = smoothstep(0.40, 0.54, s) * (1.0 - smoothstep(0.60, 0.72, s));
+    let winter = max(smoothstep(0.72, 0.82, s), 1.0 - smoothstep(0.0, 0.07, s));
     let straw = vec3<f32>(0.30, 0.19, 0.05) * (0.55 + c.g * 1.7);
-    var o = mix(c, straw, dry * 0.85);
-    o = mix(o, o * vec3<f32>(0.8, 0.7, 0.62), winter);
+    var o = mix(c, straw, dry * 0.5);
+    let grey = vec3<f32>(dot(o, vec3<f32>(0.3, 0.6, 0.1)));
+    o = mix(o, mix(grey, o, 0.72) * vec3<f32>(0.9, 0.86, 0.78), winter);
     return o;
 }
 
@@ -188,12 +191,15 @@ fn season_far_leaf(c: vec3<f32>, world: vec2<f32>, s: f32) -> vec4<f32> {
 }
 
 // The far ground: grass dries and yellows, and a far forest of broadleaves turns, then goes
-// to bare brown branches.
-fn season_far_ground(c: vec3<f32>, forest: bool, world: vec2<f32>, s: f32) -> vec3<f32> {
+// to bare brown branches, but for the share `keeps` of it that is evergreen (the hollies,
+// yews and pines among its trees), which shows dark green between them.
+fn season_far_ground(c: vec3<f32>, forest: bool, keeps: f32, world: vec2<f32>, s: f32) -> vec3<f32> {
     let q = sqrt(c);
     if (forest) {
         let leaf = season_far_leaf(c, world, s);
-        return mix(vec3<f32>(0.09, 0.07, 0.06), leaf.rgb, leaf.a);
+        // Seen from above an evergreen hides more of the wood than its share of the trunks.
+        let bare = mix(vec3<f32>(0.09, 0.07, 0.06), vec3<f32>(0.022, 0.075, 0.038), min(keeps * 1.5, 1.0));
+        return mix(bare, leaf.rgb, leaf.a);
     }
     if (season_green(q)) {
         return season_grass(c, s);
