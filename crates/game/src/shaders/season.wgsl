@@ -108,13 +108,15 @@ fn season_leaf_colour(c: vec3<f32>, leaf: Leaf, maple: bool) -> vec3<f32> {
     return mix(o, tint, leaf.turn * 0.92);
 }
 
-// Grass: dry to a deep straw by late summer, flattened and brown through winter.
+// Grass: yellows a little in the dry end of summer, greens up again with the autumn rain
+// and stays green through winter, only a shade duller in the cold.
 fn season_grass(c: vec3<f32>, s: f32) -> vec3<f32> {
-    let dry = max(smoothstep(0.40, 0.56, s), 1.0 - smoothstep(0.0, 0.07, s));
-    let winter = max(smoothstep(0.72, 0.82, s), 1.0 - smoothstep(0.0, 0.05, s));
+    let dry = smoothstep(0.40, 0.54, s) * (1.0 - smoothstep(0.60, 0.72, s));
+    let winter = max(smoothstep(0.72, 0.82, s), 1.0 - smoothstep(0.0, 0.07, s));
     let straw = vec3<f32>(0.30, 0.19, 0.05) * (0.55 + c.g * 1.7);
-    var o = mix(c, straw, dry * 0.85);
-    o = mix(o, o * vec3<f32>(0.8, 0.7, 0.62), winter);
+    var o = mix(c, straw, dry * 0.5);
+    let grey = vec3<f32>(dot(o, vec3<f32>(0.3, 0.6, 0.1)));
+    o = mix(o, mix(grey, o, 0.72) * vec3<f32>(0.9, 0.86, 0.78), winter);
     return o;
 }
 
