@@ -56,7 +56,7 @@ fn field(col: &Column, surface: Voxel) -> Option<(f32, Rock)> {
         // Bare rock and scree: loose stones lie thickest on it.
         (_, mat::STONE | mat::ROCK_DARK) => (0.35, rock),
         // Heath and tundra: a few stones in the turf, some of them lichen-spotted.
-        (Cover::Land, s) if matches!(col.biome, Biome::Heath | Biome::Tundra) && s == mat::ground_cover(col.biome) => {
+        (Cover::Land, s) if matches!(col.biome, Biome::Heath | Biome::Tundra | Biome::Moor) && s == mat::ground_cover(col.biome) => {
             (0.035, Rock { main: rock.main, other: rock.main, fleck: mat::MOSSY_STONE })
         }
         _ => return None,

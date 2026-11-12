@@ -173,6 +173,7 @@ impl<'a> Survey<'a> {
             Biome::Marsh => "marsh",
             Biome::Bog => "bog",
             Biome::Mangrove => "mangrove",
+            Biome::Moor => "moor",
             Biome::Ocean => return None,
         })
     }

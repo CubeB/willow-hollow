@@ -116,6 +116,7 @@ mangrove = Root Heron Mud Tangle Salt Crab Egret Brine
 marsh = Reed Willow Sedge Heron Rush Bittern Snipe Marigold
 bog = Bog Fen Mire Peat Moss Cotton Sundew Curlew
 heath = Heather Ling Gorse Bracken Lark Whin Broom Stonechat
+moor = Hound Hay Mis Grey Bell Hare Raven Fox Rough Wind Sheep Lark Combe Bel Hen Wild
 grassland = Meadow Lark Clover Green Hay Fair Cowslip Daisy Sorrel Hare
 steppe = Wind Feather Dry Tall Kestrel Bustard Sage Stipe
 savanna = Thorn Tawny Acacia Dust Honey Lion Ochre Kudu

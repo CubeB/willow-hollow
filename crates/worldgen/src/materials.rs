@@ -263,6 +263,17 @@ palette! {
     WOODRUSH          = ( 50,  96,  56), Foliage, 3;
     HEATHER_GREEN     = ( 74,  92,  64), Foliage, 3;
     HEATHER_RUST      = (122,  82,  78), Foliage, 2;
+    // The moor (added last so existing ids keep their numbers): its rough pale grass and
+    // the peat under it, the granite of its tors in three weathered greys, short sheep-
+    // bitten turf, and bracken, green fronds over the rust of last year's dead ones.
+    GRASS_MOOR        = (146, 144,  96), Solid, 2;
+    PEAT              = ( 70,  54,  44), Solid, 2;
+    GRANITE           = (164, 160, 150), Solid, 2;
+    GRANITE_PALE      = (186, 182, 168), Solid, 2;
+    GRANITE_GREY      = (130, 128, 124), Solid, 2;
+    TURF              = (108, 134,  74), Solid, 2;
+    BRACKEN           = ( 96, 138,  58), Foliage, 2;
+    BRACKEN_DEAD      = (150,  86,  48), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -279,6 +290,14 @@ pub fn strata(seed: u32, biome: Biome, y: i32, tilt: f32) -> Voxel {
     let k = if layer(band) < 0.4 { band - 1 } else { band };
     let r = unit(hash2(seed ^ 0x57a8, k, 7));
     // Red rock country is red through and through, in the rock its slopes show (`bedrock`).
+    // Granite is not bedded: a moor's rock is grey granite whatever the height.
+    if biome == Biome::Moor {
+        return match r {
+            ..0.55 => GRANITE,
+            ..0.8 => GRANITE_GREY,
+            _ => GRANITE_PALE,
+        };
+    }
     if biome == Biome::RedRock {
         return match r {
             ..0.40 => RED_ROCK,
@@ -331,6 +350,7 @@ pub fn ground_cover(biome: Biome) -> Voxel {
         Biome::RedRock => RED_SAND,
         Biome::Mangrove => MANGROVE_MUD,
         Biome::Volcanic => ASH,
+        Biome::Moor => GRASS_MOOR,
     }
 }
 
@@ -340,6 +360,7 @@ pub fn bedrock(biome: Biome) -> (Voxel, Voxel) {
         Biome::RedRock => (RED_ROCK, RED_ROCK_DARK),
         Biome::DuneSea | Biome::Desert => (SANDSTONE, SANDSTONE_DARK),
         Biome::Volcanic => (BASALT, ROCK_DARK),
+        Biome::Moor => (GRANITE, GRANITE_GREY),
         _ => (STONE, ROCK_DARK),
     }
 }
@@ -351,6 +372,7 @@ pub fn subsoil(cover: Voxel) -> Voxel {
         RED_SAND => RED_ROCK,
         ASH => BASALT,
         MANGROVE_MUD | BOG_MOSS => MUD,
+        GRASS_MOOR => PEAT,
         _ => DIRT,
     }
 }
@@ -362,8 +384,8 @@ pub fn cave_rock(v: Voxel, tier: u8) -> Voxel {
         return v;
     }
     let k = match v {
-        ROCK_DARK | SLATE | BASALT => 1,
-        ROCK_PALE => 2,
+        ROCK_DARK | SLATE | BASALT | GRANITE_GREY => 1,
+        ROCK_PALE | GRANITE | GRANITE_PALE => 2,
         ROCK_BROWN => 3,
         SANDSTONE => 4,
         SANDSTONE_RED | RED_ROCK | RED_ROCK_DARK => 5,
@@ -381,7 +403,7 @@ pub fn cave_rock(v: Voxel, tier: u8) -> Voxel {
 fn classify(m: &mut Materials) {
     use voxel::plant as pk;
     // Moss and lichen are left out: they keep their colour all year.
-    let kinds: [(&[Voxel], u8); 10] = [
+    let kinds: [(&[Voxel], u8); 12] = [
         (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
         // Virginia creeper turns and drops like a broadleaf tree.
         (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED, CREEPER_GREEN, CREEPER_GREEN_DARK, CREEPER_SCARLET], pk::DECIDUOUS),
@@ -397,6 +419,13 @@ fn classify(m: &mut Materials) {
             ],
             pk::EVERGREEN,
         ),
+        // Bracken fronds turn rust and die back with the broadleaves; the dead fronds of
+        // other years lie under them, rust all year, and keep showing through the winter.
+        (&[BRACKEN], pk::DECIDUOUS),
+        (
+            &[BRACKEN_DEAD],
+            pk::EVERGREEN,
+        ),
         (&[LEAVES_MAPLE, LEAVES_MAPLE_RED], pk::AUTUMN),
         (
             &[
@@ -405,7 +434,7 @@ fn classify(m: &mut Materials) {
             pk::GRASS,
         ),
         (
-            &[GRASS, GRASS_LUSH, GRASS_MEADOW, GRASS_DRY, GRASS_SAVANNA, GRASS_WOODLAND, GRASS_JUNGLE, GRASS_TAIGA, GRASS_TUNDRA],
+            &[GRASS, GRASS_LUSH, GRASS_MEADOW, GRASS_DRY, GRASS_SAVANNA, GRASS_WOODLAND, GRASS_JUNGLE, GRASS_TAIGA, GRASS_TUNDRA, GRASS_MOOR, TURF],
             pk::GROUND,
         ),
         (
