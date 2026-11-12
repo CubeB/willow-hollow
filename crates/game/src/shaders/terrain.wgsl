@@ -202,7 +202,10 @@ fn shade(in: VOut) -> vec4<f32> {
         lit_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), far * 0.65));
     }
     let ndl = max(dot(lit_n, G.sun_dir.xyz), 0.0);
-    let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    // Past the shadow maps, ground and trunks under a canopy are taken to be in its
+    // shade, so a far forest does not light up where the maps end.
+    let beyond = select(0.3, 1.0, (in.flags & FLAG_SKY) != 0u);
+    let direct = G.sun_color.rgb * ndl * sun_reaching(in.rel, n, beyond) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
     var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.

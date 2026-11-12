@@ -18,7 +18,7 @@ struct VIn {
     // a: how far standing water rises above the ground, 128/255 at the shore.
     @location(4) far: vec4<f32>,
     // x: the biome, for the snow lying there. y: the plant kind of its forest's canopy
-    // (voxel::plant), 0 with none.
+    // (voxel::plant), 0 with none. zw: its skylines toward sunrise and sunset.
     @location(5) place: vec4<u32>,
 };
 
@@ -35,6 +35,8 @@ struct VOut {
     @location(6) snow: vec4<f32>,
     // The plant kind of the canopy (voxel::plant), 0 with none.
     @location(7) @interpolate(flat) plant: u32,
+    // The skylines toward sunrise and sunset (see skyline_light).
+    @location(8) skylines: vec2<f32>,
 };
 
 @vertex
@@ -81,6 +83,7 @@ fn vs(in: VIn) -> VOut {
     out.kind = in.color.a;
     out.snow = biome_snow(in.place.x);
     out.plant = in.place.y;
+    out.skylines = vec2<f32>(in.place.zw) / 255.0;
     return out;
 }
 
@@ -116,7 +119,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // reads as a blend of the two, the sides counting for more the steeper it is.
         let steep = length(in.grad);
         let side_n = normalize(vec3<f32>(-in.grad.x, 0.0, -in.grad.y) + vec3<f32>(1e-5, 0.0, 0.0));
-        let vis = sun_visibility(in.rel, up);
+        // The shadow maps end long before here: hills shade it by their skylines.
+        let vis = skyline_light(in.skylines) * cloud_light(in.rel);
         let top = G.sun_color.rgb * max(G.sun_dir.y, 0.0) * vis + ambient(up);
         let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
         // The season: a far forest turns and goes bare, grass dries, snow settles.

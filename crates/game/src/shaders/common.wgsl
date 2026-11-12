@@ -231,12 +231,36 @@ fn ambient(n: vec3<f32>) -> vec3<f32> {
     return sky + bounce;
 }
 
-// Fraction of direct sunlight reaching a point: cascaded shadow maps with a small
-// filter, then cloud shadow.
+// How much sun the clouds let through to a point.
+fn cloud_light(rel: vec3<f32>) -> f32 {
+    // Where the sun's ray through this point crosses the cloud layer.
+    let to_cloud = (G.cascades.w - rel.y) / max(G.sun_dir.y, 0.05);
+    let at_cloud = rel.xz + G.sun_dir.xz * to_cloud + G.cam_wrapped.xz;
+    return 1.0 - cloud_shadow(at_cloud) * 0.75;
+}
+
+// How much sun reaches ground beyond the shadow maps, whose skylines toward sunrise and
+// sunset are known (farview::Skylines, each byte as 0..1): dark once the sun is below
+// the hills on its side, with an edge that is softer the higher the hills.
+fn skyline_light(skylines: vec2<f32>) -> f32 {
+    let packed = select(skylines.y, skylines.x, G.sun_dir.x > 0.0);
+    let skyline = packed * packed * 1.5;
+    let sun = G.sun_dir.y / max(length(G.sun_dir.xz), 1e-3);
+    let soft = 0.025 + skyline * 0.12;
+    return smoothstep(skyline - soft, skyline + soft, sun);
+}
+
 fn sun_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
+    return sun_reaching(rel, n, 1.0);
+}
+
+// Fraction of direct sunlight reaching a point: cascaded shadow maps with a small
+// filter, then cloud shadow. `beyond` is what to take it as past the last shadow map.
+fn sun_reaching(rel: vec3<f32>, n: vec3<f32>, beyond: f32) -> f32 {
     let depth = dot(rel, G.cam_fwd.xyz);
-    var vis = 1.0;
+    var vis = beyond;
     if (depth < G.cascades.z) {
+        vis = 1.0;
         var c = 0;
         if (depth >= G.cascades.y) {
             c = 2;
@@ -264,14 +288,10 @@ fn sun_visibility(rel: vec3<f32>, n: vec3<f32>) -> f32 {
             }
             vis = sum / f32(taps * taps);
             // The last cascade fades out rather than ending in a line.
-            vis = mix(vis, 1.0, smoothstep(G.cascades.z * 0.85, G.cascades.z, depth));
+            vis = mix(vis, beyond, smoothstep(G.cascades.z * 0.7, G.cascades.z, depth));
         }
     }
-    // Where the sun's ray through this point crosses the cloud layer.
-    let to_cloud = (G.cascades.w - rel.y) / max(G.sun_dir.y, 0.05);
-    let at_cloud = rel.xz + G.sun_dir.xz * to_cloud + G.cam_wrapped.xz;
-    vis *= 1.0 - cloud_shadow(at_cloud) * 0.75;
-    return vis;
+    return vis * cloud_light(rel);
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {

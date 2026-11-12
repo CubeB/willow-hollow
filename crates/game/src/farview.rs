@@ -58,7 +58,8 @@ pub struct FarVertex {
     /// shore, by `127 / WET_RANGE` a voxel (see [`wetness`]).
     pub far: [u8; 4],
     /// The biome (as u8), for the snow lying there (see `season::Places`); then the plant
-    /// kind (voxel::plant) of its forest's canopy, 0 with none; two spare.
+    /// kind (voxel::plant) of its forest's canopy, 0 with none; then its [`Skylines`]
+    /// toward sunrise and sunset.
     pub place: [u8; 4],
 }
 
@@ -74,6 +75,91 @@ impl FarVertex {
             // The sea takes the snow and ice of where the camera is (`Biome::Ocean`).
             place: [Biome::Ocean as u8, 0, 0, 0],
         }
+    }
+}
+
+/// How high the land stands against the sky from each grid cell of a continent, looking
+/// toward where the sun rises and where it sets. With these the far view knows when a
+/// hill has the low sun behind it, at any hour, without a shadow map.
+pub struct Skylines {
+    size: usize,
+    cell: f32,
+    /// Per grid cell: the skyline toward sunrise, then toward sunset, each the tangent
+    /// of its angle above level as [`Skylines::pack`] stores it.
+    pub angles: Vec<[u8; 2]>,
+}
+
+/// The sun's bearing when it is low, morning and evening (x, z): it rises and sets a
+/// little to one side of the x axis (see `Environment::at`).
+const SUN_BEARINGS: [(f32, f32); 2] = [(0.905, 0.426), (-0.905, 0.426)];
+/// The steepest skyline kept, as a tangent. A sun higher than this clears every hill.
+const SKYLINE_MAX: f32 = 1.5;
+/// How far a hill is looked for, in grid cells, nearest first: closely nearby, where a
+/// cell matters, and more loosely out to a few kilometres.
+const SKYLINE_REACH: [f32; 22] = [
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 24.0, 28.0, 32.0, 40.0, 48.0, 56.0, 64.0, 80.0, 96.0,
+    120.0,
+];
+
+impl Skylines {
+    fn pack(tangent: f32) -> u8 {
+        // More steps for the low angles, where the sun spends dawn and dusk.
+        ((tangent.clamp(0.0, SKYLINE_MAX) / SKYLINE_MAX).sqrt() * 255.0).round() as u8
+    }
+
+    fn of(c: &Continent) -> Self {
+        use rayon::prelude::*;
+        let size = c.size;
+        let cell = c.cell_size();
+        // Ground or sea, in voxels.
+        let ground: Vec<f32> = c.height.iter().map(|h| (h * OLD_VOXEL).max(0.0)).collect();
+        let at = |x: f32, z: f32| {
+            let (x, z) = (x.clamp(0.0, size as f32 - 1.001), z.clamp(0.0, size as f32 - 1.001));
+            let (i, j) = (x as usize, z as usize);
+            let (fx, fz) = (x - i as f32, z - j as f32);
+            let row = |j: usize| ground[j * size + i] * (1.0 - fx) + ground[j * size + i + 1] * fx;
+            row(j) * (1.0 - fz) + row(j + 1) * fz
+        };
+        let angles = (0..size * size)
+            .into_par_iter()
+            .map(|idx| {
+                let (x, z) = ((idx % size) as f32, (idx / size) as f32);
+                let here = ground[idx];
+                SUN_BEARINGS.map(|(dx, dz)| {
+                    let mut steepest = 0.0f32;
+                    for reach in SKYLINE_REACH {
+                        let rise = at(x + dx * reach, z + dz * reach) - here;
+                        steepest = steepest.max(rise / (reach * cell));
+                    }
+                    Self::pack(steepest)
+                })
+            })
+            .collect();
+        Self { size, cell, angles }
+    }
+
+    /// The skylines of a continent, worked out once and kept while it is in view.
+    pub fn get(c: &Continent) -> Arc<Skylines> {
+        static KEPT: std::sync::Mutex<Vec<((u32, i32, i32), Arc<Skylines>)>> = std::sync::Mutex::new(Vec::new());
+        let key = (c.desc.world_seed, c.desc.mx, c.desc.mz);
+        let mut kept = KEPT.lock().unwrap();
+        if let Some((_, s)) = kept.iter().find(|(k, _)| *k == key) {
+            return s.clone();
+        }
+        // The continent in view and its neighbours, and no more.
+        if kept.len() >= 12 {
+            kept.remove(0);
+        }
+        let made = Arc::new(Self::of(c));
+        kept.push((key, made.clone()));
+        made
+    }
+
+    /// The skylines at a place on the continent (voxels from its origin corner).
+    pub fn at(&self, lx: f32, lz: f32) -> [u8; 2] {
+        let i = ((lx / self.cell) as usize).min(self.size - 1);
+        let j = ((lz / self.cell) as usize).min(self.size - 1);
+        self.angles[j * self.size + i]
     }
 }
 
@@ -526,6 +612,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
     let tiles_per_side = size / TILE;
     let n = TILE / stride;
     let mut tiles = Vec::new();
+    let skylines = Skylines::get(c);
 
     for tz in 0..tiles_per_side {
         for tx in 0..tiles_per_side {
@@ -603,7 +690,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         flags,
                         grad: [pack(gx), pack(gz)],
                         far: [far[0], far[1], far[2], wet],
-                        place: [c.biome[idx], land.plant, 0, 0],
+                        place: [c.biome[idx], land.plant, skylines.angles[idx][0], skylines.angles[idx][1]],
                     });
                 }
             }
