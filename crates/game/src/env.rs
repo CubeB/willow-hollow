@@ -10,12 +10,25 @@ pub struct Environment {
     pub sun_dir: Vec3,
     pub sun_color: Vec3,
     pub sky_zenith: Vec3,
+    /// The horizon away from the sun, and toward it: at dusk the warm colour gathers
+    /// around where the sun went down.
     pub sky_horizon: Vec3,
+    pub sky_glow: Vec3,
+    /// How far into dusk or dawn the sky is, 0..1.
+    pub glow: f32,
+    /// Unit vector toward the sun itself, even at night when the light is the moon.
+    pub sun_pos: Vec3,
+    /// Clear air, per voxel: it takes the blue out of the distance first.
     pub fog_density: f32,
+    /// Haze, per voxel at sea level, and the height over which it thins to about a third.
+    pub haze: f32,
+    pub haze_height: f32,
     /// True by day; at night the light is the moon.
     pub daylight: bool,
     /// Ground mist strength (dawn and dusk), and the cloud cover 0..1.
     pub mist: f32,
+    /// The height of the low ground the mist lies on, in voxels above sea level.
+    pub mist_floor: f32,
     pub clouds: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
@@ -23,12 +36,26 @@ pub struct Environment {
     pub date: f32,
 }
 
+/// Haze at sea level in temperate air, per metre.
+const HAZE: f32 = 0.00030;
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
 impl Environment {
+    /// The air of a place: `humidity` is its biome's (season::humidity, 1 for temperate
+    /// woodland), and ground still `wet` from rain that has stopped has washed the haze out.
+    pub fn air(&mut self, humidity: f32, wet: f32) {
+        self.haze *= humidity * (1.0 - 0.45 * wet.clamp(0.0, 1.0));
+    }
+
+    /// How hazy the air is beside a temperate clear day, 0..1 (for the sun's glow in it).
+    pub fn haziness(&self) -> f32 {
+        (self.haze * VOXELS_PER_METRE / HAZE).clamp(0.0, 1.5) / 1.5
+    }
+
     /// The environment at an hour of the day and a time of year (0..1).
     pub fn at(hours: f32, date: f32) -> Self {
         let time = hours.rem_euclid(24.0);
@@ -42,17 +69,21 @@ impl Environment {
         let day = smoothstep(-0.02, 0.35, elev);
         let night = smoothstep(0.05, -0.22, elev);
         let dusk = (1.0 - day - night).max(0.0);
+        let dusk_sky = dusk;
 
         let zenith = Vec3::new(0.14, 0.30, 0.68) * day
             + Vec3::new(0.10, 0.14, 0.36) * dusk
             + Vec3::new(0.010, 0.016, 0.040) * night;
         let horizon = Vec3::new(0.52, 0.68, 0.88) * day
+            + Vec3::new(0.40, 0.36, 0.52) * dusk
+            + Vec3::new(0.024, 0.032, 0.062) * night;
+        let glow = Vec3::new(0.60, 0.72, 0.88) * day
             + Vec3::new(0.95, 0.46, 0.22) * dusk
             + Vec3::new(0.024, 0.032, 0.062) * night;
 
         let daylight = elev > -0.06;
         let (sun_dir, sun_color) = if daylight {
-            let warm = smoothstep(0.45, 0.0, elev);
+            let warm = smoothstep(0.6, 0.03, elev);
             let col = Vec3::new(1.0, 0.95, 0.86).lerp(Vec3::new(1.0, 0.50, 0.22), warm);
             (sun, col * 1.35 * smoothstep(-0.06, 0.12, elev))
         } else {
@@ -76,9 +107,15 @@ impl Environment {
             sun_color: sun_color * exposure * (1.0 + 0.25 * (-decl).max(0.0)),
             sky_zenith: zenith * exposure,
             sky_horizon: horizon * exposure,
-            fog_density: 0.0001625 / VOXELS_PER_METRE,
+            sky_glow: glow * exposure,
+            glow: dusk_sky,
+            sun_pos: sun,
+            fog_density: 0.00007 / VOXELS_PER_METRE,
+            haze: HAZE / VOXELS_PER_METRE,
+            haze_height: 160.0 * VOXELS_PER_METRE,
             daylight,
             mist,
+            mist_floor: 0.0,
             clouds: 0.45,
             sun_elevation: elev,
             date,

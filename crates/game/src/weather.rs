@@ -306,12 +306,17 @@ impl Weather {
         let s = self.now;
         let o = s.overcast.clamp(0.0, 1.0);
         env.sun_color *= 1.0 - 0.8 * o;
+        // What does come through thick cloud has lost the low sun's colour.
+        env.sun_color = env.sun_color.lerp(Vec3::splat(env.sun_color.dot(Vec3::new(0.3, 0.59, 0.11))), o * 0.8);
         let grey = |c: Vec3, k: f32| c.lerp(Vec3::splat(c.dot(Vec3::new(0.3, 0.59, 0.11)) * k), o * 0.8);
         env.sky_zenith = grey(env.sky_zenith, 0.85);
         env.sky_horizon = grey(env.sky_horizon, 0.95);
+        env.sky_glow = grey(env.sky_glow, 0.95);
+        env.glow *= 1.0 - 0.8 * o;
         env.clouds = 0.45 + 0.55 * o;
         let precip = (s.rain + s.snow).min(1.0);
-        env.fog_density *= 1.0 + 6.0 * precip + 45.0 * s.fog;
+        // Rain and fog are grey and lie low: they thicken the haze, not the clear air.
+        env.haze *= 1.0 + 4.0 * precip + 26.0 * s.fog;
         env.mist += s.fog * 0.003 / VOXELS_PER_METRE;
     }
 }
@@ -428,7 +433,7 @@ mod tests {
         let (mut clear, mut dull) = (Environment::at(12.0, 0.32), Environment::at(12.0, 0.32));
         w.apply(&mut dull);
         assert!(dull.sun_color.length() < clear.sun_color.length() * 0.5);
-        assert!(dull.clouds > clear.clouds && dull.fog_density > clear.fog_density);
+        assert!(dull.clouds > clear.clouds && dull.haze > clear.haze);
         Weather::new(None).apply(&mut clear);
         assert_eq!(Forced::named("storm"), Some(Forced::Storm));
     }

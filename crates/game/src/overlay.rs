@@ -85,6 +85,10 @@ pub fn settings_menu(ctx: &egui::Context, s: &mut Settings, held: Option<i32>, w
                     ui.checkbox(&mut s.vsync, "VSync");
                 });
                 ui.end_row();
+
+                ui.label("");
+                ui.checkbox(&mut s.shafts, "Light shafts");
+                ui.end_row();
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {

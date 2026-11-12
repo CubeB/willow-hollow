@@ -53,7 +53,8 @@ pub struct BoxInstance {
     /// tree's, plus [`BARE`] for the bare crown shown once they have.
     pub plant: u8,
     /// The tree's tag (features::tree_tag) in the first byte, so it turns and drops on
-    /// the near tree's date; the rest is padding.
+    /// the near tree's date; then the skylines where it stands (farview::Skylines), so a
+    /// hill's shadow falls on it; the last is padding.
     pub tree: [u8; 4],
 }
 
@@ -282,6 +283,7 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
     let margin = features::MAX_REACH + 1;
     let sampler = Sampler::new(&continent, world.seed(), lx0 - margin, lz0 - margin, TILE + 2 * margin);
     let lib = world.library();
+    let skylines = farview::Skylines::get(&continent);
     let mut boxes = Vec::new();
     for p in features::place(world.seed(), lib, &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE)) {
         // Each tree belongs to the square its trunk is in.
@@ -292,6 +294,7 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
         if inside && lod::stands_tall(p.species) && !farview::shows_water(&continent, lx, lz) {
             let biome = farview::biome_in(&continent, lx, lz);
             let tree = features::tree_tag(p.pos);
+            let [rise, set] = skylines.at(lx, lz);
             for (lo, size, color, plant) in models.get(world, p.species, p.variant, p.turns).iter() {
                 let at = p.pos + *lo;
                 boxes.push(BoxInstance {
@@ -300,7 +303,7 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
                     biome,
                     color: *color,
                     plant: *plant,
-                    tree: [tree, 0, 0, 0],
+                    tree: [tree, rise, set, 0],
                 });
             }
         }

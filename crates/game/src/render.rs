@@ -23,7 +23,12 @@ use crate::{
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// Light shafts: how much lit air lies along the view, and the depth it was found for.
+const SHAFTS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 const SHADOW_SIZE: u32 = 2048;
+/// How far the sun moves (as a change in its direction) before the shadow maps follow
+/// it: a 20 m tree's shadow then steps about 4 cm.
+const SHADOW_SUN_STEP: f32 = 0.002;
 const CASCADES: usize = 3;
 /// View-depth at which each shadow cascade ends.
 const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
@@ -64,6 +69,12 @@ struct Globals {
     season: [f32; 4],
     /// x: how wet the ground is. y: how much more snow the hills hold this winter.
     weather: [f32; 4],
+    /// rgb: the horizon toward the sun. w: how far into dusk or dawn the sky is.
+    sky_glow: [f32; 4],
+    /// xyz: toward the sun itself, by night too.
+    sun_pos: [f32; 4],
+    /// x: haze per voxel at sea level. y: the height it thins over. w: haziness, 0..1.
+    air: [f32; 4],
     /// Each biome's ground, by biome id: x snow at sea level, y ice on water, z how much
     /// more snow the hills hold, w the summit snowline in metres (see ground.wgsl).
     snow: [[f32; 4]; SNOW_SLOTS],
@@ -177,6 +188,8 @@ pub struct Scene<'a> {
     pub ground: crate::season::Places,
     /// Lit lantern voxels near the camera (world voxels), which light the ground around them.
     pub lamps: &'a [DVec3],
+    /// Whether to draw light shafts (settings::Settings::shafts).
+    pub shafts: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -279,6 +292,13 @@ pub struct Renderer {
     depth: Target,
     bloom_a: Target,
     bloom_b: Target,
+    /// The light caught by the air along each view ray, at a quarter of the size (see
+    /// shafts.wgsl), and what the pass that lays it over the scene reads.
+    shafts: Target,
+    shafts_layout: wgpu::BindGroupLayout,
+    shafts_bind: wgpu::BindGroup,
+    march: wgpu::RenderPipeline,
+    lay: wgpu::RenderPipeline,
     image_layout: wgpu::BindGroupLayout,
     depth_layout: wgpu::BindGroupLayout,
     depth_bind: wgpu::BindGroup,
@@ -312,6 +332,10 @@ pub struct Renderer {
     indirect_capacity: usize,
     multi_draw: bool,
     cascade_views: [Option<CascadeView>; CASCADES],
+    /// Where the shadow maps take the sun to be. It follows the real sun in small steps:
+    /// the maps' texels are fixed in the world only while it holds still, and a sun
+    /// that crept every frame would set every shadow's edge crawling.
+    shadow_sun: Vec3,
     frame: u64,
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
@@ -544,6 +568,20 @@ impl Renderer {
             ],
         });
         let depth_bind = Self::depth_bind_group(device, &depth_layout, &depth.view);
+        let shafts = make_target(device, "shafts", width / 4, height / 4, SHAFTS_FORMAT);
+        let shafts_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shafts"),
+            entries: &[
+                texture_entry(0, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
+                texture_entry(1, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
+            ],
+        });
+        let shafts_bind = Self::shafts_bind_group(device, &shafts_layout, &depth.view, &shafts.view);
+        let lay_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shafts"),
+            bind_group_layouts: &[Some(&scene_layout_bg), Some(&shafts_layout)],
+            immediate_size: 0,
+        });
 
         // --- Pipelines -----------------------------------------------------------
         let depth_state = |write: bool, compare: wgpu::CompareFunction| {
@@ -945,6 +983,52 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Light shafts: marched at a quarter of the size, then added to the scene.
+        let shafts_module = shader(device, "shafts", format!("{common}\n{}", include_str!("shaders/shafts.wgsl")));
+        let shafts_pass = |label: &str, entry: &str, layout: &wgpu::PipelineLayout, format, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &shafts_module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: fullscreen_triangle(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shafts_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let march = shafts_pass("shafts march", "fs_march", &water_layout, SHAFTS_FORMAT, None);
+        let adding = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let lay = shafts_pass(
+            "shafts",
+            "fs_lay",
+            &lay_layout,
+            HDR_FORMAT,
+            Some(wgpu::BlendState {
+                color: adding,
+                alpha: adding,
+            }),
+        );
+
         // Post-processing: one layout, several entry points.
         let post_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post"),
@@ -1021,6 +1105,11 @@ impl Renderer {
             depth,
             bloom_a,
             bloom_b,
+            shafts,
+            shafts_layout,
+            shafts_bind,
+            march,
+            lay,
             image_layout,
             depth_layout,
             depth_bind,
@@ -1054,6 +1143,7 @@ impl Renderer {
             indirect_capacity: 4096,
             multi_draw: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             cascade_views: [None; CASCADES],
+            shadow_sun: Vec3::ZERO,
             frame: 0,
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
@@ -1069,6 +1159,23 @@ impl Renderer {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(view),
             }],
+        })
+    }
+
+    fn shafts_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, depth: &wgpu::TextureView, marched: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shafts"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(marched),
+                },
+            ],
         })
     }
 
@@ -1106,6 +1213,8 @@ impl Renderer {
         self.depth_bind = Self::depth_bind_group(device, &self.depth_layout, &self.depth.view);
         self.bloom_a = make_target(device, "bloom a", width / 4, height / 4, HDR_FORMAT);
         self.bloom_b = make_target(device, "bloom b", width / 4, height / 4, HDR_FORMAT);
+        self.shafts = make_target(device, "shafts", width / 4, height / 4, SHAFTS_FORMAT);
+        self.shafts_bind = Self::shafts_bind_group(device, &self.shafts_layout, &self.depth.view, &self.shafts.view);
     }
 
     /// Light view-projection for one cascade, in camera-relative space, and its texel
@@ -1131,12 +1240,18 @@ impl Renderer {
         let texel = 2.0 * radius / SHADOW_SIZE as f32;
 
         // Light view looking along the sun direction; snap the centre to texels so
-        // the map does not shimmer as the camera moves.
+        // the map does not shimmer as the camera moves. The texels are fixed in the
+        // world, not to the camera: everything here is relative to the camera, so the
+        // snapping has to allow for where the camera is.
         let light_up = if sun.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
         let s = sun.cross(light_up).normalize();
         let u = s.cross(sun);
-        let snapped = s * ((center.dot(s) / texel).floor() * texel) + u * ((center.dot(u) / texel).floor() * texel)
-            + sun * center.dot(sun);
+        let snap = |axis: Vec3| {
+            let camera_at = camera.pos.dot(axis.as_dvec3());
+            let at = camera_at + center.dot(axis) as f64;
+            ((at / texel as f64).floor() * texel as f64 - camera_at) as f32
+        };
+        let snapped = s * snap(s) + u * snap(u) + sun * center.dot(sun);
         // Casters well outside the slice (tall trees, hills toward the sun) still count.
         let reach = radius + m(320.0);
         let eye = snapped + sun * reach;
@@ -1180,6 +1295,14 @@ impl Renderer {
         let up = right.cross(fwd);
         let time = self.start.elapsed().as_secs_f32();
         let v4 = |v: Vec3, w: f32| [v.x, v.y, v.z, w];
+        // Light shafts want the sun up and something in the air to catch it: they fade
+        // out, and their passes are left out, as the sun sets and in thin dry air.
+        let shafts = if scene.shafts && env.daylight {
+            let air = ((env.haziness() - 0.1) / 0.2).max(env.mist * VOXELS_PER_METRE / 0.0004).clamp(0.0, 1.0);
+            air * (env.sun_elevation / 0.06).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         // Shadow cascades.
         let mut light_vp = [[[0.0; 4]; 4]; CASCADES];
@@ -1189,8 +1312,11 @@ impl Renderer {
         let mut near = 0.1;
         let frame = self.frame;
         self.frame += 1;
+        if self.shadow_sun.distance(env.sun_dir) > SHADOW_SUN_STEP {
+            self.shadow_sun = env.sun_dir;
+        }
         for (i, &far_end) in CASCADE_ENDS.iter().enumerate() {
-            let (m, texel) = Self::cascade_matrix(camera, aspect, env.sun_dir, near, far_end);
+            let (m, texel) = Self::cascade_matrix(camera, aspect, self.shadow_sun, near, far_end);
             light.push(Frustum::new(m));
             near = far_end;
             fresh[i] = self.cascade_views[i].is_none_or(|v| {
@@ -1232,7 +1358,8 @@ impl Renderer {
             fog: [env.fog_density, voxel_radius, env.clouds, time * m(4.8)],
             // w: how far the tree models reach, for the far view's forest height.
             cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, impostors::REACH],
-            mist: [env.mist, m(28.0), m(-12.0), 0.0],
+            // The mist is thickest up to a little over the low ground, and thins above.
+            mist: [env.mist, m(22.0), env.mist_floor + m(5.0) - camera.pos.y as f32, 0.0],
             cascades: [
                 CASCADE_ENDS[0],
                 CASCADE_ENDS[1],
@@ -1244,6 +1371,9 @@ impl Renderer {
             lamps: nearest_lamps(scene.lamps, camera.pos),
             season: [env.date, scene.ground.here.snow, scene.ground.here.frozen, scene.ground.here.snowline],
             weather: [scene.ground.here.wet, scene.ground.here.highland, 0.0, 0.0],
+            sky_glow: v4(env.sky_glow, env.glow),
+            sun_pos: v4(env.sun_pos, 0.0),
+            air: [env.haze, env.haze_height, shafts, env.haziness()],
             snow: std::array::from_fn(|k| {
                 let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
                 [g.snow, g.frozen, g.highland, g.snowline]
@@ -1624,6 +1754,39 @@ impl Renderer {
             t.mark(encoder, 7);
         }
 
+        // --- Light shafts ----------------------------------------------------------
+        if shafts > 0.0 {
+            let passes = [
+                ("shafts march", &self.march, &self.depth_bind, &self.shafts.view, wgpu::LoadOp::Clear(wgpu::Color::BLACK)),
+                ("shafts", &self.lay, &self.shafts_bind, &self.hdr.view, wgpu::LoadOp::Load),
+            ];
+            for (label, pipeline, bind, view, load) in passes {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.scene_bind, &[]);
+                pass.set_bind_group(1, bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        if let Some(t) = &self.timer {
+            t.mark(encoder, 8);
+        }
+
         // --- Bloom and tonemap ---------------------------------------------------
         // The third slot of each bind group must not be the pass's own target, so an
         // unused texture is bound there.
@@ -1634,7 +1797,7 @@ impl Renderer {
         let b_bind = self.image_bind_group(device, &self.bloom_b.view, &self.hdr.view);
         fullscreen(encoder, "blur v", &self.blur_v, &b_bind, &self.bloom_a.view);
         if let Some(t) = &self.timer {
-            t.mark(encoder, 8);
+            t.mark(encoder, 9);
         }
     }
 
@@ -1643,7 +1806,7 @@ impl Renderer {
         let final_bind = self.image_bind_group(&gpu.device, &self.hdr.view, &self.bloom_a.view);
         fullscreen(encoder, "tonemap", &self.tonemap, &final_bind, target);
         if let Some(t) = &mut self.timer {
-            t.mark(encoder, 9);
+            t.mark(encoder, 10);
             t.resolve(encoder);
         }
     }
@@ -1764,6 +1927,7 @@ pub fn screenshot(
         wind,
         ground,
         lamps,
+        shafts: true,
     };
     renderer.render(gpu, &mut encoder, &view, &scene);
     encoder.copy_texture_to_buffer(
@@ -1818,7 +1982,7 @@ pub fn screenshot(
         for _ in 0..n {
             let t = std::time::Instant::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground };
+            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts: true };
             renderer.render(gpu, &mut encoder, &view, &scene);
             gpu.queue.submit([encoder.finish()]);
             gpu.device.poll(wgpu::PollType::wait_indefinitely())?;

@@ -85,6 +85,19 @@ const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 // thing drawn (a skin an eighth of a voxel thick), and well clear of rounding.
 const INWARD: f32 = 0.0625;
 
+// How far the wind has moved a leaf from where it grows. The offset is a smooth
+// function of world position, so neighbouring leaf voxels move together and no gaps
+// open between them.
+fn leaf_sway(origin: vec3<i32>, local: vec3<f32>, scale: f32) -> vec3<f32> {
+    let world = (vec3<f32>(origin) + local * scale) / VOXELS_PER_METRE;
+    let t = G.sun_dir.w;
+    let wave = sin(world.x * 0.4375 + world.z * 0.3375 + world.y * 0.25 + t * 1.7)
+        + 0.5 * sin(world.x * 1.125 - world.z * 0.75 + t * 2.9);
+    let strength = length(G.wind.xz) / VOXELS_PER_METRE * 0.0375;
+    return vec3<f32>(G.wind.x, 0.0, G.wind.z) * (0.02 + wave * strength)
+        + vec3<f32>(0.0, wave * strength * 0.4 * VOXELS_PER_METRE, 0.0);
+}
+
 @vertex
 fn vs(in: VIn) -> VOut {
     var out: VOut;
@@ -102,15 +115,7 @@ fn vs(in: VIn) -> VOut {
     out.scale = in.scale;
     var rel = local * in.scale + in.offset;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
-        // Leaves stir in the wind. The offset is a smooth function of world position,
-        // so neighbouring leaf voxels move together and no gaps open between them.
-        let world = (vec3<f32>(in.origin) + local * in.scale) / VOXELS_PER_METRE;
-        let t = G.sun_dir.w;
-        let wave = sin(world.x * 0.4375 + world.z * 0.3375 + world.y * 0.25 + t * 1.7)
-            + 0.5 * sin(world.x * 1.125 - world.z * 0.75 + t * 2.9);
-        let strength = length(G.wind.xz) / VOXELS_PER_METRE * 0.0375;
-        rel += vec3<f32>(G.wind.x, 0.0, G.wind.z) * (0.02 + wave * strength)
-            + vec3<f32>(0.0, wave * strength * 0.4 * VOXELS_PER_METRE, 0.0);
+        rel += leaf_sway(in.origin, local, in.scale);
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
@@ -201,9 +206,35 @@ fn shade(in: VOut) -> vec4<f32> {
     if (far > 0.0 && abs(n.y) < 0.5) {
         lit_n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), far * 0.65));
     }
-    let ndl = max(dot(lit_n, G.sun_dir.xyz), 0.0);
-    let direct = G.sun_color.rgb * ndl * sun_visibility(in.rel, n) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    let facing = dot(lit_n, G.sun_dir.xyz);
+    let foliage = (in.flags & FLAG_FOLIAGE) != 0u;
+    // Leaves are not flat boards: light wraps a little way round a clump of them.
+    let ndl = select(max(facing, 0.0), max((facing + 0.25) / 1.25, 0.0), foliage);
+    // Past the shadow maps, ground and trunks under a canopy are taken to be in its
+    // shade, so a far forest does not light up where the maps end.
+    let open = (in.flags & FLAG_SKY) != 0u;
+    let beyond = select(0.3, 1.0, open);
+    var direct = vec3<f32>(0.0);
+    // The shadow maps are drawn with every leaf where it grows, not where the wind has
+    // it: a leaf looked up where it sways to would slide in and out of its own shadow.
+    var still = in.rel;
+    if (foliage) {
+        still -= leaf_sway(in.origin, in.local, in.scale);
+    }
+    if (ndl > 0.0) {
+        direct = G.sun_color.rgb * ndl * sun_reaching(still, n, beyond) * mix(mix(0.7, 1.0, in.ao), 1.0, far);
+    } else if (foliage && G.sun_color.w > 0.5) {
+        // A leaf with the sun behind it glows with the light that comes through, if
+        // the sun reaches the other side: thin crowns and the edges of thick ones.
+        let through = max(sun_reaching(still + G.sun_dir.xyz * (1.1 * in.scale), G.sun_dir.xyz, beyond), select(0.0, 0.3, open));
+        direct = G.sun_color.rgb * vec3<f32>(0.85, 1.0, 0.45) * (0.45 * through * min(-facing * 2.0 + 0.35, 1.0));
+    }
     var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
+    if (!open) {
+        // Under a canopy the shade is not grey: it is lit by sun that has been through
+        // and bounced among the leaves overhead.
+        light += G.sun_color.rgb * vec3<f32>(0.045, 0.075, 0.028) * (max(G.sun_dir.y, 0.0) * ao * G.sun_color.w);
+    }
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
         light += vec3<f32>(mix(14.0, 1.2, G.sun_color.w));

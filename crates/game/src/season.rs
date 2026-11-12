@@ -90,6 +90,21 @@ pub fn warmth(biome: Biome) -> f32 {
     }
 }
 
+/// How hazy a biome's air is beside temperate woodland's: wet forest and marsh hold
+/// haze, dry and high country stands clear.
+pub fn humidity(biome: Biome) -> f32 {
+    match biome {
+        Biome::Rainforest | Biome::Mangrove | Biome::Marsh | Biome::Bog => 1.9,
+        Biome::Woodland => 1.4,
+        Biome::Ocean => 1.1,
+        Biome::Deciduous | Biome::OldGrowth | Biome::BirchGrove | Biome::Volcanic => 1.0,
+        Biome::Grassland | Biome::Heath => 0.85,
+        Biome::Taiga | Biome::SnowyPine => 0.7,
+        Biome::Tundra | Biome::Steppe | Biome::Savanna => 0.6,
+        Biome::Desert | Biome::DuneSea | Biome::RedRock | Biome::Alpine | Biome::AlpineMeadow => 0.4,
+    }
+}
+
 /// What the ground carries, for the shaders: snow cover and ice on still water, with how
 /// wet it is (the rain's doing, see weather.rs).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]

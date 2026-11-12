@@ -38,6 +38,8 @@ pub struct Settings {
     pub volume: f32,
     pub vsync: bool,
     pub fullscreen: bool,
+    /// Sunlight showing in haze and mist as shafts between what shades it.
+    pub shafts: bool,
     /// Window size in pixels, once it is anything but the default.
     pub window: Option<(u32, u32)>,
     pub show_debug: bool,
@@ -55,6 +57,7 @@ impl Default for Settings {
             volume: 0.75,
             vsync: true,
             fullscreen: false,
+            shafts: true,
             window: None,
             show_debug: true,
         }
@@ -73,6 +76,7 @@ impl Settings {
         let _ = writeln!(t, "volume = {}", self.volume);
         let _ = writeln!(t, "vsync = {}", self.vsync);
         let _ = writeln!(t, "fullscreen = {}", self.fullscreen);
+        let _ = writeln!(t, "shafts = {}", self.shafts);
         if let Some((w, h)) = self.window {
             let _ = writeln!(t, "window = {w}x{h}");
         }
@@ -95,6 +99,7 @@ impl Settings {
             volume: f.ranged("volume", d.volume, VOLUME),
             vsync: f.get("vsync").unwrap_or(d.vsync),
             fullscreen: f.get("fullscreen").unwrap_or(d.fullscreen),
+            shafts: f.get("shafts").unwrap_or(d.shafts),
             window: f.size("window"),
             show_debug: f.get("show_debug").unwrap_or(d.show_debug),
         }
@@ -315,6 +320,7 @@ mod tests {
             volume: 0.25,
             vsync: false,
             fullscreen: true,
+            shafts: false,
             window: Some((1920, 1080)),
             show_debug: false,
         };
