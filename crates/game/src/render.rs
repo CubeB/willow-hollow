@@ -44,9 +44,6 @@ const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
 const CLOUD_HEIGHT: f32 = m(240.0);
 /// How many of the shadow cascades, nearest first, include small plants.
 const PLANT_SHADOW_CASCADES: usize = 2;
-/// How many of them, nearest first, let flecks of sun through the leaves. The furthest
-/// is too coarse to hold gaps that small.
-const FLECK_CASCADES: usize = 2;
 /// A cached shadow map is redrawn early once the view has turned this far from it
 /// (the cosine of about ten degrees).
 const CASCADE_SWING: f32 = 0.985;
@@ -109,14 +106,7 @@ struct Shadows {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CascadeUniform {
     light_vp: [[f32; 4]; 4],
-    /// x: the date. y: 1 if this cascade lets flecks of sun through the leaves.
     season: [f32; 4],
-    /// For finding where on the ground the sun's ray through a point comes down (see
-    /// shadow.wgsl). xy: how far it carries along x and z for each voxel it falls. z: the
-    /// level of that ground, relative to the camera. w: unused.
-    lean: [f32; 4],
-    /// xy: the camera's wrapped world x and z.
-    camera: [f32; 4],
 }
 
 /// What one cascade's shadow map was last drawn from.
@@ -762,13 +752,7 @@ impl Renderer {
                 },
             }),
             multisample: Default::default(),
-            // Draws nothing, but leaves gaps in the leaves (see shadow.wgsl).
-            fragment: Some(wgpu::FragmentState {
-                module: &shadow_module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[],
-            }),
+            fragment: None,
             multiview_mask: None,
             cache: None,
         });
@@ -1397,9 +1381,6 @@ impl Renderer {
             let (m, texel, span) = Self::cascade_matrix(camera, aspect, self.shadow_sun, near, far_end, ground);
             light.push(Frustum::new(m));
             near = far_end;
-            let sun = self.shadow_sun;
-            let lean = Vec2::new(sun.x, sun.z) / sun.y.max(0.05);
-            let wrapped = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
             fresh[i] = self.cascade_views[i].is_none_or(|v| {
                 cascade_due(i, frame) || v.fwd.dot(fwd) < CASCADE_SWING || v.camera.distance(camera.pos) > far_end as f64 * CASCADE_DRIFT
             });
@@ -1414,12 +1395,7 @@ impl Renderer {
                 gpu.queue.write_buffer(
                     &self.cascade_binds[i].0,
                     0,
-                    bytemuck::bytes_of(&CascadeUniform {
-                        light_vp: m.to_cols_array_2d(),
-                        season: [env.date, (i < FLECK_CASCADES) as u8 as f32, 0.0, 0.0],
-                        lean: [lean.x, lean.y, (ground as f64 - camera.pos.y) as f32, 0.0],
-                        camera: [wrapped.x, wrapped.z, 0.0, 0.0],
-                    }),
+                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d(), season: [env.date, 0.0, 0.0, 0.0] }),
                 );
             }
             // A map drawn earlier is still right: it is fixed in the world, so only the
