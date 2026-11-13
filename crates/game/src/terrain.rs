@@ -51,16 +51,13 @@ pub const LEVELS: usize = 3;
 /// A column at some level of detail: (level, x, z), in columns of that level.
 type Col = (u8, i32, i32);
 
-/// Where each level is loaded, as (inner, outer) in full-size columns from the camera.
-/// Each ring is twice as far out as the one inside it, and reaches four of its own
-/// columns in under it. The finer ring is only ever complete to a little short of its
-/// edge, so the coarser one must be there underneath to take over.
-fn ring(level: u8, radius: i32) -> (f32, f32) {
-    let outer = |level: u8| radius as f32 * step(level);
-    match level {
-        0 => (0.0, outer(0)),
-        _ => ((outer(level - 1) - 4.0 * step(level)).max(0.0), outer(level)),
-    }
+/// How far out each level is loaded, in full-size columns from the camera. Each reaches
+/// twice as far as the one finer than it, and all the way in underneath it: whenever the
+/// finer one is not there yet (at first, or flying faster than it can be built), the
+/// coarser one is drawn in its place, rather than nothing at all. Being coarse, the part
+/// lying under the finer levels is an eighth of a level's columns.
+fn reach(level: u8, radius: i32) -> f32 {
+    radius as f32 * step(level)
 }
 
 /// How many full-size columns one column of a level spans.
@@ -68,8 +65,37 @@ fn step(level: u8) -> f32 {
     (1 << level) as f32
 }
 
+/// What a column's chunks carry of the land around them, for lighting and snow: see
+/// the fields of the same names on [`GpuChunk`].
+#[derive(Clone, Copy, Default)]
+struct Marks {
+    biomes: [u32; 8],
+    skylines: [[u8; 2]; 4],
+    slopes: [[i8; 2]; 4],
+}
+
+impl Marks {
+    fn of(world: &GameWorld, col: Col) -> Self {
+        // A grid of points in world voxels, whose edges neighbouring columns share.
+        let size = CHUNK << col.0;
+        let (x, z) = (col.1 * size, col.2 * size);
+        let mut biomes = [0u32; 8];
+        for k in 0..25 {
+            let (dx, dz) = ((k % 5) as i32 * size / 4, (k / 5) as i32 * size / 4);
+            biomes[k / 4] |= (crate::farview::biome_at(world, x + dx, z + dz) as u32) << (8 * (k % 4));
+        }
+        let corners = [(0, 0), (size, 0), (0, size), (size, size)];
+        Self {
+            biomes,
+            skylines: corners.map(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz)),
+            slopes: corners.map(|(dx, dz)| crate::farview::slope_at(world, x + dx, z + dz)),
+        }
+    }
+}
+
 struct ColumnResult {
     col: Col,
+    marks: Marks,
     /// None if the job was skipped because the camera had moved away.
     chunks: Option<Vec<(i32, ChunkMesh)>>,
     /// Whether the small plants are in these meshes.
@@ -117,9 +143,8 @@ impl Focus {
     }
 
     fn in_range(&self, col: Col, slack: i32) -> bool {
-        let (inner, outer) = ring(col.0, self.radius.load(Ordering::Relaxed));
-        let (d, slack) = (self.distance(col), slack as f32 * step(col.0));
-        d <= outer + slack && (col.0 == 0 || d >= inner - slack)
+        let outer = reach(col.0, self.radius.load(Ordering::Relaxed));
+        self.distance(col) <= outer + slack as f32 * step(col.0)
     }
 }
 
@@ -142,13 +167,20 @@ pub struct Streamer {
     /// Lantern voxels in each loaded column, to light the ground around them.
     lamps: HashMap<Col, Vec<IVec3>>,
     pending: HashSet<Col>,
-    /// Columns still to request, farthest first (so the nearest is popped first).
+    /// Columns still to request, the most pressing last (so it is popped first).
     wanted: Vec<Col>,
+    /// How far out each level is drawn (see `bands`), following what is loaded.
+    shown: [f32; LEVELS],
+    last_update: Option<Instant>,
     center: Option<(i32, i32)>,
     focus: Arc<Focus>,
     max_in_flight: usize,
     /// The largest load radius the GPU has shown it can hold.
     radius_limit: i32,
+    /// The load radius asked for, which the view goes back out to as room allows.
+    asked: i32,
+    /// When the view was last pulled in or let out for GPU memory.
+    resized: Instant,
     pub stats: Stats,
 }
 
@@ -156,6 +188,15 @@ pub struct Streamer {
 const UNLOAD_SLACK: i32 = 2;
 /// The view is never pulled in closer than this for lack of GPU memory.
 const MIN_RADIUS: i32 = 8;
+/// How long the edge of a level takes to move most of the way out to newly loaded
+/// columns, in seconds: it glides out rather than jumping a column at a time.
+const BAND_EASE: f32 = 0.2;
+/// How much further ahead of the finest level each coarser one is kept while there is
+/// more to build than time to build it, as a multiple per level of the twice that their
+/// sizes give them. The far ground is what a view is made of, and is cheap for its area.
+const COARSE_LEAD: f32 = 1.5;
+/// Seconds between steps back out of a view that was pulled in for lack of GPU memory.
+const REGROW_SECONDS: f32 = 4.0;
 /// How far from the camera small plants are drawn.
 pub const PLANT_REACH: f32 = m(100.0);
 /// Columns within this many columns of the camera carry their small plants: the reach
@@ -164,7 +205,7 @@ const PLANT_COLUMNS: i32 = (PLANT_REACH / CHUNK as f32) as i32 + 3;
 /// Roughly what one column takes on the GPU, for sizing the mesh buffer up front.
 const COLUMN_BYTES: u64 = 130 << 10;
 /// Roughly how much of that the coarse rings add, as a share of the full-size columns.
-const RINGS_SHARE: f64 = 1.2;
+const RINGS_SHARE: f64 = 1.35;
 /// Room reserved beyond that, for rugged or densely wooded land whose meshes run
 /// larger than average. Growing later means a stall while everything is copied.
 const HEADROOM: f64 = 1.5;
@@ -198,6 +239,8 @@ impl Streamer {
             lamps: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
+            shown: [0.0; LEVELS],
+            last_update: None,
             center: None,
             focus: Arc::new(Focus {
                 cx: AtomicI32::new(0),
@@ -206,6 +249,8 @@ impl Streamer {
             }),
             max_in_flight: threads * 3,
             radius_limit: i32::MAX,
+            asked: radius,
+            resized: Instant::now(),
             stats: Stats::default(),
         }
     }
@@ -215,6 +260,7 @@ impl Streamer {
     }
 
     pub fn set_radius(&mut self, radius: i32) {
+        self.asked = radius;
         let radius = radius.min(self.radius_limit);
         if radius != self.radius() {
             self.focus.radius.store(radius, Ordering::Relaxed);
@@ -222,11 +268,16 @@ impl Streamer {
         }
     }
 
-    /// For each level, the horizontal distance from the camera out to which it, and
-    /// every finer level, is fully loaded, in voxels. A level is drawn from the previous
-    /// level's distance to its own. Beyond the last, the far view covers for terrain not
-    /// loaded yet.
+    /// For each level, the horizontal distance from the camera out to which it is drawn,
+    /// in voxels: a level is drawn from the previous level's distance to its own. Beyond
+    /// the last, the far view covers for terrain not loaded yet.
     pub fn bands(&self) -> [f32; LEVELS] {
+        self.shown
+    }
+
+    /// For each level, the horizontal distance from the camera out to which it, or a
+    /// finer level, is fully loaded, in voxels.
+    fn loaded_bands(&self) -> [f32; LEVELS] {
         let mut reached = [0.0; LEVELS];
         if self.center.is_none() {
             return reached;
@@ -234,11 +285,11 @@ impl Streamer {
         let radius = self.radius();
         let mut inside = 0.0f32;
         for level in 0..LEVELS as u8 {
-            let (inner, outer) = ring(level, radius);
             let s = step(level);
-            // A column being rebuilt with its plants is still there, so it is no gap. And
-            // starting from the edge of the ring that walking uncovers keeps the boundary
-            // still as the camera crosses columns, rather than pulsing in and out.
+            // A column being rebuilt with its plants is still there, so it is no gap; nor
+            // is one missing from under the finer levels. And starting from the edge that
+            // walking uncovers keeps the boundary still as the camera crosses columns,
+            // rather than pulsing in and out.
             let nearest_missing = self
                 .pending
                 .iter()
@@ -246,14 +297,37 @@ impl Streamer {
                 .filter(|c| c.0 == level && !self.columns.contains_key(*c))
                 .map(|c| self.focus.distance(*c))
                 .filter(|d| (*d + s) * CHUNK as f32 >= inside)
-                .fold(outer - s * std::f32::consts::SQRT_2, f32::min);
+                .fold(reach(level, radius) - s * std::f32::consts::SQRT_2, f32::min);
             // The camera can be anywhere in its column, and columns are square.
             let edge = ((nearest_missing - 1.5 * s) * CHUNK as f32).max(0.0);
-            // A level that doesn't reach in as far as the one before it ends can't take over.
-            inside = if inside < inner * CHUNK as f32 { inside } else { edge.max(inside) };
+            inside = edge.max(inside);
             reached[level as usize] = inside;
         }
         reached
+    }
+
+    /// Moves the edges of the levels toward what is loaded: in at once, as what is gone
+    /// cannot be drawn, and out smoothly.
+    fn follow_bands(&mut self, dt: f32) {
+        let loaded = self.loaded_bands();
+        let ease = 1.0 - (-dt / BAND_EASE).exp();
+        let mut inside = 0.0f32;
+        for (shown, loaded) in self.shown.iter_mut().zip(loaded) {
+            // The last voxels are closed up outright, or the edge would creep for ever.
+            let eased = *shown + (loaded - *shown) * ease;
+            *shown = if loaded - eased < 2.0 { loaded } else { eased }.min(loaded).max(inside);
+            inside = *shown;
+        }
+    }
+
+    /// A line on how far loading has got, for the log of a timed run.
+    pub fn progress(&self) -> String {
+        let count = |level: u8, cols: &mut dyn Iterator<Item = &Col>| cols.filter(|c| c.0 == level).count();
+        let levels: Vec<String> = (0..LEVELS as u8)
+            .map(|l| format!("{}+{}q+{}p", count(l, &mut self.columns.keys()), count(l, &mut self.wanted.iter()), count(l, &mut self.pending.iter())))
+            .collect();
+        let bands = self.bands().map(|b| (b / CHUNK as f32).round());
+        format!("radius {}, columns loaded+queued+building by level {}, bands {bands:?} columns, meshes {} of {} MiB", self.radius(), levels.join(" "), self.stats.mesh_bytes >> 20, self.arena.capacity_bytes() >> 20)
     }
 
     pub fn is_idle(&self) -> bool {
@@ -353,7 +427,7 @@ impl Streamer {
                     s.mesh_ms += (result.mesh_ms - s.mesh_ms) * 0.05;
                     let b = &mut s.built[result.col.0 as usize];
                     *b = (b.0 + 1, b.1 + result.gen_ms, b.2 + result.mesh_ms);
-                    let Some(chunks) = self.upload_column(gpu, result.col, meshes) else {
+                    let Some(chunks) = self.upload_column(gpu, result.col, meshes, result.marks) else {
                         // Out of GPU memory. The rest can wait until the view has shrunk.
                         self.shrink_view();
                         break;
@@ -387,6 +461,11 @@ impl Streamer {
                 _ => {}
             }
         }
+        self.regrow_view();
+        let now = Instant::now();
+        let dt = self.last_update.map_or(f32::INFINITY, |t| (now - t).as_secs_f32());
+        self.last_update = Some(now);
+        self.follow_bands(dt);
         self.stats.columns = self.columns.len();
         self.stats.queued = self.wanted.len();
         self.stats.in_flight = self.pending.len();
@@ -398,6 +477,7 @@ impl Streamer {
         loop {
             self.update(gpu, cam, f32::INFINITY);
             if self.is_idle() {
+                self.follow_bands(f32::INFINITY);
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -430,9 +510,9 @@ impl Streamer {
             let s = step(level) as i32;
             let (cx, cz) = (center.0.div_euclid(s), center.1.div_euclid(s));
             // A column of this level counts by its middle, so reach one further each way.
-            let reach = (ring(level, r).1 / step(level)).ceil() as i32 + 1;
-            for dx in -reach..=reach {
-                for dz in -reach..=reach {
+            let span = (reach(level, r) / step(level)).ceil() as i32 + 1;
+            for dx in -span..=span {
+                for dz in -span..=span {
                     let col = (level, cx + dx, cz + dz);
                     if !focus.in_range(col, 0) || self.pending.contains(&col) {
                         continue;
@@ -445,31 +525,30 @@ impl Streamer {
                 }
             }
         }
-        self.wanted.sort_unstable_by_key(|c| std::cmp::Reverse((focus.distance(*c) * 16.0) as i64));
+        // Each level is built outward at its own scale and the coarser ones a little
+        // sooner still, so that they keep well ahead of the camera rather than waiting
+        // for the finest to finish: at speed it never does, and they would never start.
+        // Columns only wanted again for their plants come after everything missing.
+        let columns = &self.columns;
+        self.wanted.sort_unstable_by_key(|c| {
+            let replant = if columns.contains_key(c) { 1 << 40 } else { 0 };
+            let lead = step(c.0) * COARSE_LEAD.powi(c.0 as i32);
+            std::cmp::Reverse((focus.distance(*c) / lead * 16.0) as i64 + replant)
+        });
     }
 
     /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
-    fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>) -> Option<Vec<GpuChunk>> {
+    fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>, marks: Marks) -> Option<Vec<GpuChunk>> {
         let mut chunks = Vec::with_capacity(meshes.len());
-        // A grid of points in world voxels, whose edges neighbouring columns share.
-        let size = CHUNK << col.0;
-        let (x, z) = (col.1 * size, col.2 * size);
-        let mut biomes = [0u32; 8];
-        for k in 0..25 {
-            let (dx, dz) = ((k % 5) as i32 * size / 4, (k / 5) as i32 * size / 4);
-            biomes[k / 4] |= (crate::farview::biome_at(&self.world, x + dx, z + dz) as u32) << (8 * (k % 4));
-        }
-        let skylines = [(0, 0), (size, 0), (0, size), (size, size)].map(|(dx, dz)| crate::farview::skylines_at(&self.world, x + dx, z + dz));
-        let slopes = [(0, 0), (size, 0), (0, size), (size, size)].map(|(dx, dz)| crate::farview::slope_at(&self.world, x + dx, z + dz));
         for (cy, mesh) in meshes {
             let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
                 release(&mut self.arena, &chunks);
                 self.recount();
                 return None;
             };
-            chunk.biomes = biomes;
-            chunk.skylines = skylines;
-            chunk.slopes = slopes;
+            chunk.biomes = marks.biomes;
+            chunk.skylines = marks.skylines;
+            chunk.slopes = marks.slopes;
             chunks.push(chunk);
         }
         Some(chunks)
@@ -515,9 +594,23 @@ impl Streamer {
         let now = self.radius();
         let next = (now - (now / 8).max(1)).max(MIN_RADIUS);
         self.radius_limit = next;
+        self.resized = Instant::now();
         if next < now {
             log::warn!("out of GPU memory: load radius reduced from {now} to {next}");
             self.focus.radius.store(next, Ordering::Relaxed);
+            self.center = None; // force a rebuild of the wanted list
+        }
+    }
+
+    /// Lets a view that was pulled in back out a column at a time, once the meshes loaded
+    /// leave room to spare: what filled the GPU was the land there, dense forest say, and
+    /// the view should not stay small for the rest of the session on its account.
+    fn regrow_view(&mut self) {
+        let roomy = self.stats.mesh_bytes * 10 < self.arena.capacity_bytes() * 7;
+        if self.radius_limit < self.asked && roomy && self.is_idle() && self.resized.elapsed().as_secs_f32() > REGROW_SECONDS {
+            self.radius_limit += 1;
+            self.resized = Instant::now();
+            self.focus.radius.store(self.radius_limit, Ordering::Relaxed);
             self.center = None; // force a rebuild of the wanted list
         }
     }
@@ -602,6 +695,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     if !focus.in_range(col, UNLOAD_SLACK) {
         return ColumnResult {
             col,
+            marks: Marks::default(),
             chunks: None,
             planted: false,
             cascades: Vec::new(),
@@ -647,6 +741,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     let lamps = lamp_voxels(&output.chunks, col, world.materials());
     ColumnResult {
         col,
+        marks: Marks::of(world, col),
         chunks: Some(chunks),
         planted: plants,
         cascades: output.cascades,
@@ -689,6 +784,7 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
     let t2 = Instant::now();
     ColumnResult {
         col,
+        marks: Marks::of(world, col),
         chunks: Some(meshes),
         // Coarse columns never need building again with plants.
         planted: true,

@@ -87,6 +87,8 @@ struct Options {
     frames: Option<u64>,
     /// Fly straight ahead at this many metres a second, to measure streaming.
     drift: Option<f32>,
+    /// Turn while drifting, so as to fly a circle of this radius in metres.
+    circle: Option<f32>,
     /// Seconds of ambient life (leaves, birds, spray) simulated before a screenshot.
     ambient: f32,
     /// Draw the map on a screenshot: the corner map, or the large map this many voxels
@@ -114,6 +116,7 @@ impl Default for Options {
             size: (1280, 720),
             frames: None,
             drift: None,
+            circle: None,
             ambient: 8.0,
             shot_map: None,
             walked: Vec::new(),
@@ -148,6 +151,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went
   --drift V             fly straight ahead at V metres a second
+  --circle R            with --drift, fly a circle of radius R metres instead
   --no-vsync            uncapped frame rate";
 
 fn list<T: std::str::FromStr>(s: &str, sep: char, n: usize) -> Result<Vec<T>> {
@@ -218,6 +222,7 @@ fn parse_args() -> Result<Options> {
             "--day-minutes" => o.overrides.day_minutes = Some(value()?.parse()?),
             "--frames" => o.frames = Some(value()?.parse()?),
             "--drift" => o.drift = Some(value()?.parse()?),
+            "--circle" => o.circle = Some(value()?.parse::<f32>()?.max(1.0)),
             "--no-vsync" => o.overrides.vsync = Some(false),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -503,6 +508,7 @@ struct Running {
     /// Every frame's length in milliseconds, kept only when measuring.
     frame_log: Option<Vec<f32>>,
     drift: Option<f32>,
+    circle: Option<f32>,
     map: Minimap,
     /// The large map is being dragged with the mouse, from this cursor position.
     drag: Option<(f64, f64)>,
@@ -641,6 +647,7 @@ impl Running {
             cpu: CpuTimer::new(),
             frame_log: opts.frames.map(|n| Vec::with_capacity(n as usize)),
             drift: opts.drift,
+            circle: opts.circle,
             gpu,
             surface,
         })
@@ -850,6 +857,9 @@ impl Running {
         }
         self.cpu.start();
         if let Some(speed) = self.drift {
+            if let Some(radius) = self.circle {
+                self.camera.yaw = (self.camera.yaw + speed / radius * dt).rem_euclid(std::f32::consts::TAU);
+            }
             let ahead = self.camera.forward() * glam::Vec3::new(1.0, 0.0, 1.0);
             self.camera.pos += (ahead.normalize_or_zero() * m(speed) * dt).as_dvec3();
         }
@@ -1249,6 +1259,9 @@ impl ApplicationHandler for App {
                 if r.save_timer <= 0.0 {
                     r.save_timer = AUTOSAVE;
                     r.persist(&self.opts.overrides);
+                }
+                if self.opts.frames.is_some() && r.frame % 120 == 0 {
+                    log::info!("frame {}: {}; {}", r.frame, r.streamer.progress(), r.impostors.progress());
                 }
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
                     let (s, d) = (r.streamer.stats, r.renderer.stats);
