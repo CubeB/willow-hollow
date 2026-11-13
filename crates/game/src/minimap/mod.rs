@@ -14,17 +14,27 @@
 //! Marks are hints, not objectives: no distances, no lines to them. A place not yet
 //! visited shows only as a soft glow, and only once the land around it has been seen;
 //! one still out of sight shows as a faint glow at the corner map's rim in its direction,
-//! for the nearest few. A visited place turns into its icon, and on the large map its name.
+//! for the nearest few. A visited place turns into its icon, or close in, where the
+//! model has the place itself standing on it, is left to that.
 //!
 //! The large map is a model of the land seen so far ([`relief`]): a slab of blocks with
-//! its water, paths and woods, looked down on at a slant, which the mouse moves, turns
-//! and zooms. The corner map is a small one of the same, of the ground about the
+//! its water, paths and woods, and close in its trees, buildings, bridges and tors,
+//! looked down on at a slant, which the mouse moves, turns and zooms. It is lit by a
+//! sun of its own that never moves ([`light`]), with the shadows worked into the model
+//! as it is built. The corner map is a small one of the same, of the ground about the
 //! player, turned so that the way they face is always up.
+//!
+//! The large map has the names of the places on it ([`names`]): the land's own (regions,
+//! ranges, lakes, rivers, peaks, tors) wherever the land they belong to has been seen,
+//! and those of what people built once they have been visited. The corner map has one
+//! name, along its foot: the place stood at, or the region.
 //!
 //! [`build`] is the older still image of a whole continent, for `--map FILE`.
 
 pub mod gpu;
+pub mod light;
 pub mod marks;
+pub mod names;
 pub mod picture;
 pub mod relief;
 pub mod reveal;
@@ -42,21 +52,23 @@ use glam::{DVec2, DVec3, Mat4, Vec2, Vec3, Vec4};
 use worldgen::{
     continent::Continent,
     macro_layout::MACRO_SIZE,
-    scale::{OLD_VOXEL, m64},
+    names::PlaceKind,
+    scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
     world::GameWorld,
 };
 
 use crate::gfx::Gpu;
 use gpu::{Instance, MapGpu, ReliefGpu, Uniforms};
 use marks::{Kind, Mark};
-use relief::{Relief, Request};
+use names::Name;
+use relief::{Relief, Request, Season};
 use reveal::Reveal;
 
 /// A continent, by macro-cell.
 pub type Key = (i32, i32);
 
 /// How near and how far the large map zooms, edge to edge, in voxels.
-const LARGE_SPAN: (f64, f64) = (m64(700.0), MACRO_SIZE as f64);
+const LARGE_SPAN: (f64, f64) = (m64(160.0), MACRO_SIZE as f64);
 const LARGE_START: f64 = m64(2400.0);
 /// How the large map is first looked at: turned a little from north, and from how high.
 const YAW: f32 = -0.3;
@@ -65,14 +77,14 @@ const PITCH_RANGE: (f32, f32) = (0.45, 1.45);
 /// The large map's field of view, top to bottom.
 const FOV: f32 = 0.5;
 /// How many pixels wide a column of the large map's model is, about, on a window 720 high.
-const COLUMN_PX: f64 = 6.0;
+const COLUMN_PX: f64 = 5.0;
 /// How far, in columns, the map's middle may stray from the model's before a new one is made.
 const STRAY: i64 = 40;
 /// The corner map: how much ground it spans across its middle, how steeply it is looked
 /// down on, how far the player may walk from the middle of its model, in columns, and
 /// how long it waits, in seconds, before a new one is made for newly seen ground.
 const SMALL_SPAN: f64 = m64(130.0);
-const SMALL_PITCH: f32 = 0.95;
+const SMALL_PITCH: f32 = 0.78;
 const SMALL_STRAY: i64 = 16;
 const SMALL_EVERY: f32 = 1.5;
 /// Which model an answer from the relief thread is.
@@ -86,6 +98,16 @@ const HINTS: usize = 3;
 const SEE_STEP: f64 = m64(6.0);
 /// Seconds before asking again for a neighbouring continent that was not ready.
 const RETRY: f32 = 3.0;
+/// How near a named place the player must stand for the corner map to name it rather
+/// than the region.
+const NAMED: f32 = m(30.0);
+/// How finely a continent is looked over for where to write its regions' names: this
+/// many points each way.
+const REGION_GRID: usize = 72;
+/// The colours names are written in: land, water, and a region's.
+const INK: [u8; 3] = [250, 248, 240];
+const WATER_INK: [u8; 3] = [200, 228, 252];
+const REGION_INK: [u8; 3] = [255, 246, 222];
 
 /// What the worker makes of one continent.
 pub struct Sheet {
@@ -96,11 +118,13 @@ pub struct Sheet {
 
 /// Builds the sheet for continent `key`.
 pub fn sheet(world: &GameWorld, c: Arc<Continent>) -> Sheet {
-    Sheet { picture: Arc::new(picture::picture(world, &c)), marks: marks::find(&c, world.seed()), continent: c }
+    Sheet { picture: Arc::new(picture::flat(world, &c)), marks: marks::find(&c, world.seed()), continent: c }
 }
 
 struct Known {
     sheet: Sheet,
+    /// What kind of place each mark with a name is, and how much it matters on a map.
+    places: Vec<Option<(PlaceKind, f32)>>,
     visited: Vec<bool>,
     /// Whether `visited` has been read back from the walked trail in the saved mask.
     checked: bool,
@@ -193,7 +217,7 @@ fn look_down(look: DVec2, per_px: f32, yaw: f32, pitch: f32, aim: f32, corner: V
 /// The width of the model's columns, in voxels, for a map drawn at `voxels_per_px`.
 fn step_for(voxels_per_px: f64, s: f32) -> i32 {
     let want = (voxels_per_px * COLUMN_PX * s as f64).max(1.0);
-    (1 << want.log2().round() as i32).clamp(relief::MIN_STEP, relief::MAX_STEP)
+    (1 << want.log2().round() as i32).clamp(relief::FINE_STEP, relief::MAX_STEP)
 }
 
 /// Where on the screen the map is drawn this frame, and what it shows.
@@ -288,6 +312,8 @@ pub struct Minimap {
     aim: Option<f32>,
     /// The time of day to show on the large map, in hours.
     pub hour: f32,
+    /// The time of year the models are made for, once it is known.
+    season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
     /// land shown since the game began.
     relief: Option<Relief>,
@@ -305,7 +331,12 @@ pub struct Minimap {
     player: DVec3,
     heading: Vec2,
     region: Option<String>,
+    /// The named place the player stands at, if any.
+    near: Option<String>,
     region_timer: f32,
+    /// Where each region's name is written on each continent, in world voxels (with the
+    /// place it is in the gazetteer), and what had been seen when that was worked out.
+    anchors: HashMap<Key, (u64, Vec<(usize, DVec2)>)>,
     clock: f32,
     labels: Vec<Label>,
 }
@@ -340,7 +371,14 @@ impl Minimap {
                 while let Ok(req) = reliefs.recv() {
                     let t = std::time::Instant::now();
                     let made = relief::build(&w, &req);
-                    log::debug!("map model at step {}: {} corners, {} trees, made in {:.2} s", made.step, made.vertices.len(), made.trees.len(), t.elapsed().as_secs_f32());
+                    log::debug!(
+                        "map model at step {}: {} corners, {} trees, {} buildings and tors, made in {:.2} s",
+                        made.step,
+                        made.vertices.len(),
+                        made.trees.len(),
+                        made.models,
+                        t.elapsed().as_secs_f32()
+                    );
                     if to_main.send(Answer::Relief(Box::new(made))).is_err() {
                         break;
                     }
@@ -390,6 +428,7 @@ impl Minimap {
             pitch: PITCH,
             aim: None,
             hour: 12.0,
+            season: None,
             relief: None,
             relief_ask,
             relief_pending: false,
@@ -404,9 +443,25 @@ impl Minimap {
             player: DVec3::ZERO,
             heading: Vec2::X,
             region: None,
+            near: None,
             region_timer: 0.0,
+            anchors: HashMap::new(),
             clock: 0.0,
             labels: Vec::new(),
+        }
+    }
+
+    /// Tells the map the time of year (0 to 1 from the spring equinox) and what the
+    /// ground carries in each biome, so that its woods turn and its hills whiten with
+    /// the world's. The models are made again when either has changed enough to see.
+    pub fn set_season(&mut self, date: f32, places: crate::season::Places) {
+        let moved = self.season.is_none_or(|s| {
+            let snow = |p: &crate::season::Places| p.biomes.iter().map(|g| g.snow + g.highland).sum::<f32>();
+            (s.date - date).abs() > 0.008 || (snow(&s.places) - snow(&places)).abs() > 0.5
+        });
+        if moved {
+            self.season = Some(Season { date, places });
+            self.version += 1;
         }
     }
 
@@ -415,6 +470,8 @@ impl Minimap {
         if open && !self.open {
             self.look = xz(self.player);
             self.aim = None;
+            // The regions' names are placed as soon as it is open.
+            self.region_timer = 0.0;
         }
         self.open = open;
     }
@@ -493,7 +550,7 @@ impl Minimap {
                 }
             }
         }
-        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version }).is_ok()
+        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version, season: self.season }).is_ok()
     }
 
     /// Asks for a new model for the large map if the one it has no longer fits: the map
@@ -578,7 +635,9 @@ impl Minimap {
                 self.pending.remove(&key);
                 if let Some(sheet) = sheet {
                     let n = sheet.marks.len();
-                    self.known.insert(key, Known { sheet, visited: vec![false; n], checked: false });
+                    let gazetteer = &sheet.continent.trails.names;
+                    let places = sheet.marks.iter().map(|m| gazetteer.named(m.name.as_deref()?).map(|p| (p.kind, p.importance))).collect();
+                    self.known.insert(key, Known { sheet, places, visited: vec![false; n], checked: false });
                     self.reveal_mut(key);
                     self.check_visits(key);
                     self.version += 1;
@@ -671,7 +730,65 @@ impl Minimap {
             let names = &k.sheet.continent.trails.names;
             let at = (xz(eye) - origin(here)).as_vec2();
             self.region = names.region_at(at).and_then(|i| names.places.get(i)).map(|p| p.name.clone());
+            // The place stood at: the smallest that reaches here, a thing people built
+            // only once it has been visited. Islands and ranges are too large to stand at.
+            let visited = |name: &str| k.sheet.marks.iter().zip(&k.visited).any(|(m, &v)| v && m.name.as_deref() == Some(name));
+            self.near = names
+                .places
+                .iter()
+                .filter(|p| matches!(p.kind, PlaceKind::Lake | PlaceKind::River | PlaceKind::Peak | PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_)))
+                .filter(|p| p.distance(at) <= NAMED && (p.kind.is_natural() || visited(&p.name)))
+                .min_by(|a, b| a.radius.total_cmp(&b.radius))
+                .map(|p| p.name.clone());
             self.region_timer = 1.0;
+            if self.open {
+                self.anchor_regions();
+            }
+        }
+    }
+
+    /// Works out where each region's name goes on each continent: in the middle of what
+    /// has been seen of its land, so that a region is named as soon as some of it is on
+    /// the map, and its name moves in as more of it is. Done again only when more has
+    /// been seen.
+    fn anchor_regions(&mut self) {
+        for (key, k) in &self.known {
+            let Some(r) = self.reveals.get(key) else { continue };
+            if self.anchors.get(key).is_some_and(|a| a.0 == self.version) {
+                continue;
+            }
+            let c = &k.sheet.continent;
+            let names = &c.trails.names;
+            let cell = MACRO_SIZE as f32 / REGION_GRID as f32;
+            let mut seen: Vec<(usize, Vec2)> = Vec::new();
+            for gz in 0..REGION_GRID {
+                for gx in 0..REGION_GRID {
+                    let at = Vec2::new(gx as f32 + 0.5, gz as f32 + 0.5) * cell;
+                    let grid = |v: f32| ((v / c.cell_size()) as usize).min(c.size - 1);
+                    if r.seen(at)
+                        && !c.ocean[grid(at.y) * c.size + grid(at.x)]
+                        && let Some(i) = names.region_at(at)
+                    {
+                        seen.push((i, at));
+                    }
+                }
+            }
+            let mut middles: HashMap<usize, (Vec2, f32)> = HashMap::new();
+            for &(i, at) in &seen {
+                let m = middles.entry(i).or_insert((Vec2::ZERO, 0.0));
+                *m = (m.0 + at, m.1 + 1.0);
+            }
+            let o = origin(*key);
+            let mut anchors: Vec<(usize, DVec2)> = middles
+                .into_iter()
+                .filter_map(|(i, (sum, count))| {
+                    let middle = sum / count;
+                    let nearest = seen.iter().filter(|s| s.0 == i).min_by(|a, b| a.1.distance(middle).total_cmp(&b.1.distance(middle)))?;
+                    Some((i, o + nearest.1.as_dvec2()))
+                })
+                .collect();
+            anchors.sort_by_key(|a| a.0);
+            self.anchors.insert(*key, (self.version, anchors));
         }
     }
 
@@ -824,7 +941,13 @@ impl Minimap {
             None => view.px(at, level).map(|p| (p, false)),
         };
         let mut labels = Vec::new();
-        self.marks(&f, &place, Some((view.east, view.north)), &mut out, &mut labels);
+        let models = model.is_some_and(|r| r.step <= relief::MODEL_STEP);
+        self.marks(&f, &place, Some((view.east, view.north)), models, &mut out, None);
+        // Where this is: the place stood at, or the region, small along the foot.
+        if let Some(name) = self.near.as_ref().or(self.region.as_ref()) {
+            let size = (12.5 * f.s).min(f.half.x * 1.8 / names::width(name, 1.0).max(1.0));
+            labels.push(Label { pos: [f.centre.x, f.centre.y + f.half.y - 10.0 * f.s], text: name.clone(), size, color: [INK[0], INK[1], INK[2], 235], left: false, right: false });
+        }
 
         // The player, always facing up the map, and where north has got to.
         if let Some((me, _)) = place(xz(self.player)) {
@@ -832,7 +955,9 @@ impl Minimap {
             arrow.dir = [0.0, -1.0];
             out.push(arrow);
         }
-        let north = f.rim(f.centre, view.north.normalize_or_zero(), 10.0 * f.s);
+        // Clear of the name along the foot.
+        let mut north = f.rim(f.centre, view.north.normalize_or_zero(), 10.0 * f.s);
+        north.y = north.y.min(f.centre.y + f.half.y - 26.0 * f.s);
         labels.push(Label { pos: north.into(), text: "N".into(), size: 12.0 * f.s, color: [250, 248, 240, 235], left: false, right: false });
 
         let transform = model.map(|r| {
@@ -844,7 +969,7 @@ impl Minimap {
         self.gpu.pass(encoder, target, 0..1);
         if let Some(transform) = transform {
             let within = [corner.x.round() as u32, corner.y.round() as u32, side.x.round() as u32, side.y.round() as u32];
-            self.small_gpu.draw(gpu, encoder, target, size, transform, Some(within));
+            self.small_gpu.draw(gpu, encoder, target, size, transform, Some(within), self.hour, self.clock);
         }
         self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
@@ -889,7 +1014,10 @@ impl Minimap {
             None => view.px(at, level).map(|p| (p, false)),
         };
         let mut labels = Vec::new();
-        self.marks(&f, &place, None, &mut out, &mut labels);
+        let models = relief.is_some_and(|r| r.step <= relief::MODEL_STEP);
+        let mut named: Vec<Name> = Vec::new();
+        self.marks(&f, &place, None, models, &mut out, Some(&mut named));
+        self.names(&f, &place, &mut named);
 
         let white = [250, 248, 240, 255];
         let me = xz(self.player);
@@ -923,7 +1051,24 @@ impl Minimap {
         }
         let metres = |v: f64| v / worldgen::scale::VOXELS_PER_METRE as f64;
         let hour = self.hour.rem_euclid(24.0);
-        let zoom = relief.map_or(1, |r| r.step / relief::MIN_STEP);
+        let zoom = relief.map_or(1, |r| r.step / relief::FINE_STEP);
+        // The names give way to what else is written on the map, and to the player.
+        let mut taken: Vec<(Vec2, Vec2)> = Vec::new();
+        let about = |mid: Vec2, half: Vec2| (mid - half, mid + half);
+        taken.push(about(rose, Vec2::splat(reach + 22.0 * s)));
+        if let Some(region) = &self.region {
+            let wide = names::width(region, 30.0 * s);
+            taken.push((Vec2::new(w - 112.0 * s - wide, 22.0 * s), Vec2::new(w - 112.0 * s, 66.0 * s)));
+        }
+        taken.push((Vec2::new(0.0, 0.0), Vec2::new(360.0 * s, 34.0 * s)));
+        taken.push(about(Vec2::new(w * 0.5, h - 20.0 * s), Vec2::new(300.0 * s, 12.0 * s)));
+        if let Some((p, _)) = place(me) {
+            taken.push(about(p, Vec2::splat(9.0 * s)));
+        }
+        let edge = 6.0 * s;
+        for n in names::declutter(named, (Vec2::splat(edge), screen - Vec2::splat(edge)), &taken, 5.0 * s) {
+            labels.push(Label { pos: n.at.into(), text: n.text, size: n.size, color: n.color, left: false, right: false });
+        }
         labels.push(Label {
             pos: [16.0 * s, 20.0 * s],
             text: format!(
@@ -956,7 +1101,7 @@ impl Minimap {
         self.gpu.load(gpu, &u, &out);
         self.gpu.pass(encoder, target, 0..1);
         if let Some(transform) = transform {
-            self.relief_gpu.draw(gpu, encoder, target, size, transform, None);
+            self.relief_gpu.draw(gpu, encoder, target, size, transform, None, self.hour, self.clock);
         }
         self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
@@ -971,7 +1116,22 @@ impl Minimap {
     /// screen's edge, and the places hinted at, a few kilometres off, mostly lie within
     /// it on ground not yet seen: a glow at the edge of the screen pointing at the middle
     /// of it, wandering round the edge as the map was turned, read as something wrong.
-    fn marks(&self, f: &Frame, place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>, rim: Option<(Vec2, Vec2)>, out: &mut Vec<Instance>, labels: &mut Vec<Label>) {
+    ///
+    /// With `models`, the map's model has the buildings, bridges and tors standing on it
+    /// as themselves, and those have no icon laid over them. `named` takes the names of
+    /// the marked places that have one to show: any the land shows that is the land's
+    /// own (a lake, a peak, a tor, a fall), and what people built once it is visited.
+    #[allow(clippy::too_many_arguments)]
+    fn marks(
+        &self,
+        f: &Frame,
+        place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>,
+        rim: Option<(Vec2, Vec2)>,
+        models: bool,
+        out: &mut Vec<Instance>,
+        mut named: Option<&mut Vec<Name>>,
+    ) {
+        let span = (self.span / VOXELS_PER_METRE as f64) as f32;
         let me = xz(self.player);
         let me_px = place(me).map(|p| p.0);
         let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
@@ -980,27 +1140,45 @@ impl Minimap {
         for key in self.known.keys() {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
-            for (mark, &visited) in k.sheet.marks.iter().zip(&k.visited) {
+            for ((mark, &visited), known) in k.sheet.marks.iter().zip(&k.visited).zip(&k.places) {
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
+                // What stands there as a model of itself is its own mark.
+                let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Bridge | Kind::Tor);
+                let mut on_water = false;
+                if let Some((p, _)) = at
+                    && on_map
+                    && (visited || seen)
+                    && let Some(named) = named.as_deref_mut()
+                    && let (Some(name), Some((kind, importance))) = (&mark.name, known)
+                    && (visited || kind.is_natural())
+                {
+                    let rank = names::rank(*kind);
+                    let fade = names::fade(rank, *importance, span);
+                    if fade > 0.05 {
+                        let ink = if names::watery(*kind) { WATER_INK } else { INK };
+                        let strength = if visited { 255.0 } else { 225.0 };
+                        // Over its place, as a pin's flag is; a lake's lies on its water.
+                        on_water = *kind == PlaceKind::Lake;
+                        let lift = if on_water { 0.0 } else { icon + 9.0 * f.s + if modelled { 8.0 * f.s } else { 0.0 } };
+                        named.push(Name {
+                            text: name.clone(),
+                            at: Vec2::new(p.x, p.y - lift),
+                            // Under its place, if there is no room over it.
+                            or: (!on_water).then(|| Vec2::new(p.x, p.y + icon + 10.0 * f.s)),
+                            size: names::size(rank, *importance) * f.s,
+                            weight: rank as u8 as f32 * 100.0 + importance + if visited { 40.0 } else { 0.0 },
+                            color: [ink[0], ink[1], ink[2], (strength * fade) as u8],
+                        });
+                    }
+                }
                 if let Some((p, _)) = at
                     && on_map
                     && visited
                 {
-                    icons.push(icon_of(mark, p, icon));
-                    if self.open
-                        && let Some(name) = &mark.name
-                    {
-                        // Over its place, as a pin's flag is.
-                        labels.push(Label {
-                            pos: [p.x, p.y - icon - 9.0 * f.s],
-                            text: name.clone(),
-                            size: 13.5 * f.s,
-                            color: [250, 248, 240, 255],
-                            left: false,
-                            right: false,
-                        });
+                    if !modelled && !on_water {
+                        icons.push(icon_of(mark, p, icon));
                     }
                 } else if let Some((p, _)) = at
                     && on_map
@@ -1042,6 +1220,54 @@ impl Minimap {
             }
         }
         out.extend(icons);
+    }
+
+    /// The names of the places that are not marks: the regions, and the ranges, islands,
+    /// rivers and bays, each where the land shows it. `place` is as for [`Self::marks`].
+    fn names(&self, f: &Frame, place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>, named: &mut Vec<Name>) {
+        let span = (self.span / VOXELS_PER_METRE as f64) as f32;
+        for (key, k) in &self.known {
+            let Some(r) = self.reveals.get(key) else { continue };
+            let o = origin(*key);
+            let gazetteer = &k.sheet.continent.trails.names;
+            let anchors = self.anchors.get(key).map_or(&[][..], |a| &a.1[..]);
+            for (i, p) in gazetteer.places.iter().enumerate() {
+                let rank = names::rank(p.kind);
+                let at = match p.kind {
+                    PlaceKind::Region => anchors.iter().find(|a| a.0 == i).map(|a| a.1),
+                    PlaceKind::Range | PlaceKind::Fault | PlaceKind::Rift | PlaceKind::Island | PlaceKind::River | PlaceKind::Bay | PlaceKind::Inlet => {
+                        // Where the gazetteer has it, or along its course where that
+                        // has been seen.
+                        let near = |a: &&Vec2, b: &&Vec2| a.distance(p.at).total_cmp(&b.distance(p.at));
+                        let local = if r.seen(p.at) { Some(p.at) } else { p.line.iter().filter(|q| r.seen(**q)).min_by(near).copied() };
+                        local.map(|q| o + q.as_dvec2())
+                    }
+                    // The rest are marks, and named with them.
+                    _ => None,
+                };
+                let Some(at) = at else { continue };
+                let fade = names::fade(rank, p.importance, span);
+                if fade <= 0.05 {
+                    continue;
+                }
+                let Some((px, _)) = place(at).filter(|(px, _)| f.edge(*px) < -3.0) else { continue };
+                let (text, ink, strength) = match p.kind {
+                    PlaceKind::Region => (names::spaced(&p.name), REGION_INK, 215.0),
+                    kind if names::watery(kind) => (p.name.clone(), WATER_INK, 240.0),
+                    _ => (p.name.clone(), INK, 240.0),
+                };
+                // A river's name lies beside its water, not over it.
+                let lift = if p.kind == PlaceKind::River { 11.0 * f.s } else { 0.0 };
+                named.push(Name {
+                    text,
+                    at: Vec2::new(px.x, px.y - lift),
+                    or: (p.kind == PlaceKind::River).then(|| Vec2::new(px.x, px.y + lift)),
+                    size: names::size(rank, p.importance) * f.s,
+                    weight: rank as u8 as f32 * 100.0 + p.importance,
+                    color: [ink[0], ink[1], ink[2], (strength * fade) as u8],
+                });
+            }
+        }
     }
 }
 
@@ -1122,7 +1348,7 @@ mod tests {
 
     #[test]
     fn the_model_has_coarser_columns_the_further_out_the_map_is() {
-        assert_eq!(step_for(0.5, 1.0), relief::MIN_STEP);
+        assert_eq!(step_for(0.2, 1.0), relief::FINE_STEP);
         assert_eq!(step_for(1.0e6, 1.0), relief::MAX_STEP);
         let steps: Vec<i32> = (0..40).map(|k| step_for(1.5 * 1.15f64.powi(k), 1.0)).collect();
         assert!(steps.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] * 2), "{steps:?}");

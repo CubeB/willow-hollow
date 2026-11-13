@@ -207,9 +207,9 @@ pub fn map_labels(ctx: &egui::Context, labels: &[crate::minimap::Label]) {
         let [r, g, b, a] = l.color;
         let dark = (r as u32 + g as u32 + b as u32) < 384;
         let halo = if dark {
-            egui::Color32::from_rgba_unmultiplied(246, 242, 232, 140)
+            egui::Color32::from_rgba_unmultiplied(246, 242, 232, 150)
         } else {
-            egui::Color32::from_rgba_unmultiplied(20, 20, 22, 140)
+            egui::Color32::from_rgba_unmultiplied(16, 18, 22, 150)
         };
         let font = egui::FontId::proportional(l.size / ppp);
         let at = egui::pos2(l.pos[0] / ppp, l.pos[1] / ppp);
@@ -220,8 +220,10 @@ pub fn map_labels(ctx: &egui::Context, labels: &[crate::minimap::Label]) {
         } else {
             egui::Align2::CENTER_CENTER
         };
-        let step = 1.0 / ppp;
-        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+        // An outline all round, heavier for larger names, and as faint as the name is.
+        let step = (l.size / 13.0).clamp(1.0, 2.0) / ppp;
+        let halo = halo.gamma_multiply(a as f32 / 255.0);
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7)] {
             painter.text(at + egui::vec2(dx * step, dy * step), align, &l.text, font.clone(), halo);
         }
         painter.text(at, align, &l.text, font, egui::Color32::from_rgba_unmultiplied(r, g, b, a));

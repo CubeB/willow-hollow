@@ -105,6 +105,29 @@ and on the GPU pass by pass. Compare the numbers before and after a change.
 ./target/release/game.exe --seed 1 --frames 2500 --over 42186,30679,60 --look 0,-15 --drift 25 --no-vsync --no-audio --size 1920x1080
 ```
 
+**The in-game map.** A screenshot can have the corner map or the large map drawn on it,
+as the player would have it after walking to where the camera is. `--minimap` draws the
+corner map; `--bigmap KM` opens the large map, KM kilometres across (0.16 to 26), with
+`--bigmap-turn YAW,PITCH` to turn and tilt it in degrees and `--bigmap-pan X,Z` to move
+it X metres east and Z south. Only land that has been seen is on the map, so
+`--walked X,Z;X,Z;..` lays a walk through those points (in voxels, as `mapgen --poi`
+prints them) to the camera first: what was seen along it is on the map, and the places
+passed are visited, which is what puts a name on the things people built. `--time` and
+`--season` change the map as they change the world.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot map.png --over 36830,35610,2 --time 10 --weather clear --no-audio --bigmap 6 --bigmap-turn 200,40 --walked "21846,27358;26424,28346;30866,30264;33928,37020"
+```
+
+The map's models are built on a worker thread, and how long each took is logged at
+debug level (`RUST_LOG=warn,game=debug`, "map model at step ..."). The columns of a
+model are `step` voxels wide, a power of two from 4 to 512 chosen from the zoom; up to
+32 the model is read from the voxel world and has buildings, bridges and tors standing
+on it, and up to 16 every tree. Its light is worked out once, as it is built
+(`minimap/light.rs`), so drawing it costs no more than drawing its triangles: check
+that with a timed run with the corner map on (the default), and with `--bigmap KM`
+added, which keeps the large map open throughout.
+
 **Maps.** Draws relief, biome and rainfall maps of a world cell and prints the
 coordinates of landmarks, which is how to find a place worth a screenshot.
 

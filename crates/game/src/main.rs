@@ -186,7 +186,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --ambient S           seconds of ambient life before a screenshot (default 8)
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
-  --frames N            exit after N frames, logging where the time went
+  --frames N            exit after N frames, logging where the time went (with --bigmap,
+                        the large map is open throughout)
   --drift V             fly straight ahead at V metres a second
   --circle R            with --drift, fly a circle of radius R metres instead
   --no-vsync            uncapped frame rate";
@@ -1269,6 +1270,7 @@ impl Running {
         lit.adapt(self.shut_in);
         lit.mist_floor = self.mist_floor.unwrap_or(self.camera.pos.y as f32 - m(12.0));
         let ground = self.weather.places(self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
+        self.map.set_season(self.env.date, ground);
         let scene = render::Scene {
             camera: &self.camera,
             env: &lit,
@@ -1580,6 +1582,26 @@ impl ApplicationHandler for App {
                     r.save_timer = AUTOSAVE;
                     r.persist(&self.opts.overrides);
                 }
+                // A timed run can have the large map open, as a screenshot can, to see
+                // what drawing it costs.
+                if self.opts.frames.is_some()
+                    && r.frame == 2
+                    && let Some(large) = self.opts.shot_map
+                {
+                    let mut path = self.opts.walked.clone();
+                    path.push(glam::DVec2::new(r.camera.pos.x, r.camera.pos.z));
+                    r.map.walk(&path);
+                    if let Some(span) = large {
+                        r.set_map(true);
+                        r.map.set_span(span);
+                        if let Some((yaw, pitch)) = self.opts.shot_turn {
+                            r.map.set_turn(yaw.to_radians(), pitch.to_radians());
+                        }
+                        if let Some(by) = self.opts.shot_pan {
+                            r.map.shift(by);
+                        }
+                    }
+                }
                 if self.opts.frames.is_some() && r.frame % 120 == 0 {
                     log::info!("frame {}: {}; {}", r.frame, r.streamer.progress(), r.impostors.progress());
                 }
@@ -1758,6 +1780,7 @@ fn main() -> Result<()> {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut map = opts.shot_map.map(|large| {
             let mut map = Minimap::new(&gpu, format, world.clone(), None);
+            map.set_season(env.date, weather.places(env.date, settings.year_days, warmth, settings.seed));
             map.settle(&gpu, camera.pos, camera.forward());
             let mut path = opts.walked.clone();
             path.push(glam::DVec2::new(camera.pos.x, camera.pos.z));
