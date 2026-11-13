@@ -924,6 +924,13 @@ pub fn max_top(lib: &Library) -> i32 {
 /// or a small feature that close whose far end looks at the ground as far again.
 pub const MAX_REACH: i32 = if GIANTS.reach > 2 * SMALL.reach { GIANTS.reach } else { 2 * SMALL.reach };
 
+/// Whether `v` is something a plant bears that can be gathered from it, leaving the
+/// plant: the berries of holly and ivy, the blossom of gorse, the head of a reed. A
+/// column that has been picked ([`crate::world::GameWorld::pick`]) grows none of them.
+pub fn borne(v: Voxel) -> bool {
+    matches!(v, mat::HOLLY_BERRY | mat::GORSE_BLOOM | mat::IVY_BERRY | mat::IVY_BERRY_GREEN | mat::REED_HEAD)
+}
+
 /// Flowers and heather: drifts of colour on grass, one species per drift. The colour
 /// stands for a flower of that colour, which `plants::flower_at` names by the biome.
 pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxel> {

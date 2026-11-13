@@ -284,6 +284,15 @@ impl Store {
         self.report(write_whole(&self.dir, &path, text))
     }
 
+    /// What has been set down in a world, as it was saved: nothing if it never was.
+    pub fn placed(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("placed-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_placed(&self, seed: u32, text: &str) -> bool {
+        self.report(write_whole(&self.dir, format!("placed-{seed}.txt").as_ref(), text))
+    }
+
     fn pack_path(&self, seed: u32) -> PathBuf {
         PathBuf::from(format!("pack-{seed}.txt"))
     }

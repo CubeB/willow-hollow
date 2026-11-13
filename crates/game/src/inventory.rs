@@ -5,7 +5,9 @@
 //! and when, so a picked flower stays gone, and grows back a year or two on. The window
 //! shows the slots as a grid of small pictures drawn in squares, as everything here is:
 //! drag one onto another to move, join or swap them, click one to read about it or let
-//! it go. A pack is kept with its world's save.
+//! it go. Seven more slots are the hotbar, always in view along the foot of the screen:
+//! one of them is held, and what is in it is what is set down, pitched or laid when the
+//! player uses their hands. A pack is kept with its world's save.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -15,6 +17,10 @@ use worldgen::{features::plants::Flower, materials as mat};
 /// Slots in a pack, and how many across the window shows them.
 pub const SLOTS: usize = 24;
 pub const ACROSS: usize = 6;
+/// Slots in the hotbar. They come after the pack's own, so slot `SLOTS + k` is the
+/// hotbar's `k`th.
+pub const HOTBAR: usize = 7;
+const ALL: usize = SLOTS + HOTBAR;
 /// Most of one kind a slot holds.
 pub const STACK: u32 = 99;
 /// How many gathered spots are remembered; the oldest are forgotten first (and so grow
@@ -30,16 +36,22 @@ pub enum Shape {
     Berries,
     Mushroom,
     Reed,
+    Stick,
+    Tent,
+    Fire,
 }
 
 impl Shape {
-    const ALL: [(Shape, &'static str); 6] = [
+    const ALL: [(Shape, &'static str); 9] = [
         (Shape::Flower, "flower"),
         (Shape::Spike, "spike"),
         (Shape::Sprig, "sprig"),
         (Shape::Berries, "berries"),
         (Shape::Mushroom, "mushroom"),
         (Shape::Reed, "reed"),
+        (Shape::Stick, "stick"),
+        (Shape::Tent, "tent"),
+        (Shape::Fire, "fire"),
     ];
 
     pub(crate) fn word(self) -> &'static str {
@@ -61,6 +73,9 @@ impl Shape {
             Shape::Berries => ["........", "...h....", "..hhg...", "....g...", "..lc.c..", ".ccdccd.", "..d..d..", "........"],
             Shape::Mushroom => ["........", "..cccc..", ".clccdc.", ".cccccd.", "...ww...", "...ww...", "...ww...", "..hwwh.."],
             Shape::Reed => ["...b....", "...b....", "...c....", "...c....", "...d..h.", "...g.h..", "..hgh...", "...g...."],
+            Shape::Stick => ["........", "......l.", ".d...c..", "..c.c...", "...cd...", "..c..d..", ".c....d.", "........"],
+            Shape::Tent => ["........", "...bb...", "...lc...", "..lccd..", "..lbbd..", ".lcbbdd.", ".lcbbdd.", "........"],
+            Shape::Fire => ["........", "...y....", "..yy.y..", "..yyyy..", ".cyyyyc.", ".dccccd.", "wdwddwdw", "........"],
         }
     }
 }
@@ -131,6 +146,33 @@ pub fn of_voxel(v: Voxel, materials: &voxel::Materials) -> Option<Item> {
     Some(Item::new(id, name, about, materials.get(v).color, shape))
 }
 
+/// Dry wood for a fire, gathered from under the trees.
+pub fn sticks() -> Item {
+    Item::new("sticks", "Sticks", "Dry wood from under a tree. Three will lay a fire.", [150, 116, 80], Shape::Stick)
+}
+
+/// The tent every wanderer sets out with.
+pub fn tent() -> Item {
+    Item::new("tent", "Tent", "Canvas, two poles and a bedroll: somewhere to wait for morning.", [204, 182, 136], Shape::Tent)
+}
+
+/// A fire laid in a ring of stones. It is never carried: it is what three sticks become.
+pub fn campfire() -> Item {
+    Item::new("campfire", "Campfire", "A ring of stones, and a fire laid in it.", [236, 132, 52], Shape::Fire)
+}
+
+/// How many sticks lay a fire.
+pub const FIRE_STICKS: u32 = 3;
+
+/// What using the thing called `id` does, in a few words, for the line under its name.
+pub fn use_of(id: &str) -> &'static str {
+    match id {
+        "tent" => "right click to pitch it",
+        "sticks" => "right click to lay a fire",
+        _ => "right click to set it down",
+    }
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Stack {
     pub item: Item,
@@ -146,6 +188,10 @@ pub struct Pack {
     /// How long this world has been walked, in its own years: the clock that what was
     /// gathered grows back by.
     years: f64,
+    /// Which slot of the hotbar is held, counting from 0.
+    held: usize,
+    /// Whether the tent a wanderer sets out with has been handed over.
+    kit: bool,
     /// Changed since it was last saved.
     pub unsaved: bool,
 }
@@ -158,11 +204,56 @@ impl Default for Pack {
 
 impl Pack {
     pub fn new() -> Self {
-        Self { slots: vec![None; SLOTS], gathered: HashMap::new(), order: VecDeque::new(), years: 0.0, unsaved: false }
+        Self { slots: vec![None; ALL], gathered: HashMap::new(), order: VecDeque::new(), years: 0.0, held: 0, kit: false, unsaved: false }
     }
 
+    /// Every slot: the pack's own, then the hotbar's.
     pub fn slots(&self) -> &[Option<Stack>] {
         &self.slots
+    }
+
+    /// The hotbar's slots.
+    pub fn hotbar(&self) -> &[Option<Stack>] {
+        &self.slots[SLOTS..]
+    }
+
+    /// Which slot of the hotbar is held, counting from 0.
+    pub fn held(&self) -> usize {
+        self.held
+    }
+
+    /// The slot, among all of them, that is held.
+    pub fn held_slot(&self) -> usize {
+        SLOTS + self.held
+    }
+
+    /// What is held, if the held slot is not empty.
+    pub fn in_hand(&self) -> Option<&Stack> {
+        self.slots[self.held_slot()].as_ref()
+    }
+
+    /// Holds slot `k` of the hotbar. Whether that is a change.
+    pub fn hold(&mut self, k: usize) -> bool {
+        let k = k.min(HOTBAR - 1);
+        let changed = k != self.held;
+        self.held = k;
+        self.unsaved |= changed;
+        changed
+    }
+
+    /// Holds the slot `by` along from the one held, round the end and back.
+    pub fn cycle(&mut self, by: i32) -> bool {
+        self.hold((self.held as i32 + by).rem_euclid(HOTBAR as i32) as usize)
+    }
+
+    /// Hands over the tent a wanderer sets out with, once in the life of a pack: to a
+    /// new pack, or to one from before there were tents.
+    pub fn give_kit(&mut self) {
+        if !self.kit {
+            self.kit = true;
+            self.unsaved = true;
+            self.add(&tent());
+        }
     }
 
     /// How many of the thing called `id` are carried.
@@ -171,15 +262,44 @@ impl Pack {
     }
 
     /// Puts one of `item` in: on a stack of its kind with room, else in the first empty
-    /// slot. False if the pack is full.
+    /// slot of the hotbar, else of the pack. False if there is no room anywhere.
     pub fn add(&mut self, item: &Item) -> bool {
-        let stack = self.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item.id == item.id && s.count < STACK));
-        let Some(at) = stack.or_else(|| self.slots.iter().position(Option::is_none)) else { return false };
+        // The hotbar is looked over first, then the pack.
+        let order = || (SLOTS..ALL).chain(0..SLOTS);
+        let stack = order().find(|&i| self.slots[i].as_ref().is_some_and(|s| s.item.id == item.id && s.count < STACK));
+        let Some(at) = stack.or_else(|| order().find(|&i| self.slots[i].is_none())) else { return false };
         match &mut self.slots[at] {
             Some(s) => s.count += 1,
             empty => *empty = Some(Stack { item: item.clone(), count: 1 }),
         }
         self.unsaved = true;
+        true
+    }
+
+    /// Puts `n` of `item` in, as far as there is room. How many would not go.
+    pub fn add_many(&mut self, item: &Item, n: u32) -> u32 {
+        (0..n).filter(|_| !self.add(item)).count() as u32
+    }
+
+    /// Takes `n` of the thing called `id` out, from wherever it is carried, the held
+    /// slot first. False, and nothing taken, if there are not so many.
+    pub fn spend(&mut self, id: &str, n: u32) -> bool {
+        if self.count(id) < n {
+            return false;
+        }
+        let mut left = n;
+        for at in std::iter::once(self.held_slot()).chain(SLOTS..ALL).chain(0..SLOTS) {
+            if let Some(s) = &self.slots[at]
+                && s.item.id == id
+            {
+                let take = s.count.min(left);
+                self.drop_from(at, take);
+                left -= take;
+            }
+            if left == 0 {
+                break;
+            }
+        }
         true
     }
 
@@ -198,7 +318,7 @@ impl Pack {
     /// Moves what is in slot `from` to slot `to`: onto a stack of the same kind as far
     /// as it has room, else changing places with what is there.
     pub fn shift(&mut self, from: usize, to: usize) {
-        if from == to || from >= SLOTS || to >= SLOTS || self.slots[from].is_none() {
+        if from == to || from >= ALL || to >= ALL || self.slots[from].is_none() {
             return;
         }
         let same = matches!((&self.slots[from], &self.slots[to]), (Some(a), Some(b)) if a.item.id == b.item.id);
@@ -269,13 +389,20 @@ impl Pack {
     /// The pack as a save holds it: a line to a slot, each telling all there is to know
     /// of what is in it, so that a thing from a newer or older game still reads.
     pub fn to_text(&self) -> String {
-        let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
         let mut out = String::new();
         for (i, s) in self.slots.iter().enumerate() {
             if let Some(s) = s {
-                let [r, g, b] = s.item.color;
-                out += &format!("slot {i} = {}|{}|{r},{g},{b}|{}|{}|{}\n", s.count, s.item.shape.word(), clean(&s.item.id), clean(&s.item.name), clean(&s.item.about));
+                // The hotbar's slots have their own word, so a pack from before there
+                // was a hotbar reads as it always did.
+                let slot = if i < SLOTS { format!("slot {i}") } else { format!("hot {}", i - SLOTS) };
+                out += &format!("{slot} = {}\n", stack_text(s));
             }
+        }
+        if self.held != 0 {
+            out += &format!("held = {}\n", self.held);
+        }
+        if self.kit {
+            out += "kit = 1\n";
         }
         if !self.order.is_empty() {
             out += &format!("years = {}\n", self.years);
@@ -293,7 +420,11 @@ impl Pack {
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             let (key, value) = (key.trim(), value.trim());
-            if key == "years" {
+            if key == "held" {
+                pack.held = value.parse::<usize>().ok().filter(|k| *k < HOTBAR).unwrap_or(0);
+            } else if key == "kit" {
+                pack.kit = value == "1";
+            } else if key == "years" {
                 pack.years = value.parse::<f64>().ok().filter(|y| y.is_finite() && *y >= 0.0).unwrap_or(0.0);
             } else if key == "gathered" {
                 // Each spot with when it was gathered; an older save has only the spot.
@@ -306,23 +437,37 @@ impl Pack {
                         pack.mark_at(x, z, when);
                     }
                 }
-            } else if let Some(at) = key.strip_prefix("slot ").and_then(|n| n.trim().parse::<usize>().ok()) {
-                let parts: Vec<&str> = value.splitn(6, '|').collect();
-                let stack = (|| {
-                    let [count, shape, color, id, name, about] = parts[..] else { return None };
-                    let rgb: Vec<u8> = color.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-                    let count = count.trim().parse::<u32>().ok().filter(|c| *c > 0)?.min(STACK);
-                    let item = Item::new(id.trim(), name.trim(), about.trim(), <[u8; 3]>::try_from(rgb).ok()?, Shape::from_word(shape.trim())?);
-                    (!item.id.is_empty()).then_some(Stack { item, count })
-                })();
-                if at < SLOTS && stack.is_some() {
-                    pack.slots[at] = stack;
-                }
+            } else if let Some(at) = key
+                .strip_prefix("slot ")
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .filter(|at| *at < SLOTS)
+                .or_else(|| key.strip_prefix("hot ").and_then(|n| n.trim().parse::<usize>().ok()).filter(|k| *k < HOTBAR).map(|k| SLOTS + k))
+                && let Some(stack) = stack_from_text(value)
+            {
+                pack.slots[at] = Some(stack);
             }
         }
         pack.unsaved = false;
         pack
     }
+}
+
+/// A stack as a save holds it: how many, then all there is to know of the thing, so
+/// that one from a newer or older game still reads.
+pub fn stack_text(s: &Stack) -> String {
+    let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
+    let [r, g, b] = s.item.color;
+    format!("{}|{}|{r},{g},{b}|{}|{}|{}", s.count, s.item.shape.word(), clean(&s.item.id), clean(&s.item.name), clean(&s.item.about))
+}
+
+/// Reads back what [`stack_text`] wrote, or nothing if it does not make sense.
+pub fn stack_from_text(text: &str) -> Option<Stack> {
+    let parts: Vec<&str> = text.splitn(6, '|').collect();
+    let [count, shape, color, id, name, about] = parts[..] else { return None };
+    let rgb: Vec<u8> = color.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+    let count = count.trim().parse::<u32>().ok().filter(|c| *c > 0)?.min(STACK);
+    let item = Item::new(id.trim(), name.trim(), about.trim(), <[u8; 3]>::try_from(rgb).ok()?, Shape::from_word(shape.trim())?);
+    (!item.id.is_empty()).then_some(Stack { item, count })
 }
 
 /// What the pack's window remembers from frame to frame.
@@ -375,58 +520,91 @@ pub(crate) fn picture(painter: &egui::Painter, rect: egui::Rect, item: &Item, fa
     }
 }
 
-/// Shows the pack's window, and does to `pack` what is done in it.
-pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
+/// Draws slot `at` of `pack` in the pack's window, `side` across, and takes what the
+/// mouse does to it. Its place goes in `rects`, for a drag to land on.
+fn slot(ui: &mut egui::Ui, pack: &Pack, view: &mut View, at: usize, side: f32, rects: &mut Vec<(usize, egui::Rect)>) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
+    rects.push((at, rect));
+    let painter = ui.painter();
+    let stack = pack.slots()[at].as_ref();
+    let lit = response.hovered() || view.dragging.is_some_and(|_| ui.rect_contains_pointer(rect));
+    painter.rect_filled(rect, 7.0, if lit { SLOT_LIT } else { SLOT });
+    let edge = if view.selected == Some(at) && stack.is_some() { egui::Stroke::new(2.0, PICKED) } else { egui::Stroke::new(1.0, EDGE) };
+    painter.rect_stroke(rect, 7.0, edge, egui::StrokeKind::Inside);
+    if at >= SLOTS {
+        // A hotbar slot shows the key that holds it, and the held one a bar under it.
+        painter.text(rect.left_top() + egui::vec2(5.0, 3.0), egui::Align2::LEFT_TOP, at - SLOTS + 1, egui::FontId::proportional(11.0), FAINT);
+        if at == pack.held_slot() {
+            let bar = egui::Rect::from_min_max(rect.left_bottom() + egui::vec2(8.0, 3.0), rect.right_bottom() + egui::vec2(-8.0, 6.0));
+            painter.rect_filled(bar, 1.5, PICKED);
+        }
+    }
+    if let Some(s) = stack {
+        // What is being dragged is drawn under the cursor, and faintly at home.
+        let fade = if view.dragging == Some(at) { 0.3 } else { 1.0 };
+        picture(painter, rect.shrink(9.0), &s.item, fade);
+        count(painter, rect, s.count, 14.0);
+        if response.drag_started() {
+            view.dragging = Some(at);
+        }
+        if response.clicked() {
+            view.selected = Some(at);
+        }
+        if view.dragging.is_none() {
+            response.on_hover_text(&s.item.name);
+        }
+    } else if response.clicked() {
+        view.selected = None;
+    }
+}
+
+/// How many are in a slot, in its corner, if more than one.
+fn count(painter: &egui::Painter, rect: egui::Rect, count: u32, size: f32) {
+    if count > 1 {
+        let corner = rect.right_bottom() - egui::vec2(6.0, 4.0);
+        painter.text(corner + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_BOTTOM, count, egui::FontId::proportional(size), egui::Color32::from_black_alpha(200));
+        painter.text(corner, egui::Align2::RIGHT_BOTTOM, count, egui::FontId::proportional(size), INK);
+    }
+}
+
+/// Shows the pack's window, and does to `pack` what is done in it. What was let go of
+/// in it comes back, for the caller to set down in the world.
+pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) -> Vec<Stack> {
     let side = 58.0;
     let gap = 7.0;
-    let mut rects = Vec::with_capacity(SLOTS);
+    let mut rects = Vec::with_capacity(ALL);
+    let mut let_go = Vec::new();
     egui::Area::new(egui::Id::unique("pack")).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).fade_in(false).show(ctx, |ui| {
         egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, EDGE)).corner_radius(10).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
-            let width = ACROSS as f32 * side + (ACROSS - 1) as f32 * gap;
+            let width = HOTBAR as f32 * side + (HOTBAR - 1) as f32 * gap;
             ui.set_width(width);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Pack").size(22.0).color(INK));
                 let carried: u32 = pack.slots().iter().flatten().map(|s| s.count).sum();
                 let kinds = pack.slots().iter().flatten().count();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(format!("{carried} things in {kinds} of {SLOTS} slots")).size(13.0).color(FAINT));
+                    ui.label(egui::RichText::new(format!("{carried} things in {kinds} of {ALL} slots")).size(13.0).color(FAINT));
                 });
             });
             ui.add_space(10.0);
-            egui::Grid::new("pack slots").spacing([gap, gap]).show(ui, |ui| {
-                for at in 0..SLOTS {
-                    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
-                    rects.push(rect);
-                    let painter = ui.painter();
-                    let stack = pack.slots()[at].as_ref();
-                    let lit = response.hovered() || view.dragging.is_some_and(|_| ui.rect_contains_pointer(rect));
-                    painter.rect_filled(rect, 7.0, if lit { SLOT_LIT } else { SLOT });
-                    let edge = if view.selected == Some(at) && stack.is_some() { egui::Stroke::new(2.0, PICKED) } else { egui::Stroke::new(1.0, EDGE) };
-                    painter.rect_stroke(rect, 7.0, edge, egui::StrokeKind::Inside);
-                    if let Some(s) = stack {
-                        // What is being dragged is drawn under the cursor, and faintly at home.
-                        let fade = if view.dragging == Some(at) { 0.3 } else { 1.0 };
-                        picture(painter, rect.shrink(9.0), &s.item, fade);
-                        if s.count > 1 {
-                            let corner = rect.right_bottom() - egui::vec2(6.0, 4.0);
-                            painter.text(corner + egui::vec2(1.0, 1.0), egui::Align2::RIGHT_BOTTOM, s.count, egui::FontId::proportional(14.0), egui::Color32::from_black_alpha(200));
-                            painter.text(corner, egui::Align2::RIGHT_BOTTOM, s.count, egui::FontId::proportional(14.0), INK);
+            // The pack's rows sit in the middle, over the hotbar's one wider row.
+            ui.horizontal(|ui| {
+                ui.add_space((HOTBAR - ACROSS) as f32 * (side + gap) / 2.0);
+                egui::Grid::new("pack slots").spacing([gap, gap]).show(ui, |ui| {
+                    for at in 0..SLOTS {
+                        slot(ui, pack, view, at, side, &mut rects);
+                        if at % ACROSS == ACROSS - 1 {
+                            ui.end_row();
                         }
-                        if response.drag_started() {
-                            view.dragging = Some(at);
-                        }
-                        if response.clicked() {
-                            view.selected = Some(at);
-                        }
-                        if view.dragging.is_none() {
-                            response.on_hover_text(&s.item.name);
-                        }
-                    } else if response.clicked() {
-                        view.selected = None;
                     }
-                    if at % ACROSS == ACROSS - 1 {
-                        ui.end_row();
-                    }
+                });
+            });
+            ui.add_space(12.0);
+            ui.label(egui::RichText::new("Hotbar").size(13.0).color(FAINT));
+            ui.add_space(2.0);
+            egui::Grid::new("hotbar slots").spacing([gap, gap]).show(ui, |ui| {
+                for at in SLOTS..ALL {
+                    slot(ui, pack, view, at, side, &mut rects);
                 }
             });
             ui.add_space(12.0);
@@ -439,11 +617,13 @@ pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
                         picture(ui.painter(), rect, &s.item, 1.0);
                         ui.label(egui::RichText::new(format!("{}  \u{d7} {}", s.item.name, s.count)).size(16.0).color(INK));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Let all go").clicked() {
+                            if ui.button("Set all down").clicked() {
                                 pack.drop_from(at, u32::MAX);
+                                let_go.push(s.clone());
                             }
-                            if ui.button("Let one go").clicked() {
+                            if ui.button("Set one down").clicked() {
                                 pack.drop_from(at, 1);
+                                let_go.push(Stack { item: s.item.clone(), count: 1 });
                             }
                         });
                     });
@@ -453,7 +633,7 @@ pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
                     let hint = if pack.slots().iter().all(Option::is_none) {
                         "Nothing yet. Press E by a flower or a mushroom to gather it."
                     } else {
-                        "Click a thing to read about it. Drag it to another slot to move it."
+                        "Click a thing to read about it. Drag it to another slot, or down to the hotbar."
                     };
                     ui.label(egui::RichText::new(hint).size(13.0).color(FAINT));
                 }
@@ -471,12 +651,45 @@ pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
             picture(&painter, egui::Rect::from_center_size(p, egui::vec2(side - 18.0, side - 18.0)), &s.item, 1.0);
         }
         if ctx.input(|i| i.pointer.any_released() || !i.pointer.any_down()) {
-            if let Some(to) = pointer.and_then(|p| rects.iter().position(|r| r.contains(p))) {
+            if let Some(&(to, _)) = pointer.and_then(|p| rects.iter().find(|r| r.1.contains(p))) {
                 pack.shift(from, to);
                 view.selected = Some(to);
             }
             view.dragging = None;
         }
+    }
+    let_go
+}
+
+/// Draws the hotbar along the foot of the screen: its seven slots, the held one picked
+/// out, and over it `word` (what has just come to hand, and how much of it to show, 0
+/// to 1) if there is one.
+pub fn hotbar(ctx: &egui::Context, pack: &Pack, word: Option<(&str, f32)>) {
+    let (side, gap, pad) = (46.0, 5.0, 6.0);
+    let width = HOTBAR as f32 * side + (HOTBAR - 1) as f32 * gap + 2.0 * pad;
+    let screen = ctx.content_rect();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("hotbar")));
+    let corner = egui::pos2((screen.center().x - width / 2.0).round(), screen.bottom() - side - 2.0 * pad - 10.0);
+    let panel = egui::Rect::from_min_size(corner, egui::vec2(width, side + 2.0 * pad));
+    painter.rect_filled(panel, 9.0, egui::Color32::from_rgba_premultiplied(18, 22, 28, 190));
+    painter.rect_stroke(panel, 9.0, egui::Stroke::new(1.0, EDGE.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+    for (k, stack) in pack.hotbar().iter().enumerate() {
+        let rect = egui::Rect::from_min_size(corner + egui::vec2(pad + k as f32 * (side + gap), pad), egui::vec2(side, side));
+        let held = k == pack.held();
+        painter.rect_filled(rect, 6.0, if held { SLOT_LIT } else { SLOT.gamma_multiply(0.85) });
+        let edge = if held { egui::Stroke::new(2.0, PICKED) } else { egui::Stroke::new(1.0, EDGE.gamma_multiply(0.8)) };
+        painter.rect_stroke(rect, 6.0, edge, egui::StrokeKind::Inside);
+        painter.text(rect.left_top() + egui::vec2(4.0, 2.0), egui::Align2::LEFT_TOP, k + 1, egui::FontId::proportional(10.0), if held { PICKED } else { FAINT });
+        if let Some(s) = stack {
+            picture(&painter, rect.shrink(7.0), &s.item, 1.0);
+            count(&painter, rect, s.count, 12.0);
+        }
+    }
+    if let Some((text, shown)) = word {
+        let at = egui::pos2(screen.center().x, panel.top() - 8.0);
+        let font = egui::FontId::proportional(16.0);
+        painter.text(at + egui::vec2(1.0, 1.0), egui::Align2::CENTER_BOTTOM, text, font.clone(), egui::Color32::from_black_alpha(190).gamma_multiply(shown));
+        painter.text(at, egui::Align2::CENTER_BOTTOM, text, font, INK.gamma_multiply(shown));
     }
 }
 
@@ -496,13 +709,16 @@ mod tests {
             assert!(pack.add(&thing("poppy")));
         }
         assert!(pack.add(&thing("heather")));
-        let held: Vec<(String, u32)> = pack.slots().iter().flatten().map(|s| (s.item.id.clone(), s.count)).collect();
+        // The hotbar fills first.
+        let held: Vec<(String, u32)> = pack.hotbar().iter().flatten().map(|s| (s.item.id.clone(), s.count)).collect();
         assert_eq!(held, [("poppy".into(), STACK), ("poppy".into(), 3), ("heather".into(), 1)]);
+        assert!(pack.slots()[..SLOTS].iter().all(Option::is_none));
         assert_eq!(pack.count("poppy"), STACK + 3);
         // Fill every slot with something different: then only what stacks goes in.
-        for k in 0..SLOTS {
+        for k in 0..ALL {
             pack.add(&thing(&format!("kind {k}")));
         }
+        assert_eq!(pack.slots()[0].as_ref().map(|s| s.item.id.as_str()), Some("kind 4"), "the pack fills after the hotbar");
         assert!(pack.slots().iter().all(Option::is_some));
         assert!(!pack.add(&thing("one more kind")));
         assert!(pack.add(&thing("heather")));
@@ -515,6 +731,11 @@ mod tests {
             pack.add(&thing("poppy"));
         }
         pack.add(&thing("heather"));
+        // Out of the hotbar, where they went, and into the pack's first slots.
+        for k in 0..3 {
+            pack.shift(SLOTS + k, k);
+        }
+        assert!(pack.hotbar().iter().all(Option::is_none));
         // To an empty slot.
         pack.shift(2, 10);
         assert!(pack.slots()[2].is_none() && pack.slots()[10].as_ref().is_some_and(|s| s.item.id == "heather"));
@@ -540,7 +761,8 @@ mod tests {
         for _ in 0..7 {
             pack.add(&thing("poppy"));
         }
-        pack.shift(1, 17);
+        pack.shift(SLOTS, 0);
+        pack.shift(SLOTS + 1, 17);
         for k in 0..150 {
             pack.mark(k * 3 - 100, -k);
         }
@@ -553,8 +775,45 @@ mod tests {
         assert_eq!((reed.item.shape, reed.item.color, reed.item.about.as_str()), (Shape::Reed, [112, 84, 54], "A velvet head   from the water's edge."));
         assert!(back.gathered(-100, 0) && back.gathered(347, -149) && !back.gathered(5, 5));
         assert_eq!(back.to_text(), text.replace(" | ", "   "));
+        // What is in the hotbar, which slot of it is held, and the tent, come back too.
+        let mut pack = Pack::new();
+        pack.give_kit();
+        pack.give_kit();
+        pack.add(&thing("poppy"));
+        pack.shift(SLOTS + 1, SLOTS + 5);
+        pack.hold(5);
+        let back = Pack::from_text(&pack.to_text());
+        assert_eq!(back.to_text(), pack.to_text());
+        assert_eq!((back.count("tent"), back.held(), back.in_hand().map(|s| s.item.id.as_str())), (1, 5, Some("poppy")));
+        assert_eq!(back.hotbar()[0].as_ref().map(|s| s.item.clone()), Some(tent()));
+        // A pack from before there was a hotbar reads as it did, and is given its tent.
+        let mut old = Pack::from_text("slot 3 = 4|flower|1,2,3|x|X|about\nslot 30 = 4|flower|1,2,3|y|Y|about\n");
+        assert_eq!((old.count("x"), old.count("y"), old.count("tent")), (4, 0, 0));
+        old.give_kit();
+        assert_eq!(old.hotbar()[0].as_ref().map(|s| s.item.id.as_str()), Some("tent"));
         // A save from before spots had dates still reads.
         assert!(Pack::from_text("gathered = 4,5;6,-7\n").gathered(6, -7));
+    }
+
+    #[test]
+    fn the_held_slot_goes_round_and_things_are_spent_from_wherever_they_are() {
+        let mut pack = Pack::new();
+        assert!(!pack.hold(0) && pack.hold(6) && pack.cycle(1));
+        assert_eq!(pack.held(), 0);
+        assert!(pack.cycle(-1));
+        assert_eq!(pack.held(), 6);
+        for _ in 0..5 {
+            pack.add(&sticks());
+        }
+        pack.shift(SLOTS, 3);
+        pack.add(&sticks());
+        assert!(!pack.spend("sticks", 7));
+        assert_eq!(pack.count("sticks"), 6);
+        assert!(pack.spend("sticks", FIRE_STICKS));
+        assert_eq!(pack.count("sticks"), 3);
+        assert!(pack.spend("sticks", 3));
+        assert!(pack.slots().iter().all(Option::is_none));
+        assert_eq!(pack.add_many(&sticks(), 4), 0);
     }
 
     #[test]

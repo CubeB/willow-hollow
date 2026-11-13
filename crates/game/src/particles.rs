@@ -80,6 +80,10 @@ enum PKind {
     Bubble,
     /// A speck of a ring spreading out across a spring's surface.
     Ripple,
+    /// Thrown up by a fire, bright for a moment.
+    Spark,
+    /// Rising from a fire and thinning as it goes.
+    Smoke,
 }
 
 /// What a falling leaf looks like, by the tree it came from.
@@ -205,6 +209,8 @@ pub struct Surroundings<'a> {
     pub leaves: &'a [LeafSite],
     /// Flowers in bloom near the player: the voxel each stands in, and its colour.
     pub flowers: &'a [(DVec3, [f32; 3])],
+    /// Fires burning near the player: the heart of each.
+    pub fires: &'a [DVec3],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
@@ -471,6 +477,46 @@ impl Particles {
             }
         }
 
+        // Fires: sparks that fly up and wink out, and smoke that leans with the wind.
+        for &fire in s.fires {
+            if (fire - s.camera).length() > (90.0 * VOXELS_PER_METRE) as f64 {
+                continue;
+            }
+            if self.unit() < dt * 5.0 {
+                let particle = Particle {
+                    kind: PKind::Spark,
+                    pos: fire + (Vec3::new(self.range(-0.12, 0.12), self.range(0.0, 0.2), self.range(-0.12, 0.12)) * U).as_dvec3(),
+                    vel: Vec3::new(self.range(-0.35, 0.35), self.range(1.2, 2.6), self.range(-0.35, 0.35)),
+                    age: 0.0,
+                    life: self.range(0.6, 1.5),
+                    size: Vec3::splat(self.range(0.04, 0.07)),
+                    color: [1.0, self.range(0.45, 0.7), 0.12],
+                    phase: self.range(0.0, 100.0),
+                    settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
+                };
+                self.spawn(particle);
+            }
+            if self.unit() < dt * 7.0 {
+                let shade = self.range(0.16, 0.3);
+                let particle = Particle {
+                    kind: PKind::Smoke,
+                    pos: fire + (Vec3::new(self.range(-0.1, 0.1), self.range(0.3, 0.5), self.range(-0.1, 0.1)) * U).as_dvec3(),
+                    vel: Vec3::new(self.range(-0.1, 0.1), self.range(0.9, 1.4), self.range(-0.1, 0.1)),
+                    age: 0.0,
+                    life: self.range(4.0, 7.0),
+                    size: Vec3::splat(self.range(0.12, 0.2)),
+                    color: [shade, shade, shade * 1.05],
+                    phase: self.range(0.0, std::f32::consts::TAU),
+                    settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
+                };
+                self.spawn(particle);
+            }
+        }
+
         // Fireflies in warm, damp country at dusk and through the night.
         let firefly_country = matches!(
             s.biome,
@@ -617,6 +663,19 @@ impl Particles {
                 PKind::Spray | PKind::Droplet | PKind::Splash => {
                     p.vel.y -= 9.0 * dt;
                     p.pos += (p.vel * U * dt).as_dvec3();
+                }
+                PKind::Spark => {
+                    // Light enough to be tossed about by the fire's own draught.
+                    let toss = Vec3::new((t * 7.0 + p.phase).sin(), 0.0, (t * 6.0 + p.phase * 1.7).cos());
+                    p.vel += (wind * 0.5 + toss * 1.5 - p.vel * 0.8) * dt;
+                    p.pos += (p.vel * U * dt).as_dvec3();
+                }
+                PKind::Smoke => {
+                    // It rises fast off the fire, slows, and goes the way the wind does.
+                    let curl = Vec3::new((p.age * 1.3 + p.phase).sin(), 0.0, (p.age * 1.1 + p.phase * 2.0).cos()) * 0.25;
+                    p.vel += (Vec3::new(wind.x * 0.55, 0.55, wind.z * 0.55) + curl - p.vel) * (0.6 * dt);
+                    p.pos += (p.vel * U * dt).as_dvec3();
+                    p.size += Vec3::splat(0.11 * dt);
                 }
                 PKind::Mist => {
                     p.vel += (wind * 0.3 - p.vel * 0.5) * dt;
@@ -839,6 +898,16 @@ impl Particles {
             let mut color = p.color;
             match p.kind {
                 PKind::Mist => alpha *= 0.16,
+                // Smoke thins all the way up; a spark burns out.
+                PKind::Smoke => {
+                    alpha = fade_in * 0.3 * (1.0 - p.age / p.life).powf(1.5);
+                    // Seen by the day's light, and low down by the fire's own.
+                    glow = 0.06 + 0.9 * s.sun_elevation.clamp(0.0, 1.0) + 0.5 * (1.0 - p.age / 1.6).max(0.0);
+                }
+                PKind::Spark => {
+                    glow = 5.5 * (1.0 - p.age / p.life).sqrt();
+                    alpha = 1.0;
+                }
                 PKind::Spray | PKind::Droplet => alpha *= 0.75,
                 PKind::Bubble => alpha *= 0.6,
                 // A ripple fades as it spreads.
@@ -1271,6 +1340,7 @@ mod leaf_tests {
             surf: &[],
             leaves: &[],
             flowers: &[],
+            fires: &[],
             player_entered_water: None,
             leaf_fall: 0.0,
             date: 0.62,

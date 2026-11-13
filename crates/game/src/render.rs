@@ -256,15 +256,15 @@ struct CascadeView {
     fwd: Vec3,
 }
 
-/// The four lantern voxels nearest the camera, relative to it.
-fn nearest_lamps(lamps: &[DVec3], camera: DVec3) -> [[f32; 4]; 4] {
+/// The four lanterns and fires nearest the camera, relative to it, each with how
+/// brightly it burns (1 for a lantern).
+fn nearest_lamps(lamps: &[(DVec3, f32)], camera: DVec3) -> [[f32; 4]; 4] {
     let mut best = [([0.0f32; 4], f64::MAX); 4];
-    for &p in lamps {
-        // The middle of the voxel.
-        let d = p + DVec3::splat(0.5) - camera;
+    for &(p, bright) in lamps {
+        let d = p - camera;
         let d2 = d.length_squared();
         if d2 < best[3].1 {
-            best[3] = ([d.x as f32, d.y as f32, d.z as f32, 1.0], d2);
+            best[3] = ([d.x as f32, d.y as f32, d.z as f32, bright], d2);
             best.sort_by(|a, b| a.1.total_cmp(&b.1));
         }
     }
@@ -343,7 +343,8 @@ pub struct Scene<'a> {
     /// Snow, ice and wetness on the ground, here and in each biome.
     pub ground: crate::season::Places,
     /// Lit lantern voxels near the camera (world voxels), which light the ground around them.
-    pub lamps: &'a [DVec3],
+    /// Lanterns and fires: where each is, and how brightly it burns (1 for a lantern).
+    pub lamps: &'a [(DVec3, f32)],
     /// Whether to draw light shafts (settings::Settings::shafts).
     pub shafts: bool,
 }
@@ -1680,7 +1681,9 @@ impl Renderer {
             season: [env.date, scene.ground.here.snow, scene.ground.here.frozen, scene.ground.here.snowline],
             weather: [scene.ground.here.wet, scene.ground.here.highland, cloud_at.x, cloud_at.y],
             sky_glow: v4(env.sky_glow, env.glow),
-            sun_pos: v4(env.sun_pos, 0.0),
+            // w: how far the stars have wheeled round, radians: once a day, and once
+            // more over the year, so each season has its own evening sky.
+            sun_pos: v4(env.sun_pos, (env.time / 24.0 + env.date) * std::f32::consts::TAU),
             air: [env.haze, env.haze_height, shafts, env.haziness()],
             snow: std::array::from_fn(|k| {
                 let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
@@ -2225,7 +2228,7 @@ pub fn screenshot(
     props: &[ParticleInstance],
     wind: Vec3,
     ground: crate::season::Places,
-    lamps: &[DVec3],
+    lamps: &[(DVec3, f32)],
     // Drawn over each finished frame, as the map is in the game; with its text or not.
     hud: &mut dyn FnMut(&mut wgpu::CommandEncoder, &wgpu::TextureView, bool),
 ) -> anyhow::Result<()> {
