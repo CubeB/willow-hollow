@@ -177,7 +177,32 @@ impl MapGpu {
     }
 }
 
-/// The large map's model and the pipeline that draws it (shaders/relief.wgsl).
+/// What relief.wgsl is told each frame.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ReliefUniforms {
+    transform: [f32; 16],
+    grade: [f32; 4],
+    time: [f32; 4],
+}
+
+/// What the hour makes of the map's colours, and how far into the night it is, 0 to 1.
+/// The map's sun never moves, so that it reads the same at any hour; but by night it is
+/// cooler and a little darker, to sit with the dark behind it, and warmer at dusk and
+/// dawn. It is never so dark that it cannot be read.
+pub fn grade(hour: f32) -> [f32; 4] {
+    let smooth = |a: f32, b: f32, x: f32| {
+        let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let h = hour.rem_euclid(24.0);
+    let night = if h < 12.0 { 1.0 - smooth(4.5, 7.0, h) } else { smooth(18.0, 20.5, h) };
+    let turning = 4.0 * night * (1.0 - night);
+    let mix = |day: f32, dark: f32, warm: f32| (day + (dark - day) * night) * (1.0 + (warm - 1.0) * turning * 0.6);
+    [mix(1.0, 0.62, 1.06), mix(1.0, 0.72, 0.94), mix(1.0, 0.96, 0.84), night]
+}
+
+/// A map's model and the pipeline that draws it (shaders/relief.wgsl).
 pub struct ReliefGpu {
     pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
@@ -197,14 +222,14 @@ impl ReliefGpu {
             label: Some("map relief"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             }],
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("map relief"),
-            size: 64,
+            size: size_of::<ReliefUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -218,7 +243,7 @@ impl ReliefGpu {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
+        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Unorm8x4];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("map relief"),
             layout: Some(&pipeline_layout),
@@ -270,6 +295,8 @@ impl ReliefGpu {
 
     /// Draws the model over `target`, `size` pixels, through `transform`: over all of
     /// it, or within `within`, a rectangle of it given by its corner and size in pixels.
+    /// `hour` is the time of day, which colours it, and `time` the seconds gone by.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         gpu: &Gpu,
@@ -278,13 +305,16 @@ impl ReliefGpu {
         size: (u32, u32),
         transform: glam::Mat4,
         within: Option<[u32; 4]>,
+        hour: f32,
+        time: f32,
     ) {
         let Some((vertices, indices, count)) = &self.mesh else { return };
         if self.depth.as_ref().is_none_or(|d| d.0 != size) {
             self.depth = Some((size, crate::gfx::create_depth(&gpu.device, size.0, size.1)));
         }
         let depth = &self.depth.as_ref().expect("just made").1;
-        gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&transform.to_cols_array()));
+        let uniforms = ReliefUniforms { transform: transform.to_cols_array(), grade: grade(hour), time: [time, 0.0, 0.0, 0.0] };
+        gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("map relief"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

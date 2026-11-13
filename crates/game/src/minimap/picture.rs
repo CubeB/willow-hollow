@@ -33,8 +33,19 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The continent as `TEX` square RGBA (sRGB), north up: row 0 is its low-z edge.
+/// The continent as `TEX` square RGBA (sRGB), north up: row 0 is its low-z edge, with
+/// its hills shaded as on a printed relief map. For `--map FILE`.
 pub fn picture(world: &GameWorld, c: &Continent) -> Vec<u8> {
+    paint(world, c, true)
+}
+
+/// As [`picture`], with no shading: the colours of the land alone, for the map's model,
+/// which has its own light (see [`super::light`]).
+pub fn flat(world: &GameWorld, c: &Continent) -> Vec<u8> {
+    paint(world, c, false)
+}
+
+fn paint(world: &GameWorld, c: &Continent, shaded: bool) -> Vec<u8> {
     let n = TEX;
     let size = c.size;
     let land = farview::map_land(world, c);
@@ -78,7 +89,7 @@ pub fn picture(world: &GameWorld, c: &Continent) -> Vec<u8> {
             let (nx, ny, nz) = (-gx * 2.5, 1.0, -gz * 2.5);
             let len = (nx * nx + ny * ny + nz * nz).sqrt();
             let shade = ((nx * light.0 + ny * light.1 + nz * light.2) / len).clamp(0.0, 1.0);
-            rgb[t] = land[i].map(|v| v * (0.68 + 0.55 * shade));
+            rgb[t] = if shaded { land[i].map(|v| v * (0.68 + 0.55 * shade)) } else { land[i] };
         }
     }
 
