@@ -279,7 +279,8 @@ impl Tor {
         for &(c, r, depth) in &self.basins {
             let d = q.as_vec3() + Vec3::splat(0.5) - c;
             let across = (d.x * d.x + d.z * d.z).sqrt() / r;
-            if across < 1.0 && d.y > -depth * (1.0 - across * across).sqrt() - 0.5 {
+            // (Only the bowl and the air just over it: not whatever stands higher beside it.)
+            if across < 1.0 && d.y < 3.0 && d.y > -depth * (1.0 - across * across).sqrt() - 0.5 {
                 let floor = d.y < -depth * (1.0 - across * across).sqrt() + 0.6;
                 return if floor && d.y < 0.0 { Some(mat::WATER) } else { Some(voxel::AIR) };
             }
@@ -507,6 +508,15 @@ pub fn plan(seed: u32, c: &Continent, gx: i32, gz: i32) -> Tor {
     super::moorstones::lay_out(seed, c, gx, gz, tor)
 }
 
+/// The four ways across the ground.
+const SIDES: [(f32, f32); 4] = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
+/// How far each layer of a stack is bedded into the one below, voxels (see `pile`).
+const BEDDED: f32 = 0.75;
+/// How much of itself a block of a stack must rest on one below, voxels each way.
+const REST: f32 = 3.0;
+/// How far a logan stone is sunk into the slab it sits on, voxels.
+const LOGAN_SEAT: f32 = 2.0;
+
 /// Whether a column is open ground a tor or a stone can stand on.
 pub(crate) fn open(k: &Column) -> bool {
     matches!(k.cover, Cover::Land | Cover::Scree | Cover::Cliff) && k.water.is_none() && k.river > m(6.0)
@@ -599,18 +609,26 @@ fn pile(tor: &mut Tor, rng: &mut Rng, ground: &impl Fn(i32, i32) -> Column, cent
                 if layer > 0 && outer && f > 0.4 && rng.unit() < 0.22 * f {
                     continue;
                 }
-                // A block needs one under it.
-                if layer > 0 && !below.iter().any(|&(a0, a1, b0, b1)| uc > a0 - 1.0 && uc < a1 + 1.0 && vc > b0 - 1.0 && vc < b1 + 1.0) {
-                    continue;
-                }
                 // Open joints gape wider high up, where they have weathered longest.
                 let gap = rng.range(0.3, 0.6) + f * 0.5;
                 let (hu, hv) = ((u1 - u0) * 0.5 - gap, (v1 - v0) * 0.5 - gap);
                 if hu < 1.0 || hv < 1.0 {
                     continue;
                 }
+                // A block needs one under it, and to rest a good part of itself on it: the
+                // two overlap by a few voxels each way, not merely meet at a corner.
+                let rests = |&(a0, a1, b0, b1): &(f32, f32, f32, f32)| {
+                    let (over_u, over_v) = ((uc + hu).min(a1) - (uc - hu).max(a0), (vc + hv).min(b1) - (vc - hv).max(b0));
+                    over_u >= REST.min(2.0 * hu) && over_v >= REST.min(2.0 * hv)
+                };
+                if layer > 0 && !below.iter().any(rests) {
+                    continue;
+                }
                 let p = to_plan(uc, vc);
-                let ey = thick * 0.5 - rng.range(0.0, 0.25);
+                // Each layer is bedded a little into the one under it, so that for all the
+                // roughness of both there is rock between them: the joint between two
+                // layers shows as a groove round their rounded edges, never as daylight.
+                let ey = thick * 0.5 + BEDDED;
                 let block = Block::new(
                     Vec3::new(p.x, y + thick * 0.5, p.y),
                     Vec3::new(hu, ey, hv),
@@ -622,7 +640,7 @@ fn pile(tor: &mut Tor, rng: &mut Rng, ground: &impl Fn(i32, i32) -> Column, cent
                     Part::Stack,
                 );
                 tor.push(block);
-                this.push((u0, u1, v0, v1));
+                this.push((uc - hu, uc + hu, vc - hv, vc + hv));
             }
         }
         if this.is_empty() {
@@ -652,7 +670,8 @@ fn crown_stone(tor: &mut Tor, rng: &mut Rng, top: &[(f32, f32, f32, f32)], y: f3
         let (hu, hv) = ((u1 - u0) * 0.5 * rng.range(0.8, 1.05), (v1 - v0) * 0.5 * rng.range(0.8, 1.05));
         let ey = m(rng.range(0.7, 1.1));
         let p = to_plan(uc + rng.range(-1.0, 1.0), vc + rng.range(-1.0, 1.0));
-        tor.push(Block::new(Vec3::new(p.x, y + ey - 0.6, p.y), Vec3::new(hu, ey, hv), yaw + rng.range(-0.4, 0.4), hu.min(hv) * 0.7, ey * 0.6, ey * 0.95, 0.6, Part::Stack));
+        // Sunk far enough into its seat that, rough as both are, it is never clear of it.
+        tor.push(Block::new(Vec3::new(p.x, y + ey - LOGAN_SEAT, p.y), Vec3::new(hu, ey, hv), yaw + rng.range(-0.4, 0.4), hu.min(hv) * 0.7, ey * 0.6, ey * 0.8, 0.5, Part::Stack));
     } else if roll < 0.75 {
         // A rock basin: a smooth round bowl in the top, holding rainwater.
         let r = ((u1 - u0).min(v1 - v0) * 0.5 - 1.5).min(m(1.3));
@@ -712,8 +731,11 @@ fn clitter(tor: &mut Tor, rng: &mut Rng, ground: &impl Fn(i32, i32) -> Column, c
         }
         let half = half.max(1.2);
         let e = Vec3::new(half * rng.range(0.85, 1.35), half * rng.range(0.6, 0.95), half * rng.range(0.7, 1.1));
-        // Sunk into the turf, as stones are that have lain there a long time.
-        let y = k.ground.floor() - tor.origin.y as f32 + 1.0 + e.y * rng.range(0.0, 0.45);
+        // Sunk into the turf, as stones are that have lain there a long time: bedded in
+        // the lowest ground under it, so that on a slope no side of it is left in the air.
+        let r = e.x.max(e.z) * 0.7;
+        let low = SIDES.iter().map(|&(dx, dz)| ground((p.x + dx * r).round() as i32, (p.y + dz * r).round() as i32).ground).fold(k.ground, f32::min);
+        let y = low.floor() - tor.origin.y as f32 + 1.0 + e.y * rng.range(-0.3, 0.35);
         let yaw = rng.range(0.0, TAU);
         let c = Vec3::new(p.x, y, p.y);
         let block = |c: Vec3, e: Vec3, yaw: f32, rng: &mut Rng| {
@@ -809,6 +831,62 @@ mod tests {
             }
         }
         assert!(rock > 0, "no granite where the chunks meet");
+    }
+
+    /// The rock of `tor` as the chunks draw it, and how many of its voxels hang in the air:
+    /// those no chain of rock voxels, face to face, joins to the ground.
+    fn loose(w: &crate::world::GameWorld, tor: &Tor) -> (usize, usize) {
+        use std::collections::{HashMap, HashSet};
+        let span = (tor.hi.x - tor.lo.x + 1).max(tor.hi.z - tor.lo.z + 1);
+        let mut drawn: HashMap<IVec3, Voxel> = HashMap::new();
+        tor.raster(tor.lo.x, tor.lo.z, span, |q, v| {
+            drawn.insert(q, v);
+        });
+        let rock: HashSet<IVec3> = drawn.iter().filter(|(_, v)| !matches!(**v, voxel::AIR | mat::WATER)).map(|(q, _)| *q).collect();
+        let mut tops: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut held: HashSet<IVec3> = HashSet::new();
+        let mut front = Vec::new();
+        for &q in &rock {
+            let top = *tops.entry((q.x, q.z)).or_insert_with(|| w.column(q.x, q.z).top());
+            if q.y <= top + 1 {
+                held.insert(q);
+                front.push(q);
+            }
+        }
+        while let Some(q) = front.pop() {
+            for d in [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z] {
+                if rock.contains(&(q + d)) && held.insert(q + d) {
+                    front.push(q + d);
+                }
+            }
+        }
+        (rock.len(), rock.len() - held.len())
+    }
+
+    #[test]
+    fn no_rock_of_a_tor_hangs_in_the_air() {
+        use crate::world::GameWorld;
+        let w = GameWorld::new(1);
+        let c = w.continent(0, 0);
+        let cells = MACRO_SIZE / CELL;
+        let sites: Vec<(i32, i32, Site)> = (0..cells).flat_map(|gz| (0..cells).map(move |gx| (gx, gz))).filter_map(|(gx, gz)| site(1, &c, gx, gz).map(|s| (gx, gz, s))).collect();
+        let mut seen = 0;
+        let mut bad = Vec::new();
+        for class in [Class::Great, Class::Tor, Class::Outcrop] {
+            for (gx, gz, _) in sites.iter().filter(|s| s.2.class == class).take(14) {
+                let tor = plan(1, &c, *gx, *gz);
+                if tor.is_empty() {
+                    continue;
+                }
+                let (all, hanging) = loose(&w, &tor);
+                seen += 1;
+                if hanging > 0 {
+                    bad.push((class, tor.origin, all, hanging));
+                }
+            }
+        }
+        assert!(seen >= 20, "only {seen} tors looked at");
+        assert!(bad.is_empty(), "{} of {seen} tors have rock hanging in the air: {bad:?}", bad.len());
     }
 
     #[test]
