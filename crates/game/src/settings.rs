@@ -274,6 +274,20 @@ impl Store {
         self.report(write_whole(&self.dir, &path, &progress.to_text()))
     }
 
+    /// The pack carried in a world, as it was saved: empty if it never was.
+    pub fn pack(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(self.pack_path(seed))).unwrap_or_default()
+    }
+
+    pub fn write_pack(&self, seed: u32, text: &str) -> bool {
+        let path = self.pack_path(seed);
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
+    fn pack_path(&self, seed: u32) -> PathBuf {
+        PathBuf::from(format!("pack-{seed}.txt"))
+    }
+
     /// Where the map of what has been seen of each world is kept.
     pub fn map_dir(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("map-{seed}"))

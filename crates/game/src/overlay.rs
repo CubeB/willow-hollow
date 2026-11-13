@@ -235,16 +235,26 @@ pub fn draw_headless(
     target: &wgpu::TextureView,
     format: wgpu::TextureFormat,
     size: (u32, u32),
-    build: impl FnOnce(&egui::Context),
+    mut build: impl FnMut(&egui::Context),
 ) {
     let ctx = egui::Context::default();
     let input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32))),
         ..Default::default()
     };
+    // Twice over: a window is only measured the first time it is shown, and drawn the next.
+    ctx.begin_pass(input.clone());
+    build(&ctx);
+    let mut first = ctx.end_pass();
     ctx.begin_pass(input);
     build(&ctx);
-    let out = ctx.end_pass();
+    let mut out = ctx.end_pass();
+    // The first pass made the textures the second is drawn with.
+    let mut set = std::mem::take(&mut first.textures_delta.set);
+    for (id, mut deltas) in out.textures_delta.set.drain() {
+        set.entry(id).or_default().append(&mut deltas);
+    }
+    out.textures_delta.set = set;
     let mut renderer = egui_wgpu::Renderer::new(&gpu.device, format, Default::default());
     paint(&ctx, &mut renderer, gpu, encoder, target, [size.0, size.1], out);
 }

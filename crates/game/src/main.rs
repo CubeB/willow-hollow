@@ -6,6 +6,7 @@ mod env;
 mod farview;
 mod gfx;
 mod impostors;
+mod inventory;
 mod lod;
 mod minimap;
 mod overlay;
@@ -104,6 +105,8 @@ struct Options {
     /// Draw the map on a screenshot: the corner map, or the large map this many voxels
     /// across.
     shot_map: Option<Option<f64>>,
+    /// Show the pack's window on a screenshot, with a few things in it.
+    shot_pack: bool,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
 }
@@ -133,6 +136,7 @@ impl Default for Options {
             circle: None,
             ambient: 8.0,
             shot_map: None,
+            shot_pack: false,
             walked: Vec::new(),
         }
     }
@@ -162,6 +166,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --screenshot FILE     render one frame to a PNG without a window, then exit
   --map FILE            write a map of the continent around the start to a PNG, then exit
   --minimap             draw the corner map on a screenshot
+  --pack                show the pack's window on a screenshot, with a few things in it
   --bigmap KM           draw the large map, KM across, on a screenshot
   --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
                         to the start
@@ -232,6 +237,7 @@ fn parse_args() -> Result<Options> {
             "--screenshot" => o.screenshot = Some(value()?.into()),
             "--map" => o.map = Some(value()?.into()),
             "--minimap" => o.shot_map = Some(None),
+            "--pack" => o.shot_pack = true,
             "--bigmap" => o.shot_map = Some(Some(m64(value()?.parse::<f64>()? * 1000.0))),
             "--walked" => {
                 for p in value()?.split(';') {
@@ -488,6 +494,16 @@ struct Running {
     store: Option<Store>,
     save_timer: f32,
     show_settings: bool,
+    /// What the player carries, its window, and whether that is open.
+    pack: inventory::Pack,
+    pack_view: inventory::View,
+    pack_open: bool,
+    /// What could be gathered from where the player stands, and from which column;
+    /// looked for every so often.
+    within_reach: Option<((i32, i32), inventory::Item)>,
+    reach_timer: f32,
+    /// A word about what was just gathered, and how long it has left to show.
+    notice: Option<(String, f32)>,
     quit: bool,
     /// Distance walked since the last footstep, and how many there have been.
     stride: f32,
@@ -575,6 +591,8 @@ impl Running {
             .as_ref()
             .filter(|_| opts.overrides.keeps_position() && !opts.fresh)
             .and_then(|s| s.progress(settings.seed));
+        // The pack goes with the world, wherever in it this run begins.
+        let pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
 
         // Simulating the continent takes seconds, so it starts now, alongside the window
         // and the GPU, instead of waiting its turn after them.
@@ -661,6 +679,12 @@ impl Running {
             store,
             save_timer: AUTOSAVE,
             show_settings: false,
+            pack,
+            pack_view: inventory::View::default(),
+            pack_open: false,
+            within_reach: None,
+            reach_timer: 0.0,
+            notice: None,
             quit: false,
             stride: 0.0,
             steps: 0,
@@ -731,6 +755,63 @@ impl Running {
         }
     }
 
+    /// Opens or closes the pack, which needs the mouse.
+    fn set_pack(&mut self, open: bool) {
+        self.pack_open = open;
+        self.want_grab = !open;
+        self.set_grab(!open);
+    }
+
+    /// What grows within arm's reach ahead of the player that can be gathered and has
+    /// not been already: the nearest, with the column it stands in.
+    fn find_within_reach(&mut self) -> Option<((i32, i32), inventory::Item)> {
+        if !self.walking || self.player.mode != Mode::Walk {
+            return None;
+        }
+        let ahead = self.camera.forward();
+        let ahead = DVec3::new(ahead.x as f64, 0.0, ahead.z as f64).normalize_or_zero();
+        let centre = self.player.pos + ahead * m64(0.6);
+        let reach = m64(1.2);
+        let (cx, cz, feet) = (centre.x.floor() as i32, centre.z.floor() as i32, self.player.pos.y.floor() as i32);
+        let span = reach.ceil() as i32;
+        let mats = self.world.materials();
+        let mut best: Option<(f64, (i32, i32), inventory::Item)> = None;
+        for z in cz - span..=cz + span {
+            for x in cx - span..=cx + span {
+                let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
+                if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+                    continue;
+                }
+                // From head height down to a step below the feet: the first thing met.
+                for y in (feet - 3..=feet + 4).rev() {
+                    let v = self.voxels.voxel(x, y, z);
+                    if let Some(item) = inventory::of_voxel(v, mats) {
+                        best = Some((d, (x, z), item));
+                        break;
+                    }
+                    if mats.get(v).kind == voxel::Kind::Solid {
+                        break;
+                    }
+                }
+            }
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
+    /// Gathers what is within reach into the pack.
+    fn gather(&mut self) {
+        let Some(((x, z), item)) = self.find_within_reach() else { return };
+        let word = if self.pack.add(&item) {
+            self.pack.mark(x, z);
+            format!("{}  \u{d7} {}", item.name, self.pack.count(&item.id))
+        } else {
+            "Your pack is full".to_string()
+        };
+        self.notice = Some((word, 2.5));
+        self.within_reach = None;
+        self.reach_timer = 0.0;
+    }
+
     /// Opens or closes the large map, which needs the mouse to move it.
     fn set_map(&mut self, open: bool) {
         self.map.set_open(open);
@@ -794,6 +875,9 @@ impl Running {
         }
         if overrides.keeps_position() {
             store.write_progress(self.settings.seed, self.progress());
+            if self.pack.unsaved && store.write_pack(self.settings.seed, &self.pack.to_text()) {
+                self.pack.unsaved = false;
+            }
         }
         self.map.save(false);
     }
@@ -847,6 +931,8 @@ impl Running {
         } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
             let boat = self.fleet.take(i);
             self.player.board(boat.pos, boat.heading);
+        } else {
+            self.gather();
         }
     }
 
@@ -984,6 +1070,18 @@ impl Running {
             self.fly.update(&mut self.camera, &self.keys, dt);
         }
         self.fleet.update(self.player.pos, dt);
+        // What can be gathered here is looked for a few times a second, not every frame.
+        self.reach_timer -= dt;
+        if self.reach_timer <= 0.0 {
+            self.reach_timer = 0.2;
+            self.within_reach = self.find_within_reach();
+        }
+        if let Some((_, left)) = &mut self.notice {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.notice = None;
+            }
+        }
         self.cpu.lap(0);
         self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
         self.far.update(&self.gpu, self.camera.pos);
@@ -1142,12 +1240,14 @@ impl Running {
             (true, Mode::Walk, false, true) => "walking",
             (true, Mode::Walk, false, false) => "in the air",
         };
-        let prompt = match self.player.mode {
+        let prompt: Option<String> = match self.player.mode {
             _ if !self.walking => None,
-            Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail"),
-            Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat"),
-            _ => None,
+            Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail".into()),
+            Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat".into()),
+            _ if self.notice.is_some() => self.notice.as_ref().map(|n| n.0.clone()),
+            _ => self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)),
         };
+        let (pack, pack_view, pack_open) = (&mut self.pack, &mut self.pack_view, self.pack_open);
         let mut time = self.env.time;
         let mut date = self.env.date;
         let mut settings = self.settings;
@@ -1160,6 +1260,8 @@ impl Running {
                 overlay::map_labels(ctx, labels);
                 if show_menu {
                     choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
+                } else if pack_open {
+                    inventory::show(ctx, pack, pack_view);
                 } else if !grabbed && !map_open {
                     egui::Area::new(egui::Id::unique("hint"))
                         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
@@ -1266,6 +1368,8 @@ impl ApplicationHandler for App {
         {
             if r.map.open {
                 r.set_map(false);
+            } else if r.pack_open {
+                r.set_pack(false);
             } else {
                 r.set_menu(!r.show_settings);
             }
@@ -1332,7 +1436,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !r.grabbed && !r.show_settings => {
+            } if !r.grabbed && !r.show_settings && !r.pack_open => {
                 r.want_grab = true;
                 r.set_grab(true);
             }
@@ -1353,12 +1457,16 @@ impl ApplicationHandler for App {
                             r.window.set_fullscreen(fullscreen(r.settings.fullscreen));
                         } else if r.show_settings {
                             // The rest of the keyboard is for playing.
-                        } else if code == KeyCode::KeyM && !event.repeat {
+                        } else if code == KeyCode::KeyM && !event.repeat && !r.pack_open {
                             r.set_map(!r.map.open);
                         } else if code == KeyCode::KeyN && !event.repeat {
                             r.settings.minimap = !r.settings.minimap;
                         } else if r.map.open {
                             // The rest waits until the map is put away.
+                        } else if code == KeyCode::KeyI && !event.repeat {
+                            r.set_pack(!r.pack_open);
+                        } else if r.pack_open {
+                            // And until the pack is shut.
                         } else if code == KeyCode::Tab && !event.repeat {
                             r.want_grab = !r.grabbed;
                             r.set_grab(r.want_grab);
@@ -1578,7 +1686,26 @@ fn main() -> Result<()> {
             map.settle(&gpu, camera.pos, camera.forward());
             map
         });
+        // A pack with something of everything that can be gathered, some of it in plenty.
+        let mut sample = opts.shot_pack.then(|| {
+            use worldgen::materials as mat;
+            let mut pack = inventory::Pack::new();
+            let kinds = [mat::FLOWER_RED, mat::HEATHER, mat::FLOWER_BLUE, mat::HOLLY_BERRY, mat::REED_HEAD, mat::FLOWER_YELLOW, mat::GORSE_BLOOM, mat::FLOWER_PURPLE, mat::IVY_BERRY, mat::FLOWER_WHITE, mat::FLOWER_PINK];
+            for (k, v) in kinds.into_iter().enumerate() {
+                let item = inventory::of_voxel(v, world.materials()).expect("a thing to gather");
+                for _ in 0..[12, 3, 1, 7, 2, 31, 1, 5, 4, 1, 9][k] {
+                    pack.add(&item);
+                }
+            }
+            pack.shift(10, 14);
+            let mut view = inventory::View::default();
+            view.select(1);
+            (pack, view)
+        });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
+            if text && let Some((pack, pack_view)) = &mut sample {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::show(ctx, pack, pack_view));
+            }
             let Some(map) = &mut map else { return };
             map.hour = env.time;
             map.update(&gpu, camera.pos, camera.forward(), true, 0.0);
