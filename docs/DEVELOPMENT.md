@@ -67,6 +67,12 @@ Settings and your place in each world are kept outside the repository:
 Delete `settings.txt` there to go back to the defaults. A hand-edited or damaged file
 never stops the game from starting: anything unreadable falls back to its default.
 
+Each world N keeps its own files beside it, all plain text but the map: `world-N.txt`
+(where you stand), `pack-N.txt` (what you carry), `journal-N.txt` (the journal: a line
+to each find, place, river and note, and the distances gone) and `map-N/` (what the map
+has seen). Any of them can be deleted on its own; a line the game cannot read is left
+out and the rest still loads.
+
 ## Tests
 
 ```sh
@@ -97,6 +103,13 @@ change and one after, at the same place and hour, and compare them.
 degrees: yaw 0 looks toward +x (where the sun rises), 180 toward -x (where it sets).
 `--weather` and `--season` hold those for the shot. PNG files are ignored by git
 everywhere except under `docs/`, so shots can be written anywhere.
+
+The windows can be put on a shot too: `--pack` for the pack, and `--journal [PAGE]` for
+the journal open at `finds`, `places`, `walk` or `days`. A screenshot reads no save, so
+the journal shown is one written up as if after a walk to the sixteen named places
+nearest the camera; `--journal-fill N` changes how many, and `--journal-fill 0` shows a
+journal with nothing in it yet. In a live run, `RUST_LOG=info,game::journal=debug` logs
+each line as the journal writes it.
 
 **Frame timing.** Flies a fixed path and logs where each frame's time went, on the CPU
 and on the GPU pass by pass. Compare the numbers before and after a change.

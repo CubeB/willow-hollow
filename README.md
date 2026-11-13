@@ -26,6 +26,8 @@ The simulation is much coarser than the voxels, so rivers aren't read straight o
 
 **Places to find.** Every landmass has a network of trails linking shrines, lookout towers, camps, ruins, standing stones, huts and boat landings. They're built from whatever is local, so a desert shrine is sandstone and a shrine among the redwoods is mossy rock and red timber. The paths are worn into the ground, climb steep slopes in rough steps, and are marked by cairns, waymarks and milestones. They cross brooks on stepping stones and rivers on arched stone bridges, and the lanterns come on at dusk.
 
+**The journal.** Press J for a record of the walk that writes itself. The first of each kind of thing you gather is entered with where and when you found it and the sort of country it grows in; what you haven't found yet is only an outline. Each named place is entered when you first come to it, region by region. There is a page for how far you have walked, glided, sailed and swum, the highest ground you have stood on and the rivers you have followed down to the sea, and one that sets down the notable moments a day at a time: a new region, a summit at dusk, the first snow.
+
 **Getting around.** Open the glider in mid-air and ride it off anything tall. Every landing has a boat tied up, which you can take down a river or across the strait to the next island. Press V to see yourself from behind: a small figure that walks, swims and carries the glider folded on its back.
 
 **The map.** The map fills in with what you've seen, which is further from high ground, and shows a faint line where you've walked. A small one sits in the corner, turned the way you face. The large one is a model of the land you've seen, made of blocks like the world, which you can move, turn and zoom. Places you have visited get their name on it.
@@ -67,13 +69,14 @@ The first launch takes a few seconds, because the starting continent has to be s
 | Key | What it does |
 |---|---|
 | Mouse | Look around (**Tab** frees or recaptures the mouse) |
-| Esc | Settings, or close the map or the pack |
+| Esc | Settings, or close the map, the pack or the journal |
 | W A S D | Walk |
 | Shift | Sprint |
 | Space | Jump, or swim up |
 | G, or Space in mid-air | Open or fold the glider. Look down to dive, up to slow down |
 | E | Pick what's in front of you, or get in or out of a boat at a landing. W sails, Shift for full sail |
 | I | Open the pack. Drag one thing onto another to move, join or swap them, click one to read about it or let it go |
+| J | Open the journal. Click a page's name, or use the left and right arrows, to turn to it |
 | M | The large map. Drag to move it, right drag to turn it, the wheel to zoom |
 | N | Show or hide the corner map |
 | V | First or third person |
@@ -83,7 +86,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 
 The settings menu covers field of view, mouse sensitivity, volume, how far terrain loads, the length of a day and of a year, window size, fullscreen, vsync, light shafts and the corner map. If you push the load radius further than your graphics card can hold, the game pulls it back in by itself.
 
-A plain run starts a new, random world each time. The game remembers your settings and where you were standing in each world, boat included, along with the time of year, the map you've drawn and what's in your pack, so `--seed N` takes you back to world N where you left it. Use `--fresh` to go back to the start of a world. `--time H` picks the hour and `--season` the time of year for one run, and the debug panel has sliders for both.
+A plain run starts a new, random world each time. The game remembers your settings and where you were standing in each world, boat included, along with the time of year, the map you've drawn, what's in your pack and your journal, so `--seed N` takes you back to world N where you left it. Use `--fresh` to go back to the start of a world. `--time H` picks the hour and `--season` the time of year for one run, and the debug panel has sliders for both.
 
 ### Looking around without playing
 

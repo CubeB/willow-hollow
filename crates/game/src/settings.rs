@@ -288,6 +288,16 @@ impl Store {
         PathBuf::from(format!("pack-{seed}.txt"))
     }
 
+    /// The journal kept in a world, as it was saved: empty if it never was.
+    pub fn journal(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("journal-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_journal(&self, seed: u32, text: &str) -> bool {
+        let path = PathBuf::from(format!("journal-{seed}.txt"));
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
     /// Where the map of what has been seen of each world is kept.
     pub fn map_dir(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("map-{seed}"))

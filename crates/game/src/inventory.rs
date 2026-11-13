@@ -42,18 +42,18 @@ impl Shape {
         (Shape::Reed, "reed"),
     ];
 
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         Self::ALL.iter().find(|s| s.0 == self).expect("every shape has a word").1
     }
 
-    fn from_word(word: &str) -> Option<Self> {
+    pub(crate) fn from_word(word: &str) -> Option<Self> {
         Self::ALL.iter().find(|s| s.1 == word).map(|s| s.0)
     }
 
     /// The picture, eight squares each way: `c` the thing's own colour, `d` a darker
     /// shade of it, `l` a lighter, `y` a yellow heart, `g` and `h` stem and leaf greens,
     /// `w` a pale stalk, `b` brown.
-    fn picture(self) -> [&'static str; 8] {
+    pub(crate) fn picture(self) -> [&'static str; 8] {
         match self {
             Shape::Flower => ["........", "..c..c..", ".cclcc..", "..cyyc..", ".ccycc..", "..c.gc..", "...gh...", "...g...."],
             Shape::Spike => ["...l....", "...c....", "..ccd...", "...cc...", "..dcc...", "...g.h..", "...gh...", "...g...."],
@@ -348,7 +348,7 @@ const INK: egui::Color32 = egui::Color32::from_rgb(240, 236, 226);
 const FAINT: egui::Color32 = egui::Color32::from_rgb(160, 168, 176);
 
 /// Draws a thing's picture in `rect`.
-fn picture(painter: &egui::Painter, rect: egui::Rect, item: &Item, fade: f32) {
+pub(crate) fn picture(painter: &egui::Painter, rect: egui::Rect, item: &Item, fade: f32) {
     let [r, g, b] = item.color;
     let tone = |by: f32| {
         let v = |c: u8| (c as f32 * by).round().clamp(0.0, 255.0) as u8;
