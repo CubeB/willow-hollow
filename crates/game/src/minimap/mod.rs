@@ -18,7 +18,8 @@
 //!
 //! The large map is a model of the land seen so far ([`relief`]): a slab of blocks with
 //! its water, paths and woods, looked down on at a slant, which the mouse moves, turns
-//! and zooms. The corner map stays a flat picture.
+//! and zooms. The corner map is a small one of the same, of the ground about the
+//! player, turned so that the way they face is always up.
 //!
 //! [`build`] is the older still image of a whole continent, for `--map FILE`.
 
@@ -46,7 +47,7 @@ use worldgen::{
 };
 
 use crate::gfx::Gpu;
-use gpu::{Instance, MapGpu, ReliefGpu, SLOTS, Uniforms};
+use gpu::{Instance, MapGpu, ReliefGpu, Uniforms};
 use marks::{Kind, Mark};
 use relief::{Relief, Request};
 use reveal::Reveal;
@@ -54,8 +55,6 @@ use reveal::Reveal;
 /// A continent, by macro-cell.
 pub type Key = (i32, i32);
 
-/// How much of the world the corner map spans, edge to edge, in voxels.
-const CORNER_SPAN: f64 = m64(1800.0);
 /// How near and how far the large map zooms, edge to edge, in voxels.
 const LARGE_SPAN: (f64, f64) = (m64(700.0), MACRO_SIZE as f64);
 const LARGE_START: f64 = m64(2400.0);
@@ -69,6 +68,16 @@ const FOV: f32 = 0.5;
 const COLUMN_PX: f64 = 6.0;
 /// How far, in columns, the map's middle may stray from the model's before a new one is made.
 const STRAY: i64 = 40;
+/// The corner map: how much ground it spans across its middle, how steeply it is looked
+/// down on, how far the player may walk from the middle of its model, in columns, and
+/// how long it waits, in seconds, before a new one is made for newly seen ground.
+const SMALL_SPAN: f64 = m64(380.0);
+const SMALL_PITCH: f32 = 0.95;
+const SMALL_STRAY: i64 = 12;
+const SMALL_EVERY: f32 = 0.75;
+/// Which model an answer from the relief thread is.
+const LARGE: u8 = 0;
+const SMALL: u8 = 1;
 /// How far off a place may be for its glow to show at the rim.
 const HINT: f64 = m64(2500.0);
 /// Most places hinted at the rim at once.
@@ -128,6 +137,8 @@ struct View {
     /// From voxels east, up and south of the map's middle to the screen.
     transform: Mat4,
     look: DVec2,
+    /// The part of the screen it fills: its corner and size, in pixels.
+    corner: Vec2,
     screen: Vec2,
     /// Which way east and north run across the screen, a unit each on level ground.
     east: Vec2,
@@ -139,7 +150,43 @@ impl View {
     fn px(&self, at: DVec2, height: f32) -> Option<Vec2> {
         let o = at - self.look;
         let p = self.transform * Vec4::new(o.x as f32, height, o.y as f32, 1.0);
-        (p.w > 1e-3).then(|| Vec2::new((p.x / p.w * 0.5 + 0.5) * self.screen.x, (0.5 - p.y / p.w * 0.5) * self.screen.y))
+        (p.w > 1e-3).then(|| self.corner + Vec2::new((p.x / p.w * 0.5 + 0.5) * self.screen.x, (0.5 - p.y / p.w * 0.5) * self.screen.y))
+    }
+}
+
+/// A view down onto the ground at `look`, from `yaw` round it (0 is from the south,
+/// looking north) and `pitch` above the level, aimed `aim` voxels up, drawn at `per_px`
+/// voxels a pixel there, in the rectangle of the screen at `corner`, `size` pixels.
+fn look_down(look: DVec2, per_px: f32, yaw: f32, pitch: f32, aim: f32, corner: Vec2, size: Vec2) -> View {
+    let dist = size.y * 0.5 * per_px / (FOV * 0.5).tan();
+    let (sin, cos) = yaw.sin_cos();
+    let target = Vec3::new(0.0, aim, 0.0);
+    let eye = target + dist * Vec3::new(sin * pitch.cos(), pitch.sin(), cos * pitch.cos());
+    // Written out by hand, as the camera's is: right-handed, looking down -Z, depth 0..1.
+    let ahead = (target - eye).normalize();
+    let right = ahead.cross(Vec3::Y).normalize();
+    let up = right.cross(ahead);
+    let looking = Mat4::from_cols(
+        Vec4::new(right.x, up.x, -ahead.x, 0.0),
+        Vec4::new(right.y, up.y, -ahead.y, 0.0),
+        Vec4::new(right.z, up.z, -ahead.z, 0.0),
+        Vec4::new(-right.dot(eye), -up.dot(eye), ahead.dot(eye), 1.0),
+    );
+    let (near, far) = (dist * 0.05, dist * 40.0);
+    let t = 1.0 / (FOV * 0.5).tan();
+    let lens = Mat4::from_cols(
+        Vec4::new(t * size.y / size.x, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, t, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, far / (near - far), -1.0),
+        Vec4::new(0.0, 0.0, near * far / (near - far), 0.0),
+    );
+    View {
+        transform: lens * looking,
+        look,
+        corner,
+        screen: size,
+        east: Vec2::new(cos, sin * pitch.sin()),
+        north: Vec2::new(sin, -cos * pitch.sin()),
     }
 }
 
@@ -156,18 +203,12 @@ struct Frame {
     half: Vec2,
     round: bool,
     corner: f32,
-    /// The world at the map's middle, voxels.
-    look: DVec2,
     voxels_per_px: f64,
     /// Scale for sizes, from the window height.
     s: f32,
 }
 
 impl Frame {
-    fn to_px(&self, at: DVec2) -> Vec2 {
-        self.centre + ((at - self.look) / self.voxels_per_px).as_vec2()
-    }
-
     /// Distance in pixels from the map's edge, negative inside (as the shader has it).
     fn edge(&self, p: Vec2) -> f32 {
         let o = p - self.centre;
@@ -207,7 +248,7 @@ fn key_of(at: DVec2) -> Key {
 
 /// The two by two continents nearest `at`: together they hold everything within half a
 /// continent of it.
-fn block_of(at: DVec2) -> [Key; SLOTS] {
+fn block_of(at: DVec2) -> [Key; 4] {
     let (bx, bz) = ((at.x / MACRO_SIZE as f64 - 0.5).floor() as i32, (at.y / MACRO_SIZE as f64 - 0.5).floor() as i32);
     [(bx, bz), (bx + 1, bz), (bx, bz + 1), (bx + 1, bz + 1)]
 }
@@ -254,11 +295,13 @@ pub struct Minimap {
     relief_pending: bool,
     version: u64,
     relief_gpu: ReliefGpu,
+    /// The corner map's model, as the large map's.
+    small: Option<Relief>,
+    small_pending: bool,
+    small_asked: f32,
+    small_aim: Option<f32>,
+    small_gpu: ReliefGpu,
     gpu: MapGpu,
-    slots: [Option<Key>; SLOTS],
-    /// Whether each slot's picture, and its mask, are on the GPU.
-    pictured: [bool; SLOTS],
-    revealed: [bool; SLOTS],
     player: DVec3,
     heading: Vec2,
     region: Option<String>,
@@ -294,11 +337,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map relief".into())
             .spawn(move || {
-                while let Ok(mut req) = reliefs.recv() {
-                    // Only the newest is worth making.
-                    while let Ok(newer) = reliefs.try_recv() {
-                        req = newer;
-                    }
+                while let Ok(req) = reliefs.recv() {
                     let t = std::time::Instant::now();
                     let made = relief::build(&w, &req);
                     log::debug!("map model at step {}: {} corners, made in {:.2} s", made.step, made.vertices.len(), t.elapsed().as_secs_f32());
@@ -356,10 +395,12 @@ impl Minimap {
             relief_pending: false,
             version: 0,
             relief_gpu: ReliefGpu::new(gpu, format),
+            small: None,
+            small_pending: false,
+            small_asked: -1.0e9,
+            small_aim: None,
+            small_gpu: ReliefGpu::new(gpu, format),
             gpu: MapGpu::new(gpu, format),
-            slots: [None; SLOTS],
-            pictured: [false; SLOTS],
-            revealed: [false; SLOTS],
             player: DVec3::ZERO,
             heading: Vec2::X,
             region: None,
@@ -407,36 +448,38 @@ impl Minimap {
     fn view(&self, w: f32, h: f32) -> View {
         let side = (w.min(h) * 0.86).floor();
         let per_px = (self.span / side as f64) as f32;
-        let dist = h * 0.5 * per_px / (FOV * 0.5).tan();
-        let (sin, cos) = self.yaw.sin_cos();
-        let target = Vec3::new(0.0, self.aim.unwrap_or(0.0), 0.0);
-        let eye = target + dist * Vec3::new(sin * self.pitch.cos(), self.pitch.sin(), cos * self.pitch.cos());
-        // Written out by hand, as the camera's is: right-handed, looking down -Z, depth 0..1.
-        let ahead = (target - eye).normalize();
-        let right = ahead.cross(Vec3::Y).normalize();
-        let up = right.cross(ahead);
-        let looking = Mat4::from_cols(
-            Vec4::new(right.x, up.x, -ahead.x, 0.0),
-            Vec4::new(right.y, up.y, -ahead.y, 0.0),
-            Vec4::new(right.z, up.z, -ahead.z, 0.0),
-            Vec4::new(-right.dot(eye), -up.dot(eye), ahead.dot(eye), 1.0),
-        );
-        let (near, far) = (dist * 0.05, dist * 40.0);
-        let t = 1.0 / (FOV * 0.5).tan();
-        let lens = Mat4::from_cols(
-            Vec4::new(t * h / w, 0.0, 0.0, 0.0),
-            Vec4::new(0.0, t, 0.0, 0.0),
-            Vec4::new(0.0, 0.0, far / (near - far), -1.0),
-            Vec4::new(0.0, 0.0, near * far / (near - far), 0.0),
-        );
-        let transform = lens * looking;
-        View {
-            transform,
-            look: self.look,
-            screen: Vec2::new(w, h),
-            east: Vec2::new(cos, sin * self.pitch.sin()),
-            north: Vec2::new(sin, -cos * self.pitch.sin()),
+        look_down(self.look, per_px, self.yaw, self.pitch, self.aim.unwrap_or(0.0), Vec2::ZERO, Vec2::new(w, h))
+    }
+
+    /// Asks the relief thread for the model `tag`, `n` columns of `step` voxels each way
+    /// about `centre` (in columns), of what has been seen. False if it cannot be asked
+    /// for yet.
+    fn ask_relief(&mut self, tag: u8, n: usize, step: i32, centre: (i64, i64)) -> bool {
+        let origin = ((centre.0 - n as i64 / 2) as i32, (centre.1 - n as i64 / 2) as i32);
+        let corner = |c: usize, o: i32| (o as f64 + c as f64 + 0.5) * step as f64;
+        let (lo, hi) = (key_of(DVec2::new(corner(0, origin.0), corner(0, origin.1))), key_of(DVec2::new(corner(n - 1, origin.0), corner(n - 1, origin.1))));
+        let mut sheets = Vec::new();
+        for kz in lo.1..=hi.1 {
+            for kx in lo.0..=hi.0 {
+                if let Some(k) = self.known.get(&(kx, kz)) {
+                    sheets.push(((kx, kz), k.sheet.continent.clone(), k.sheet.picture.clone()));
+                }
+            }
         }
+        if sheets.is_empty() {
+            return false;
+        }
+        let mut mask = vec![[0u8; 2]; n * n];
+        for z in 0..n {
+            for x in 0..n {
+                let at = DVec2::new(corner(x, origin.0), corner(z, origin.1));
+                let key = key_of(at);
+                if let Some(r) = self.reveals.get(&key) {
+                    mask[z * n + x] = r.at((at - self::origin(key)).as_vec2());
+                }
+            }
+        }
+        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version }).is_ok()
     }
 
     /// Asks for a new model for the large map if the one it has no longer fits: the map
@@ -454,32 +497,28 @@ impl Minimap {
                 return;
             }
         }
-        let origin = ((centre.0 - n / 2) as i32, (centre.1 - n / 2) as i32);
-        let corner = |c: usize, o: i32| (o as f64 + c as f64 + 0.5) * step as f64;
-        let (lo, hi) = (key_of(DVec2::new(corner(0, origin.0), corner(0, origin.1))), key_of(DVec2::new(corner(relief::N - 1, origin.0), corner(relief::N - 1, origin.1))));
-        let mut sheets = Vec::new();
-        for kz in lo.1..=hi.1 {
-            for kx in lo.0..=hi.0 {
-                if let Some(k) = self.known.get(&(kx, kz)) {
-                    sheets.push(((kx, kz), k.sheet.continent.clone(), k.sheet.picture.clone()));
-                }
-            }
-        }
-        if sheets.is_empty() {
+        self.relief_pending = self.ask_relief(LARGE, relief::N, step, centre);
+    }
+
+    /// Asks for a new model for the corner map once the player has walked too far from
+    /// the middle of the one it has, or has seen more ground, though not too often.
+    fn want_small(&mut self) {
+        if self.open || !self.corner || self.small_pending {
             return;
         }
-        let mut mask = vec![[0u8; 2]; relief::N * relief::N];
-        for z in 0..relief::N {
-            for x in 0..relief::N {
-                let at = DVec2::new(corner(x, origin.0), corner(z, origin.1));
-                let key = key_of(at);
-                if let Some(r) = self.reveals.get(&key) {
-                    mask[z * relief::N + x] = r.at((at - self::origin(key)).as_vec2());
-                }
+        let step = relief::MIN_STEP;
+        let centre = ((self.player.x / step as f64).round() as i64, (self.player.z / step as f64).round() as i64);
+        let n = relief::SMALL as i64;
+        if let Some(r) = &self.small {
+            let mid = (r.origin.0 as i64 + n / 2, r.origin.1 as i64 + n / 2);
+            let near = (centre.0 - mid.0).abs() <= SMALL_STRAY && (centre.1 - mid.1).abs() <= SMALL_STRAY;
+            if near && (r.version == self.version || self.clock - self.small_asked < SMALL_EVERY) {
+                return;
             }
         }
-        if self.relief_ask.send(Request { step, origin, mask, sheets, version: self.version }).is_ok() {
-            self.relief_pending = true;
+        self.small_pending = self.ask_relief(SMALL, relief::SMALL, step, centre);
+        if self.small_pending {
+            self.small_asked = self.clock;
         }
     }
 
@@ -532,11 +571,15 @@ impl Minimap {
                 }
             }
             Answer::Relief(mut r) => {
-                self.relief_pending = false;
-                self.relief_gpu.upload(gpu, &r.vertices, &r.indices);
+                let (model, pending, on_gpu) = match r.tag {
+                    LARGE => (&mut self.relief, &mut self.relief_pending, &mut self.relief_gpu),
+                    _ => (&mut self.small, &mut self.small_pending, &mut self.small_gpu),
+                };
+                *pending = false;
+                on_gpu.upload(gpu, &r.vertices, &r.indices);
                 r.vertices = Vec::new();
                 r.indices = Vec::new();
-                self.relief = Some(*r);
+                *model = Some(*r);
             }
             Answer::Reveal(key, loaded) => {
                 let mut r = loaded.unwrap_or_default();
@@ -587,8 +630,17 @@ impl Minimap {
         {
             self.see(&c, eye, walked);
         }
-        self.fill_slots(gpu, block);
         self.want_relief();
+        self.want_small();
+        // Each map looks at the ground under its middle, coming to it gently, or walking
+        // over the blocks of the corner map's model would jolt it.
+        if let Some(r) = &self.small {
+            let ground = r.top_at(self.player.x, self.player.z).unwrap_or(r.level * r.step as f32);
+            self.small_aim = Some(match self.small_aim {
+                Some(aim) if dt > 0.0 => aim + (ground - aim) * (1.0 - (-dt * 4.0).exp()),
+                _ => ground,
+            });
+        }
         // The large map looks at the ground under its middle, coming to it gently as it
         // is moved over hills.
         if let Some(r) = self.relief.as_ref().filter(|_| self.open) {
@@ -647,41 +699,6 @@ impl Minimap {
         }
     }
 
-    /// Puts the continents of `block` on the GPU, keeping any already there in place.
-    fn fill_slots(&mut self, gpu: &Gpu, block: [Key; SLOTS]) {
-        for s in 0..SLOTS {
-            if self.slots[s].is_some_and(|k| !block.contains(&k)) {
-                self.slots[s] = None;
-            }
-        }
-        for key in block {
-            if !self.slots.contains(&Some(key))
-                && let Some(s) = self.slots.iter().position(Option::is_none)
-            {
-                self.slots[s] = Some(key);
-                self.pictured[s] = false;
-                self.revealed[s] = false;
-            }
-        }
-        for s in 0..SLOTS {
-            let Some(key) = self.slots[s] else { continue };
-            if !self.pictured[s]
-                && let Some(k) = self.known.get(&key)
-            {
-                self.gpu.picture(gpu, s, &k.sheet.picture);
-                self.pictured[s] = true;
-            }
-            if let Some(r) = self.reveals.get_mut(&key) {
-                let rect = if self.revealed[s] { r.stale.take() } else { Some((0, 0, picture::TEX, picture::TEX)) };
-                r.stale = None;
-                if let Some(rect) = rect {
-                    self.gpu.reveal(gpu, s, rect, &r.rows(rect));
-                }
-                self.revealed[s] = true;
-            }
-        }
-    }
-
     /// Writes what has changed of the masks on the disk thread; if `wait` (when the game
     /// is closing), waits until that and any earlier save are done.
     pub fn save(&mut self, wait: bool) {
@@ -705,7 +722,7 @@ impl Minimap {
     pub fn settle(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3) {
         loop {
             self.update(gpu, eye, forward, false, 0.0);
-            if self.pending.is_empty() && self.loading.is_empty() && !self.relief_pending {
+            if self.pending.is_empty() && self.loading.is_empty() && !self.relief_pending && !self.small_pending {
                 break;
             }
             match self.answers.recv_timeout(std::time::Duration::from_secs(120)) {
@@ -740,31 +757,18 @@ impl Minimap {
         &self.labels
     }
 
+    /// Where on the screen the corner map is.
     fn frame(&self, w: f32, h: f32) -> Frame {
         let s = (h / 720.0).max(0.75);
-        if self.open {
-            let side = (w.min(h) * 0.86).floor();
-            Frame {
-                centre: Vec2::new(w, h) * 0.5,
-                half: Vec2::splat(side * 0.5),
-                round: false,
-                corner: 10.0 * s,
-                look: self.look,
-                voxels_per_px: self.span / side as f64,
-                s,
-            }
-        } else {
-            let d = (h * 0.27).clamp(140.0, 360.0).floor();
-            let margin = (h * 0.035).max(12.0);
-            Frame {
-                centre: Vec2::new(w - margin - d * 0.5, margin + d * 0.5),
-                half: Vec2::splat(d * 0.5),
-                round: true,
-                corner: 0.0,
-                look: xz(self.player),
-                voxels_per_px: CORNER_SPAN / d as f64,
-                s,
-            }
+        let d = (h * 0.27).clamp(140.0, 360.0).floor();
+        let margin = (h * 0.035).max(12.0);
+        Frame {
+            centre: Vec2::new(w - margin - d * 0.5, margin + d * 0.5),
+            half: Vec2::splat(d * 0.5),
+            round: false,
+            corner: 9.0 * s,
+            voxels_per_px: SMALL_SPAN / d as f64,
+            s,
         }
     }
 
@@ -780,44 +784,55 @@ impl Minimap {
             return;
         }
         let f = self.frame(w, h);
-        let mut u = Uniforms {
+        let u = Uniforms {
             screen: [w, h],
             centre: f.centre.into(),
             half: f.half.into(),
             voxels_per_px: f.voxels_per_px as f32,
-            round: if f.round { 1.0 } else { 0.0 },
             time: self.clock,
             corner: f.corner,
-            look: [f.look.x.rem_euclid(1.0e6) as f32, f.look.y.rem_euclid(1.0e6) as f32],
             ..Default::default()
         };
-        for (s, key) in self.slots.iter().enumerate() {
-            if let Some(key) = key {
-                let o = (f.look - origin(*key)).as_vec2();
-                let ready = self.pictured[s] && self.revealed[s];
-                u.slots[s] = [o.x, o.y, if ready { 1.0 } else { 0.0 }, 0.0];
-            }
-        }
+        // The way the player faces is up: the map is looked at from behind them.
+        let yaw = (-self.heading.x).atan2(-self.heading.y);
+        let inset = Vec2::splat(2.0);
+        let (corner, side) = (f.centre - f.half + inset, (f.half - inset) * 2.0);
+        let view = look_down(xz(self.player), f.voxels_per_px as f32, yaw, SMALL_PITCH, self.small_aim.unwrap_or(0.0), corner, side);
         let mut out = Vec::with_capacity(64);
-        let mut map = Instance::new(gpu::MAP, f.centre.into(), 0.0, [1.0; 4]);
-        map.size = (f.half + Vec2::splat(12.0)).into();
-        out.push(map);
+        let mut panel = Instance::new(gpu::PANEL, f.centre.into(), 0.0, [0.075, 0.095, 0.125, 0.78]);
+        panel.size = (f.half + Vec2::splat(12.0)).into();
+        out.push(panel);
+
+        let model = self.small.as_ref();
+        let level = self.small_aim.unwrap_or(0.0);
+        let place = |at: DVec2| match model.and_then(|r| Some((r.top_at(at.x, at.y)?, r.step))) {
+            Some((top, step)) => view.px(at, top + step as f32).map(|p| (p, true)),
+            None => view.px(at, level).map(|p| (p, false)),
+        };
         let mut labels = Vec::new();
-        let place = |at: DVec2| Some((f.to_px(at), true));
         self.marks(&f, &place, &mut out, &mut labels);
 
-        // The player, and north.
-        let me = f.to_px(xz(self.player));
-        if f.edge(me) < -2.0 {
+        // The player, always facing up the map, and where north has got to.
+        if let Some((me, _)) = place(xz(self.player)) {
             let mut arrow = Instance::new(gpu::ARROW, me.into(), 7.5 * f.s, [0.99, 0.98, 0.95, 1.0]);
-            arrow.dir = self.heading.into();
+            arrow.dir = [0.0, -1.0];
             out.push(arrow);
         }
-        let top = f.centre - Vec2::new(0.0, f.half.y - 9.0 * f.s);
-        labels.push(Label { pos: top.into(), text: "N".into(), size: 11.0 * f.s, color: [60, 56, 50, 220], left: false, right: false });
+        let north = f.rim(f.centre, view.north.normalize_or_zero(), 10.0 * f.s);
+        labels.push(Label { pos: north.into(), text: "N".into(), size: 12.0 * f.s, color: [250, 248, 240, 235], left: false, right: false });
+
+        let transform = model.map(|r| {
+            let from = (DVec2::new(r.origin.0 as f64, r.origin.1 as f64) * r.step as f64 - xz(self.player)).as_vec2();
+            view.transform * Mat4::from_translation(Vec3::new(from.x, 0.0, from.y)) * Mat4::from_scale(Vec3::splat(r.step as f32))
+        });
         self.labels = labels;
         self.gpu.load(gpu, &u, &out);
-        self.gpu.pass(encoder, target, 0..out.len() as u32);
+        self.gpu.pass(encoder, target, 0..1);
+        if let Some(transform) = transform {
+            let within = [corner.x.round() as u32, corner.y.round() as u32, side.x.round() as u32, side.y.round() as u32];
+            self.small_gpu.draw(gpu, encoder, target, size, transform, Some(within));
+        }
+        self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
 
     /// Draws the large map: the land seen so far as a model looked down on at a slant,
@@ -835,7 +850,6 @@ impl Minimap {
             half: screen * 0.5 - Vec2::splat(8.0 * s),
             round: false,
             corner: 0.0,
-            look: self.look,
             voxels_per_px: self.span / self.side as f64,
             s,
         };
@@ -928,7 +942,7 @@ impl Minimap {
         self.gpu.load(gpu, &u, &out);
         self.gpu.pass(encoder, target, 0..1);
         if let Some(transform) = transform {
-            self.relief_gpu.draw(gpu, encoder, target, size, transform);
+            self.relief_gpu.draw(gpu, encoder, target, size, transform, None);
         }
         self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
@@ -942,8 +956,7 @@ impl Minimap {
         let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
         let mut hints: Vec<(f64, DVec2)> = Vec::new();
         let mut icons = Vec::new();
-        let keys: Vec<Key> = if self.open { self.known.keys().copied().collect() } else { self.slots.iter().flatten().copied().collect() };
-        for key in &keys {
+        for key in self.known.keys() {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
             for (mark, &visited) in k.sheet.marks.iter().zip(&k.visited) {
@@ -1043,9 +1056,25 @@ mod tests {
             half: Vec2::splat(100.0),
             round,
             corner: 8.0,
-            look: DVec2::new(1000.0, 2000.0),
             voxels_per_px: 10.0,
             s: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_view_puts_what_it_looks_at_in_its_middle_and_what_lies_ahead_above_it() {
+        let look = DVec2::new(5000.0, -3000.0);
+        let (corner, size) = (Vec2::new(900.0, 20.0), Vec2::new(200.0, 200.0));
+        for heading in [Vec2::new(1.0, 0.0), Vec2::new(0.0, -1.0), Vec2::new(-0.6, 0.8)] {
+            let yaw = (-heading.x).atan2(-heading.y);
+            let v = look_down(look, 2.0, yaw, SMALL_PITCH, 40.0, corner, size);
+            let mid = v.px(look, 40.0).expect("in front");
+            assert!((mid - (corner + size * 0.5)).length() < 0.01, "{mid}");
+            let ahead = v.px(look + heading.as_dvec2() * 100.0, 40.0).expect("in front");
+            assert!((ahead.x - mid.x).abs() < 0.01 && ahead.y < mid.y - 10.0, "{heading}: {ahead} from {mid}");
+            // The ground to the right of the way faced is to the right.
+            let right = v.px(look + DVec2::new(-heading.y as f64, heading.x as f64) * 100.0, 40.0).expect("in front");
+            assert!(right.x > mid.x + 10.0, "{heading}: {right}");
         }
     }
 
@@ -1064,12 +1093,12 @@ mod tests {
     }
 
     #[test]
-    fn the_map_puts_its_middle_in_the_middle_and_north_up() {
-        let f = frame(true);
-        assert_eq!(f.to_px(f.look), f.centre);
-        // North is toward -z, up the screen.
-        assert!(f.to_px(f.look - DVec2::new(0.0, 500.0)).y < f.centre.y);
-        assert!(f.edge(f.centre) < 0.0 && f.edge(f.centre + Vec2::new(120.0, 0.0)) > 0.0);
+    fn the_edge_of_the_map_is_nought_and_inside_is_less() {
+        for round in [true, false] {
+            let f = frame(round);
+            assert!(f.edge(f.centre) < 0.0 && f.edge(f.centre + Vec2::new(120.0, 0.0)) > 0.0);
+            assert!(f.edge(f.centre + Vec2::new(100.0, 0.0)).abs() < 1e-3);
+        }
     }
 
     #[test]

@@ -1,17 +1,10 @@
 //! The map's textures and its one pipeline (shaders/minimap.wgsl).
 
 use bytemuck::{Pod, Zeroable};
-use worldgen::macro_layout::MACRO_SIZE;
 
-use super::picture::TEX;
-use super::reveal::Rect;
 use crate::gfx::Gpu;
 
-/// Continents the map can show at once: the two by two around its middle.
-pub const SLOTS: usize = 4;
-
 pub const VEIL: u32 = 0;
-pub const MAP: u32 = 1;
 pub const GLOW: u32 = 2;
 pub const ARROW: u32 = 3;
 pub const CIRCLE: u32 = 4;
@@ -21,6 +14,8 @@ pub const RING: u32 = 7;
 pub const BAR: u32 = 8;
 /// A plain bar, as long and as thick as its size.
 pub const LINE: u32 = 9;
+/// The map's own shape, filled with one colour: what the corner map's model lies on.
+pub const PANEL: u32 = 10;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -32,9 +27,6 @@ pub struct Uniforms {
     pub round: f32,
     pub time: f32,
     pub corner: f32,
-    /// The world at the map's middle, wrapped, for the grain of the blank.
-    pub look: [f32; 2],
-    pub slots: [[f32; 4]; SLOTS],
 }
 
 /// One quad: the map, a mark, the arrow.
@@ -64,22 +56,7 @@ pub struct MapGpu {
     uniforms: wgpu::Buffer,
     instances: wgpu::Buffer,
     capacity: usize,
-    pictures: wgpu::Texture,
-    reveals: wgpu::Texture,
     bind: wgpu::BindGroup,
-}
-
-fn layers(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d { width: TEX as u32, height: TEX as u32, depth_or_array_layers: SLOTS as u32 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    })
 }
 
 fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -94,21 +71,10 @@ fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
 impl MapGpu {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
         let device = &gpu.device;
-        let source = format!("const MACRO_SIZE: f32 = {:?};\n{}", MACRO_SIZE as f32, include_str!("../shaders/minimap.wgsl"));
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("minimap"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/minimap.wgsl").into()),
         });
-        let texture = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2Array,
-                multisampled: false,
-            },
-            count: None,
-        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("minimap"),
             entries: &[
@@ -122,14 +88,6 @@ impl MapGpu {
                     },
                     count: None,
                 },
-                texture(1),
-                texture(2),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
             ],
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -138,27 +96,11 @@ impl MapGpu {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let pictures = layers(device, "map pictures", wgpu::TextureFormat::Rgba8Unorm);
-        let reveals = layers(device, "map reveals", wgpu::TextureFormat::Rg8Unorm);
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("minimap"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        let array = |t: &wgpu::Texture| {
-            t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() })
-        };
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("minimap"),
             layout: &layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&array(&pictures)) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&array(&reveals)) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -197,32 +139,7 @@ impl MapGpu {
             cache: None,
         });
         let capacity = 256;
-        Self { pipeline, uniforms, instances: instance_buffer(device, capacity), capacity, pictures, reveals, bind }
-    }
-
-    fn write(gpu: &Gpu, texture: &wgpu::Texture, layer: usize, rect: Rect, bytes_per_texel: usize, data: &[u8]) {
-        let (w, h) = ((rect.2 - rect.0) as u32, (rect.3 - rect.1) as u32);
-        gpu.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: rect.0 as u32, y: rect.1 as u32, z: layer as u32 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * bytes_per_texel as u32), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
-    }
-
-    /// A continent's picture (TEX square RGBA) into a layer.
-    pub fn picture(&self, gpu: &Gpu, layer: usize, rgba: &[u8]) {
-        Self::write(gpu, &self.pictures, layer, (0, 0, TEX, TEX), 4, rgba);
-    }
-
-    /// Part of a continent's reveal mask (two bytes a texel, `rect` row by row).
-    pub fn reveal(&self, gpu: &Gpu, layer: usize, rect: Rect, rows: &[u8]) {
-        Self::write(gpu, &self.reveals, layer, rect, 2, rows);
+        Self { pipeline, uniforms, instances: instance_buffer(device, capacity), capacity, bind }
     }
 
     /// Sets what the passes of this frame draw.
@@ -351,8 +268,17 @@ impl ReliefGpu {
         ));
     }
 
-    /// Draws the model over `target`, `size` pixels, through `transform`.
-    pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, size: (u32, u32), transform: glam::Mat4) {
+    /// Draws the model over `target`, `size` pixels, through `transform`: over all of
+    /// it, or within `within`, a rectangle of it given by its corner and size in pixels.
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        size: (u32, u32),
+        transform: glam::Mat4,
+        within: Option<[u32; 4]>,
+    ) {
         let Some((vertices, indices, count)) = &self.mesh else { return };
         if self.depth.as_ref().is_none_or(|d| d.0 != size) {
             self.depth = Some((size, crate::gfx::create_depth(&gpu.device, size.0, size.1)));
@@ -376,6 +302,14 @@ impl ReliefGpu {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some([x, y, w, h]) = within {
+            let (w, h) = (w.min(size.0.saturating_sub(x)), h.min(size.1.saturating_sub(y)));
+            if w == 0 || h == 0 {
+                return;
+            }
+            pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+            pass.set_scissor_rect(x, y, w, h);
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));

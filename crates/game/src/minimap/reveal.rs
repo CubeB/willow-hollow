@@ -147,14 +147,6 @@ impl Reveal {
         })
     }
 
-    /// The texels of `rect`, both channels, row by row, for copying to the GPU.
-    pub fn rows(&self, rect: Rect) -> Vec<u8> {
-        let mut out = Vec::with_capacity((rect.2 - rect.0) * (rect.3 - rect.1) * 2);
-        for z in rect.1..rect.3 {
-            out.extend_from_slice(&self.data[(z * TEX + rect.0) * 2..(z * TEX + rect.2) * 2]);
-        }
-        out
-    }
 }
 
 /// Writes a mask's data as a PNG, through a temporary file so that a crash part way

@@ -30,8 +30,9 @@ use worldgen::{
 use super::{Key, picture::TEX};
 use crate::farview;
 
-/// Columns per side of the model.
+/// Columns per side of the large map's model, and of the corner map's. Whole tiles.
 pub const N: usize = 384;
+pub const SMALL: usize = 128;
 /// The narrowest and widest a column is, in voxels.
 pub const MIN_STEP: i32 = 16;
 pub const MAX_STEP: i32 = 512;
@@ -58,6 +59,10 @@ pub struct Vertex {
 }
 
 pub struct Request {
+    /// Which of the map's models this is for; handed back with it.
+    pub tag: u8,
+    /// Columns per side.
+    pub n: usize,
     pub step: i32,
     /// The model's north-west corner, in columns of `step` voxels from the world's origin.
     pub origin: (i32, i32),
@@ -70,6 +75,8 @@ pub struct Request {
 }
 
 pub struct Relief {
+    pub tag: u8,
+    pub n: usize,
     pub step: i32,
     pub origin: (i32, i32),
     pub version: u64,
@@ -86,10 +93,10 @@ impl Relief {
     pub fn top_at(&self, x: f64, z: f64) -> Option<f32> {
         let s = self.step as f64;
         let (cx, cz) = ((x / s).floor() as i64 - self.origin.0 as i64, (z / s).floor() as i64 - self.origin.1 as i64);
-        if cx < 0 || cz < 0 || cx >= N as i64 || cz >= N as i64 {
+        if cx < 0 || cz < 0 || cx >= self.n as i64 || cz >= self.n as i64 {
             return None;
         }
-        let t = self.tops[cz as usize * N + cx as usize];
+        let t = self.tops[cz as usize * self.n + cx as usize];
         (t != UNSEEN).then(|| t as f32 * self.step as f32)
     }
 }
@@ -134,21 +141,23 @@ fn conifer(species: Option<Species>) -> bool {
 
 pub fn build(world: &GameWorld, req: &Request) -> Relief {
     let step = req.step;
+    let n = req.n;
+    debug_assert!(n % TILE == 0 && req.mask.len() == n * n);
     let tall = tallness(step);
     let block = |voxels: f32| (voxels * tall / step as f32).round().clamp(-200.0, 2000.0) as i16;
     let mats = world.materials();
     let water = mats.get(mat::WATER).color.map(f32::from);
     let sheet = |key: Key| req.sheets.iter().find(|s| s.0 == key);
-    let mut cells: Vec<Option<Cell>> = vec![None; N * N];
+    let mut cells: Vec<Option<Cell>> = vec![None; n * n];
     // World voxel at the middle of a column.
     let mid = |c: usize, o: i32| (o + c as i32) * step + step / 2;
     let key_of = |x: i32, z: i32| (x.div_euclid(MACRO_SIZE), z.div_euclid(MACRO_SIZE));
 
     if step < MACRO_SIZE / TEX as i32 {
         // From the voxel world's surface, a square of columns at a time.
-        for tz in (0..N).step_by(TILE) {
-            for tx in (0..N).step_by(TILE) {
-                let seen = |x: usize, z: usize| req.mask[z * N + x][0] >= 128;
+        for tz in (0..n).step_by(TILE) {
+            for tx in (0..n).step_by(TILE) {
+                let seen = |x: usize, z: usize| req.mask[z * n + x][0] >= 128;
                 if !(tz..tz + TILE).any(|z| (tx..tx + TILE).any(|x| seen(x, z))) {
                     continue;
                 }
@@ -183,13 +192,13 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                                 });
                             Cell { top: block(col.ground), color: mats.get(surface).color.map(f32::from), water: false, tree }
                         };
-                        cells[z * N + x] = Some(cell);
+                        cells[z * n + x] = Some(cell);
                     }
                 }
             }
         }
         // The paths, drawn through from point to point so that none is left in dots.
-        let mut path = vec![false; N * N];
+        let mut path = vec![false; n * n];
         for (key, c, _) in &req.sheets {
             let o = Vec2::new((key.0 * MACRO_SIZE) as f32, (key.1 * MACRO_SIZE) as f32) / step as f32 - Vec2::new(req.origin.0 as f32, req.origin.1 as f32);
             for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
@@ -198,11 +207,11 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                         continue;
                     }
                     let (a, b) = (pair[0] / step as f32 + o, pair[1] / step as f32 + o);
-                    let n = ((b - a).abs().max_element() * 2.0).ceil().max(1.0) as usize;
-                    for k in 0..=n {
-                        let p = a.lerp(b, k as f32 / n as f32);
-                        if p.x >= 0.0 && p.y >= 0.0 && (p.x as usize) < N && (p.y as usize) < N {
-                            path[p.y as usize * N + p.x as usize] = true;
+                    let steps = ((b - a).abs().max_element() * 2.0).ceil().max(1.0) as usize;
+                    for k in 0..=steps {
+                        let p = a.lerp(b, k as f32 / steps as f32);
+                        if p.x >= 0.0 && p.y >= 0.0 && (p.x as usize) < n && (p.y as usize) < n {
+                            path[p.y as usize * n + p.x as usize] = true;
                         }
                     }
                 }
@@ -219,9 +228,9 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
         }
     } else {
         // From the continent's grid and its picture.
-        for z in 0..N {
-            for x in 0..N {
-                if req.mask[z * N + x][0] < 128 {
+        for z in 0..n {
+            for x in 0..n {
+                if req.mask[z * n + x][0] < 128 {
                     continue;
                 }
                 let (wx, wz) = (mid(x, req.origin.0), mid(z, req.origin.1));
@@ -258,7 +267,7 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                     }
                     Cell { top: block(sum / count as f32 * OLD_VOXEL).max(1), color, water: false, tree }
                 };
-                cells[z * N + x] = Some(cell);
+                cells[z * n + x] = Some(cell);
             }
         }
     }
@@ -281,9 +290,9 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
     let base = lowest - FOOT;
 
     let mut mesh = Mesh { vertices: Vec::with_capacity(count * 12), indices: Vec::with_capacity(count * 18) };
-    for z in 0..N {
-        for x in 0..N {
-            let Some(cell) = cells[z * N + x] else { continue };
+    for z in 0..n {
+        for x in 0..n {
+            let Some(cell) = cells[z * n + x] else { continue };
             let (wx, wz) = (req.origin.0 + x as i32, req.origin.1 + z as i32);
             // Each block a touch lighter or darker than the next, as cut blocks are.
             let grain = if cell.water { 1.0 } else { 0.965 + 0.07 * hash(wx, wz, 3) };
@@ -293,10 +302,10 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
             let under = if cell.water { color.map(|v| v * 0.8) } else { mix(color, EARTH, 0.65) };
             let beside = |dx: i32, dz: i32| {
                 let (nx, nz) = (x as i32 + dx, z as i32 + dz);
-                if nx < 0 || nz < 0 || nx >= N as i32 || nz >= N as i32 {
+                if nx < 0 || nz < 0 || nx >= n as i32 || nz >= n as i32 {
                     return base;
                 }
-                match tops[nz as usize * N + nx as usize] {
+                match tops[nz as usize * n + nx as usize] {
                     UNSEEN => base,
                     t => t,
                 }
@@ -347,7 +356,7 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
             }
         }
     }
-    Relief { step, origin: req.origin, version: req.version, tops, level, vertices: mesh.vertices, indices: mesh.indices }
+    Relief { tag: req.tag, step, n, origin: req.origin, version: req.version, tops, level, vertices: mesh.vertices, indices: mesh.indices }
 }
 
 struct Mesh {
@@ -384,6 +393,8 @@ mod tests {
         // Around the middle of the continent.
         let centre = MACRO_SIZE / 2 / step;
         Request {
+            tag: 0,
+            n: N,
             step,
             origin: (centre - N as i32 / 2, centre - N as i32 / 2),
             mask: (0..N * N).map(|i| [if seen(i % N, i / N) { 255 } else { 0 }, 0]).collect(),

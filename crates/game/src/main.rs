@@ -1,6 +1,7 @@
 mod arena;
 mod audio;
 mod camera;
+mod character;
 mod env;
 mod farview;
 mod gfx;
@@ -68,6 +69,9 @@ struct Options {
     over: Option<(i32, i32, f64)>,
     /// Start flying instead of on foot. Implied by --pos and --over.
     fly: bool,
+    /// On a screenshot, stand the player's figure at the start and look from behind it,
+    /// or from this many degrees round it.
+    third: Option<f32>,
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
@@ -105,6 +109,7 @@ impl Default for Options {
             pos: DVec3::new(0.0, 90.0, 0.0),
             over: None,
             fly: false,
+            third: None,
             look: (35.0, -18.0),
             time: None,
             date: None,
@@ -133,6 +138,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --pos X,Y,Z           camera start position in voxels
   --over X,Z,H          start H voxels above the ground (or water) at X,Z
   --fly                 start in free-fly mode (F toggles in game)
+  --third               on a screenshot, show the player's figure from behind (V in game)
+  --figure DEG          as --third, with the figure turned DEG degrees from the view
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
@@ -182,6 +189,8 @@ fn parse_args() -> Result<Options> {
                 o.overrides.placed = true;
             }
             "--fly" => o.fly = true,
+            "--third" => o.third = Some(0.0),
+            "--figure" => o.third = Some(value()?.parse()?),
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
@@ -478,6 +487,9 @@ struct Running {
     /// Space was pressed: opens the glider too, but only well clear of the ground.
     deploy_clear: bool,
     last_yaw: f32,
+    /// The view is from behind the player's figure, not through its eyes.
+    third: bool,
+    gait: character::Gait,
     world: Arc<GameWorld>,
     camera: Camera,
     /// On foot, or flying free of collision.
@@ -598,6 +610,8 @@ impl Running {
             overlay,
             renderer,
             last_yaw: camera.yaw,
+            third: false,
+            gait: character::Gait::new(camera.yaw),
             camera,
             walking: !flying,
             player,
@@ -696,6 +710,8 @@ impl Running {
         self.map.set_open(open);
         self.drag = None;
         self.turning = None;
+        // Where the cursor was before it was let go of is not where it is now.
+        self.last_cursor_seen = None;
         self.want_grab = !open;
         self.set_grab(!open);
     }
@@ -890,6 +906,35 @@ impl Running {
             };
             self.player.update(&mut self.voxels, controls, dt);
             self.camera.pos = self.player.eye();
+            // The figure: its stride from how fast it goes over the ground, and facing the
+            // way it goes, or the way its glider or boat does.
+            let over_ground = glam::Vec2::new(self.player.vel.x, self.player.vel.z);
+            let speed = over_ground.length() / worldgen::scale::VOXELS_PER_METRE;
+            let heading = match self.player.mode {
+                Mode::Glide => Some(self.camera.yaw),
+                Mode::Boat => Some(self.player.heading),
+                Mode::Walk if speed > 0.5 => Some(over_ground.y.atan2(over_ground.x)),
+                Mode::Walk if !self.third => Some(self.camera.yaw),
+                Mode::Walk => None,
+            };
+            let doing = character::Doing::of(self.player.mode, self.player.on_ground, self.player.swimming, speed);
+            self.gait.update(doing, heading, dt);
+            if self.third {
+                // Behind and looking past the figure, as far back as the ground and walls allow.
+                use player::Voxels;
+                let back = -self.camera.forward().as_dvec3();
+                let eye = self.camera.pos + DVec3::new(0.0, m64(0.25), 0.0);
+                let (reach, step) = (m64(3.6), 0.25);
+                let mut d = 0.0;
+                while d < reach {
+                    let ahead = (eye + back * (d + 0.75)).floor().as_ivec3();
+                    if self.voxels.kind(ahead.x, ahead.y, ahead.z) == voxel::Kind::Solid {
+                        break;
+                    }
+                    d += step;
+                }
+                self.camera.pos = eye + back * d;
+            }
             self.camera.roll = self.player.bank;
         } else {
             self.camera.roll = 0.0;
@@ -968,11 +1013,18 @@ impl Running {
                 Mode::Glide => vehicles::draw_glider(self.player.pos, self.camera.yaw, self.camera.pos, &mut self.props),
                 Mode::Walk => {}
             }
+            if self.third {
+                // Sitting, the hips are where the thwart is.
+                let sunk = if self.player.mode == Mode::Boat { m64(0.43) } else { 0.0 };
+                let feet = self.player.pos - DVec3::new(0.0, sunk, 0.0);
+                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), self.camera.pos, &mut self.props);
+            }
         }
 
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
-        self.map.update(&self.gpu, self.camera.pos, self.camera.forward(), self.walking, dt);
+        let here = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
 
         self.cpu.lap(2);
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
@@ -1161,7 +1213,12 @@ impl ApplicationHandler for App {
             }
             return;
         }
-        if !r.grabbed && r.overlay.on_event(&r.window, &event) {
+        // While the map is up the mouse is the map's, wherever on it the cursor is: egui
+        // still hears of it, but may not keep it.
+        let for_map = r.map.open
+            && !r.show_settings
+            && matches!(event, WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. });
+        if !r.grabbed && r.overlay.on_event(&r.window, &event) && !for_map {
             return;
         }
         match event {
@@ -1173,29 +1230,38 @@ impl ApplicationHandler for App {
                     r.settings.window = Some((s.width, s.height));
                 }
             }
-            WindowEvent::Focused(false) => r.set_grab(false),
+            WindowEvent::Focused(false) => {
+                r.set_grab(false);
+                r.drag = None;
+                r.turning = None;
+            }
             WindowEvent::Focused(true) => {
                 if r.want_grab {
                     r.set_grab(true);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // A drag begun before the cursor was ever seen starts from here.
                 if let Some((x, y)) = r.drag {
-                    r.map.drag((position.x - x) as f32, (position.y - y) as f32);
+                    if x.is_finite() {
+                        r.map.drag((position.x - x) as f32, (position.y - y) as f32);
+                    }
                     r.drag = Some((position.x, position.y));
                 }
                 if let Some((x, y)) = r.turning {
-                    r.map.turn((position.x - x) as f32, (position.y - y) as f32);
+                    if x.is_finite() {
+                        r.map.turn((position.x - x) as f32, (position.y - y) as f32);
+                    }
                     r.turning = Some((position.x, position.y));
                 }
                 r.last_cursor_seen = Some((position.x, position.y));
                 r.cursor_moved(position.x, position.y);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if r.map.open && !r.show_settings => {
-                r.drag = (state == ElementState::Pressed).then_some(r.last_cursor_seen).flatten();
+                r.drag = (state == ElementState::Pressed).then(|| r.last_cursor_seen.unwrap_or((f64::NAN, f64::NAN)));
             }
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if r.map.open && !r.show_settings => {
-                r.turning = (state == ElementState::Pressed).then_some(r.last_cursor_seen).flatten();
+                r.turning = (state == ElementState::Pressed).then(|| r.last_cursor_seen.unwrap_or((f64::NAN, f64::NAN)));
             }
             WindowEvent::MouseWheel { delta, .. } if r.map.open => {
                 let lines = match delta {
@@ -1238,6 +1304,8 @@ impl ApplicationHandler for App {
                         } else if code == KeyCode::Tab && !event.repeat {
                             r.want_grab = !r.grabbed;
                             r.set_grab(r.want_grab);
+                        } else if code == KeyCode::KeyV && !event.repeat {
+                            r.third = !r.third;
                         } else if code == KeyCode::KeyF && !event.repeat {
                             r.toggle_flying();
                         } else if code == KeyCode::KeyE && !event.repeat {
@@ -1361,7 +1429,13 @@ fn main() -> Result<()> {
         let settings = opts.overrides.applied_to(Settings::default());
         let gpu = Gpu::headless()?;
         let world = Arc::new(GameWorld::new(settings.seed));
-        let camera = make_camera(&opts, &world, None);
+        let mut camera = make_camera(&opts, &world, None);
+        // The figure stands where the camera was, mid stride, and the camera steps back.
+        let figure = opts.third.map(|turned| {
+            let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+            camera.pos += -camera.forward().as_dvec3() * m64(3.6) + DVec3::new(0.0, m64(0.25), 0.0);
+            (feet, character::Gait::striding(camera.yaw + turned.to_radians()))
+        });
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let mut impostors = Impostors::new(&gpu, world.clone());
@@ -1388,6 +1462,9 @@ fn main() -> Result<()> {
         let mut props = Vec::new();
         for boat in fleet.boats() {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
+        }
+        if let Some((feet, gait)) = &figure {
+            character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), camera.pos, &mut props);
         }
         let mut particles = Particles::new();
         for step in 0..(opts.ambient * 60.0) as u32 {
@@ -1427,8 +1504,8 @@ fn main() -> Result<()> {
             if let Some(span) = large {
                 map.set_open(true);
                 map.set_span(span);
-                map.settle(&gpu, camera.pos, camera.forward());
             }
+            map.settle(&gpu, camera.pos, camera.forward());
             map
         });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
