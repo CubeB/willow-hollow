@@ -165,6 +165,11 @@ impl Impostors {
         self.tiles.values().flatten()
     }
 
+    /// A line on how far loading has got, for the log of a timed run.
+    pub fn progress(&self) -> String {
+        format!("tree squares {} loaded, {} queued, {} building, {} waiting", self.tiles.len(), self.wanted.len(), self.pending.len(), self.waiting.len())
+    }
+
     fn in_reach(tile: (i32, i32), center: (i32, i32), slack: i32) -> bool {
         let (dx, dz) = (tile.0 - center.0, tile.1 - center.1);
         let r = (REACH / TILE as f32) as i32 + slack;
