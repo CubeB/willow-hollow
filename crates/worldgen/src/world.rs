@@ -962,6 +962,10 @@ impl GameWorld {
             };
             features::tree_detail::grow(&voxels, &self.materials, &grove, &mut plants);
         }
+        // What the bushes, the ivy and the reeds bore on a picked column has been taken.
+        if !picked.is_empty() {
+            plants.retain(|p| !(features::borne(p.voxel) && picked.contains(&(p.lo[0].div_euclid(CELLS), p.lo[2].div_euclid(CELLS)))));
+        }
         ColumnOutput {
             chunks: out,
             cascades,

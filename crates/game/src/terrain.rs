@@ -105,6 +105,8 @@ struct ColumnResult {
     surf: Vec<Surf>,
     /// Lit lantern voxels in these chunks, in world voxels.
     lamps: Vec<IVec3>,
+    /// What grows here that can be gathered (see [`Streamer::growing_near`]).
+    growing: Vec<(IVec3, voxel::Voxel)>,
     gen_ms: f32,
     mesh_ms: f32,
 }
@@ -166,6 +168,9 @@ pub struct Streamer {
     surf: HashMap<Col, Vec<Surf>>,
     /// Lantern voxels in each loaded column, to light the ground around them.
     lamps: HashMap<Col, Vec<IVec3>>,
+    /// The blooms, caps, berries and reed heads in each loaded column, each with the
+    /// voxel it is in: what can be gathered, as the meshes really have it.
+    growing: HashMap<Col, Vec<(IVec3, voxel::Voxel)>>,
     pending: HashSet<Col>,
     /// Columns still to request, the most pressing last (so it is popped first).
     wanted: Vec<Col>,
@@ -237,6 +242,7 @@ impl Streamer {
             springs: HashMap::new(),
             surf: HashMap::new(),
             lamps: HashMap::new(),
+            growing: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
             shown: [0.0; LEVELS],
@@ -391,6 +397,20 @@ impl Streamer {
             .filter(move |p| ((p.x as f64 - pos.x).hypot(p.z as f64 - pos.z)) <= radius as f64)
     }
 
+    /// What grows in the voxel columns of the square from `(x0, z0)`, `span` each way,
+    /// that can be gathered: the bloom or cap of a flower or mushroom, berries, gorse
+    /// blossom, a reed's head, each as the material it is made of and the voxel it is
+    /// in. Only from columns loaded with their plants, so it names what is really there.
+    pub fn growing_in(&self, x0: i32, z0: i32, span: i32) -> impl Iterator<Item = (IVec3, voxel::Voxel)> + '_ {
+        let (c0, c1) = ((x0.div_euclid(CHUNK), z0.div_euclid(CHUNK)), ((x0 + span - 1).div_euclid(CHUNK), (z0 + span - 1).div_euclid(CHUNK)));
+        (c0.1..=c1.1)
+            .flat_map(move |cz| (c0.0..=c1.0).map(move |cx| (0, cx, cz)))
+            .filter_map(move |col| self.growing.get(&col))
+            .flatten()
+            .copied()
+            .filter(move |(p, _)| (x0..x0 + span).contains(&p.x) && (z0..z0 + span).contains(&p.z))
+    }
+
     /// Call once per frame. Uploads finished columns for about `upload_ms` at most.
     pub fn update(&mut self, gpu: &Gpu, cam: DVec3, upload_ms: f32) {
         let center = (
@@ -455,6 +475,11 @@ impl Streamer {
                     } else {
                         self.lamps.insert(result.col, result.lamps);
                     }
+                    if result.growing.is_empty() {
+                        self.growing.remove(&result.col);
+                    } else {
+                        self.growing.insert(result.col, result.growing);
+                    }
                 }
                 // Skipped by the worker but wanted again by now: put it back in the queue.
                 None if self.focus.in_range(result.col, 0) => self.wanted.push(result.col),
@@ -510,6 +535,7 @@ impl Streamer {
         self.springs.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.surf.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.lamps.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
+        self.growing.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.bare.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
         if self.columns.len() != before {
             self.recount();
@@ -649,6 +675,30 @@ impl Streamer {
 }
 
 /// The lit voxels (lanterns, embers) in a column's chunks, in world voxels.
+/// The parts of the small plants that can be gathered, each once for the voxel column
+/// it stands in (the highest of its kind there): see [`Streamer::growing_in`].
+fn gatherable(plants: &[voxel::mesh::PlantBox]) -> Vec<(IVec3, voxel::Voxel)> {
+    use worldgen::materials as mat;
+    static BLOOMS: std::sync::OnceLock<Vec<voxel::Voxel>> = std::sync::OnceLock::new();
+    let blooms = BLOOMS.get_or_init(|| features::plants::Flower::ALL.iter().map(|f| f.petals()).collect());
+    let mut found: HashMap<(i32, i32, voxel::Voxel), i32> = HashMap::new();
+    for p in plants {
+        let wanted = match p.voxel {
+            // A reed's head is a fat one; the same brown is the eye of a small flower.
+            mat::REED_HEAD => p.hi[0] - p.lo[0] >= 2 && p.hi[2] - p.lo[2] >= 2,
+            v => features::borne(v) || blooms.contains(&v),
+        };
+        if wanted {
+            let at = IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS));
+            let y = found.entry((at.x, at.z, p.voxel)).or_insert(at.y);
+            *y = (*y).max(at.y);
+        }
+    }
+    let mut out: Vec<(IVec3, voxel::Voxel)> = found.into_iter().map(|((x, z, v), y)| (IVec3::new(x, y, z), v)).collect();
+    out.sort_unstable_by_key(|(p, v)| (p.x, p.z, *v));
+    out
+}
+
 fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Materials) -> Vec<IVec3> {
     use voxel::PAD;
     let lit: Vec<bool> = (0..mats.len()).map(|i| mats.get(i as voxel::Voxel).emissive).collect();
@@ -712,6 +762,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             springs: Vec::new(),
             surf: Vec::new(),
             lamps: Vec::new(),
+            growing: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
         };
@@ -750,6 +801,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     chunks.reverse();
     let t2 = Instant::now();
     let lamps = lamp_voxels(&output.chunks, col, world.materials());
+    let growing = gatherable(&output.plants);
     ColumnResult {
         col,
         marks: Marks::of(world, col),
@@ -759,6 +811,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         springs: output.springs,
         surf: output.surf,
         lamps,
+        growing,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
     }
@@ -804,7 +857,73 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         springs: Vec::new(),
         surf: Vec::new(),
         lamps: Vec::new(),
+        growing: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use worldgen::{continent::SimConfig, features::plants::Flower};
+
+    /// The chunk columns of a small world's land, a scattering of them.
+    fn land(world: &GameWorld) -> Vec<(i32, i32)> {
+        let c = world.continent(0, 0);
+        let cs = c.cell_size() as i32;
+        (0..c.size * c.size)
+            .step_by(53)
+            .filter(|&i| !c.ocean[i] && c.height[i] > 4.0)
+            .map(|i| (((i % c.size) as i32 * cs).div_euclid(CHUNK), ((i / c.size) as i32 * cs).div_euclid(CHUNK)))
+            .collect()
+    }
+
+    #[test]
+    fn the_flowers_the_world_names_are_there_to_gather_and_nothing_picked_is() {
+        let world = GameWorld::with_config(3, SimConfig { size: 256 });
+        let (mut named, mut there) = (0, 0);
+        let mut kinds: HashSet<Flower> = HashSet::new();
+        let mut found: HashSet<Flower> = HashSet::new();
+        let mut borne = 0;
+        for (cx, cz) in land(&world) {
+            let growing = gatherable(&world.generate_column(cx, cz).plants);
+            let flowers = world.flowers_in(cx * CHUNK, cz * CHUNK, CHUNK);
+            for ((x, z), f) in &flowers {
+                named += 1;
+                kinds.insert(*f);
+                if growing.iter().any(|(p, v)| p.x == *x && p.z == *z && *v == f.petals()) {
+                    there += 1;
+                    found.insert(*f);
+                }
+            }
+            // Picking a column takes what it bore, and its flower, and leaves the rest.
+            let fruit: Vec<_> = growing.iter().filter(|(p, v)| features::borne(*v) && p.x.div_euclid(CHUNK) == cx && p.z.div_euclid(CHUNK) == cz).take(3).copied().collect();
+            let picked: Vec<(i32, i32)> = fruit.iter().map(|(p, _)| (p.x, p.z)).chain(flowers.iter().take(3).map(|(at, _)| *at)).collect();
+            if !picked.is_empty() {
+                for &(x, z) in &picked {
+                    world.pick(x, z);
+                }
+                let after = gatherable(&world.generate_column(cx, cz).plants);
+                assert!(after.iter().all(|(p, _)| !picked.contains(&(p.x, p.z))), "something still grows on a picked column of {cx},{cz}");
+                assert!(after.len() + picked.len() * 4 >= growing.len(), "picking {} columns took {} things", picked.len(), growing.len() - after.len());
+                for &(x, z) in &picked {
+                    world.regrow(x, z);
+                }
+                assert_eq!(gatherable(&world.generate_column(cx, cz).plants), growing, "what was picked did not grow back as it was");
+                borne += fruit.len();
+            }
+            if named > 1500 && borne > 0 {
+                break;
+            }
+        }
+        assert!(named > 300, "only {named} flowers named");
+        // Nearly every flower named is really there (a boulder sits on the odd one), and
+        // every kind named is somewhere found.
+        assert!(there * 100 >= named * 90, "{there} of {named} flowers named are there");
+        let missing: Vec<_> = kinds.difference(&found).collect();
+        assert!(missing.is_empty(), "never found growing: {missing:?}");
+        assert!(borne > 0, "nothing that bears berries, blossom or reed heads was met");
     }
 }
