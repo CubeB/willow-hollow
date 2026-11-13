@@ -389,6 +389,27 @@ pub fn bedrock(biome: Biome) -> (Voxel, Voxel) {
     }
 }
 
+/// The two stones a builder gets from ground of `rock`: the rock itself for the walls,
+/// and the stone found with it in the same country for footings, courses and copings.
+/// Both belong to the rock's own family, so granite is never trimmed in sandstone.
+pub fn masonry(rock: Voxel) -> (Voxel, Voxel) {
+    match rock {
+        ROCK_DARK => (ROCK_DARK, STONE),
+        ROCK_PALE => (ROCK_PALE, STONE),
+        ROCK_BROWN => (ROCK_BROWN, ROCK_DARK),
+        SANDSTONE => (SANDSTONE, SANDSTONE_DARK),
+        SANDSTONE_DARK => (SANDSTONE_DARK, SANDSTONE),
+        SANDSTONE_RED => (SANDSTONE_RED, RED_ROCK),
+        RED_ROCK => (RED_ROCK, RED_ROCK_DARK),
+        RED_ROCK_DARK => (RED_ROCK_DARK, RED_ROCK),
+        GRANITE => (GRANITE, GRANITE_GREY),
+        GRANITE_GREY => (GRANITE_GREY, GRANITE),
+        GRANITE_PALE => (GRANITE_PALE, GRANITE),
+        BASALT => (BASALT, ROCK_DARK),
+        _ => (STONE, ROCK_DARK),
+    }
+}
+
 /// What lies a little beneath a biome's ground cover.
 pub fn subsoil(cover: Voxel) -> Voxel {
     match cover {

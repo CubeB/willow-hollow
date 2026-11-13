@@ -919,6 +919,13 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
     best
 }
 
+/// The building materials of the place at continent-local column `(lx, lz)` and height
+/// `y`: stone from the rock in the ground there, timber from the trees of the country.
+pub(super) fn palette_at(c: &Continent, seed: u32, biome: crate::biome::Biome, lx: i32, y: i32, lz: i32) -> Palette {
+    use crate::macro_layout::MACRO_SIZE;
+    Palette::at(seed, biome, c.desc.mx * MACRO_SIZE + lx, y, c.desc.mz * MACRO_SIZE + lz)
+}
+
 fn absolute(voxels: Vec<(IVec3, Voxel)>, origin: IVec3, turns: u32) -> Vec<(IVec3, Voxel)> {
     voxels.into_iter().map(|(p, v)| (origin + rotate(p, turns), v)).collect()
 }
@@ -992,8 +999,8 @@ fn place_land(
     let found = siting::settle(c, seed, kind, cell)?;
     let (x, z) = (found.x, found.z);
     let biome = Sampler::new(c, seed, x, z, 1).column(x, z).biome;
-    let palette = Palette::of(biome);
     let y = found.y.round();
+    let palette = palette_at(c, seed, biome, x, y as i32, z);
     let history = landmarks::History::of(kind, site_seed);
     let lay = layout(kind);
     let mut pad = Pad::plain(x as f32 + 0.5, z as f32 + 0.5, kind.radius(), y);
@@ -1051,7 +1058,7 @@ fn water_path(c: &Continent, seed: u32, pad: &Pad, water: Vec2) -> Option<Vec<Ve
 fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mut Network) -> Option<Site> {
     let shore = find_shore(c, seed, cell)?;
     let biome = Sampler::new(c, seed, shore.x, shore.z, 1).column(shore.x, shore.z).biome;
-    let palette = Palette::of(biome);
+    let palette = palette_at(c, seed, biome, shore.x, shore.level, shore.z);
     let y = shore.level as f32 + 0.5;
     net.pads.push(Pad::plain(shore.x as f32 + 0.5, shore.z as f32 + 0.5, Landmark::Landing.radius(), y));
     let origin = IVec3::new(shore.x, shore.level + 1, shore.z);
@@ -1149,8 +1156,9 @@ struct Layer<'a> {
 }
 
 impl Layer<'_> {
-    fn palette_at(&self, col: &Column) -> Palette {
-        Palette::of(col.biome)
+    /// The palette of the ground at trail point `p`, whose bare column is `col`.
+    fn palette_at(&self, col: &Column, p: Vec2) -> Palette {
+        palette_at(self.c, self.seed, col.biome, p.x.floor() as i32, col.top(), p.y.floor() as i32)
     }
 
     /// `widths` is the half-width the traffic calls for at each of `raw`.
@@ -1186,7 +1194,9 @@ impl Layer<'_> {
         for &(s, e) in &runs {
             let span = e - s + 1;
             let mid = (s + e) / 2;
-            let palette = self.palette_at(&cols[mid]);
+            // Built of the rock of the bank it springs from.
+            let bank = s.saturating_sub(1);
+            let palette = self.palette_at(&cols[bank], pts[bank]);
             let depth = (s..=e)
                 .filter_map(|i| cols[i].water_surface().map(|k| k - cols[i].top()))
                 .max()
@@ -1357,7 +1367,7 @@ impl Layer<'_> {
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
             let at = IVec3::new(x, y, z);
-            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col), height, hash2(salt, x, z), style, turns, gate_half);
+            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col, q), height, hash2(salt, x, z), style, turns, gate_half);
             let footprint: Vec<IVec2> = voxels
                 .iter()
                 .filter(|(p, _)| (0..=2).contains(&p.y))
@@ -1653,7 +1663,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
                 if d < best { (p.y, d) } else { (y, best) }
             });
         let directions: &[f32] = if near.is_empty() { &[0.0, 2.1] } else { &near };
-        let voxels = landmarks::signpost(&Palette::of(col.biome), directions);
+        let voxels = landmarks::signpost(&palette_at(c, world_seed, col.biome, x, col.top(), z), directions);
         net.add_stamp(absolute(voxels, IVec3::new(x, trail_y.floor() as i32 + 1, z), 0));
     }
 
@@ -1674,7 +1684,8 @@ fn terrace_walls(c: &Continent, seed: u32, net: &mut Network) {
         let reach = (pad.radius + crate::surface::TERRACE_RING).ceil() as i32 + 1;
         let (cx, cz) = (pad.x.floor() as i32, pad.z.floor() as i32);
         let s = Sampler::with_network(c, seed, cx - reach - 1, cz - reach - 1, 2 * reach + 3, net);
-        let pal = Palette::of(s.column(cx, cz).biome);
+        // The same stone as the place it holds up (see `place_land`).
+        let pal = palette_at(c, seed, s.column(cx, cz).biome, cx, pad.y.round() as i32, cz);
         let mut rng = Rng::new(hash2(seed ^ 0x07e4_4ace, cx, cz));
         let pad_top = pad.y.floor() as i32;
         let mut voxels = Vec::new();

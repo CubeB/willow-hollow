@@ -190,6 +190,27 @@ pub fn strata_height(seed: u32, y: f32, tilt: f32) -> f32 {
     s + 7.0 * perlin2(seed ^ 0x57c1, s as f64 / 26.0, 0.37) + 2.0 * perlin2(seed ^ 0x57c2, s as f64 / 11.0, 0.71)
 }
 
+/// The rock in the ground at world column `(wx, wz)` and height `y`: the bed a cliff
+/// cut there would show (see the chunk fill in `world.rs`, which adds only ragged edges
+/// and the odd thin bed to this). It is what anything built there is built of. Volcanic
+/// country is basalt under its ash whatever the height. (The dry biomes here are the
+/// ones `materials::strata` gives sandstone.)
+pub fn local_rock(seed: u32, biome: crate::biome::Biome, wx: i32, y: i32, wz: i32) -> voxel::Voxel {
+    if biome == crate::biome::Biome::Volcanic {
+        return crate::materials::BASALT;
+    }
+    let s = strata_height(seed, y as f32, strata_tilt(seed, wx as f64, wz as f64)).floor() as i32;
+    let bed = |down: i32| crate::materials::strata(seed, biome, s - down * STRATA as i32, 0.0);
+    // The dry country's sandstones have the odd thin bed of pale grey rock among them.
+    // Nobody builds of that with sandstone a spade's depth under it: there, the rock
+    // of the place is the nearest sandstone bed below.
+    use crate::biome::Biome;
+    if matches!(biome, Biome::Desert | Biome::DuneSea | Biome::Savanna | Biome::Heath) {
+        return (0..6).map(bed).find(|&r| r != crate::materials::ROCK_PALE).unwrap_or(crate::materials::SANDSTONE);
+    }
+    bed(0)
+}
+
 impl Face {
     /// Raises or lowers `ground` to cut the face, scaled by `strength` (0 to 1), on
     /// ground whose natural slope is `slope`.

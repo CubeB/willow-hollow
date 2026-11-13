@@ -1,8 +1,9 @@
 //! The places trails lead to: shrines, towers, camps, ruins and the like.
 //!
-//! Every landmark is generated from a seed and a palette taken from where it stands, so
-//! a shrine in the desert is sandstone and a shrine in the redwoods is mossy rock and
-//! red timber, and no two are quite the same. In model space the origin column is the
+//! Every landmark is generated from a seed and a palette taken from where it stands:
+//! its stone is the rock in the ground there and its timber the trees round about, so a
+//! shrine in the desert is sandstone, a tower on the moor is granite and a shrine in the
+//! redwoods is mossy rock and red timber, and no two are quite the same. In model space the origin column is the
 //! middle of the site and `y = 0` is the first layer above the ground.
 
 use std::f32::consts::TAU;
@@ -116,6 +117,24 @@ impl Palette {
             Deciduous | Woodland => stone(mat::BARK_OAK, mat::PLANK, mat::ROOF_TILE, mat::CLOTH_RED, 0.3),
             other => unreachable!("{other:?} is not an original biome"),
         }
+    }
+
+    /// The palette of one place: what suits its biome ([`Palette::of`]), but its stone
+    /// the rock that is in the ground there (`rock`, see [`crate::surface::local_rock`])
+    /// with the stone that goes with it, and its timber the trees of the country where
+    /// it is wooded. A tower on a granite moor is granite; one on red sandstone is red.
+    pub fn local(biome: Biome, rock: Voxel) -> Self {
+        let mut p = Self::of(biome);
+        (p.stone, p.stone_dark) = mat::masonry(rock);
+        if let Some(wood) = super::timber(biome) {
+            p.wood = wood;
+        }
+        p
+    }
+
+    /// [`Palette::local`] for the ground at world column `(wx, wz)` and height `y`.
+    pub fn at(seed: u32, biome: Biome, wx: i32, y: i32, wz: i32) -> Self {
+        Self::local(biome, crate::surface::local_rock(seed, biome, wx, y, wz))
     }
 
     /// This palette with its choices varied by `seed`: each place draws its roof, timber,

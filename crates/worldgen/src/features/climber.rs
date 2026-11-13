@@ -1264,6 +1264,12 @@ pub fn climbable(v: Voxel) -> bool {
             | mat::WOOD_DEAD
             | mat::STONE
             | mat::ROCK_DARK
+            | mat::ROCK_PALE
+            | mat::ROCK_BROWN
+            | mat::SANDSTONE_RED
+            | mat::GRANITE
+            | mat::GRANITE_GREY
+            | mat::GRANITE_PALE
             | mat::MOSSY_STONE
             | mat::SANDSTONE
             | mat::SANDSTONE_DARK

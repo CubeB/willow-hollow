@@ -20,7 +20,7 @@ mod spring;
 
 pub use spring::Spring;
 
-pub use cliff::{strata_height, strata_tilt};
+pub use cliff::{local_rock, strata_height, strata_tilt};
 
 use crate::{
     biome::Biome,
