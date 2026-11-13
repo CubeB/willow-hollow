@@ -495,6 +495,8 @@ struct Running {
     fleet: Fleet,
     /// Solid models to draw this frame.
     props: Vec<particles::ParticleInstance>,
+    /// As `props`, but casting shadows only: the player's figure, seen through its eyes.
+    shades: Vec<particles::ParticleInstance>,
     /// Glider key pressed since the last frame.
     deploy: bool,
     /// Space was pressed: opens the glider too, but only well clear of the ground.
@@ -660,6 +662,7 @@ impl Running {
             was_swimming: false,
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
+            shades: Vec::new(),
             deploy: false,
             deploy_clear: false,
             world,
@@ -1032,6 +1035,7 @@ impl Running {
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
         self.props.clear();
+        self.shades.clear();
         for boat in self.fleet.boats() {
             vehicles::draw_boat(boat.pos, boat.heading, clock, self.camera.pos, &mut self.props);
         }
@@ -1046,14 +1050,16 @@ impl Running {
             if self.glider > 0.0 {
                 vehicles::draw_glider(self.player.pos, self.camera.yaw, self.glider, self.camera.pos, &mut self.props);
             }
-            if self.third {
+            {
                 // Sitting, the hips are where the thwart is.
                 // On foot they rise and fall over steps as smoothly as the eye does.
                 let feet = match self.player.mode {
                     Mode::Boat => self.player.pos - DVec3::new(0.0, m64(0.43), 0.0),
                     _ => self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0),
                 };
-                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), self.camera.pos, &mut self.props);
+                // Seen from behind, or through its own eyes only by its shadow.
+                let into = if self.third { &mut self.props } else { &mut self.shades };
+                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), self.camera.pos, into);
             }
         }
 
@@ -1084,6 +1090,7 @@ impl Running {
             impostors: &self.impostors,
             particles: self.particles.instances(),
             props: &self.props,
+            shades: &self.shades,
             wind: self.particles.wind.lagged * OLD_VOXEL,
             ground,
             lamps: &lamps,

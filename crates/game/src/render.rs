@@ -203,6 +203,9 @@ pub struct Scene<'a> {
     pub particles: &'a [ParticleInstance],
     /// Solid moving models (boats, the glider), drawn with the opaque scene.
     pub props: &'a [ParticleInstance],
+    /// More of the same that are not seen but cast a shadow: the player's own figure,
+    /// seen through its eyes.
+    pub shades: &'a [ParticleInstance],
     pub wind: Vec3,
     /// Snow, ice and wetness on the ground, here and in each biome.
     pub ground: crate::season::Places,
@@ -339,6 +342,7 @@ pub struct Renderer {
     tonemap: wgpu::RenderPipeline,
     particles: wgpu::RenderPipeline,
     props: wgpu::RenderPipeline,
+    prop_shadow: wgpu::RenderPipeline,
     prop_instances: wgpu::Buffer,
     cube: wgpu::Buffer,
     particle_instances: wgpu::Buffer,
@@ -993,6 +997,40 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let prop_shadow_module = shader(device, "prop shadow", include_str!("shaders/prop_shadow.wgsl").to_string());
+        let prop_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("prop shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &prop_shadow_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 24,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<ParticleInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 7 => Float32x2],
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
         let prop_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("prop instances"),
             size: (PROP_CAPACITY * size_of::<ParticleInstance>()) as u64,
@@ -1154,6 +1192,7 @@ impl Renderer {
             tonemap,
             particles,
             props,
+            prop_shadow,
             prop_instances,
             cube,
             particle_instances,
@@ -1666,6 +1705,17 @@ impl Renderer {
             t.mark(encoder, 0);
         }
 
+        // The moving models: those seen first, then those that only cast a shadow.
+        let prop_count = scene.props.len().min(PROP_CAPACITY);
+        let shade_count = scene.shades.len().min(PROP_CAPACITY - prop_count);
+        if prop_count > 0 {
+            gpu.queue.write_buffer(&self.prop_instances, 0, bytemuck::cast_slice(&scene.props[..prop_count]));
+        }
+        if shade_count > 0 {
+            let at = (prop_count * size_of::<ParticleInstance>()) as u64;
+            gpu.queue.write_buffer(&self.prop_instances, at, bytemuck::cast_slice(&scene.shades[..shade_count]));
+        }
+
         // --- Shadow passes -------------------------------------------------------
         for (i, view) in self.shadow_views.iter().enumerate() {
             if !fresh[i] {
@@ -1697,6 +1747,14 @@ impl Renderer {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
                 draw_chunks(&mut pass, indirect, &draws, shadow_lists[i].clone());
             }
+            // They are small and near: the far cascade would not show them.
+            if i < PLANT_SHADOW_CASCADES && prop_count + shade_count > 0 {
+                pass.set_pipeline(&self.prop_shadow);
+                pass.set_bind_group(0, &self.cascade_binds[i].1, &[]);
+                pass.set_vertex_buffer(0, self.cube.slice(..));
+                pass.set_vertex_buffer(1, self.prop_instances.slice(..));
+                pass.draw(0..36, 0..(prop_count + shade_count) as u32);
+            }
             drop(pass);
             if let Some(t) = &self.timer {
                 t.mark(encoder, i as u32 + 1);
@@ -1704,10 +1762,6 @@ impl Renderer {
         }
 
         // --- Opaque scene --------------------------------------------------------
-        let prop_count = scene.props.len().min(PROP_CAPACITY);
-        if prop_count > 0 {
-            gpu.queue.write_buffer(&self.prop_instances, 0, bytemuck::cast_slice(&scene.props[..prop_count]));
-        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
@@ -2011,6 +2065,7 @@ pub fn screenshot(
         impostors,
         particles,
         props,
+        shades: &[],
         wind,
         ground,
         lamps,
@@ -2096,7 +2151,7 @@ pub fn screenshot(
                 camera.yaw += 0.6 * dt;
             }
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let scene = Scene { camera: &camera, env: &env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts };
+            let scene = Scene { camera: &camera, env: &env, terrain: streamer, far, impostors, particles, props, shades: &[], lamps, wind, ground, shafts };
             renderer.render(gpu, &mut encoder, &view, &scene);
             encoder.copy_texture_to_buffer(
                 target.as_image_copy(),
@@ -2129,7 +2184,7 @@ pub fn screenshot(
         for _ in 0..n {
             let t = std::time::Instant::now();
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, lamps, wind, ground, shafts };
+            let scene = Scene { camera, env, terrain: streamer, far, impostors, particles, props, shades: &[], lamps, wind, ground, shafts };
             renderer.render(gpu, &mut encoder, &view, &scene);
             hud(&mut encoder, &view, false);
             gpu.queue.submit([encoder.finish()]);
