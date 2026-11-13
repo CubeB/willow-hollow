@@ -28,6 +28,21 @@ pub fn named(name: &str) -> Option<f32> {
     })
 }
 
+/// The middle of a month, by its name in English or its first three letters ("may",
+/// "sept", "October"), as a date: the months the flowers keep (`plants::month_start`).
+pub fn month(name: &str) -> Option<f32> {
+    use worldgen::features::plants::{MONTHS, month_start};
+    let name = name.to_ascii_lowercase();
+    let m = MONTHS.iter().position(|m| name.len() >= 3 && m.to_ascii_lowercase().starts_with(&name))?;
+    Some((month_start(m as u8 + 1) + 1.0 / 24.0).rem_euclid(1.0))
+}
+
+/// The name of the month a date falls in.
+pub fn month_name(date: f32) -> &'static str {
+    use worldgen::features::plants::{MONTHS, month_of};
+    MONTHS[month_of(date) as usize - 1]
+}
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -257,6 +272,13 @@ mod tests {
         let temperate = warmth(Biome::Deciduous);
         assert_eq!(Ground::at(DEFAULT_DATE, temperate, 0.6, 0.0, 0.0).snow, 0.6);
         assert_eq!(named("winter"), Some(0.86));
+        // Months, for the command line: the middle of each, in the season it belongs to.
+        assert_eq!((month_name(0.0), month_name(0.25), month_name(0.76), month_name(DEFAULT_DATE)), ("March", "June", "December", "July"));
+        for (name, full) in [("may", "May"), ("Sept", "September"), ("december", "December"), ("jan", "January")] {
+            assert_eq!(month_name(month(name).expect(name)), full);
+        }
+        assert_eq!((month("ma"), month("smarch")), (None, None));
+        assert!(month("june").unwrap() < month("august").unwrap() && month("feb").unwrap() > 0.85);
         assert_eq!(named("monsoon"), None);
     }
 

@@ -147,7 +147,8 @@ const WASH_SLOTS: usize = 64;
 /// Those tables: for the wash numbered `i`, its leaves' colour (linear) and its flowers',
 /// each with its plant kind, which the seasons go by, in the whole part of `w`; in the
 /// rest of `w`, half of how much of the ground's colour the plant takes the place of, and
-/// half the flowers' share of it.
+/// half the flowers' share of it. Above the three bits of the flowers' kind is the row
+/// of the table of seasons they keep (`plants::seasons`), 0 with none of their own.
 fn wash_tables() -> ([[f32; 4]; WASH_SLOTS], [[f32; 4]; WASH_SLOTS]) {
     let mats = worldgen::materials::build();
     let all = worldgen::features::plants::washes();
@@ -160,7 +161,8 @@ fn wash_tables() -> ([[f32; 4]; WASH_SLOTS], [[f32; 4]; WASH_SLOTS]) {
         let [r, g, bl] = linear(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w.body.2));
         body[i + 1] = [r, g, bl, mats.get(w.body.0).plant as f32 + w.cover.clamp(0.0, 1.0) * 0.5];
         let [r, g, bl] = linear(colour(w.bloom.0));
-        bloom[i + 1] = [r, g, bl, mats.get(w.bloom.0).plant as f32 + w.bloom.1.clamp(0.0, 1.0) * 0.5];
+        let kind = mats.get(w.bloom.0).plant as u32 | (w.season as u32) << 3;
+        bloom[i + 1] = [r, g, bl, kind as f32 + w.bloom.1.clamp(0.0, 1.0) * 0.5];
     }
     (body, bloom)
 }
@@ -212,7 +214,13 @@ struct Globals {
     /// The colours small plants give the ground from afar (see `wash_tables`).
     wash_body: [[f32; 4]; WASH_SLOTS],
     wash_bloom: [[f32; 4]; WASH_SLOTS],
+    /// The seasons of the plants that have their own: `plants::seasons`.
+    flowering: [[f32; 4]; SEASON_SLOTS],
 }
+
+/// Rows in the table of seasons, which the shaders keep as 64.
+const SEASON_SLOTS: usize = worldgen::features::plants::SEASON_SLOTS;
+const _: () = assert!(SEASON_SLOTS == 64);
 
 /// Entries in the globals' snow table: every biome, rounded up.
 const SNOW_SLOTS: usize = 24;
@@ -233,6 +241,8 @@ struct Shadows {
 struct CascadeUniform {
     light_vp: [[f32; 4]; 4],
     season: [f32; 4],
+    /// The seasons of the plants that have their own, as in [`Globals`].
+    flowering: [[f32; 4]; SEASON_SLOTS],
 }
 
 /// What one cascade's shadow map was last drawn from.
@@ -433,6 +443,8 @@ pub struct Renderer {
     cloud_edges: [f32; CLOUD_COVERS],
     /// The colours small plants give the ground from afar (see `wash_tables`).
     wash: ([[f32; 4]; WASH_SLOTS], [[f32; 4]; WASH_SLOTS]),
+    /// The table of seasons (`plants::seasons`), for the globals and the shadow passes.
+    flowering: [[f32; 4]; SEASON_SLOTS],
     globals: wgpu::Buffer,
     shadows: wgpu::Buffer,
     scene_bind: wgpu::BindGroup,
@@ -943,7 +955,7 @@ impl Renderer {
         });
 
         let far_module = shader(device, "far", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/far.wgsl")));
-        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2, 4 => Unorm8x4, 5 => Uint8x4];
+        let far_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Snorm16x2, 4 => Unorm8x4, 5 => Uint8x4, 6 => Uint8x4];
         let far_instance_attrs = wgpu::vertex_attr_array![3 => Float32x3];
         let far = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("far"),
@@ -1333,6 +1345,7 @@ impl Renderer {
             height,
             cloud_edges,
             wash: wash_tables(),
+            flowering: worldgen::features::plants::seasons(),
             globals,
             shadows,
             scene_bind,
@@ -1620,7 +1633,7 @@ impl Renderer {
                 gpu.queue.write_buffer(
                     &self.cascade_binds[i].0,
                     0,
-                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d(), season: [env.date, 0.0, 0.0, 0.0] }),
+                    bytemuck::bytes_of(&CascadeUniform { light_vp: m.to_cols_array_2d(), season: [env.date, 0.0, 0.0, 0.0], flowering: self.flowering }),
                 );
             }
             // A map drawn earlier is still right: it is fixed in the world, so only the
@@ -1675,6 +1688,7 @@ impl Renderer {
             }),
             wash_body: self.wash.0,
             wash_bloom: self.wash.1,
+            flowering: self.flowering,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -2427,6 +2441,10 @@ mod tests {
             // A plant kind in the whole part, and half a share in the rest.
             assert!(body[i][3].fract() > 0.0 && body[i][3].fract() <= 0.5, "{:?}", body[i]);
             assert!(bloom[i][3].fract() <= 0.5);
+            // The flowers' season rides above their kind, and both come back out whole.
+            let w = &worldgen::features::plants::washes()[i - 1];
+            assert_eq!((bloom[i][3] as u32) >> 3, w.season as u32);
+            assert!((bloom[i][3] as u32 & 7) < 8 && (w.season as usize) < SEASON_SLOTS);
             assert!(body[i][..3].iter().all(|c| (0.0..=1.0).contains(c)));
         }
     }

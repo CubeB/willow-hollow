@@ -116,7 +116,7 @@ struct Plot<'a> {
 impl Plot<'_> {
     fn add(&mut self, lo: [i32; 3], hi: [i32; 3], voxel: Voxel, sway: (bool, bool)) {
         let at = |p: [i32; 3]| [self.origin[0] + p[0], self.origin[1] + p[1], self.origin[2] + p[2]];
-        self.out.push(PlantBox { lo: at(lo), hi: at(hi), voxel, sway_lo: sway.0, sway_hi: sway.1, thin: 0 });
+        self.out.push(PlantBox { lo: at(lo), hi: at(hi), voxel, sway_lo: sway.0, sway_hi: sway.1, thin: 0, season: 0 });
     }
 
     /// A vertical stem one cell square, rooted on the ground.

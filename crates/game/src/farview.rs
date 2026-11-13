@@ -62,6 +62,11 @@ pub struct FarVertex {
     /// forest keeps its leaves in winter in the five bits above it (see [`pack_plant`]);
     /// then its [`Skylines`] toward sunrise and sunset.
     pub place: [u8; 4],
+    /// Land: the wash of the flowers or heather that lie over it (its number in the
+    /// globals' tables, 0 for none), which the shader colours by the date as it does the
+    /// nearer ground; how much of the ground's colour it takes the place of; and how much
+    /// of that is still seen under the land's forest, out beyond the tree models.
+    pub wash: [u8; 4],
 }
 
 impl FarVertex {
@@ -75,6 +80,7 @@ impl FarVertex {
             far: [color[0], color[1], color[2], 0],
             // The sea takes the snow and ice of where the camera is (`Biome::Ocean`).
             place: [Biome::Ocean as u8, 0, 0, 0],
+            wash: [0; 4],
         }
     }
 }
@@ -444,6 +450,9 @@ struct Look {
     plant: u8,
     /// How high that canopy stands above the ground, in voxels.
     lift: f32,
+    /// The wash of the flowers that lie over it, how much of the ground's colour it takes,
+    /// and how much of that shows under the canopy (see [`FarVertex::wash`]).
+    wash: (u8, f32, f32),
 }
 
 /// The land at a cell as the far surface draws it. The ground is the one the voxel world
@@ -454,7 +463,7 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     if c.ocean[i] {
         // Under the sea plane; only seen through gaps, so keep it sandy.
         let sand = color(mat::SAND);
-        return Look { ground: sand, far: sand, plant: 0, lift: 0.0 };
+        return Look { ground: sand, far: sand, plant: 0, lift: 0.0, wash: (0, 0.0, 0.0) };
     }
     let biome = Biome::from_u8(c.biome[i]);
     // Sand as far in from the shore as the voxel world's beach reaches, which the
@@ -465,11 +474,11 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     let beach = sand > 0.5;
     let mut ground = color(mat::ground_cover(biome));
     // Drifts of flowers and beds of heather colour the land they lie over, as the ground
-    // under each plant is coloured nearer to (see `wash` in terrain.wgsl).
+    // under each plant is coloured nearer to (see `wash` in terrain.wgsl). The shader
+    // lays the colour on, since it changes with the date: purple while the heather is
+    // out, rust when it is over.
     let (wx, wz) = (c.desc.mx * MACRO_SIZE + centre.x as i32, c.desc.mz * MACRO_SIZE + centre.y as i32);
-    if let Some((tint, share)) = features::plants::far_wash(biome, wx, wz, c.desc.world_seed, mats) {
-        ground = mix(ground, tint, share);
-    }
+    let (wash, mut washed) = features::plants::far_wash(biome, wx, wz, c.desc.world_seed).unwrap_or((0, 0.0));
     ground = mix(ground, color(mat::SAND), sand);
     // The voxel world's snow line wanders by 0.015 either way of 0.10.
     let snow = ((0.115 - c.temperature[i]) / 0.03).clamp(0.0, 1.0) * (1.0 - sand);
@@ -479,10 +488,12 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     let (light, dark) = mat::bedrock(biome);
     let rocky = smoothstep(1.3, 1.9, slope);
     ground = mix(ground, mix(color(light), color(dark), 0.25), rocky);
+    // Nothing flowers on sand, snow or rock.
+    washed *= (1.0 - sand) * (1.0 - snow) * (1.0 - rocky);
 
     // Trees take no root on rock, on the beach, or where it is too cold.
     let Some(canopy) = canopies[biome as usize].filter(|_| !beach) else {
-        return Look { ground, far: ground, plant: 0, lift: 0.0 };
+        return Look { ground, far: ground, plant: 0, lift: 0.0, wash: (wash, washed, 1.0) };
     };
     let grows = (1.0 - rocky) * smoothstep(0.125, 0.14, c.temperature[i]);
     Look {
@@ -490,6 +501,7 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
         far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),
         plant: pack_plant(canopy.plant, canopy.winter_green),
         lift: canopy.cover * canopy.height * 0.6 * grows,
+        wash: (wash, washed, 1.0 - canopy.cover * 0.85 * grows),
     }
 }
 
@@ -707,6 +719,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         // Nothing grows in the water.
                         land.far = land.ground;
                         land.lift = 0.0;
+                        land.wash = (0, 0.0, 0.0);
                     }
                     // The forest comes down to the ground beside water, so the water is
                     // not tilted up to the canopy across the triangles of its shore.
@@ -755,6 +768,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         grad: [pack(gx), pack(gz)],
                         far: [far[0], far[1], far[2], wet],
                         place: [c.biome[idx], land.plant, skylines.angles[idx][0], skylines.angles[idx][1]],
+                        wash: [land.wash.0, (land.wash.1.clamp(0.0, 1.0) * 255.0).round() as u8, (land.wash.2.clamp(0.0, 1.0) * 255.0).round() as u8, 0],
                     });
                 }
             }

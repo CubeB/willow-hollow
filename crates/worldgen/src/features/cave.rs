@@ -654,6 +654,7 @@ fn spire(out: &mut Vec<PlantBox>, wx: i32, wz: i32, from: i32, len: i32, w0: i32
             sway_lo: false,
             sway_hi: false,
             thin: if down { 1 << 3 } else { 0 },
+            season: 0,
         });
     }
 }
@@ -671,6 +672,7 @@ fn pillar(grid: &mut Grid, out: &mut Vec<PlantBox>, (px, pz): (i32, i32), (wx, w
         sway_lo: false,
         sway_hi: false,
         thin: if down { 1 << 3 } else { 0 },
+        season: 0,
     };
     let (f, r) = (sp.floor * CELLS, sp.roof * CELLS);
     out.push(ring(f, f + 3, 1, false));
@@ -691,6 +693,7 @@ fn rubble(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng, mut 
             sway_lo: false,
             sway_hi: false,
             thin: 0,
+            season: 0,
         });
     };
     if rng.unit() < 0.25 {
@@ -766,7 +769,7 @@ fn fern(out: &mut Vec<PlantBox>, wx: i32, y: i32, wz: i32, rng: &mut Rng, open: 
     let turn = rng.range(0.0, std::f32::consts::TAU);
     let leaf = |rng: &mut Rng| if rng.unit() < 0.3 { mat::IVY_LEAF } else { mat::LEAVES_JUNGLE };
     let mut add = |x: i32, y: i32, z: i32, w: i32, d: i32, v: Voxel, sway: bool| {
-        out.push(PlantBox { lo: [x, y, z], hi: [x + w, y + 1, z + d], voxel: v, sway_lo: sway, sway_hi: sway, thin: 0 });
+        out.push(PlantBox { lo: [x, y, z], hi: [x + w, y + 1, z + d], voxel: v, sway_lo: sway, sway_hi: sway, thin: 0, season: 0 });
     };
     for (x, z) in [(cx - 1, cz - 1), (cx, cz - 1), (cx - 1, cz), (cx, cz)] {
         open([x, cy, z]);

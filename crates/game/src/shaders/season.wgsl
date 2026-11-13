@@ -101,6 +101,51 @@ fn season_gone(s: f32, kind: u32, vox: vec3<i32>, tag: u32) -> bool {
     return false;
 }
 
+// --- Plants with a season of their own ---------------------------------------------------
+// A flower's bloom, its leaves, a berry: each keeps a row of the table of seasons
+// (worldgen's `plants::seasons`, held in the globals), [start, length, bud, seed], all as
+// shares of the year. Its vertices are PLANT_FLOWER and carry the row's number where a
+// leaf carries its tree's tag (season_tag); 0 is the common year of flowers above. The
+// plants of one kind come out one after another over SEASON_STAGGER of the year, each
+// column on its own day, and go over in the same order.
+
+const SEASON_STAGGER: f32 = 0.05;
+
+// What the plant part on the column `col` (world voxels) is doing this date. x: 0 gone,
+// 1 in bud, 2 out, 3 gone to seed. y, as a share of the year: in bud, how long until it
+// opens; gone to seed, how long since it went over. `plants::Season::
+// phase` is the same sum, which is how the game knows which flowers can be picked.
+fn season_phase(row: vec4<f32>, s: f32, col: vec2<i32>) -> vec2<f32> {
+    if (row.y >= 1.0) {
+        return vec2<f32>(2.0, 0.0);
+    }
+    let h = season_hash(vec3<i32>(col.x, 0, col.y));
+    let u = fract(s - row.x - SEASON_STAGGER * h + row.z);
+    if (u < row.z) {
+        return vec2<f32>(1.0, row.z - u);
+    }
+    if (u < row.z + row.y) {
+        return vec2<f32>(2.0, 0.0);
+    }
+    if (u < row.z + row.y + row.w) {
+        return vec2<f32>(3.0, u - row.z - row.y);
+    }
+    return vec2<f32>(0.0, 0.0);
+}
+
+// The colour of a bloom by its phase (season_phase): a green bud that shows its colour
+// in its last few days, the flower as modelled, then a head that browns in a few more.
+fn season_bloom(c: vec3<f32>, phase: vec2<f32>) -> vec3<f32> {
+    let light = 0.6 + 0.8 * dot(c, vec3<f32>(0.3, 0.59, 0.11));
+    if (phase.x < 1.5) {
+        return mix(vec3<f32>(0.075, 0.2, 0.045) * light, c, (1.0 - smoothstep(0.0, 0.012, phase.y)) * 0.75);
+    }
+    if (phase.x > 2.5) {
+        return mix(c, vec3<f32>(0.2, 0.105, 0.07) * light, smoothstep(0.0, 0.015, phase.y));
+    }
+    return c;
+}
+
 // Colour of a leaf still on: new and pale in spring, gold and red in autumn. A maple is
 // modelled in its autumn colours, so it is green until its own autumn.
 fn season_leaf_colour(c: vec3<f32>, leaf: Leaf, maple: bool) -> vec3<f32> {

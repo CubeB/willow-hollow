@@ -381,11 +381,229 @@ impl Flower {
     }
 }
 
+/// The names of the months, January first.
+pub const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// How far into the calendar year the spring equinox falls (the 20th of March), which is
+/// where the game's date starts from: a date is a fraction of the year from then, 0.25
+/// midsummer, 0.5 the autumn equinox and 0.75 midwinter.
+const EQUINOX: f32 = 79.0 / 365.0;
+
+/// The date on which month `m` begins, 1 for January (and 13 for January again).
+pub fn month_start(m: u8) -> f32 {
+    ((m as f32 - 1.0) / 12.0 - EQUINOX).rem_euclid(1.0)
+}
+
+/// The month a date falls in, 1 for January.
+pub fn month_of(date: f32) -> u8 {
+    (((date + EQUINOX).rem_euclid(1.0) * 12.0) as u8).min(11) + 1
+}
+
+/// Over how much of the year the plants of one kind come into flower, one after another,
+/// and go over again: each column has its own place in it. season.wgsl keeps the same
+/// number (`SEASON_STAGGER`).
+pub const STAGGER: f32 = 0.05;
+
+/// What one part of a plant is doing on a date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// Not there at all.
+    Gone,
+    /// There, but green and shut.
+    Bud,
+    /// Out: in flower, or in leaf.
+    Bloom,
+    /// Over: a brown head where the flower was.
+    Seed,
+}
+
+/// The year one part of a plant keeps: a flower's bloom, or its leaves. The renderer
+/// holds every one in a table (see [`seasons`]), and a plant's boxes name theirs by its
+/// row ([`voxel::mesh::PlantBox::season`]), so the shader and [`Season::phase`] agree
+/// about every plant.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Season {
+    /// The date the earliest plants come out. The latest follow [`STAGGER`] after.
+    pub start: f32,
+    /// How long each plant is out for. 1 or more for all year.
+    pub length: f32,
+    /// How long before it comes out a plant shows a green bud.
+    pub bud: f32,
+    /// How long after it goes over a plant keeps a seed head.
+    pub seed: f32,
+}
+
+/// The shader's `season_hash`, for the column at `(x, z)`: where in the [`STAGGER`] the
+/// plant standing on it falls.
+fn stagger(x: i32, z: i32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(374761393).wrapping_add((z as u32).wrapping_mul(2246822519));
+    h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+    h ^= h >> 16;
+    (h & 0xff_ffff) as f32 / 16_777_216.0
+}
+
+impl Season {
+    const ALWAYS: Season = Season { start: 0.0, length: 1.0, bud: 0.0, seed: 0.0 };
+
+    /// What the plant on the column at `(x, z)` is doing on `date`. `season_phase` in
+    /// season.wgsl is the same sum.
+    pub fn phase(&self, date: f32, x: i32, z: i32) -> Phase {
+        if self.length >= 1.0 {
+            return Phase::Bloom;
+        }
+        let u = (date - self.start - STAGGER * stagger(x, z) + self.bud).rem_euclid(1.0);
+        if u < self.bud {
+            Phase::Bud
+        } else if u < self.bud + self.length {
+            Phase::Bloom
+        } else if u < self.bud + self.length + self.seed {
+            Phase::Seed
+        } else {
+            Phase::Gone
+        }
+    }
+
+    /// As the shader's table holds it.
+    fn row(&self) -> [f32; 4] {
+        [self.start, self.length, self.bud, self.seed]
+    }
+}
+
+/// Rows in the table of seasons: what a [`voxel::mesh::PlantBox::season`] can name.
+pub const SEASON_SLOTS: usize = 64;
+
+/// The table of seasons, by the number a plant's box carries: `[start, length, bud,
+/// seed]` of a [`Season`]. Row 0 is unused (a box with no season of its own); then come
+/// the blooms of the flowers in the order of [`Flower::ALL`], then their leaves.
+pub fn seasons() -> [[f32; 4]; SEASON_SLOTS] {
+    let mut rows = [[0.0; 4]; SEASON_SLOTS];
+    for &f in Flower::ALL {
+        rows[f.bloom_code() as usize] = f.bloom().row();
+        rows[f.leaf_code() as usize] = f.leaves().row();
+    }
+    rows
+}
+
+impl Flower {
+    /// The first and last month it is in flower (a mushroom, up), 1 for January: true to
+    /// the plant, in the temperate north. `(1, 12)` for the few that flower all year.
+    pub fn months(self) -> (u8, u8) {
+        match self {
+            Flower::Primrose => (2, 5),
+            Flower::Violet | Flower::MarshMarigold => (3, 5),
+            Flower::Daisy => (3, 10),
+            Flower::Bluebell => (4, 5),
+            Flower::Stitchwort => (4, 6),
+            Flower::Speedwell | Flower::Thrift => (4, 7),
+            Flower::Campion => (4, 10),
+            Flower::Lupin | Flower::CottonGrass | Flower::FlagIris => (5, 7),
+            Flower::Buttercup => (5, 8),
+            Flower::Pimpernel => (5, 9),
+            Flower::Foxglove | Flower::Poppy | Flower::Gentian => (6, 8),
+            Flower::Cinquefoil | Flower::WaterLily => (6, 9),
+            Flower::Edelweiss | Flower::Thistle => (7, 9),
+            Flower::Heather => (8, 9),
+            Flower::PennyBun => (8, 10),
+            Flower::FlyAgaric => (9, 11),
+            // The desert flowers whenever it has rained, and the rainforest has no winter.
+            Flower::DesertMarigold => (3, 11),
+            Flower::Orchid | Flower::Heliconia => (1, 12),
+        }
+    }
+
+    /// Whether it flowers the whole year round.
+    pub fn all_year(self) -> bool {
+        self.months() == (1, 12)
+    }
+
+    /// Its flowering season: the dates (fractions of the year from the spring equinox)
+    /// between which it is to be found in flower. The end is before the start for one
+    /// that flowers across the equinox, as a primrose does; `(0.0, 1.0)` is all year.
+    pub fn season(self) -> (f32, f32) {
+        if self.all_year() {
+            return (0.0, 1.0);
+        }
+        let (first, last) = self.months();
+        (month_start(first), month_start(last + 1))
+    }
+
+    /// How much of the year its season is.
+    fn span(self) -> f32 {
+        let (start, end) = self.season();
+        if self.all_year() { 1.0 } else { (end - start).rem_euclid(1.0) }
+    }
+
+    /// Whether `date` is in its flowering season. A plant here and there is not out yet
+    /// at the start of it, or is already over at the end: see [`Flower::blooming_at`].
+    pub fn in_bloom(self, date: f32) -> bool {
+        self.all_year() || (date - self.season().0).rem_euclid(1.0) < self.span()
+    }
+
+    /// What the plant of this kind on the column at `(x, z)` shows on `date`: each comes
+    /// out and goes over on its own day, as the game draws it.
+    pub fn phase_at(self, date: f32, x: i32, z: i32) -> Phase {
+        self.bloom().phase(date, x, z)
+    }
+
+    /// Whether the plant of this kind on the column at `(x, z)` is in flower on `date`.
+    pub fn blooming_at(self, date: f32, x: i32, z: i32) -> bool {
+        self.phase_at(date, x, z) == Phase::Bloom
+    }
+
+    /// The year its bloom keeps.
+    pub fn bloom(self) -> Season {
+        if self.all_year() {
+            return Season::ALWAYS;
+        }
+        let length = self.span() - STAGGER;
+        let (bud, seed) = match self {
+            // A mushroom comes up overnight and rots away.
+            Flower::FlyAgaric | Flower::PennyBun => (0.0, 0.0),
+            // Spent heather stays on the plant, rusty, until it buds again.
+            Flower::Heather => (0.04, 1.0 - 0.04 - length),
+            // The white heads are the seed, and blow away; a lily sinks; these are small.
+            Flower::CottonGrass | Flower::WaterLily | Flower::Daisy | Flower::Primrose => (0.03, 0.0),
+            _ => (0.03, 0.045),
+        };
+        Season { start: self.season().0, length, bud, seed }
+    }
+
+    /// The year its stems and leaves keep: up before the buds, and gone by winter. A
+    /// bluebell's die back soon after it flowers; a primrose's stay.
+    pub fn leaves(self) -> Season {
+        if self.all_year() || matches!(self, Flower::Primrose | Flower::DesertMarigold) {
+            return Season::ALWAYS;
+        }
+        // A mushroom's stem goes with its cap.
+        if matches!(self, Flower::FlyAgaric | Flower::PennyBun) {
+            return self.bloom();
+        }
+        let (first, end) = self.season();
+        let start = (first - 0.08).rem_euclid(1.0);
+        let since = |date: f32| (date - start).rem_euclid(1.0);
+        let after = since(end + 0.10);
+        let length = if self == Flower::Bluebell { after } else { after.max(since(0.68)) };
+        Season { start, length, bud: 0.0, seed: 0.0 }
+    }
+
+    /// The row of [`seasons`] its bloom keeps.
+    pub fn bloom_code(self) -> u8 {
+        self as u8 + 1
+    }
+
+    /// The row of [`seasons`] its stems and leaves keep.
+    pub fn leaf_code(self) -> u8 {
+        self as u8 + 1 + Flower::ALL.len() as u8
+    }
+}
+
 /// The flower a drift of flowering ground grows, from the colour the drift carries
-/// (`features::flower`) and the biome. `alt` picks between two flowers of one colour in
-/// broad swathes, so neighbouring drifts can differ.
-fn species(biome: Biome, surface: Voxel, alt: bool) -> Option<Flower> {
+/// (`features::flower`) and the biome. `which` (see [`swathe`]) picks between the flowers
+/// one colour stands for, in broad swathes, so neighbouring drifts can differ: and so
+/// that a biome has something in flower from spring to autumn, each kind in its season.
+fn species(biome: Biome, surface: Voxel, which: f32) -> Option<Flower> {
     use Flower as F;
+    let alt = which > 0.0;
     let generic = match surface {
         mat::FLOWER_RED => F::Pimpernel,
         mat::FLOWER_YELLOW => F::Cinquefoil,
@@ -398,19 +616,49 @@ fn species(biome: Biome, surface: Voxel, alt: bool) -> Option<Flower> {
     Some(match (biome, surface) {
         (Biome::Grassland, mat::FLOWER_YELLOW) => if alt { F::Cinquefoil } else { F::Buttercup },
         (Biome::Grassland, mat::FLOWER_WHITE) => if alt { F::Stitchwort } else { F::Daisy },
-        (Biome::Grassland, mat::FLOWER_RED) => F::Poppy,
+        // Scarlet pimpernel is a weed of the same ground as the poppy.
+        (Biome::Grassland, mat::FLOWER_RED) => if which > 0.3 { F::Pimpernel } else { F::Poppy },
         (Biome::Grassland | Biome::AlpineMeadow, mat::FLOWER_PURPLE) => if alt { F::Violet } else { F::Lupin },
-        (Biome::Deciduous | Biome::Woodland | Biome::BirchGrove, mat::FLOWER_BLUE) => F::Bluebell,
+        (Biome::Deciduous | Biome::Woodland, mat::FLOWER_BLUE) => F::Bluebell,
+        // Dog violets in the birches, out before the bluebells.
+        (Biome::BirchGrove, mat::FLOWER_BLUE) => if which < -0.2 { F::Violet } else { F::Bluebell },
         (Biome::Deciduous | Biome::Woodland, mat::FLOWER_YELLOW) => F::Primrose,
+        // Stitchwort in spring; red campion from then until the frost, and ragged robin,
+        // its cousin, in the marsh.
+        (Biome::Deciduous | Biome::Woodland | Biome::BirchGrove | Biome::Marsh, mat::FLOWER_WHITE) => if alt { F::Campion } else { F::Stitchwort },
         (Biome::AlpineMeadow, mat::FLOWER_BLUE) => F::Gentian,
         (Biome::Marsh, mat::FLOWER_YELLOW) => if alt { F::FlagIris } else { F::MarshMarigold },
-        (Biome::Bog | Biome::Moor, mat::FLOWER_WHITE) => F::CottonGrass,
+        // Violets on the heath and the moor in spring, before the tormentil.
+        (Biome::Heath | Biome::Moor, mat::FLOWER_YELLOW) => if alt { F::Violet } else { F::Cinquefoil },
+        (Biome::Moor, mat::FLOWER_WHITE) => F::CottonGrass,
+        // Kingcups in the wettest of the bog in spring, cotton grass in early summer, and
+        // tormentil on its drier edges until autumn.
+        (Biome::Bog, mat::FLOWER_WHITE) => {
+            if which > 0.15 {
+                F::MarshMarigold
+            } else if which < -0.15 {
+                F::Cinquefoil
+            } else {
+                F::CottonGrass
+            }
+        }
+        // The far north's short summer: gentians and cinquefoil after the violets.
+        (Biome::Tundra, mat::FLOWER_PURPLE) => if alt { F::Gentian } else { F::Violet },
+        (Biome::Tundra, mat::FLOWER_WHITE) => if alt { F::Cinquefoil } else { F::Stitchwort },
         (Biome::Rainforest, mat::FLOWER_RED) => F::Heliconia,
         (Biome::Rainforest, mat::FLOWER_PINK) => F::Orchid,
-        (Biome::Steppe, mat::FLOWER_PURPLE) => F::Thistle,
+        (Biome::Steppe, mat::FLOWER_PURPLE) => if alt { F::Violet } else { F::Thistle },
         (Biome::Desert | Biome::RedRock, mat::FLOWER_YELLOW) => F::DesertMarigold,
+        // Dry country: marigolds whenever it rains.
+        (Biome::Savanna, mat::FLOWER_YELLOW) => if alt { F::DesertMarigold } else { F::Cinquefoil },
         _ => generic,
     })
+}
+
+/// Which of a colour's flowers the drifts round `(x, z)` grow: noise over about a hundred
+/// metres, for [`species`].
+fn swathe(seed: u32, x: i32, z: i32) -> f32 {
+    patch(seed, 0xa17e, x, z, 96.0)
 }
 
 /// What grows on one column, decided before any of it is built, so that [`grow`] and
@@ -468,7 +716,7 @@ fn decide(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, a: f32) -> Op
                 return Some(Growth::Flower(Flower::Heather));
             }
             if matches!(surface, mat::FLOWER_RED | mat::FLOWER_YELLOW | mat::FLOWER_WHITE | mat::FLOWER_PURPLE | mat::FLOWER_BLUE | mat::FLOWER_PINK) {
-                return species(col.biome, surface, patch(seed, 0xa17e, x, z, 96.0) > 0.0).map(Growth::Flower);
+                return species(col.biome, surface, swathe(seed, x, z)).map(Growth::Flower);
             }
             let forest = matches!(col.biome, Biome::OldGrowth | Biome::Rainforest | Biome::Taiga);
             if forest && a < 0.012 && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
@@ -518,7 +766,8 @@ fn column_hash(seed: u32, x: i32, z: i32) -> u32 {
 
 /// The flower (or mushroom) that [`grow`] builds on the column at world position
 /// `(x, z)` for the same arguments, if it builds one. Where things grow does not depend on
-/// the season, so neither does this, though a flower can be out of bloom.
+/// the season, so neither does this, though a flower can be out of bloom: ask
+/// [`Flower::blooming_at`].
 pub fn flower_at(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32) -> Option<Flower> {
     match decide(col, surface, x, z, seed, unit(column_hash(seed, x, z)))? {
         Growth::Flower(f) => Some(f),
@@ -537,12 +786,18 @@ pub struct Wash {
     /// The flowers or heads, and how much of the plant's colour is theirs (0 with none).
     /// The seasons take them away as they do the flowers themselves.
     pub bloom: (Voxel, f32),
+    /// The row of [`seasons`] the flowers keep, or 0 for heads with no season of their own.
+    pub season: u8,
     /// How much of the ground's colour gives way to the plant's.
     pub cover: f32,
 }
 
 fn wash_of(growth: &Growth) -> Option<Wash> {
-    let w = |body: (Voxel, Voxel, f32), bloom: (Voxel, f32), cover: f32| Some(Wash { body, bloom, cover });
+    let season = match *growth {
+        Growth::Flower(f) => f.bloom_code(),
+        _ => 0,
+    };
+    let w = |body: (Voxel, Voxel, f32), bloom: (Voxel, f32), cover: f32| Some(Wash { body, bloom, season, cover });
     let none = (voxel::AIR, 0.0);
     match *growth {
         Growth::Grass(kind, ref sward) => match kind {
@@ -621,14 +876,16 @@ pub fn wash_at(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32) -> u8 {
 }
 
 /// The colour the flowers and heather round `(x, z)` give the land seen from beyond the
-/// voxels, where a stretch of ground is all one colour: that colour (sRGB) and how much
-/// of the ground's it takes the place of. It follows the drifts the flowers grow in
+/// voxels, where a stretch of ground is all one colour: the wash of what grows there (its
+/// place in [`washes`] plus one, as [`wash_at`] gives it) and how much of the ground's
+/// colour it takes the place of. It follows the drifts the flowers grow in
 /// ([`super::flower_drift`]) and the moor's beds of heather, so a far moor is patched
-/// with heather as a near one is.
-pub fn far_wash(biome: Biome, x: i32, z: i32, seed: u32, mats: &voxel::Materials) -> Option<([f32; 3], f32)> {
+/// with heather as a near one is, and the far view colours it by the date as the near
+/// ground is coloured.
+pub fn far_wash(biome: Biome, x: i32, z: i32, seed: u32) -> Option<(u8, f32)> {
     let (growth, share) = match super::flower_drift(biome, x, z, seed) {
         Some((mat::HEATHER, share)) => (Growth::Flower(Flower::Heather), share),
-        Some((surface, share)) => (Growth::Flower(species(biome, surface, patch(seed, 0xa17e, x, z, 96.0) > 0.0)?), share),
+        Some((surface, share)) => (Growth::Flower(species(biome, surface, swathe(seed, x, z))?), share),
         None => {
             // Heather out of flower, in its beds (see `wintergreen_at`).
             let heather = match biome {
@@ -643,22 +900,71 @@ pub fn far_wash(biome: Biome, x: i32, z: i32, seed: u32, mats: &voxel::Materials
         }
     };
     let w = wash_of(&growth)?;
-    let colour = |v: Voxel| mats.get(v).color.map(f32::from);
-    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t);
-    let body = mix(colour(w.body.0), colour(w.body.1), w.body.2);
-    // Less of the flowers than in summer: this colour is the same all year.
-    let all = mix(body, colour(w.bloom.0), w.bloom.1 * 0.7);
-    // Darker than the plant's own colours, as its wash on the nearer ground is.
-    Some((all.map(|v| v * 0.8), (share * 2.0).min(1.0) * w.cover))
+    let code = washes().iter().position(|v| *v == w)? as u8 + 1;
+    Some((code, (share * 2.0).min(1.0) * w.cover))
 }
 
 /// Lays out boxes in cells relative to the corner of one voxel.
 struct Plot<'a> {
     origin: [i32; 3],
     out: &'a mut Vec<PlantBox>,
+    /// The flower being built, if it is one: its blooms and its leaves are given the
+    /// seasons they keep (see [`seasons`]).
+    flower: Option<Flower>,
 }
 
-impl Plot<'_> {
+/// Whether a material is part of a flower's bloom (or a mushroom), which comes and goes
+/// with its flowering season.
+fn is_bloom(voxel: Voxel) -> bool {
+    matches!(
+        voxel,
+        mat::BLOOM_RED
+            | mat::BLOOM_YELLOW
+            | mat::BLOOM_WHITE
+            | mat::BLOOM_PURPLE
+            | mat::BLOOM_BLUE
+            | mat::BLOOM_PINK
+            | mat::MUSHROOM_STEM
+            | mat::MUSHROOM_RED
+            | mat::MUSHROOM_TAN
+            | mat::BLOOM_BLUEBELL
+            | mat::BLOOM_FOXGLOVE
+            | mat::BLOOM_PRIMROSE
+            | mat::BLOOM_GOLD
+            | mat::BLOOM_POPPY
+            | mat::BLOOM_EYE
+            | mat::BLOOM_LUPIN
+            | mat::BLOOM_GENTIAN
+            | mat::BLOOM_FELT
+            | mat::BLOOM_ORCHID
+            | mat::BLOOM_ORCHID_LIP
+            | mat::BLOOM_THISTLE
+            // The eye of a cinquefoil.
+            | mat::REED_HEAD
+    )
+}
+
+impl<'a> Plot<'a> {
+    /// A plot for a plant with its corner at `origin`, in cells.
+    fn new(origin: [i32; 3], out: &'a mut Vec<PlantBox>) -> Self {
+        Self { origin, out, flower: None }
+    }
+
+    /// The season a box of `voxel` keeps, as a row of [`seasons`]: 0 for anything that
+    /// is not part of a flower.
+    fn season(&self, voxel: Voxel) -> u8 {
+        let Some(f) = self.flower else { return 0 };
+        // The six small flowers of the drifts have a blade of grass for a stem.
+        let small = matches!(f, Flower::Pimpernel | Flower::Cinquefoil | Flower::Stitchwort | Flower::Violet | Flower::Speedwell | Flower::Campion);
+        if is_bloom(voxel) {
+            f.bloom_code()
+        } else if matches!(voxel, mat::STEM | mat::LEAF_GLOSS | mat::LEAF_GREY) || (small && matches!(voxel, mat::TUFT_LUSH | mat::TUFT)) {
+            f.leaf_code()
+        } else {
+            0
+        }
+    }
+
     /// A box from `lo` up to, but not including, `hi`. Its ends sway with the wind if
     /// their flags say so: a stem is rooted at the bottom and free at the top.
     fn add(&mut self, lo: [i32; 3], hi: [i32; 3], voxel: Voxel, sway: (bool, bool)) {
@@ -670,6 +976,7 @@ impl Plot<'_> {
             sway_lo: sway.0,
             sway_hi: sway.1,
             thin: 0,
+            season: self.season(voxel),
         });
     }
 
@@ -1296,10 +1603,10 @@ pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut V
     };
     let y = col.top() + 1;
     let mut rng = Rng::new(h.rotate_left(13));
-    let mut plot = Plot {
-        origin: [x * CELLS, y * CELLS, z * CELLS],
-        out,
-    };
+    let mut plot = Plot::new([x * CELLS, y * CELLS, z * CELLS], out);
+    if let Growth::Flower(kind) = growth {
+        plot.flower = Some(kind);
+    }
     let p = &mut plot;
     match growth {
         Growth::Grass(kind, sward) => grass(p, &mut rng, kind, &sward),
@@ -1469,7 +1776,7 @@ mod tests {
 
     fn model(kind: Grass, salt: u32) -> Vec<PlantBox> {
         let mut out = Vec::new();
-        let mut plot = Plot { origin: [0, 0, 0], out: &mut out };
+        let mut plot = Plot::new([0, 0, 0], &mut out);
         grass(&mut plot, &mut Rng::new(hash3(77, salt as i32, 0, 3)), kind, &sward(Biome::Grassland).unwrap());
         out
     }
@@ -1582,16 +1889,17 @@ mod tests {
 
     #[test]
     fn far_land_takes_the_colour_of_its_drifts() {
-        let mats = mat::build();
         let (mut tinted, mut heather) = (0, 0);
         for x in 0..80 {
             for z in 0..80 {
-                if let Some((colour, share)) = far_wash(Biome::Moor, x * 40, z * 40, 3, &mats) {
-                    assert!((0.0..=1.0).contains(&share) && colour.iter().all(|c| (0.0..=255.0).contains(c)));
+                if let Some((code, share)) = far_wash(Biome::Moor, x * 40, z * 40, 3) {
+                    assert!((0.0..=1.0).contains(&share));
+                    let wash = washes()[code as usize - 1];
                     if share > 0.05 {
                         tinted += 1;
-                        // Heather in flower is more purple than the moor's grass is.
-                        if colour[2] > colour[1] {
+                        // Heather that flowers, which the far view turns purple in its season.
+                        if wash.season == Flower::Heather.bloom_code() {
+                            assert_eq!(wash.bloom.0, mat::BLOOM_PURPLE);
                             heather += 1;
                         }
                     }
@@ -1601,7 +1909,7 @@ mod tests {
         assert!(tinted > 300 && tinted < 5000, "{tinted} of 6400 cells tinted");
         assert!(heather > 50, "{heather} cells of flowering heather");
         // Bare lava grows nothing to colour it.
-        assert!(far_wash(Biome::Volcanic, 100, 100, 3, &mats).is_none());
+        assert!(far_wash(Biome::Volcanic, 100, 100, 3).is_none());
     }
 
     #[test]
@@ -1615,7 +1923,8 @@ mod tests {
     /// Builds one flower of a kind on its own, for looking at its shape.
     fn flower_model(kind: Flower, salt: u32) -> Vec<PlantBox> {
         let mut out = Vec::new();
-        let mut plot = Plot { origin: [0, 0, 0], out: &mut out };
+        let mut plot = Plot::new([0, 0, 0], &mut out);
+        plot.flower = Some(kind);
         build_flower(&mut plot, &mut Rng::new(hash3(91, salt as i32, 0, 7)), kind);
         out
     }
@@ -1748,6 +2057,198 @@ mod tests {
         for f in [Flower::WaterLily, Flower::FlyAgaric, Flower::PennyBun, Flower::Heather, Flower::Bluebell, Flower::Foxglove, Flower::Thrift, Flower::MarshMarigold] {
             assert!(seen.contains(&f), "never found {f:?}");
         }
+    }
+
+    /// The middle of month `m`, as a date.
+    fn mid(m: u8) -> f32 {
+        (month_start(m) + 1.0 / 24.0).rem_euclid(1.0)
+    }
+
+    #[test]
+    fn the_calendar_puts_the_months_round_the_equinox() {
+        // The year starts at the spring equinox, late in March; midsummer is in June,
+        // the autumn equinox in September and midwinter in December.
+        assert_eq!((month_of(0.0), month_of(0.25), month_of(0.5), month_of(0.75)), (3, 6, 9, 12));
+        for m in 1..=12 {
+            assert_eq!(month_of(mid(m)), m);
+            assert_eq!(month_of(month_start(m) + 0.001), m);
+        }
+        assert!((month_start(13) - month_start(1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn every_flower_has_a_season_of_its_own() {
+        for (i, &f) in Flower::ALL.iter().enumerate() {
+            assert_eq!(f as usize, i, "Flower::ALL is out of order at {f:?}");
+            let (first, last) = f.months();
+            assert!((1..=12).contains(&first) && (1..=12).contains(&last), "{f:?}");
+            let (start, end) = f.season();
+            assert!((0.0..=1.0).contains(&start) && (0.0..=1.0).contains(&end), "{f:?}");
+            let months = (last as i32 - first as i32).rem_euclid(12) + 1;
+            if f.all_year() {
+                assert!((0..40).all(|k| f.in_bloom(k as f32 / 40.0) && f.blooming_at(k as f32 / 40.0, k, 3)));
+                continue;
+            }
+            // Out for two months at the least, and not for a month at the least.
+            assert!((2..=11).contains(&months), "{f:?} flowers for {months} months");
+            // In flower in the middle of each of its months, and not in the months either side.
+            for k in 0..months {
+                assert!(f.in_bloom(mid(((first as i32 - 1 + k) % 12 + 1) as u8)), "{f:?} in month {k} of its season");
+            }
+            assert!(!f.in_bloom(mid(((first as i32 + 10) % 12 + 1) as u8)), "{f:?} the month before");
+            assert!(!f.in_bloom(mid((last % 12) + 1)), "{f:?} the month after");
+            // The bloom is there for a part of the year only (heather keeps its spent
+            // flowers), is out for longer than it is in bud, and fits in the year.
+            let b = f.bloom();
+            assert!(b.length > 0.1 && b.length > b.bud + 0.05, "{f:?}: {b:?}");
+            assert!(b.bud + b.length + b.seed <= 1.0 + 1e-6, "{f:?}: {b:?}");
+            // Its leaves are up before it buds and stay until it is over.
+            let l = f.leaves();
+            if l.length < 1.0 {
+                let before = (b.start - b.bud - l.start).rem_euclid(1.0);
+                assert!(before < 0.2 && before + b.bud + b.length <= l.length + 1e-6, "{f:?}: {l:?} against {b:?}");
+            }
+        }
+        // True to the plants: the early ones early, the late ones late.
+        let month = |f: Flower| f.months();
+        assert!(month(Flower::Primrose).0 <= 2, "primroses at winter's end");
+        assert_eq!(month(Flower::Bluebell), (4, 5), "bluebells before the canopy closes");
+        assert!(month(Flower::Poppy).0 >= 6 && month(Flower::Foxglove).0 >= 6 && month(Flower::Buttercup).1 >= 7, "summer flowers");
+        assert_eq!(month(Flower::Heather), (8, 9), "heather in late summer");
+        assert!(month(Flower::Gentian).0 >= 6 && month(Flower::Gentian).1 <= 8, "the short alpine summer");
+        assert!(month(Flower::FlyAgaric).0 >= 9, "toadstools in autumn");
+        // The seasons differ: no one window is shared by more than a few kinds.
+        let windows: std::collections::HashSet<(u8, u8)> = Flower::ALL.iter().map(|f| f.months()).collect();
+        assert!(windows.len() >= 14, "only {} different seasons", windows.len());
+    }
+
+    #[test]
+    fn each_plant_comes_out_on_its_own_day_within_the_season() {
+        for &f in Flower::ALL {
+            if f.all_year() {
+                continue;
+            }
+            let (start, _) = f.season();
+            let out = |date: f32| (0..400).filter(|&k| f.blooming_at(date, k * 7, 1000 - k * 3)).count();
+            // None the day before the season, some a few days in, all once the stagger is past.
+            assert_eq!(out((start - 0.004).rem_euclid(1.0)), 0, "{f:?} out before its season");
+            let early = out((start + STAGGER * 0.4).rem_euclid(1.0));
+            assert!(early > 80 && early < 320, "{f:?}: {early} of 400 out early in the season");
+            assert_eq!(out((start + STAGGER + 0.01).rem_euclid(1.0)), 400, "{f:?} not all out");
+            // Never out outside its season, and never gone in the middle of it.
+            for k in 0..200 {
+                let date = k as f32 / 200.0;
+                for c in 0..20 {
+                    let phase = f.phase_at(date, c * 13, c * 5);
+                    assert!(f.in_bloom(date) || phase != Phase::Bloom, "{f:?} out of season at {date}");
+                }
+            }
+        }
+        // The same plant, asked twice, gives the same answer, and neighbours differ.
+        let f = Flower::Bluebell;
+        let date = f.season().0 + STAGGER * 0.5;
+        let differ = (0..200).filter(|&x| f.blooming_at(date, x, 9) != f.blooming_at(date, x + 1, 9)).count();
+        assert!(differ > 50, "{differ}");
+    }
+
+    /// Every kind of flower the drifts of a biome can grow, and what stands among them,
+    /// away from water and the shore. Nothing for a biome with no drifts.
+    fn flowers_of(biome: Biome) -> Vec<Flower> {
+        let Some((surfaces, _)) = super::super::flower_kinds(biome) else { return Vec::new() };
+        let mut found = Vec::new();
+        for &surface in surfaces {
+            for which in [-0.5, -0.17, 0.1, 0.17, 0.5] {
+                let f = if surface == mat::HEATHER { Flower::Heather } else { species(biome, surface, which).expect("a drift names a flower") };
+                if !found.contains(&f) {
+                    found.push(f);
+                }
+            }
+        }
+        if matches!(biome, Biome::Deciduous | Biome::Woodland | Biome::BirchGrove | Biome::Moor) {
+            found.push(Flower::Foxglove);
+        }
+        found
+    }
+
+    #[test]
+    fn something_is_in_flower_in_every_month_from_spring_to_autumn() {
+        let mut biomes = 0;
+        let mut placed = std::collections::HashSet::new();
+        for biome in Biome::ALL {
+            let flowers = flowers_of(biome);
+            if flowers.is_empty() {
+                continue;
+            }
+            biomes += 1;
+            placed.extend(flowers.iter().copied());
+            // What the drifts are said to grow, they do grow.
+            let col = column(Cover::Land, biome);
+            for &f in &flowers {
+                let surfaces = [mat::FLOWER_RED, mat::FLOWER_YELLOW, mat::FLOWER_WHITE, mat::FLOWER_PURPLE, mat::FLOWER_BLUE, mat::FLOWER_PINK, mat::HEATHER, mat::ground_cover(biome)];
+                let grows = surfaces.iter().any(|&s| (0..90_000).any(|k| flower_at(&col, s, k % 300 * 7, k / 300 * 7, 5) == Some(f)));
+                assert!(grows, "{f:?} never grows in {biome:?}");
+            }
+            // From the first of spring to the autumn equinox there is always something
+            // out (in the far north and on the heights, through their short summer).
+            let months = if matches!(biome, Biome::Tundra | Biome::AlpineMeadow) { 4..=9 } else { 3..=9 };
+            for m in months {
+                assert!(flowers.iter().any(|f| f.in_bloom(mid(m))), "nothing in flower in {biome:?} in {}: it grows {flowers:?}", MONTHS[m as usize - 1]);
+            }
+            // And never one season for all of them, but where there is no winter.
+            let kinds: std::collections::HashSet<(u8, u8)> = flowers.iter().map(|f| f.months()).collect();
+            assert!(kinds.len() >= 2 || matches!(biome, Biome::Desert | Biome::RedRock | Biome::Rainforest), "{biome:?} has one season: {flowers:?}");
+        }
+        assert!(biomes >= 13, "only {biomes} biomes grow flowers");
+        // Every kind is to be found somewhere: in the drifts, or in its own place.
+        let elsewhere = [Flower::WaterLily, Flower::FlyAgaric, Flower::PennyBun, Flower::Thrift, Flower::Edelweiss];
+        for &f in Flower::ALL {
+            assert!(placed.contains(&f) || elsewhere.contains(&f), "{f:?} grows nowhere");
+        }
+        // Over the whole world there is something to find in every month but the dead of
+        // winter: primroses from February, toadstools into November.
+        for m in 2..=11 {
+            assert!(Flower::ALL.iter().any(|f| !f.all_year() && f.in_bloom(mid(m))), "nothing in {}", MONTHS[m as usize - 1]);
+        }
+    }
+
+    #[test]
+    fn a_flower_marks_its_blooms_and_leaves_with_their_seasons() {
+        let rows = seasons();
+        assert_eq!(rows[0], [0.0; 4]);
+        assert!(Flower::ALL.len() * 2 < SEASON_SLOTS);
+        let mats = mat::build();
+        for &kind in Flower::ALL {
+            assert_eq!(rows[kind.bloom_code() as usize], kind.bloom().row());
+            assert_eq!(rows[kind.leaf_code() as usize], kind.leaves().row());
+            if kind == Flower::WaterLily {
+                continue;
+            }
+            for salt in 0..200 {
+                let boxes = flower_model(kind, salt);
+                for b in &boxes {
+                    let plant = mats.get(b.voxel).plant;
+                    if is_bloom(b.voxel) {
+                        assert_eq!(b.season, kind.bloom_code(), "{kind:?}: {b:?}");
+                    } else if plant == voxel::plant::FLOWER {
+                        // No part of a flower is left to the common year of flowers.
+                        assert_eq!(b.season, kind.leaf_code(), "{kind:?}: {b:?}");
+                    } else {
+                        // Its grass and its evergreen parts keep to the year of their kind.
+                        assert!(b.season == 0 || b.season == kind.leaf_code(), "{kind:?}: {b:?}");
+                    }
+                }
+                assert!(kind == Flower::Heather || boxes.iter().any(|b| b.season == kind.bloom_code()), "{kind:?} has no bloom");
+            }
+        }
+        // Grass and the other small plants have no season of their own.
+        assert!(grown(&column(Cover::Land, Biome::Grassland), mat::GRASS_MEADOW).iter().all(|b| b.season == 0));
+        assert!(grown(&column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath)).iter().all(|b| b.season == 0));
+        // A water lily's flower keeps its season, and its pad none.
+        let mut lake = column(Cover::LakeBed, Biome::Deciduous);
+        lake.water = Some(40 + 8 * BLOCK);
+        let lilies = grown(&lake, mat::MUD);
+        assert!(lilies.iter().any(|b| b.voxel == mat::BLOOM_PINK && b.season == Flower::WaterLily.bloom_code()));
+        assert!(lilies.iter().all(|b| b.voxel != mat::LILY || b.season == 0));
     }
 
     #[test]

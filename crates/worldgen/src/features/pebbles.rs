@@ -84,6 +84,7 @@ pub fn scatter(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mu
             sway_lo: false,
             sway_hi: false,
             thin: 0,
+            season: 0,
         });
     };
     let pick = |rng: &mut Rng| match rng.unit() {

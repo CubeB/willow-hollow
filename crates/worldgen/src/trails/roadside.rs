@@ -60,7 +60,7 @@ impl Model {
     /// A fixed box, in cells from the corner of model voxel 0.
     fn b(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel) {
         debug_assert!(lo.0 < hi.0 && lo.1 < hi.1 && lo.2 < hi.2, "empty marker part");
-        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo: false, sway_hi: false, thin: 0 });
+        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo: false, sway_hi: false, thin: 0, season: 0 });
     }
 
     fn vox(&mut self, x: i32, y: i32, z: i32, v: Voxel) {

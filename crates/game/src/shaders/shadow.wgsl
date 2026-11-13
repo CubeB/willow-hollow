@@ -4,6 +4,8 @@ struct Cascade {
     light_vp: mat4x4<f32>,
     // x: the date.
     season: vec4<f32>,
+    // The seasons of the plants that have their own (see season_phase in season.wgsl).
+    flowering: array<vec4<f32>, 64>,
 };
 
 @group(0) @binding(0) var<uniform> C: Cascade;
@@ -54,6 +56,20 @@ fn vs(in: VIn) -> @builtin(position) vec4<f32> {
         // The same voxel the terrain shader names, so a leaf and its shadow fall together.
         let vox = in.origin / i32(scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
         if (season_gone(C.season.x, kind, vox, season_tag(in.b))) {
+            return vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        }
+    }
+    if (kind == PLANT_FLOWER) {
+        // A flower that is not there casts nothing. Flowers go a column at a time.
+        let col = in.origin / i32(scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
+        let tag = season_tag(in.b);
+        var gone = false;
+        if (tag != 0u) {
+            gone = season_phase(C.flowering[tag], C.season.x, col.xz).x < 0.5;
+        } else {
+            gone = season_gone(C.season.x, kind, vec3<i32>(col.x, 0, col.z), 0u);
+        }
+        if (gone) {
             return vec4<f32>(0.0, 0.0, 2.0, 1.0);
         }
     }
