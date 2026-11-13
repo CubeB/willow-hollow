@@ -280,6 +280,24 @@ palette! {
     PATH_LITTER       = (120,  92,  64), Solid, 3;
     PATH_NEEDLES      = (102,  80,  62), Solid, 3;
     PATH_SNOW         = (198, 196, 192), Solid, 2;
+    // Wild flowers of particular kinds (features::plants), added last so existing ids keep
+    // their numbers: their petals, the stems and leaves that die back with them, and the
+    // grey felted leaves of the dry, the cold and the coast.
+    BLOOM_BLUEBELL    = (124, 116, 240), Foliage, 2;
+    BLOOM_FOXGLOVE    = (198,  92, 168), Foliage, 2;
+    BLOOM_PRIMROSE    = (244, 230, 112), Foliage, 1;
+    BLOOM_GOLD        = (250, 196,  36), Foliage, 1;
+    BLOOM_POPPY       = (222,  46,  34), Foliage, 1;
+    BLOOM_EYE         = ( 58,  46,  50), Foliage, 1;
+    BLOOM_LUPIN       = (120,  98, 214), Foliage, 2;
+    BLOOM_GENTIAN     = ( 38,  66, 200), Foliage, 1;
+    BLOOM_FELT        = (232, 232, 218), Foliage, 1;
+    BLOOM_ORCHID      = (242, 200, 230), Foliage, 1;
+    BLOOM_ORCHID_LIP  = (178,  48, 132), Foliage, 1;
+    BLOOM_THISTLE     = (170,  84, 178), Foliage, 2;
+    STEM              = ( 84, 136,  64), Foliage, 2;
+    LEAF_GLOSS        = ( 48, 112,  56), Foliage, 2;
+    LEAF_GREY         = (130, 148, 120), Foliage, 2;
 }
 
 /// Thickness of one rock layer, in voxels.
@@ -409,7 +427,7 @@ pub fn cave_rock(v: Voxel, tier: u8) -> Voxel {
 fn classify(m: &mut Materials) {
     use voxel::plant as pk;
     // Moss and lichen are left out: they keep their colour all year.
-    let kinds: [(&[Voxel], u8); 12] = [
+    let kinds: [(&[Voxel], u8); 13] = [
         (&[LEAVES_OAK, LEAVES_BIRCH, LEAVES_WILLOW, LEAVES_ACACIA, LEAVES_CHERRY], pk::DECIDUOUS),
         // Virginia creeper turns and drops like a broadleaf tree.
         (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED, CREEPER_GREEN, CREEPER_GREEN_DARK, CREEPER_SCARLET], pk::DECIDUOUS),
@@ -445,6 +463,15 @@ fn classify(m: &mut Materials) {
         ),
         (
             &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN, VINE_FLOWER],
+            pk::FLOWER,
+        ),
+        // The wild flowers die back whole, stems and leaves with the petals, so no bare
+        // stalk stands through the winter.
+        (
+            &[
+                BLOOM_BLUEBELL, BLOOM_FOXGLOVE, BLOOM_PRIMROSE, BLOOM_GOLD, BLOOM_POPPY, BLOOM_EYE, BLOOM_LUPIN, BLOOM_GENTIAN, BLOOM_FELT,
+                BLOOM_ORCHID, BLOOM_ORCHID_LIP, BLOOM_THISTLE, STEM, LEAF_GLOSS, LEAF_GREY,
+            ],
             pk::FLOWER,
         ),
         (

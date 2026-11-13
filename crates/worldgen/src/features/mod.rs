@@ -910,7 +910,8 @@ pub fn max_top(lib: &Library) -> i32 {
 /// or a small feature that close whose far end looks at the ground as far again.
 pub const MAX_REACH: i32 = if GIANTS.reach > 2 * SMALL.reach { GIANTS.reach } else { 2 * SMALL.reach };
 
-/// Flowers and heather: drifts of colour on grass, one species per drift.
+/// Flowers and heather: drifts of colour on grass, one species per drift. The colour
+/// stands for a flower of that colour, which `plants::flower_at` names by the biome.
 pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxel> {
     let (kinds, density): (&[Voxel], f32) = match biome {
         Biome::Grassland => (
@@ -926,8 +927,11 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         Biome::Marsh => (&[mat::FLOWER_YELLOW, mat::FLOWER_WHITE], 0.12),
         Biome::BirchGrove => (&[mat::FLOWER_WHITE, mat::FLOWER_BLUE], 0.14),
         Biome::Steppe => (&[mat::FLOWER_YELLOW, mat::FLOWER_PURPLE], 0.06),
-        Biome::Bog => (&[mat::FLOWER_WHITE], 0.06),
-        Biome::Moor => (&[mat::HEATHER, mat::HEATHER, mat::HEATHER, mat::FLOWER_YELLOW], 0.42),
+        // Cotton grass, white over the wettest of the bog and here and there on the moor.
+        Biome::Bog => (&[mat::FLOWER_WHITE], 0.12),
+        Biome::Moor => (&[mat::HEATHER, mat::HEATHER, mat::HEATHER, mat::FLOWER_YELLOW, mat::FLOWER_WHITE], 0.42),
+        // Desert marigold, thinly, where the sand holds a little water after rain.
+        Biome::Desert | Biome::RedRock => (&[mat::FLOWER_YELLOW], 0.035),
         _ => return None,
     };
     // A fast noise marks the drifts; a slow one chooses what grows in each.
@@ -935,9 +939,17 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
     if patch < 0.22 {
         return None;
     }
-    let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
     let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
-    (roll < density * edge).then(|| kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)])
+    // Too high a roll for even a carpet: the slow noise need not be worked out.
+    if roll >= density * edge * 2.2 {
+        return None;
+    }
+    let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
+    let kind = kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)];
+    // Bluebells carpet the floor of a broadleaf wood, thicker than other flowers grow.
+    let carpet = kind == mat::FLOWER_BLUE && matches!(biome, Biome::Deciduous | Biome::Woodland | Biome::BirchGrove);
+    let density = if carpet { density * 2.2 } else { density };
+    (roll < density * edge).then_some(kind)
 }
 
 #[cfg(test)]
