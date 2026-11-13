@@ -543,7 +543,15 @@ impl PlaceCache {
 /// Features overlapping the square of columns at continent-local `(lx0, lz0)`, `span`
 /// wide. `sampler` must cover that square plus the largest reach.
 pub fn place(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
-    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin)
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true)
+}
+
+/// The trees of [`place`] alone, the giants and the ordinary ones, each where it stands
+/// in the world and of the same species, variant and turn, but without the bushes,
+/// boulders and logs, and without working out the roots bared on a slope: several
+/// times quicker, for drawing where the trees are (the map).
+pub fn place_trees(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES], false)
 }
 
 /// [`place`], remembering each cell in `cache` for the next to ask. A cache must only
@@ -559,9 +567,12 @@ pub fn place_cached(
     span: i32,
     macro_origin: (i32, i32),
 ) -> Vec<Placement> {
-    place_in(Some(cache), world_seed, lib, sampler, lx0, lz0, span, macro_origin)
+    place_in(Some(cache), world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true)
 }
 
+/// The features of `layers` (giants before trees, as a giant keeps trees from under it);
+/// with `roots`, the roots bared beside each tree too. Only with all the layers and
+/// roots may it remember cells in `cache`.
 #[allow(clippy::too_many_arguments)]
 fn place_in(
     cache: Option<&PlaceCache>,
@@ -572,11 +583,14 @@ fn place_in(
     lz0: i32,
     span: i32,
     macro_origin: (i32, i32),
+    layers: &[Layer],
+    roots: bool,
 ) -> Vec<Placement> {
+    debug_assert!(roots || cache.is_none());
     let mut out = Vec::new();
     // Where giants were chosen to stand, across the ground.
     let mut giants: Vec<(i32, i32)> = Vec::new();
-    for layer in [GIANTS, TREES, SMALL] {
+    for &layer in layers {
         let (wx0, wz0) = (macro_origin.0 + lx0, macro_origin.1 + lz0);
         let (c0x, c1x) = ((wx0 - layer.reach).div_euclid(layer.cell), (wx0 + span + layer.reach).div_euclid(layer.cell));
         let (c0z, c1z) = ((wz0 - layer.reach).div_euclid(layer.cell), (wz0 + span + layer.reach).div_euclid(layer.cell));
@@ -591,7 +605,7 @@ fn place_in(
                 let grown = match cache.and_then(|c| c.get(&key)) {
                     Some(grown) => grown,
                     None => {
-                        let grown = cell.grow(world_seed, lib, sampler, &layer, macro_origin);
+                        let grown = cell.grow(world_seed, lib, sampler, &layer, macro_origin, roots);
                         // Kept only if the sampler covers all the ground the cell looked at,
                         // so that the next to ask gets what it would have worked out itself.
                         if let Some(cache) = cache
@@ -635,7 +649,7 @@ impl Cell {
 
     /// What grows in the cell, if anything, reading the ground no further than the
     /// layer's reach from where it stands.
-    fn grow(&self, world_seed: u32, lib: &Library, sampler: &Sampler, layer: &Layer, macro_origin: (i32, i32)) -> Grown {
+    fn grow(&self, world_seed: u32, lib: &Library, sampler: &Sampler, layer: &Layer, macro_origin: (i32, i32), with_roots: bool) -> Grown {
         let (x, z) = (self.x, self.z);
         let roll = |k: u32| self.roll(k);
         let nothing = |chosen: bool| Grown { chosen, feature: None };
@@ -698,7 +712,7 @@ impl Cell {
                 pos.y = y;
             }
         }
-        let roots = if layer.salt == SMALL.salt || cleared {
+        let roots = if layer.salt == SMALL.salt || cleared || !with_roots {
             None
         } else {
             let ground = |x: i32, z: i32| {

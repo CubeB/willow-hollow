@@ -13,8 +13,8 @@
 //!
 //! Marks are hints, not objectives: no distances, no lines to them. A place not yet
 //! visited shows only as a soft glow, and only once the land around it has been seen;
-//! one still out of sight shows as a faint glow at the map's rim in its direction, for
-//! the nearest few. A visited place turns into its icon, and on the large map its name.
+//! one still out of sight shows as a faint glow at the corner map's rim in its direction,
+//! for the nearest few. A visited place turns into its icon, and on the large map its name.
 //!
 //! The large map is a model of the land seen so far ([`relief`]): a slab of blocks with
 //! its water, paths and woods, looked down on at a slant, which the mouse moves, turns
@@ -340,7 +340,7 @@ impl Minimap {
                 while let Ok(req) = reliefs.recv() {
                     let t = std::time::Instant::now();
                     let made = relief::build(&w, &req);
-                    log::debug!("map model at step {}: {} corners, made in {:.2} s", made.step, made.vertices.len(), t.elapsed().as_secs_f32());
+                    log::debug!("map model at step {}: {} corners, {} trees, made in {:.2} s", made.step, made.vertices.len(), made.trees.len(), t.elapsed().as_secs_f32());
                     if to_main.send(Answer::Relief(Box::new(made))).is_err() {
                         break;
                     }
@@ -442,6 +442,20 @@ impl Minimap {
     pub fn turn(&mut self, dx: f32, dy: f32) {
         self.yaw = (self.yaw - dx * 0.006).rem_euclid(std::f32::consts::TAU);
         self.pitch = (self.pitch + dy * 0.005).clamp(PITCH_RANGE.0, PITCH_RANGE.1);
+    }
+
+    /// Turns and tilts the large map to `yaw` and `pitch`, in radians, as right drags
+    /// would, for screenshots.
+    pub fn set_turn(&mut self, yaw: f32, pitch: f32) {
+        self.yaw = yaw.rem_euclid(std::f32::consts::TAU);
+        self.pitch = pitch.clamp(PITCH_RANGE.0, PITCH_RANGE.1);
+    }
+
+    /// Moves the large map's middle by `by` world voxels east and south, as left drags
+    /// would, for screenshots.
+    pub fn shift(&mut self, by: DVec2) {
+        self.look += by;
+        self.aim = None;
     }
 
     /// How the large map is looked at on a screen `w` by `h`.
@@ -810,7 +824,7 @@ impl Minimap {
             None => view.px(at, level).map(|p| (p, false)),
         };
         let mut labels = Vec::new();
-        self.marks(&f, &place, &mut out, &mut labels);
+        self.marks(&f, &place, Some((view.east, view.north)), &mut out, &mut labels);
 
         // The player, always facing up the map, and where north has got to.
         if let Some((me, _)) = place(xz(self.player)) {
@@ -875,7 +889,7 @@ impl Minimap {
             None => view.px(at, level).map(|p| (p, false)),
         };
         let mut labels = Vec::new();
-        self.marks(&f, &place, &mut out, &mut labels);
+        self.marks(&f, &place, None, &mut out, &mut labels);
 
         let white = [250, 248, 240, 255];
         let me = xz(self.player);
@@ -949,8 +963,15 @@ impl Minimap {
 
     /// The places on the map: icons for those visited, soft glows for those seen but
     /// not visited, and at the rim, the nearest few still out of sight. `place` gives
-    /// where a point of the world falls on the screen, and whether the map shows it.
-    fn marks(&self, f: &Frame, place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>, out: &mut Vec<Instance>, labels: &mut Vec<Label>) {
+    /// where a point of the world falls on the screen, and whether the map shows it;
+    /// `rim`, the ways east and north run across the screen, for the hints at the rim,
+    /// or None for none.
+    ///
+    /// The large map has no hints at its rim. It fills the screen, so its rim is the
+    /// screen's edge, and the places hinted at, a few kilometres off, mostly lie within
+    /// it on ground not yet seen: a glow at the edge of the screen pointing at the middle
+    /// of it, wandering round the edge as the map was turned, read as something wrong.
+    fn marks(&self, f: &Frame, place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>, rim: Option<(Vec2, Vec2)>, out: &mut Vec<Instance>, labels: &mut Vec<Label>) {
         let me = xz(self.player);
         let me_px = place(me).map(|p| p.0);
         let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
@@ -997,14 +1018,18 @@ impl Minimap {
                 }
             }
         }
-        // Only from where the player is on the map: a hint points away from them.
-        if let Some(me_px) = me_px
+        // Only on the corner map, and from where the player is on it: a hint points away
+        // from them. Its way across the screen is worked out on the level ground, not from
+        // where the place itself would fall: a place a few kilometres off is far outside
+        // the view, or behind the eye, where a projected point swings about or flips over.
+        if let Some((east, north)) = rim
+            && let Some(me_px) = me_px
             && f.edge(me_px) < -2.0
         {
             hints.sort_by(|a, b| a.0.total_cmp(&b.0));
             for (d, at) in hints.into_iter().take(HINTS) {
-                let Some((p, _)) = place(at) else { continue };
-                let dir = (p - me_px).normalize_or_zero();
+                let off = (at - me).as_vec2();
+                let dir = (east * off.x - north * off.y).normalize_or_zero();
                 if dir == Vec2::ZERO {
                     continue;
                 }
@@ -1075,6 +1100,23 @@ mod tests {
             // The ground to the right of the way faced is to the right.
             let right = v.px(look + DVec2::new(-heading.y as f64, heading.x as f64) * 100.0, 40.0).expect("in front");
             assert!(right.x > mid.x + 10.0, "{heading}: {right}");
+        }
+    }
+
+    /// The way a hint at the corner map's rim points, worked out on the level ground, is
+    /// the way the place lies on the map, however the map is turned.
+    #[test]
+    fn a_hint_points_the_way_its_place_lies_however_the_map_is_turned() {
+        let look = DVec2::new(5000.0, -3000.0);
+        let (corner, size) = (Vec2::new(900.0, 20.0), Vec2::new(200.0, 200.0));
+        for yaw in [0.0f32, 0.8, 1.6, 2.4, 3.1, 4.7] {
+            let v = look_down(look, 2.0, yaw, SMALL_PITCH, 40.0, corner, size);
+            let me = v.px(look, 40.0).expect("in front");
+            for off in [DVec2::new(60.0, 0.0), DVec2::new(-40.0, 50.0), DVec2::new(10.0, -70.0)] {
+                let seen = (v.px(look + off, 40.0).expect("in front") - me).normalize();
+                let way = |off: DVec2| (v.east * off.x as f32 - v.north * off.y as f32).normalize();
+                assert!(way(off).dot(seen) > 0.97, "yaw {yaw} {off}: {} against {seen}", way(off));
+            }
         }
     }
 

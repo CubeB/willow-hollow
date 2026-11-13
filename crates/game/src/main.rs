@@ -105,6 +105,10 @@ struct Options {
     /// Draw the map on a screenshot: the corner map, or the large map this many voxels
     /// across.
     shot_map: Option<Option<f64>>,
+    /// The large map on a screenshot turned and tilted, in degrees, and moved off the
+    /// player, in metres east and south.
+    shot_turn: Option<(f32, f32)>,
+    shot_pan: Option<glam::DVec2>,
     /// Show the pack's window on a screenshot, with a few things in it.
     shot_pack: bool,
     /// Where the player is taken to have walked before a screenshot, world x and z.
@@ -136,6 +140,8 @@ impl Default for Options {
             circle: None,
             ambient: 8.0,
             shot_map: None,
+            shot_turn: None,
+            shot_pan: None,
             shot_pack: false,
             walked: Vec::new(),
         }
@@ -168,6 +174,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --minimap             draw the corner map on a screenshot
   --pack                show the pack's window on a screenshot, with a few things in it
   --bigmap KM           draw the large map, KM across, on a screenshot
+  --bigmap-turn YAW,PITCH  with --bigmap, the large map turned YAW and tilted PITCH degrees
+                        (as a right drag would; the map opens at about -17,49)
+  --bigmap-pan X,Z      with --bigmap, the large map moved X metres east and Z south
   --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
                         to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
@@ -239,6 +248,14 @@ fn parse_args() -> Result<Options> {
             "--minimap" => o.shot_map = Some(None),
             "--pack" => o.shot_pack = true,
             "--bigmap" => o.shot_map = Some(Some(m64(value()?.parse::<f64>()? * 1000.0))),
+            "--bigmap-turn" => {
+                let v = list::<f32>(&value()?, ',', 2)?;
+                o.shot_turn = Some((v[0], v[1]));
+            }
+            "--bigmap-pan" => {
+                let v = list::<f64>(&value()?, ',', 2)?;
+                o.shot_pan = Some(glam::DVec2::new(m64(v[0]), m64(v[1])));
+            }
             "--walked" => {
                 for p in value()?.split(';') {
                     let v = list::<f64>(p, ',', 2)?;
@@ -1695,6 +1712,12 @@ fn main() -> Result<()> {
             if let Some(span) = large {
                 map.set_open(true);
                 map.set_span(span);
+                if let Some((yaw, pitch)) = opts.shot_turn {
+                    map.set_turn(yaw.to_radians(), pitch.to_radians());
+                }
+                if let Some(by) = opts.shot_pan {
+                    map.shift(by);
+                }
             }
             map.settle(&gpu, camera.pos, camera.forward());
             map
