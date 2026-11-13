@@ -389,6 +389,8 @@ fn twig(plot: &mut FacePlot, rng: &mut Rng, wood: Voxel) {
 
 /// What shows among the leaves of some kinds: the red berries of a holly, the yellow
 /// flowers of gorse, each 0.1 m. Nothing, and no roll of the dice, for any other leaf.
+/// One set out from the face has a leaf under it to sit on, or it would hang in the air
+/// wherever the tufts laid after it happened to miss.
 fn garnish(plot: &mut FacePlot, rng: &mut Rng, leaf: Voxel) {
     let (piece, chance, most) = match leaf {
         mat::LEAVES_HOLLY => (mat::HOLLY_BERRY, 0.3, 2),
@@ -401,6 +403,7 @@ fn garnish(plot: &mut FacePlot, rng: &mut Rng, leaf: Voxel) {
     for _ in 0..rng.int(1, most) {
         let (u, v, d) = (rng.int(0, 3), rng.int(0, 3), rng.int(0, 1));
         plot.fill(u, u + 1, v, v + 1, d, d + 1, piece);
+        plot.fill(u, u + 1, v, v + 1, 0, d, leaf);
     }
 }
 
@@ -571,6 +574,42 @@ mod tests {
 
     fn key(b: &PlantBox) -> ([i32; 3], [i32; 3], Voxel, bool) {
         (b.lo, b.hi, b.voxel, b.sway_hi)
+    }
+
+    #[test]
+    fn berries_and_blooms_never_hang_in_the_air() {
+        for (leaf, piece) in [(mat::LEAVES_HOLLY, mat::HOLLY_BERRY), (mat::GORSE, mat::GORSE_BLOOM)] {
+            let mut seen = 0;
+            for seed in 0..4000 {
+                for toward in [Toward::NegX, Toward::PosZ, Toward::Above, Toward::Below] {
+                    let site = Site { air: IVec3::new(3, 9, -2), toward, host: leaf, canopy: 0 };
+                    let mut raster = Raster::new();
+                    let mut plot = site.plot(&mut raster);
+                    let mut rng = Rng::new(seed);
+                    garnish(&mut plot, &mut rng, leaf);
+                    // Not the tufts: they are what used to hold a berry up only by chance.
+                    let mut boxes = Vec::new();
+                    raster.finish(&mut boxes, |_| (true, true));
+                    let step = toward.step();
+                    let low = site.air * CELLS;
+                    let filled = |c: IVec3| boxes.iter().any(|b| (0..3).all(|k| (b.lo[k]..b.hi[k]).contains(&c[k])));
+                    for b in boxes.iter().filter(|b| b.voxel == piece) {
+                        for x in b.lo[0]..b.hi[0] {
+                            for y in b.lo[1]..b.hi[1] {
+                                for z in b.lo[2]..b.hi[2] {
+                                    seen += 1;
+                                    // The next cell toward the host: in the host itself, or filled.
+                                    let next = IVec3::new(x, y, z) + step;
+                                    let inside = (0..3).all(|k| (low[k]..low[k] + CELLS).contains(&next[k]));
+                                    assert!(!inside || filled(next), "seed {seed} {toward:?}: a piece at {x},{y},{z} with nothing behind it");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(seen > 500, "only {seen} pieces looked at");
+        }
     }
 
     #[test]
