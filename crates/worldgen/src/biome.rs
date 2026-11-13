@@ -51,12 +51,16 @@ pub enum Biome {
 
 /// The climate and ground a moor takes: temperature, least rainfall, least broad height
 /// (in simulation units) and steepest broad slope, and the least of the slow variety noise.
-const MOOR_COOL: f32 = 0.26;
-const MOOR_WARM: f32 = 0.44;
-const MOOR_RAIN: f32 = 0.75;
-const MOOR_HEIGHT: f32 = 45.0;
-const MOOR_SLOPE: f32 = 0.22;
-const MOOR_VARIETY: f32 = -0.35;
+/// The height a moor needs rises with warmth: in the coolest, wettest country moor runs
+/// down nearly to the shore, as it does on the northern isles, while in milder country
+/// only the high plateaus are open moor and the lower ground is wooded.
+const MOOR_COOL: f32 = 0.25;
+const MOOR_WARM: f32 = 0.48;
+const MOOR_RAIN: f32 = 0.70;
+const MOOR_HEIGHT: f32 = 10.0;
+const MOOR_HEIGHT_PER_WARMTH: f32 = 260.0;
+const MOOR_SLOPE: f32 = 0.45;
+const MOOR_VARIETY: f32 = -0.45;
 
 /// What, beyond climate, decides a biome at a spot.
 #[derive(Clone, Copy, Debug)]
@@ -67,7 +71,7 @@ pub struct Site {
     pub rain: f32,
     /// Height above sea level in simulation units (0.8 m).
     pub height: f32,
-    /// Rise over run.
+    /// Rise over run, the mean of the ground for a few dozen metres around.
     pub slope: f32,
     /// How waterlogged the ground is, 0..1: high on flat land beside big rivers and lakes.
     pub wet: f32,
@@ -130,8 +134,8 @@ impl Biome {
         } else if t < 0.58 {
             match r {
                 r if r < 0.40 => Biome::Heath,
-                r if r < 0.85 => Biome::Grassland,
-                r if r < 1.55 => Biome::Deciduous,
+                r if r < 0.92 => Biome::Grassland,
+                r if r < 1.42 => Biome::Deciduous,
                 _ => Biome::OldGrowth,
             }
         } else {
@@ -157,7 +161,7 @@ impl Biome {
         }
         // How waterlogged the ground is: wet ground near big water that is also flat
         // enough to hold it, more so under heavy rain.
-        let sodden = wet * (1.0 - slope / 0.08).clamp(0.0, 1.0) * (0.75 + 0.25 * r.min(2.0));
+        let sodden = wet * (1.0 - slope / 0.12).clamp(0.0, 1.0) * (0.75 + 0.25 * r.min(2.0));
         // Some stretches of country are given over to wetland more than others.
         let wetland = 0.22 - 0.06 * v;
         // The tree line wanders a little from place to place.
@@ -168,12 +172,13 @@ impl Biome {
         // Moor: the cool, wet temperate uplands where the ground lies open and rolling
         // rather than steep, a plateau above the lowland woods and below the mountains.
         // Its valleys are moor too, all but the steepest of their sides.
+        let moor_height = MOOR_HEIGHT + (t - MOOR_COOL).max(0.0) * MOOR_HEIGHT_PER_WARMTH;
         let moor = (MOOR_COOL..MOOR_WARM).contains(&t)
             && r > MOOR_RAIN
-            && broad_height > MOOR_HEIGHT
+            && broad_height > moor_height
             && broad_slope < MOOR_SLOPE
-            && h > MOOR_HEIGHT * 0.7
-            && slope < MOOR_SLOPE * 2.0
+            && h > moor_height * 0.6
+            && slope < MOOR_SLOPE * 1.6
             && v > MOOR_VARIETY;
         match base {
             // Warm, wet, low ground at sheltered coasts (bays, lagoons, estuaries) and
@@ -205,10 +210,22 @@ impl Biome {
                 Biome::BirchGrove
             }
             // Its waterlogged hollows are blanket bog and valley mire.
-            Biome::Grassland | Biome::Deciduous if moor => {
+            Biome::Grassland | Biome::Deciduous | Biome::OldGrowth if moor => {
                 if sodden > wetland * 0.8 { Biome::Bog } else { Biome::Moor }
             }
             Biome::Heath | Biome::Grassland if t > 0.40 && r < 0.62 && v < -0.1 => Biome::Steppe,
+            // The broad belts of forest and grass are not one thing from end to end: the
+            // slow noise hands some stretches of them to the neighbouring kind of country
+            // the climate there nearly is, so a belt tens of kilometres long still changes
+            // every few. Cool grass runs to heather and milder, wetter grass to broadleaf
+            // wood, the wetter broadleaf woods to old growth, warm woods to rainforest or
+            // open savanna, and the wetter savanna to woodland.
+            Biome::Grassland if t < 0.40 && v < -0.15 => Biome::Heath,
+            Biome::Grassland if r > 0.72 && v > 0.28 => Biome::Deciduous,
+            Biome::Deciduous if r > 1.15 && v > 0.22 => Biome::OldGrowth,
+            Biome::Woodland if r > 1.10 && v > 0.10 => Biome::Rainforest,
+            Biome::Woodland if r < 1.05 && v < -0.25 => Biome::Savanna,
+            Biome::Savanna if r > 0.5 && v > 0.25 => Biome::Woodland,
             Biome::Desert | Biome::Savanna if h > 70.0 && v < -0.05 && r < 0.6 => Biome::RedRock,
             Biome::Desert if h < 80.0 && v > -0.1 => Biome::DuneSea,
             b => b,
@@ -319,6 +336,13 @@ mod tests {
         // Steep upland, or low ground, in the same climate is forest, not moor.
         assert_eq!(Biome::select(&site(0.36, 1.1, 80.0, 0.5)), Biome::Deciduous);
         assert_eq!(Biome::select(&site(0.36, 1.1, 20.0, 0.1)), Biome::Deciduous);
+        // In the coolest wet country moor comes down nearly to the shore; in milder
+        // country even a high plateau is wooded.
+        assert_eq!(Biome::select(&site(0.27, 1.0, 20.0, 0.1)), Biome::Moor);
+        assert_eq!(Biome::select(&site(0.55, 1.2, 150.0, 0.1)), Biome::Deciduous);
+        // The slow noise breaks the broad belts: cool grass runs to heather in places.
+        assert_eq!(Biome::select(&site(0.35, 0.6, 5.0, 0.05)), Biome::Grassland);
+        assert_eq!(Biome::select(&Site { variety: -0.5, ..site(0.35, 0.6, 5.0, 0.05) }), Biome::Heath);
     }
 
     #[test]

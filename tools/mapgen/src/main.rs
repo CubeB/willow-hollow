@@ -323,6 +323,61 @@ fn print_trail_stats(c: &Continent) {
 /// Smallest discharge drawn as a stream.
 const MIN_RIVER: f32 = 24.0;
 
+/// How each biome lies on the land: its share to a tenth of a percent, how many patches
+/// it comes in, the area-weighted mean patch (the size of patch a walker on that biome is
+/// typically standing in), and how much of it lies in specks under a tenth of a square
+/// kilometre. Patches join across the four sides of a cell.
+fn print_patches(c: &Continent, counts: &[usize], land: usize) {
+    let (w, n) = (c.size, c.size * c.size);
+    let km2 = c.sim_cell_size() * c.sim_cell_size() / 1e6;
+    let mut seen = vec![false; n];
+    let mut patches: Vec<Vec<usize>> = vec![Vec::new(); Biome::ALL.len()];
+    let mut stack = Vec::new();
+    for start in 0..n {
+        if seen[start] || c.ocean[start] {
+            continue;
+        }
+        let b = c.biome[start];
+        let mut size = 0;
+        seen[start] = true;
+        stack.push(start);
+        while let Some(i) = stack.pop() {
+            size += 1;
+            let (x, z) = (i % w, i / w);
+            let mut visit = |j: usize| {
+                if !seen[j] && !c.ocean[j] && c.biome[j] == b {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            };
+            if x > 0 { visit(i - 1); }
+            if x + 1 < w { visit(i + 1); }
+            if z > 0 { visit(i - w); }
+            if z + 1 < w { visit(i + w); }
+        }
+        patches[b as usize].push(size);
+    }
+    for &b in Biome::ALL.iter() {
+        let total = counts[b as usize];
+        if total == 0 {
+            continue;
+        }
+        let p = &patches[b as usize];
+        let weighted = p.iter().map(|&s| s as f64 * s as f64).sum::<f64>() / total as f64 * km2 as f64;
+        let specks = p.iter().filter(|&&s| (s as f32 * km2) < 0.1).sum::<usize>() as f32 / total as f32 * 100.0;
+        let walkable = p.iter().filter(|&&s| (s as f32 * km2) >= 0.5).count();
+        println!(
+            "  patch {:<13} {:5.1}%  {:6} patches, {:4} of 0.5 km2+, weighted mean {:7.2} km2, specks {:4.1}%",
+            format!("{b:?}"),
+            total as f32 / land as f32 * 100.0,
+            p.len(),
+            walkable,
+            weighted,
+            specks
+        );
+    }
+}
+
 fn print_stats(c: &Continent) {
     let n = c.size * c.size;
     let land: Vec<usize> = (0..n).filter(|&i| !c.ocean[i]).collect();
@@ -358,6 +413,7 @@ fn print_stats(c: &Continent) {
     shares.sort_by(|a, b| b.1.total_cmp(&a.1));
     let shares: Vec<String> = shares.iter().map(|(b, s)| format!("{b:?} {s:.0}%")).collect();
     println!("  biomes: {}", shares.join(", "));
+    print_patches(c, &counts, land.len());
     let rains: Vec<f32> = land.iter().map(|&i| c.rain[i]).collect();
     println!(
         "  rain min {:.2}, max {:.2}",
