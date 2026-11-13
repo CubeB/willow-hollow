@@ -629,6 +629,19 @@ pub fn catalogue(materials: &voxel::Materials) -> Vec<Item> {
     flowers.chain(borne).collect()
 }
 
+/// The months the thing called `id` is to be found in, if it is a flower or a mushroom.
+pub fn months(id: &str) -> Option<String> {
+    use worldgen::features::plants::MONTHS;
+    let f = Flower::ALL.iter().find(|f| f.id() == id)?;
+    let word = if matches!(f, Flower::FlyAgaric | Flower::PennyBun) { "Up" } else { "In flower" };
+    let (first, last) = f.months();
+    Some(if f.all_year() {
+        format!("{word} all the year round.")
+    } else {
+        format!("{word} from {} to {}.", MONTHS[first as usize - 1], MONTHS[last as usize - 1])
+    })
+}
+
 /// The kind of country the thing called `id` grows in, if that is known.
 pub fn country(id: &str) -> Option<&'static str> {
     if let Some(f) = Flower::ALL.iter().find(|f| f.id() == id) {
@@ -812,6 +825,9 @@ fn finds_page(ui: &mut egui::Ui, journal: &Journal, view: &mut View) {
                     ui.label(text(format!("First found{at} in {}.", find.when.when()), 13.0, FAINT));
                     if let Some(country) = country(&find.item.id) {
                         ui.label(text(format!("Where it grows: {}", lower(country)), 13.0, FAINT));
+                    }
+                    if let Some(months) = months(&find.item.id) {
+                        ui.label(text(months, 13.0, FAINT));
                     }
                 });
             });
