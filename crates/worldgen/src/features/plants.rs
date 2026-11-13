@@ -178,17 +178,352 @@ fn wintergreen_at(col: &Column, seed: u32, x: i32, z: i32, a: f32) -> Option<Win
     }
 }
 
-/// The petals that go with a flowering ground voxel.
-fn bloom(surface: Voxel) -> Option<Voxel> {
-    Some(match surface {
-        mat::FLOWER_RED => mat::BLOOM_RED,
-        mat::FLOWER_YELLOW => mat::BLOOM_YELLOW,
-        mat::FLOWER_WHITE => mat::BLOOM_WHITE,
-        mat::FLOWER_PURPLE => mat::BLOOM_PURPLE,
-        mat::FLOWER_BLUE => mat::BLOOM_BLUE,
-        mat::FLOWER_PINK => mat::BLOOM_PINK,
+/// The flowers, and the other things that can be picked where they grow: each kind the
+/// small plants grow with a bloom (or a cap) on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Flower {
+    // The small star of five petals and an eye, in the colour of its drift.
+    Pimpernel,
+    Cinquefoil,
+    Stitchwort,
+    Violet,
+    Speedwell,
+    Campion,
+    /// Heather in flower, on the heath and the moor.
+    Heather,
+    /// A lily pad with a flower open on it.
+    WaterLily,
+    FlyAgaric,
+    PennyBun,
+    /// Nodding bells along one side of an arching stem, in carpets under broadleaves.
+    Bluebell,
+    /// A tall spike hung with bells down one side, at the edges of woods and on the moor.
+    Foxglove,
+    /// A low clump of pale yellow flowers in a rosette of leaves, in woods in spring.
+    Primrose,
+    /// A low white star with a yellow eye, over the grassland.
+    Daisy,
+    /// Glossy gold cups on a branching stem, in the meadows.
+    Buttercup,
+    /// A scarlet cup with a dark boss on a tall wiry stem, in the grassland.
+    Poppy,
+    /// A dense tapering spike over a hand of leaves, mostly blue-violet.
+    Lupin,
+    /// White tufts on slender stems over the bog and the wet moor.
+    CottonGrass,
+    /// Kingcups: gold flowers over a mound of round dark leaves, in the marsh and by streams.
+    MarshMarigold,
+    /// A fan of sword leaves and a gold flower with drooping falls, in the marsh and by streams.
+    FlagIris,
+    /// Pink pompoms over a tight cushion, on dunes and shingle.
+    Thrift,
+    /// Upright trumpets of deep blue, close to the ground in the alpine meadows.
+    Gentian,
+    /// A grey felted star, found alone here and there high up.
+    Edelweiss,
+    /// Pale flowers with a dark lip, alternating up a stem over broad leaves, in the rainforest.
+    Orchid,
+    /// Zigzag red bracts tipped with gold, among paddle leaves, in the rainforest.
+    Heliconia,
+    /// Gold heads over a grey woolly mound, scattered over the desert.
+    DesertMarigold,
+    /// A purple brush on a spiny stem, on the steppe.
+    Thistle,
+}
+
+impl Flower {
+    pub const ALL: &[Flower] = &[
+        Flower::Pimpernel,
+        Flower::Cinquefoil,
+        Flower::Stitchwort,
+        Flower::Violet,
+        Flower::Speedwell,
+        Flower::Campion,
+        Flower::Heather,
+        Flower::WaterLily,
+        Flower::FlyAgaric,
+        Flower::PennyBun,
+        Flower::Bluebell,
+        Flower::Foxglove,
+        Flower::Primrose,
+        Flower::Daisy,
+        Flower::Buttercup,
+        Flower::Poppy,
+        Flower::Lupin,
+        Flower::CottonGrass,
+        Flower::MarshMarigold,
+        Flower::FlagIris,
+        Flower::Thrift,
+        Flower::Gentian,
+        Flower::Edelweiss,
+        Flower::Orchid,
+        Flower::Heliconia,
+        Flower::DesertMarigold,
+        Flower::Thistle,
+    ];
+
+    /// Its name, in plain English.
+    pub fn name(self) -> &'static str {
+        match self {
+            Flower::Pimpernel => "Scarlet pimpernel",
+            Flower::Cinquefoil => "Cinquefoil",
+            Flower::Stitchwort => "Stitchwort",
+            Flower::Violet => "Violet",
+            Flower::Speedwell => "Speedwell",
+            Flower::Campion => "Campion",
+            Flower::Heather => "Heather",
+            Flower::WaterLily => "Water lily",
+            Flower::FlyAgaric => "Fly agaric",
+            Flower::PennyBun => "Penny bun",
+            Flower::Bluebell => "Bluebell",
+            Flower::Foxglove => "Foxglove",
+            Flower::Primrose => "Primrose",
+            Flower::Daisy => "Daisy",
+            Flower::Buttercup => "Buttercup",
+            Flower::Poppy => "Poppy",
+            Flower::Lupin => "Lupin",
+            Flower::CottonGrass => "Cotton grass",
+            Flower::MarshMarigold => "Marsh marigold",
+            Flower::FlagIris => "Flag iris",
+            Flower::Thrift => "Thrift",
+            Flower::Gentian => "Gentian",
+            Flower::Edelweiss => "Edelweiss",
+            Flower::Orchid => "Orchid",
+            Flower::Heliconia => "Heliconia",
+            Flower::DesertMarigold => "Desert marigold",
+            Flower::Thistle => "Thistle",
+        }
+    }
+
+    /// A key that never changes, for save files.
+    pub fn id(self) -> &'static str {
+        match self {
+            Flower::Pimpernel => "pimpernel",
+            Flower::Cinquefoil => "cinquefoil",
+            Flower::Stitchwort => "stitchwort",
+            Flower::Violet => "violet",
+            Flower::Speedwell => "speedwell",
+            Flower::Campion => "campion",
+            Flower::Heather => "heather",
+            Flower::WaterLily => "water_lily",
+            Flower::FlyAgaric => "fly_agaric",
+            Flower::PennyBun => "penny_bun",
+            Flower::Bluebell => "bluebell",
+            Flower::Foxglove => "foxglove",
+            Flower::Primrose => "primrose",
+            Flower::Daisy => "daisy",
+            Flower::Buttercup => "buttercup",
+            Flower::Poppy => "poppy",
+            Flower::Lupin => "lupin",
+            Flower::CottonGrass => "cotton_grass",
+            Flower::MarshMarigold => "marsh_marigold",
+            Flower::FlagIris => "flag_iris",
+            Flower::Thrift => "thrift",
+            Flower::Gentian => "gentian",
+            Flower::Edelweiss => "edelweiss",
+            Flower::Orchid => "orchid",
+            Flower::Heliconia => "heliconia",
+            Flower::DesertMarigold => "desert_marigold",
+            Flower::Thistle => "thistle",
+        }
+    }
+
+    /// The material of its bloom (or cap): the colour it shows.
+    pub fn petals(self) -> Voxel {
+        match self {
+            Flower::Pimpernel => mat::BLOOM_RED,
+            Flower::Cinquefoil => mat::BLOOM_YELLOW,
+            Flower::Stitchwort => mat::BLOOM_WHITE,
+            Flower::WaterLily => mat::BLOOM_PINK,
+            Flower::Violet | Flower::Heather => mat::BLOOM_PURPLE,
+            Flower::Speedwell => mat::BLOOM_BLUE,
+            Flower::Campion => mat::BLOOM_PINK,
+            Flower::FlyAgaric => mat::MUSHROOM_RED,
+            Flower::PennyBun => mat::MUSHROOM_TAN,
+            Flower::Bluebell => mat::BLOOM_BLUEBELL,
+            Flower::Foxglove => mat::BLOOM_FOXGLOVE,
+            Flower::Primrose => mat::BLOOM_PRIMROSE,
+            Flower::Daisy | Flower::CottonGrass => mat::BLOOM_WHITE,
+            Flower::Buttercup | Flower::MarshMarigold | Flower::FlagIris | Flower::DesertMarigold => mat::BLOOM_GOLD,
+            Flower::Poppy => mat::BLOOM_POPPY,
+            Flower::Lupin => mat::BLOOM_LUPIN,
+            Flower::Thrift => mat::BLOOM_PINK,
+            Flower::Gentian => mat::BLOOM_GENTIAN,
+            Flower::Edelweiss => mat::BLOOM_FELT,
+            Flower::Orchid => mat::BLOOM_ORCHID,
+            Flower::Heliconia => mat::BLOOM_RED,
+            Flower::Thistle => mat::BLOOM_THISTLE,
+        }
+    }
+
+    /// The colour of its bloom, sRGB: the colour of [`Flower::petals`] in the palette.
+    pub fn color(self) -> [u8; 3] {
+        match self.petals() {
+            mat::BLOOM_RED => [222, 70, 64],
+            mat::BLOOM_YELLOW => [244, 214, 80],
+            mat::BLOOM_WHITE => [244, 244, 234],
+            mat::BLOOM_PURPLE => [170, 110, 204],
+            mat::BLOOM_BLUE => [108, 140, 230],
+            mat::BLOOM_PINK => [242, 160, 198],
+            mat::MUSHROOM_RED => [196, 56, 48],
+            mat::MUSHROOM_TAN => [178, 142, 100],
+            mat::BLOOM_BLUEBELL => [124, 116, 240],
+            mat::BLOOM_FOXGLOVE => [198, 92, 168],
+            mat::BLOOM_PRIMROSE => [244, 230, 112],
+            mat::BLOOM_GOLD => [250, 196, 36],
+            mat::BLOOM_POPPY => [222, 46, 34],
+            mat::BLOOM_LUPIN => [120, 98, 214],
+            mat::BLOOM_GENTIAN => [38, 66, 200],
+            mat::BLOOM_FELT => [232, 232, 218],
+            mat::BLOOM_ORCHID => [242, 200, 230],
+            _ => [170, 84, 178],
+        }
+    }
+}
+
+/// The flower a drift of flowering ground grows, from the colour the drift carries
+/// (`features::flower`) and the biome. `alt` picks between two flowers of one colour in
+/// broad swathes, so neighbouring drifts can differ.
+fn species(biome: Biome, surface: Voxel, alt: bool) -> Option<Flower> {
+    use Flower as F;
+    let generic = match surface {
+        mat::FLOWER_RED => F::Pimpernel,
+        mat::FLOWER_YELLOW => F::Cinquefoil,
+        mat::FLOWER_WHITE => F::Stitchwort,
+        mat::FLOWER_PURPLE => F::Violet,
+        mat::FLOWER_BLUE => F::Speedwell,
+        mat::FLOWER_PINK => F::Campion,
         _ => return None,
+    };
+    Some(match (biome, surface) {
+        (Biome::Grassland, mat::FLOWER_YELLOW) => if alt { F::Cinquefoil } else { F::Buttercup },
+        (Biome::Grassland, mat::FLOWER_WHITE) => if alt { F::Stitchwort } else { F::Daisy },
+        (Biome::Grassland, mat::FLOWER_RED) => F::Poppy,
+        (Biome::Grassland | Biome::AlpineMeadow, mat::FLOWER_PURPLE) => if alt { F::Violet } else { F::Lupin },
+        (Biome::Deciduous | Biome::Woodland | Biome::BirchGrove, mat::FLOWER_BLUE) => F::Bluebell,
+        (Biome::Deciduous | Biome::Woodland, mat::FLOWER_YELLOW) => F::Primrose,
+        (Biome::AlpineMeadow, mat::FLOWER_BLUE) => F::Gentian,
+        (Biome::Marsh, mat::FLOWER_YELLOW) => if alt { F::FlagIris } else { F::MarshMarigold },
+        (Biome::Bog | Biome::Moor, mat::FLOWER_WHITE) => F::CottonGrass,
+        (Biome::Rainforest, mat::FLOWER_RED) => F::Heliconia,
+        (Biome::Rainforest, mat::FLOWER_PINK) => F::Orchid,
+        (Biome::Steppe, mat::FLOWER_PURPLE) => F::Thistle,
+        (Biome::Desert | Biome::RedRock, mat::FLOWER_YELLOW) => F::DesertMarigold,
+        _ => generic,
     })
+}
+
+/// What grows on one column, decided before any of it is built, so that [`grow`] and
+/// [`flower_at`] cannot disagree.
+enum Growth {
+    Grass(Grass, Sward),
+    /// A dry tussock: marram on the dunes, or a clump on a dry stream's bank.
+    Tussock,
+    Reeds,
+    /// A lily pad with no flower.
+    Lily,
+    Wintergreen(Wintergreen),
+    Flower(Flower),
+}
+
+/// Whether a column is in the temperate band where kingcups and flag irises line the water.
+fn temperate(col: &Column) -> bool {
+    (0.36..0.72).contains(&col.temperature) && !col.biome.arid() && !matches!(col.biome, Biome::Savanna | Biome::Rainforest | Biome::Mangrove)
+}
+
+/// What grows at this column, if anything. `a` is the column's roll of the dice.
+fn decide(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, a: f32) -> Option<Growth> {
+    match col.cover {
+        // Dry streams have no reeds, only a tussock now and then along the banks.
+        Cover::Bank if col.biome.arid() => {
+            (col.water_surface().is_none() && a < 0.035 && patch(seed, 0x4eef, x, z, 6.0) > 0.1).then_some(Growth::Tussock)
+        }
+        // Elsewhere reeds stand in clumps and stretches along the water, with open bank
+        // between them where the grass comes down to the edge.
+        Cover::Bank if a < 0.25 && patch(seed, 0x4eed, x, z, 4.8) > 0.3 => Some(Growth::Reeds),
+        Cover::Bank if col.clear >= m(0.8) && col.water_surface().is_none() => {
+            if surface != mat::ground_cover(col.biome) {
+                return None;
+            }
+            // Kingcups and flag irises in stretches along temperate streams, between the reeds.
+            if a < 0.08 && temperate(col) && patch(seed, 0xb10e, x, z, 7.2) > 0.2 {
+                let iris = patch(seed, 0xb10f, x, z, 20.0) > 0.0;
+                return Some(Growth::Flower(if iris { Flower::FlagIris } else { Flower::MarshMarigold }));
+            }
+            let (kind, sward) = grass_at(col, seed, x, z)?;
+            (a < kind.share(&sward)).then_some(Growth::Grass(kind, sward))
+        }
+        Cover::LakeBed => {
+            let k = col.water_surface()?;
+            if k - col.top() >= 2 * BLOCK && a < 0.10 && patch(seed, 0x11e5, x, z, 4.8) > 0.2 {
+                let bloom = unit(hash3(seed ^ 0x11e6, x, 0, z)) < 0.2;
+                Some(if bloom { Growth::Flower(Flower::WaterLily) } else { Growth::Lily })
+            } else {
+                None
+            }
+        }
+        Cover::Land if col.clear >= m(0.8) && col.water_surface().is_none() => {
+            // Flowering heather ground carries the heather itself, not a flower.
+            if surface == mat::HEATHER {
+                return Some(Growth::Flower(Flower::Heather));
+            }
+            if matches!(surface, mat::FLOWER_RED | mat::FLOWER_YELLOW | mat::FLOWER_WHITE | mat::FLOWER_PURPLE | mat::FLOWER_BLUE | mat::FLOWER_PINK) {
+                return species(col.biome, surface, patch(seed, 0xa17e, x, z, 96.0) > 0.0).map(Growth::Flower);
+            }
+            let forest = matches!(col.biome, Biome::OldGrowth | Biome::Rainforest | Biome::Taiga);
+            if forest && a < 0.012 && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
+                let red = unit(hash3(seed ^ 0x3052, x, 0, z)) < 0.5;
+                return Some(Growth::Flower(if red { Flower::FlyAgaric } else { Flower::PennyBun }));
+            }
+            if surface != mat::ground_cover(col.biome) {
+                return None;
+            }
+            // Foxgloves stand in loose groups at the edges of woods and on the moor, and
+            // edelweiss is found alone, high up where the grass is short.
+            let wooded = matches!(col.biome, Biome::Deciduous | Biome::Woodland | Biome::OldGrowth | Biome::BirchGrove | Biome::Moor);
+            if wooded && a < 0.03 && patch(seed, 0xf0c5, x, z, 12.0) > 0.38 {
+                return Some(Growth::Flower(Flower::Foxglove));
+            }
+            if matches!(col.biome, Biome::AlpineMeadow | Biome::Tundra) && a < 0.0025 {
+                return Some(Growth::Flower(Flower::Edelweiss));
+            }
+            if let Some(kind) = wintergreen_at(col, seed, x, z, a) {
+                return Some(Growth::Wintergreen(kind));
+            }
+            let (kind, sward) = grass_at(col, seed, x, z)?;
+            (a < kind.share(&sward)).then_some(Growth::Grass(kind, sward))
+        }
+        // Marram grass binding the dunes: sparse dry clumps on the seaward face, thicker
+        // further up and behind, where the sand is higher and sheltered from the spray.
+        // Thrift grows in pink patches among it, out of the tropics.
+        Cover::Dune if col.water_surface().is_none() && col.biome != Biome::Volcanic => {
+            if a < 0.03 && col.temperature < 0.75 && patch(seed, 0x7417, x, z, 6.0) > 0.3 {
+                return Some(Growth::Flower(Flower::Thrift));
+            }
+            let landward = ((col.ground - m(2.0)) / m(3.0)).clamp(0.0, 1.0);
+            (a < 0.03 + 0.12 * landward && patch(seed, 0x3a77, x, z, 4.0) > -0.25).then_some(Growth::Tussock)
+        }
+        // Thrift in cushions on the shingle above the tide.
+        Cover::Shingle if col.water_surface().is_none() && col.temperature < 0.75 && !col.biome.arid() => {
+            (a < 0.05 && patch(seed, 0x7418, x, z, 6.0) > 0.15).then_some(Growth::Flower(Flower::Thrift))
+        }
+        _ => None,
+    }
+}
+
+/// The roll of the dice for the column at `(x, z)`.
+fn column_hash(seed: u32, x: i32, z: i32) -> u32 {
+    hash3(seed ^ 0x91a7, x, 0, z)
+}
+
+/// The flower (or mushroom) that [`grow`] builds on the column at world position
+/// `(x, z)` for the same arguments, if it builds one. Where things grow does not depend on
+/// the season, so neither does this, though a flower can be out of bloom.
+pub fn flower_at(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32) -> Option<Flower> {
+    match decide(col, surface, x, z, seed, unit(column_hash(seed, x, z)))? {
+        Growth::Flower(f) => Some(f),
+        _ => None,
+    }
 }
 
 /// Lays out boxes in cells relative to the corner of one voxel.
@@ -216,7 +551,28 @@ impl Plot<'_> {
     fn stem(&mut self, x: i32, z: i32, height: i32, voxel: Voxel) {
         self.add([x, 0, z], [x + 1, height, z + 1], voxel, (false, true));
     }
+
+    /// A single cell at `(x, y, z)`, free to sway.
+    fn dot(&mut self, x: i32, y: i32, z: i32, voxel: Voxel) {
+        self.add([x, y, z], [x + 1, y + 1, z + 1], voxel, (true, true));
+    }
+
+    /// A single cell lying on the ground.
+    fn low(&mut self, x: i32, z: i32, voxel: Voxel) {
+        self.add([x, 0, z], [x + 1, 1, z + 1], voxel, (false, true));
+    }
+
+    /// Four leaves lying round the edge of the footprint, turning one way round it like a
+    /// pinwheel, which leave the middle four cells open for the plant's stems.
+    fn rosette(&mut self, height: i32, voxel: Voxel) {
+        for (lo, hi) in [([0, 0], [2, 1]), ([3, 0], [4, 2]), ([2, 3], [4, 4]), ([0, 2], [1, 4])] {
+            self.add([lo[0], 0, lo[1]], [hi[0], height, hi[1]], voxel, (false, true));
+        }
+    }
 }
+
+/// The four directions across the ground.
+const SIDES: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
 /// The four 2x2 quarters of a voxel's footprint, by their low corners.
 const QUARTERS: [(i32, i32); 4] = [(0, 0), (2, 0), (0, 2), (2, 2)];
@@ -430,107 +786,407 @@ fn reeds(p: &mut Plot, rng: &mut Rng) {
     }
 }
 
-fn mushroom(p: &mut Plot, rng: &mut Rng) {
-    let cap = if rng.unit() < 0.5 { mat::MUSHROOM_RED } else { mat::MUSHROOM_TAN };
+fn mushroom(p: &mut Plot, rng: &mut Rng, cap: Voxel) {
     let (x, z) = (rng.int(1, CELLS - 2), rng.int(1, CELLS - 2));
     p.add([x, 0, z], [x + 1, 2, z + 1], mat::MUSHROOM_STEM, (false, false));
     p.add([x - 1, 2, z - 1], [x + 2, 3, z + 2], cap, (false, false));
     p.add([x, 3, z], [x + 1, 4, z + 1], cap, (false, false));
 }
 
-/// A pad floating on the surface plane `y` (in cells, relative to the plot).
-fn lily(p: &mut Plot, rng: &mut Rng, y: i32) {
+/// A pad floating on the surface plane `y` (in cells, relative to the plot), with a
+/// flower open on it if `bloom`.
+fn lily(p: &mut Plot, rng: &mut Rng, y: i32, bloom: bool) {
     let top = y;
     let size = rng.int(3, CELLS);
     let (x, z) = (rng.int(0, CELLS - size), rng.int(0, CELLS - size));
     p.add([x, top - 1, z], [x + size, top, z + size - 1], mat::LILY, (false, false));
     // The other row is shorter, leaving the notch a lily pad has.
     p.add([x, top - 1, z + size - 1], [x + size - 1, top, z + size], mat::LILY, (false, false));
-    if rng.unit() < 0.2 {
+    if bloom {
         p.add([x + 1, top, z + 1], [x + 2, top + 1, z + 2], mat::BLOOM_PINK, (false, false));
+    }
+}
+
+/// A cell of the middle four, where a plant's stem stands clear of a rosette.
+fn middle(rng: &mut Rng) -> (i32, i32) {
+    (rng.int(1, 2), rng.int(1, 2))
+}
+
+fn bluebell(p: &mut Plot, rng: &mut Rng) {
+    // Strap leaves lying along two edges.
+    let s = rng.int(0, 1);
+    p.add([s, 0, 0], [s + 3, 1, 1], mat::LEAF_GLOSS, (false, true));
+    let s = rng.int(0, 1);
+    p.add([s, 0, 3], [s + 3, 1, 4], mat::LEAF_GLOSS, (false, true));
+    // Two or three stems, each arching over at the top to one side, where the bells hang
+    // one under another from the crook.
+    for (i, (x, z, dx, dz)) in [(1, 1, -1, 0), (2, 2, 1, 0), (1, 2, 0, 1)].into_iter().enumerate() {
+        if i == 2 && rng.unit() < 0.5 {
+            continue;
+        }
+        let height = rng.int(5, 7);
+        p.stem(x, z, height, mat::STEM);
+        let (bx, bz) = (x + dx, z + dz);
+        // The crook itself is the first bell, the next hangs under it, and a third lower
+        // down the side of the stem on the taller ones.
+        p.add([bx, height - 2, bz], [bx + 1, height, bz + 1], mat::BLOOM_BLUEBELL, (true, true));
+        if height == 7 {
+            p.dot(bx, height - 4, bz, mat::BLOOM_BLUEBELL);
+        }
+    }
+}
+
+fn foxglove(p: &mut Plot, rng: &mut Rng) {
+    p.rosette(rng.int(1, 2), mat::LEAF_GLOSS);
+    let (x, z) = middle(rng);
+    let height = rng.int(9, 13);
+    p.stem(x, z, height, mat::STEM);
+    // Bells all down one side of the spike, from below its green tip, and every other
+    // one on the side next round; the lowest are open and paler at the mouth.
+    let first = rng.int(0, 3) as usize;
+    let (dx, dz) = SIDES[first];
+    let (ex, ez) = SIDES[(first + 2) % 4];
+    let lowest = (height - 7).max(3);
+    for y in lowest..height - 2 {
+        let colour = if y == lowest { mat::BLOOM_ORCHID } else { mat::BLOOM_FOXGLOVE };
+        p.dot(x + dx, y, z + dz, colour);
+        if (y - lowest) % 2 == 1 {
+            p.dot(x + ex, y, z + ez, mat::BLOOM_FOXGLOVE);
+        }
+    }
+}
+
+fn primrose(p: &mut Plot, rng: &mut Rng) {
+    p.rosette(1, mat::LEAF_GLOSS);
+    // Flowers on short stalks in the open middle, a clump of pale yellow.
+    for (i, (x, z)) in [(1, 1), (2, 1), (1, 2), (2, 2)].into_iter().enumerate() {
+        if i > 0 && rng.unit() < 0.25 {
+            continue;
+        }
+        let stalk = rng.int(1, 2);
+        p.stem(x, z, stalk, mat::STEM);
+        p.dot(x, stalk, z, mat::BLOOM_PRIMROSE);
+    }
+}
+
+fn daisy(p: &mut Plot, rng: &mut Rng) {
+    let (x, z) = middle(rng);
+    let height = rng.int(2, 3);
+    p.stem(x, z, height, mat::STEM);
+    // A flat white star at the top with its yellow eye in the middle of it.
+    p.dot(x, height, z, mat::BLOOM_GOLD);
+    for (dx, dz) in SIDES {
+        p.dot(x + dx, height, z + dz, mat::BLOOM_WHITE);
+    }
+    // Leaves lying under it, and a second, smaller head low beside it.
+    p.low(x - 1, z, mat::LEAF_GLOSS);
+    p.low(x + 1, z, mat::LEAF_GLOSS);
+    let (cx, cz) = (x + if rng.unit() < 0.5 { 1 } else { -1 }, z + if rng.unit() < 0.5 { 1 } else { -1 });
+    if rng.unit() < 0.6 {
+        p.low(cx, cz, mat::STEM);
+        p.dot(cx, 1, cz, mat::BLOOM_WHITE);
+    }
+}
+
+fn buttercup(p: &mut Plot, rng: &mut Rng) {
+    // Cut leaves on the ground at two corners.
+    p.add([0, 0, 0], [2, 1, 1], mat::LEAF_GLOSS, (false, true));
+    p.add([2, 0, 3], [4, 1, 4], mat::LEAF_GLOSS, (false, true));
+    let (x, z) = middle(rng);
+    let height = rng.int(5, 7);
+    p.stem(x, z, height, mat::STEM);
+    p.dot(x, height, z, mat::BLOOM_GOLD);
+    // Side shoots, each ending in a cup, lower down on two sides.
+    let first = rng.int(0, 3) as usize;
+    let (dx, dz) = SIDES[first];
+    p.dot(x + dx, height - 3, z + dz, mat::STEM);
+    p.dot(x + dx, height - 2, z + dz, mat::BLOOM_GOLD);
+    if height >= 6 {
+        let (ex, ez) = SIDES[(first + 2) % 4];
+        p.dot(x + ex, height - 5, z + ez, mat::STEM);
+        p.dot(x + ex, height - 4, z + ez, mat::BLOOM_GOLD);
+    }
+}
+
+fn poppy(p: &mut Plot, rng: &mut Rng) {
+    let quarters = shuffled_quarters(rng);
+    // A wiry stem with a scarlet cup on it, and a dark boss in the middle of the cup.
+    let (qx, qz) = quarters[0];
+    let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+    let height = rng.int(6, 8);
+    p.stem(x, z, height, mat::STEM);
+    p.add([qx, height, qz], [qx + 2, height + 1, qz + 2], mat::BLOOM_POPPY, (true, true));
+    p.dot(x, height + 1, z, mat::BLOOM_EYE);
+    // A second, lower: open, or a nodding bud.
+    let (qx, qz) = quarters[1];
+    let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+    let height = rng.int(4, 5);
+    p.stem(x, z, height, mat::STEM);
+    if rng.unit() < 0.5 {
+        p.add([qx, height, qz], [qx + 2, height + 1, qz + 2], mat::BLOOM_POPPY, (true, true));
+    } else {
+        p.dot(x, height, z, mat::LEAF_GREY);
+    }
+    // Grey-green cut leaves low in another quarter.
+    let (qx, qz) = quarters[2];
+    p.add([qx, 0, qz], [qx + 2, 1, qz + 1], mat::LEAF_GREY, (false, true));
+}
+
+fn lupin(p: &mut Plot, rng: &mut Rng) {
+    let (x, z) = middle(rng);
+    let stalk = rng.int(2, 3);
+    p.stem(x, z, stalk, mat::STEM);
+    // A hand of leaves round the stalk.
+    for (dx, dz) in SIDES {
+        p.dot(x + dx, 1, z + dz, mat::LEAF_GLOSS);
+    }
+    let colour = match rng.unit() {
+        u if u < 0.2 => mat::BLOOM_PINK,
+        u if u < 0.28 => mat::BLOOM_WHITE,
+        _ => mat::BLOOM_LUPIN,
+    };
+    // The spike, thick below and tapering to its tip.
+    let (qx, qz) = (x - rng.int(0, 1), z - rng.int(0, 1));
+    let thick = rng.int(3, 4);
+    p.add([qx, stalk, qz], [qx + 2, stalk + thick, qz + 2], colour, (true, true));
+    p.add([x, stalk + thick, z], [x + 1, stalk + thick + 2, z + 1], colour, (true, true));
+}
+
+fn cotton_grass(p: &mut Plot, rng: &mut Rng) {
+    let quarters = shuffled_quarters(rng);
+    let stems = rng.int(3, 4) as usize;
+    for (i, &(qx, qz)) in quarters[..stems].iter().enumerate() {
+        let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+        let height = rng.int(4, 7);
+        p.stem(x, z, height, mat::TUFT_SEDGE);
+        if i == 0 || rng.unit() < 0.85 {
+            p.add([x, height, z], [x + 1, height + 2, z + 1], mat::BLOOM_WHITE, (true, true));
+        }
+    }
+}
+
+fn marsh_marigold(p: &mut Plot, rng: &mut Rng) {
+    // Round glossy leaves held up on stalks in a mound, gold cups sitting over some.
+    let quarters = shuffled_quarters(rng);
+    let leaves = rng.int(3, 4) as usize;
+    for (i, &(qx, qz)) in quarters[..leaves].iter().enumerate() {
+        let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+        let up = rng.int(1, 2);
+        p.stem(x, z, up, mat::STEM);
+        p.add([qx, up, qz], [qx + 2, up + 1, qz + 2], mat::LEAF_GLOSS, (true, true));
+        if i < 2 {
+            p.add([x, up + 1, z], [x + 1, up + 2, z + 1], mat::BLOOM_GOLD, (true, true));
+        }
+    }
+}
+
+fn flag_iris(p: &mut Plot, rng: &mut Rng) {
+    // A fan of sword leaves in a row, and the flower stem among them.
+    let row = rng.int(1, 2);
+    let flip = rng.unit() < 0.5;
+    let at = |i: i32| if flip { 3 - i } else { i };
+    for (i, (lo, hi)) in [(0, (5, 6)), (1, (7, 9)), (3, (5, 7))] {
+        let height = rng.int(lo, hi);
+        p.stem(at(i), row, height, mat::TUFT_SEDGE);
+    }
+    let x = at(2);
+    let height = rng.int(8, 10);
+    p.stem(x, row, height, mat::STEM);
+    // The standard upright on top and the falls drooping either side.
+    p.dot(x, height, row, mat::BLOOM_GOLD);
+    p.dot(x, height - 1, row - 1, mat::BLOOM_GOLD);
+    p.dot(x, height - 1, row + 1, mat::BLOOM_GOLD);
+}
+
+fn thrift(p: &mut Plot, rng: &mut Rng) {
+    // A tight cushion, domed in the middle, with pink heads on wiry stalks at its corners.
+    let (s, t) = (rng.int(0, 1), rng.int(0, 1));
+    p.add([s, 0, t], [s + 3, 1, t + 3], mat::TUFT_ALPINE, (false, false));
+    p.add([s + 1, 1, t + 1], [s + 2, 2, t + 2], mat::TUFT_ALPINE, (false, true));
+    for (i, (cx, cz)) in [(0, 0), (2, 0), (0, 2), (2, 2)].into_iter().enumerate() {
+        if i > 0 && rng.unit() < 0.3 {
+            continue;
+        }
+        let top = rng.int(2, 4);
+        p.add([s + cx, 1, t + cz], [s + cx + 1, top, t + cz + 1], mat::STEM, (false, true));
+        p.dot(s + cx, top, t + cz, mat::BLOOM_PINK);
+    }
+}
+
+fn gentian(p: &mut Plot, rng: &mut Rng) {
+    p.rosette(1, mat::LEAF_GLOSS);
+    // Upright trumpets of deep blue, close to the ground.
+    let mut shown = 0;
+    for (x, z) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+        if shown == 3 || (shown > 0 && rng.unit() < 0.4) {
+            continue;
+        }
+        shown += 1;
+        p.low(x, z, mat::STEM);
+        p.add([x, 1, z], [x + 1, 3, z + 1], mat::BLOOM_GENTIAN, (true, true));
+    }
+}
+
+fn edelweiss(p: &mut Plot, rng: &mut Rng) {
+    let (x, z) = middle(rng);
+    let height = 3;
+    // Felted grey leaves at the foot, a grey stem, and a star of felted bracts at the top
+    // round a cluster of pale heads, the corner bracts held a little lower.
+    for (dx, dz) in SIDES {
+        p.low(x + dx, z + dz, mat::LEAF_GREY);
+    }
+    p.stem(x, z, height, mat::LEAF_GREY);
+    p.dot(x, height, z, mat::BLOOM_PRIMROSE);
+    for (dx, dz) in SIDES {
+        p.dot(x + dx, height, z + dz, mat::BLOOM_FELT);
+    }
+    for (dx, dz) in [(1, 1), (-1, 1), (1, -1), (-1, -1)] {
+        if rng.unit() < 0.75 {
+            p.dot(x + dx, height - 1, z + dz, mat::BLOOM_FELT);
+        }
+    }
+}
+
+fn orchid(p: &mut Plot, rng: &mut Rng) {
+    // Two broad leaves lying flat, and a stem with flowers turned alternately either way,
+    // each a pale face over its dark lip.
+    for z in [0, 3] {
+        let x = rng.int(0, 2);
+        p.add([x, 0, z], [x + 2, 1, z + 1], mat::LEAF_GLOSS, (false, true));
+    }
+    let (x, z) = middle(rng);
+    let height = rng.int(6, 8);
+    p.stem(x, z, height, mat::STEM);
+    let mut side = if rng.unit() < 0.5 { 1 } else { -1 };
+    let mut y = height - 1;
+    while y >= 3 {
+        p.dot(x + side, y, z, mat::BLOOM_ORCHID);
+        p.dot(x + side, y - 1, z, mat::BLOOM_ORCHID_LIP);
+        side = -side;
+        y -= 2;
+    }
+}
+
+fn heliconia(p: &mut Plot, rng: &mut Rng) {
+    // Paddle leaves standing up along two edges.
+    for z in [0, 3] {
+        let x = rng.int(0, 2);
+        p.add([x, 0, z], [x + 2, rng.int(6, 9), z + 1], mat::LEAF_GLOSS, (false, true));
+    }
+    // The flower stalk, with red bracts alternating either side of it down from the top,
+    // each tipped with gold.
+    let (x, z) = middle(rng);
+    let height = rng.int(7, 9);
+    p.stem(x, z, height, mat::STEM);
+    let mut side = if rng.unit() < 0.5 { 1 } else { -1 };
+    let mut top = height;
+    while top - 2 >= 2 {
+        p.add([x + side, top - 2, z], [x + side + 1, top, z + 1], mat::BLOOM_RED, (true, true));
+        p.dot(x + side, top, z, mat::BLOOM_GOLD);
+        side = -side;
+        top -= 2;
+    }
+}
+
+fn desert_marigold(p: &mut Plot, rng: &mut Rng) {
+    // A grey woolly mound with gold heads on stalks round it and one sitting on top.
+    p.add([1, 0, 1], [3, 1, 3], mat::LEAF_GREY, (false, false));
+    p.dot(rng.int(1, 2), 1, rng.int(1, 2), mat::BLOOM_GOLD);
+    for (i, (x, z)) in [(0, 1), (2, 0), (3, 2), (1, 3)].into_iter().enumerate() {
+        if i > 0 && rng.unit() < 0.3 {
+            continue;
+        }
+        let stalk = rng.int(1, 2);
+        p.stem(x, z, stalk, mat::LEAF_GREY);
+        p.dot(x, stalk, z, mat::BLOOM_GOLD);
+    }
+}
+
+fn thistle(p: &mut Plot, rng: &mut Rng) {
+    let quarters = shuffled_quarters(rng);
+    let (qx, qz) = quarters[0];
+    let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+    let height = rng.int(6, 8);
+    p.stem(x, z, height, mat::STEM);
+    // Spiny leaves standing out from the stem, turning outward from the middle.
+    let out = (if x < 2 { -1 } else { 1 }, if z < 2 { -1 } else { 1 });
+    let ok = |v: i32| (0..CELLS).contains(&v);
+    if ok(x + out.0) {
+        p.dot(x + out.0, 1, z, mat::LEAF_GREY);
+    }
+    if ok(z + out.1) {
+        p.dot(x, 3, z + out.1, mat::LEAF_GREY);
+    }
+    // The head: a bulb of grey bracts and the purple brush on top.
+    p.add([qx, height, qz], [qx + 2, height + 1, qz + 2], mat::LEAF_GREY, (true, true));
+    p.add([qx, height + 1, qz], [qx + 2, height + 2, qz + 2], mat::BLOOM_THISTLE, (true, true));
+    // A smaller head, lower, in the opposite quarter.
+    if rng.unit() < 0.6 {
+        let (qx, qz) = (2 - qx, 2 - qz);
+        let (x, z) = (qx + rng.int(0, 1), qz + rng.int(0, 1));
+        let height = rng.int(4, 5);
+        p.stem(x, z, height, mat::STEM);
+        p.dot(x, height, z, mat::LEAF_GREY);
+        p.dot(x, height + 1, z, mat::BLOOM_THISTLE);
+    }
+}
+
+/// Builds a flower of the kind given.
+fn build_flower(p: &mut Plot, rng: &mut Rng, kind: Flower) {
+    match kind {
+        Flower::Pimpernel | Flower::Cinquefoil | Flower::Stitchwort | Flower::Violet | Flower::Speedwell | Flower::Campion => {
+            flower(p, rng, kind.petals())
+        }
+        Flower::Heather => heather(p, rng, true),
+        Flower::FlyAgaric | Flower::PennyBun => mushroom(p, rng, kind.petals()),
+        // Built by `grow`, which knows where the water is.
+        Flower::WaterLily => {}
+        Flower::Bluebell => bluebell(p, rng),
+        Flower::Foxglove => foxglove(p, rng),
+        Flower::Primrose => primrose(p, rng),
+        Flower::Daisy => daisy(p, rng),
+        Flower::Buttercup => buttercup(p, rng),
+        Flower::Poppy => poppy(p, rng),
+        Flower::Lupin => lupin(p, rng),
+        Flower::CottonGrass => cotton_grass(p, rng),
+        Flower::MarshMarigold => marsh_marigold(p, rng),
+        Flower::FlagIris => flag_iris(p, rng),
+        Flower::Thrift => thrift(p, rng),
+        Flower::Gentian => gentian(p, rng),
+        Flower::Edelweiss => edelweiss(p, rng),
+        Flower::Orchid => orchid(p, rng),
+        Flower::Heliconia => heliconia(p, rng),
+        Flower::DesertMarigold => desert_marigold(p, rng),
+        Flower::Thistle => thistle(p, rng),
     }
 }
 
 /// Adds whatever grows on the column at world position `(x, z)`. `surface` is its top
 /// voxel, or the flower the ground carries there.
 pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut Vec<PlantBox>) {
-    let h = hash3(seed ^ 0x91a7, x, 0, z);
-    let a = unit(h);
+    let h = column_hash(seed, x, z);
+    let Some(growth) = decide(col, surface, x, z, seed, unit(h)) else {
+        return;
+    };
     let y = col.top() + 1;
     let mut rng = Rng::new(h.rotate_left(13));
     let mut plot = Plot {
         origin: [x * CELLS, y * CELLS, z * CELLS],
         out,
     };
-
-    match col.cover {
-        // Dry streams have no reeds, only a tussock now and then along the banks.
-        Cover::Bank if col.biome.arid() => {
-            if col.water_surface().is_none() && a < 0.035 && patch(seed, 0x4eef, x, z, 6.0) > 0.1 {
-                bunch(&mut plot, &mut rng);
-            }
+    let p = &mut plot;
+    match growth {
+        Growth::Grass(kind, sward) => grass(p, &mut rng, kind, &sward),
+        Growth::Tussock => bunch(p, &mut rng),
+        Growth::Reeds => reeds(p, &mut rng),
+        Growth::Lily | Growth::Flower(Flower::WaterLily) => {
+            let k = col.water_surface().unwrap_or(y);
+            lily(p, &mut rng, (k - y) * CELLS, matches!(growth, Growth::Flower(_)));
         }
-        // Elsewhere reeds stand in clumps and stretches along the water, with open bank
-        // between them where the grass comes down to the edge.
-        Cover::Bank if a < 0.25 && patch(seed, 0x4eed, x, z, 4.8) > 0.3 => reeds(&mut plot, &mut rng),
-        Cover::Bank if col.clear >= m(0.8) && col.water_surface().is_none() => {
-            if let Some((kind, sward)) = grass_at(col, seed, x, z)
-                && surface == mat::ground_cover(col.biome)
-                && a < kind.share(&sward)
-            {
-                grass(&mut plot, &mut rng, kind, &sward);
-            }
-        }
-        Cover::LakeBed => {
-            if let Some(k) = col.water_surface()
-                && k - col.top() >= 2 * BLOCK
-                && a < 0.10
-                && patch(seed, 0x11e5, x, z, 4.8) > 0.2
-            {
-                lily(&mut plot, &mut rng, (k - y) * CELLS);
-            }
-        }
-        Cover::Land if col.clear >= m(0.8) && col.water_surface().is_none() => {
-            // Flowering heather ground carries the heather itself, not a flower.
-            if surface == mat::HEATHER {
-                heather(&mut plot, &mut rng, true);
-                return;
-            }
-            if let Some(petals) = bloom(surface) {
-                flower(&mut plot, &mut rng, petals);
-                return;
-            }
-            let forest = matches!(col.biome, Biome::OldGrowth | Biome::Rainforest | Biome::Taiga);
-            if forest && a < 0.012 && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
-                mushroom(&mut plot, &mut rng);
-                return;
-            }
-            if surface == mat::ground_cover(col.biome)
-                && let Some(kind) = wintergreen_at(col, seed, x, z, a)
-            {
-                match kind {
-                    Wintergreen::Fern => fern(&mut plot, &mut rng),
-                    Wintergreen::Rush => rush(&mut plot, &mut rng),
-                    Wintergreen::Heather => heather(&mut plot, &mut rng, false),
-                }
-                return;
-            }
-            if let Some((kind, sward)) = grass_at(col, seed, x, z)
-                && surface == mat::ground_cover(col.biome)
-                && a < kind.share(&sward)
-            {
-                grass(&mut plot, &mut rng, kind, &sward);
-            }
-        }
-        // Marram grass binding the dunes: sparse dry clumps on the seaward face, thicker
-        // further up and behind, where the sand is higher and sheltered from the spray.
-        Cover::Dune if col.water_surface().is_none() && col.biome != Biome::Volcanic => {
-            let landward = ((col.ground - m(2.0)) / m(3.0)).clamp(0.0, 1.0);
-            if a < 0.03 + 0.12 * landward && patch(seed, 0x3a77, x, z, 4.0) > -0.25 {
-                bunch(&mut plot, &mut rng);
-            }
-        }
-        _ => {}
+        Growth::Wintergreen(Wintergreen::Fern) => fern(p, &mut rng),
+        Growth::Wintergreen(Wintergreen::Rush) => rush(p, &mut rng),
+        Growth::Wintergreen(Wintergreen::Heather) => heather(p, &mut rng, false),
+        Growth::Flower(kind) => build_flower(p, &mut rng, kind),
     }
 }
 
@@ -563,10 +1219,13 @@ mod tests {
 
     #[test]
     fn marram_grows_on_dunes_and_thickest_landward() {
+        // In the tropics, where no thrift grows among it.
         let mut low = column(Cover::Dune, Biome::Ocean);
         low.ground = m(2.0);
+        low.temperature = 0.9;
         let mut high = column(Cover::Dune, Biome::Ocean);
         high.ground = m(5.0);
+        high.temperature = 0.9;
         let (seaward, landward) = (grown(&low, mat::SAND), grown(&high, mat::SAND));
         assert!(!seaward.is_empty() && landward.len() > 2 * seaward.len());
         assert!(landward.iter().all(|b| matches!(b.voxel, mat::TUFT_DRY | mat::TUFT_STRAW) && b.thin == 0));
@@ -769,5 +1428,159 @@ mod tests {
         let (a, b) = (grown(&col, mat::GRASS_MEADOW), grown(&col, mat::GRASS_MEADOW));
         assert_eq!(a.len(), b.len());
         assert!(a.iter().zip(&b).all(|(p, q)| p.lo == q.lo && p.hi == q.hi && p.voxel == q.voxel));
+    }
+
+    /// Builds one flower of a kind on its own, for looking at its shape.
+    fn flower_model(kind: Flower, salt: u32) -> Vec<PlantBox> {
+        let mut out = Vec::new();
+        let mut plot = Plot { origin: [0, 0, 0], out: &mut out };
+        build_flower(&mut plot, &mut Rng::new(hash3(91, salt as i32, 0, 7)), kind);
+        out
+    }
+
+    #[test]
+    fn every_flower_is_well_formed_and_none_is_a_single_voxel() {
+        for &kind in Flower::ALL {
+            if kind == Flower::WaterLily {
+                continue;
+            }
+            for salt in 0..2000 {
+                let boxes = flower_model(kind, salt);
+                assert!(kind == Flower::Heather || boxes.len() >= 3, "{kind:?} is too plain: {boxes:?}");
+                if kind != Flower::Heather {
+                    // Lupins come in pink and white as well.
+                    let bloom = |v| v == kind.petals() || (kind == Flower::Lupin && matches!(v, mat::BLOOM_PINK | mat::BLOOM_WHITE));
+                    assert!(boxes.iter().any(|b| bloom(b.voxel)), "{kind:?} grew no bloom");
+                }
+                for (i, a) in boxes.iter().enumerate() {
+                    assert!((0..3).all(|axis| a.lo[axis] < a.hi[axis]), "{kind:?}: {a:?} is empty");
+                    assert!(a.lo[1] >= 0, "{kind:?}: {a:?} is under the ground");
+                    for axis in [0, 2] {
+                        assert!(a.lo[axis] >= 0 && a.hi[axis] <= CELLS, "{kind:?}: {a:?} leaves its column");
+                    }
+                    assert!(a.hi[0] - a.lo[0] < CELLS && a.hi[2] - a.lo[2] < CELLS, "{kind:?}: {a:?} is a voxel wide");
+                    assert_eq!(a.thin, 0);
+                    for b in &boxes[i + 1..] {
+                        let overlap = (0..3).all(|axis| a.lo[axis] < b.hi[axis] && b.lo[axis] < a.hi[axis]);
+                        assert!(!overlap, "{kind:?}: {a:?} overlaps {b:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_flowers_differ_in_shape() {
+        let height = |kind| (0..300).map(|s| flower_model(kind, s).iter().map(|b| b.hi[1]).max().unwrap() as f32).sum::<f32>() / 300.0;
+        assert!(height(Flower::Foxglove) > 2.0 * height(Flower::Primrose));
+        assert!(height(Flower::Daisy) < height(Flower::Poppy));
+        assert!(height(Flower::Gentian) <= 3.0 && height(Flower::Edelweiss) <= 4.0, "the alpine flowers keep low");
+        assert!(height(Flower::FlagIris) > height(Flower::MarshMarigold) * 2.0);
+    }
+
+    /// The kinds of flower growing over a stretch of one sort of ground.
+    fn census(col: &Column, surface: Voxel) -> std::collections::HashMap<Flower, u32> {
+        let mut found = std::collections::HashMap::new();
+        for x in 0..300 {
+            for z in 0..300 {
+                if let Some(f) = flower_at(col, surface, x, z, 5) {
+                    *found.entry(f).or_insert(0) += 1;
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn each_flower_grows_where_it_belongs_and_not_elsewhere() {
+        let land = |biome| column(Cover::Land, biome);
+        let has = |col: &Column, surface, kind: Flower| census(col, surface).contains_key(&kind);
+        // Drifts of colour name the flower by the biome.
+        assert!(has(&land(Biome::Deciduous), mat::FLOWER_BLUE, Flower::Bluebell));
+        assert!(!has(&land(Biome::Grassland), mat::FLOWER_BLUE, Flower::Bluebell), "no bluebells out in the open");
+        assert!(has(&land(Biome::Grassland), mat::FLOWER_RED, Flower::Poppy));
+        assert!(has(&land(Biome::AlpineMeadow), mat::FLOWER_BLUE, Flower::Gentian));
+        assert!(has(&land(Biome::Bog), mat::FLOWER_WHITE, Flower::CottonGrass));
+        assert!(has(&land(Biome::Rainforest), mat::FLOWER_PINK, Flower::Orchid));
+        assert!(has(&land(Biome::Desert), mat::FLOWER_YELLOW, Flower::DesertMarigold));
+        assert!(has(&land(Biome::Steppe), mat::FLOWER_PURPLE, Flower::Thistle));
+        // Over the plain ground: foxgloves by woods, edelweiss high up, and neither elsewhere.
+        let wood = census(&land(Biome::Deciduous), mat::ground_cover(Biome::Deciduous));
+        let foxgloves = wood.get(&Flower::Foxglove).copied().unwrap_or(0);
+        assert!(foxgloves > 50 && foxgloves < 90_000 / 100, "{foxgloves} foxgloves");
+        assert!(!has(&land(Biome::Steppe), mat::ground_cover(Biome::Steppe), Flower::Foxglove));
+        let alps = census(&land(Biome::AlpineMeadow), mat::ground_cover(Biome::AlpineMeadow));
+        let edelweiss = alps.get(&Flower::Edelweiss).copied().unwrap_or(0);
+        assert!(edelweiss > 20 && edelweiss < 90_000 / 200, "edelweiss is a rare find: {edelweiss}");
+        assert!(!has(&land(Biome::Grassland), mat::ground_cover(Biome::Grassland), Flower::Edelweiss));
+        // By temperate water, kingcups and irises; not by tropical water.
+        let bank = column(Cover::Bank, Biome::Deciduous);
+        let banks = census(&bank, mat::ground_cover(Biome::Deciduous));
+        assert!(banks.contains_key(&Flower::MarshMarigold) && banks.contains_key(&Flower::FlagIris), "{banks:?}");
+        let mut hot = column(Cover::Bank, Biome::Rainforest);
+        hot.temperature = 0.9;
+        assert!(census(&hot, mat::ground_cover(Biome::Rainforest)).is_empty());
+        // Thrift on the dunes and shingle of cool coasts, not hot ones.
+        assert!(has(&column(Cover::Dune, Biome::Ocean), mat::SAND, Flower::Thrift));
+        assert!(has(&column(Cover::Shingle, Biome::Ocean), mat::GRAVEL, Flower::Thrift));
+        let mut tropic = column(Cover::Dune, Biome::Ocean);
+        tropic.temperature = 0.9;
+        assert!(!has(&tropic, mat::SAND, Flower::Thrift));
+    }
+
+    #[test]
+    fn flower_at_names_what_grows() {
+        let mut lake = column(Cover::LakeBed, Biome::Deciduous);
+        lake.water = Some(40 + 8 * BLOCK);
+        let places = [
+            (column(Cover::Land, Biome::Grassland), mat::FLOWER_YELLOW),
+            (column(Cover::Land, Biome::Grassland), mat::FLOWER_WHITE),
+            (column(Cover::Land, Biome::Deciduous), mat::FLOWER_BLUE),
+            (column(Cover::Land, Biome::Deciduous), mat::ground_cover(Biome::Deciduous)),
+            (column(Cover::Land, Biome::OldGrowth), mat::ground_cover(Biome::OldGrowth)),
+            (column(Cover::Land, Biome::Heath), mat::HEATHER),
+            (column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath)),
+            (column(Cover::Bank, Biome::Deciduous), mat::ground_cover(Biome::Deciduous)),
+            (column(Cover::Dune, Biome::Ocean), mat::SAND),
+            (lake, mat::MUD),
+        ];
+        // Every bloom but heather's purple, which its sprigs show only on flowering ground.
+        let blooms: Vec<Voxel> = Flower::ALL.iter().map(|f| f.petals()).filter(|&v| v != mat::BLOOM_PURPLE).collect();
+        let mut seen = std::collections::HashSet::new();
+        for (col, surface) in &places {
+            for x in 0..200 {
+                for z in 0..200 {
+                    let mut boxes = Vec::new();
+                    grow(col, *surface, x, z, 5, &mut boxes);
+                    match flower_at(col, *surface, x, z, 5) {
+                        Some(f) => {
+                            seen.insert(f);
+                            // Heather can have every sprig gone to rust.
+                            assert!(f == Flower::Heather || boxes.iter().any(|b| b.voxel == f.petals()), "{f:?} at {x},{z} grew {boxes:?}");
+                        }
+                        None => assert!(boxes.iter().all(|b| !blooms.contains(&b.voxel)), "a flower grew at {x},{z} unnamed: {boxes:?}"),
+                    }
+                }
+            }
+        }
+        for f in [Flower::WaterLily, Flower::FlyAgaric, Flower::PennyBun, Flower::Heather, Flower::Bluebell, Flower::Foxglove, Flower::Thrift, Flower::MarshMarigold] {
+            assert!(seen.contains(&f), "never found {f:?}");
+        }
+    }
+
+    #[test]
+    fn flowers_have_names_keys_and_colours_and_die_back_in_winter() {
+        let mats = mat::build();
+        let mut ids = std::collections::HashSet::new();
+        for &f in Flower::ALL {
+            assert!(!f.name().is_empty());
+            assert!(f.id().chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{}", f.id());
+            assert!(ids.insert(f.id()), "{} twice", f.id());
+            assert_eq!(f.color(), mats.get(f.petals()).color, "{f:?}");
+            assert_eq!(mats.get(f.petals()).plant, voxel::plant::FLOWER, "{f:?} must fade in winter");
+        }
+        for v in [mat::STEM, mat::LEAF_GLOSS, mat::LEAF_GREY, mat::BLOOM_EYE, mat::BLOOM_ORCHID_LIP] {
+            assert_eq!(mats.get(v).plant, voxel::plant::FLOWER);
+        }
     }
 }
