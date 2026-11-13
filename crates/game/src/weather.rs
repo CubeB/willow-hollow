@@ -20,6 +20,9 @@ use crate::{env::Environment, season};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Forced {
     Clear,
+    /// Scattered fair-weather cloud, and broken cloud with the sun between.
+    Fair,
+    Broken,
     Overcast,
     Rain,
     Snow,
@@ -31,6 +34,8 @@ impl Forced {
     pub fn named(name: &str) -> Option<Self> {
         Some(match name {
             "clear" => Self::Clear,
+            "fair" => Self::Fair,
+            "broken" => Self::Broken,
             "overcast" | "cloudy" => Self::Overcast,
             "rain" => Self::Rain,
             "snow" => Self::Snow,
@@ -46,6 +51,9 @@ impl Forced {
 pub struct Sky {
     pub rain: f32,
     pub snow: f32,
+    /// How much of the sky the clouds fill.
+    pub cloud: f32,
+    /// How grey and dim the day is under them.
     pub overcast: f32,
     /// Gale: scales the gusts.
     pub storm: f32,
@@ -61,6 +69,8 @@ pub struct Weather {
     /// Ice on still water, 0..1.
     pub ice: f32,
     forced: Option<Forced>,
+    /// Whether the sky's cloud has been set to the date's yet.
+    cloud_set: bool,
     /// The date and warmth `lying` was last worked out for, and what it gave.
     lying_for: Option<(f32, f32)>,
     lying: (f32, f32),
@@ -150,10 +160,31 @@ pub fn natural(date: f32, year_days: f32, warmth: f32, seed: u32) -> Sky {
     Sky {
         rain: precip * (1.0 - cold),
         snow: precip * cold,
-        overcast: (precip * 0.9).max(smooth(threshold - 0.35, threshold, front) * 0.6),
+        overcast: greyness(cover(date, year_days, seed, front, threshold, precip), precip),
         storm: precip * gale,
         fog: smooth(threshold - 0.5, threshold - 0.1, front) * (1.0 - precip) * foggy,
+        cloud: cover(date, year_days, seed, front, threshold, precip),
     }
+}
+
+/// How much of the sky the clouds fill. Dry days have their own sky, changing about once
+/// a day: some clear, some with scattered fair-weather cloud, some broken, some overcast.
+/// The cloud builds as a front comes on (`front` nearing `threshold`, past which it rains
+/// or snows), and is never thin while anything falls: a shower comes from broken cloud
+/// with the sun between, a downpour from a full overcast.
+fn cover(date: f32, year_days: f32, seed: u32, front: f32, threshold: f32, precip: f32) -> f32 {
+    let fair = around_year(date, year_days, 1.0, seed ^ 0xc10d);
+    let dry = smooth(-0.25, 0.42, fair);
+    let coming = smooth(threshold - 0.35, threshold, front) * 0.5;
+    let falling = if precip > 0.0 { 0.5 + 0.5 * smooth(0.0, 0.6, precip) } else { 0.0 };
+    dry.max(coming).max(falling)
+}
+
+/// How grey and dim a sky with this much cloud is: hardly at all while the sun shows
+/// between the clouds (their shadows do the dimming there), then more as they close over,
+/// and more again in rain or snow.
+fn greyness(cloud: f32, precip: f32) -> f32 {
+    (smooth(0.45, 1.0, cloud) * 0.85).max(precip * 0.6)
 }
 
 /// The snow lying at sea level and the ice on still water at `date`, 0..1 each: the
@@ -191,17 +222,24 @@ fn days_apart(a: f32, b: f32, year_days: f32) -> f32 {
 fn forced_sky(f: Forced) -> Sky {
     match f {
         Forced::Clear => Sky::default(),
-        Forced::Overcast => Sky { overcast: 0.8, ..Sky::default() },
-        Forced::Rain => Sky { rain: 0.8, overcast: 0.8, storm: 0.3, ..Sky::default() },
-        Forced::Snow => Sky { snow: 0.8, overcast: 0.7, storm: 0.1, ..Sky::default() },
-        Forced::Storm => Sky { rain: 1.0, overcast: 1.0, storm: 1.0, ..Sky::default() },
-        Forced::Fog => Sky { overcast: 0.3, fog: 0.9, ..Sky::default() },
+        Forced::Fair => Sky { cloud: FAIR, ..Sky::default() },
+        Forced::Broken => Sky { cloud: 0.6, overcast: greyness(0.6, 0.0), ..Sky::default() },
+        Forced::Overcast => Sky { cloud: 1.0, overcast: 0.8, ..Sky::default() },
+        Forced::Rain => Sky { rain: 0.8, cloud: 0.92, overcast: 0.8, storm: 0.3, ..Sky::default() },
+        Forced::Snow => Sky { snow: 0.8, cloud: 0.95, overcast: 0.7, storm: 0.1, ..Sky::default() },
+        Forced::Storm => Sky { rain: 1.0, cloud: 1.0, overcast: 1.0, storm: 1.0, ..Sky::default() },
+        Forced::Fog => Sky { cloud: 0.6, overcast: 0.3, fog: 0.9, ..Sky::default() },
     }
 }
 
+/// Scattered fair-weather cloud: the sky a screenshot takes when no weather is asked for.
+const FAIR: f32 = 0.3;
+
 impl Weather {
     pub fn new(forced: Option<Forced>) -> Self {
-        let mut w = Self { now: Sky::default(), wet: 0.0, snowpack: 0.0, ice: 0.0, forced, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
+        // Until the first update brings in the date's own sky (straight away: see there),
+        // a fair day.
+        let mut w = Self { now: Sky { cloud: FAIR, ..Sky::default() }, wet: 0.0, snowpack: 0.0, ice: 0.0, forced, cloud_set: false, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
         if let Some(f) = forced {
             // A forced weather is already in place, and has been for a while.
             w.now = forced_sky(f);
@@ -278,6 +316,12 @@ impl Weather {
         let target = self.forced.map_or_else(|| natural(date, year_days, warmth, seed), forced_sky);
         let ease = 1.0 - (-dt / 8.0).exp();
         let s = &mut self.now;
+        // The cloud is the date's from the start, not rolling in over the first seconds.
+        if !std::mem::replace(&mut self.cloud_set, true) {
+            s.cloud = target.cloud;
+            s.overcast = target.overcast;
+        }
+        s.cloud += (target.cloud - s.cloud) * ease;
         s.rain += (target.rain - s.rain) * ease;
         s.snow += (target.snow - s.snow) * ease;
         s.overcast += (target.overcast - s.overcast) * ease;
@@ -313,7 +357,7 @@ impl Weather {
         env.sky_horizon = grey(env.sky_horizon, 0.95);
         env.sky_glow = grey(env.sky_glow, 0.95);
         env.glow *= 1.0 - 0.8 * o;
-        env.clouds = 0.45 + 0.55 * o;
+        env.clouds = s.cloud.clamp(0.0, 1.0);
         let precip = (s.rain + s.snow).min(1.0);
         // Rain and fog are grey and lie low: they thicken the haze, not the clear air.
         env.haze *= 1.0 + 4.0 * precip + 26.0 * s.fog;
@@ -436,6 +480,63 @@ mod tests {
         assert!(dull.clouds > clear.clouds && dull.haze > clear.haze);
         Weather::new(None).apply(&mut clear);
         assert_eq!(Forced::named("storm"), Some(Forced::Storm));
+    }
+
+    #[test]
+    fn dry_days_run_from_clear_to_overcast_and_rain_never_falls_from_a_clear_sky() {
+        let (mut dry, mut clear, mut scattered, mut broken, mut overcast, mut wet) = (0, 0, 0, 0, 0, 0);
+        for seed in 1..=4 {
+            for i in 0..2000 {
+                let date = i as f32 / 2000.0;
+                let s = natural(date, 24.0, 0.25, seed);
+                if s.rain + s.snow > 0.01 {
+                    wet += 1;
+                    assert!(s.cloud >= 0.5, "{date} seed {seed}: {s:?}");
+                    if s.rain + s.snow > 0.6 {
+                        assert!(s.cloud > 0.9 && s.overcast > 0.6, "{date} seed {seed}: {s:?}");
+                    }
+                    continue;
+                }
+                dry += 1;
+                match s.cloud {
+                    c if c < 0.08 => clear += 1,
+                    c if c < 0.45 => scattered += 1,
+                    c if c < 0.85 => broken += 1,
+                    _ => overcast += 1,
+                }
+                // The sun shows between broken cloud: the day only greys as it closes over.
+                if s.cloud < 0.45 {
+                    assert!(s.overcast < 0.05, "{date} seed {seed}: {s:?}");
+                }
+            }
+        }
+        let share = |n: i32| n as f32 / dry as f32;
+        println!("dry {dry} wet {wet}: clear {} scattered {} broken {} overcast {}", share(clear), share(scattered), share(broken), share(overcast));
+        for (name, n) in [("clear", clear), ("scattered", scattered), ("broken", broken), ("overcast", overcast)] {
+            assert!(share(n) > 0.1, "{name} {}", share(n));
+        }
+        // Some showers fall from broken cloud, not every one from a full overcast.
+        let showers = (1..=4).flat_map(|seed| (0..2000).map(move |i| natural(i as f32 / 2000.0, 24.0, 0.25, seed)));
+        assert!(showers.filter(|s| s.rain + s.snow > 0.01).any(|s| s.cloud < 0.8));
+        // And the cover closes round at the year's end like the rest.
+        assert!((natural(0.9999, 24.0, 0.25, 1).cloud - natural(0.0, 24.0, 0.25, 1).cloud).abs() < 0.05);
+    }
+
+    #[test]
+    fn forced_weathers_bring_their_own_cloud() {
+        let cloud = |f| {
+            let mut env = Environment::at(12.0, 0.32);
+            Weather::new(Some(f)).apply(&mut env);
+            env.clouds
+        };
+        assert_eq!(cloud(Forced::Clear), 0.0);
+        assert!(cloud(Forced::Fair) > 0.1 && cloud(Forced::Fair) < 0.5);
+        assert_eq!(cloud(Forced::Overcast), 1.0);
+        assert!(cloud(Forced::Rain) > 0.8 && cloud(Forced::Snow) > 0.8 && cloud(Forced::Storm) > 0.95);
+        // The first update brings in the date's own sky at once.
+        let mut w = Weather::new(None);
+        w.update(0.016, 0.0, 0.3, 24.0, 0.25, 1);
+        assert_eq!(w.now.cloud, natural(0.3, 24.0, 0.25, 1).cloud);
     }
 
     #[test]

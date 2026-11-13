@@ -45,6 +45,50 @@ const CASCADES: usize = 3;
 const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
 /// Height of the cloud layer above sea level.
 const CLOUD_HEIGHT: f32 = m(240.0);
+/// The clouds' blocks (see cloud_trace in common.wgsl): how wide each cell of their grid,
+/// how tall each block, how many blocks the tallest stands, and how many cells before
+/// the grid's pattern comes round again (a power of two).
+const CLOUD_CELL: f32 = m(24.0);
+const CLOUD_STEP: f32 = m(15.0);
+const CLOUD_STEPS: f32 = 4.0;
+const CLOUD_PERIOD: i32 = 1024;
+/// The most cells a view ray crosses looking for a cloud.
+const CLOUD_MARCH: i32 = 64;
+
+/// The clouds' field, a byte for each cell of their grid, row by row: high where cloud
+/// stands first as the cover grows (see cloud_blocks in common.wgsl). Heaps a few hundred
+/// metres across with ragged edges, wrapping round at the grid's edge. It never changes,
+/// so it is worked out once here and not for every pixel that looks for a cloud.
+fn cloud_field() -> Vec<u8> {
+    fn hash(x: i32, y: i32, z: i32) -> f32 {
+        let mut h = (x as u32).wrapping_mul(0x8da6b343).wrapping_add((y as u32).wrapping_mul(0xd8163841)).wrapping_add((z as u32).wrapping_mul(0xcb1ab31f));
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x2c1b3c6d);
+        h ^= h >> 12;
+        h = h.wrapping_mul(0x297a2d39);
+        h ^= h >> 15;
+        (h >> 8) as f32 / 16777216.0
+    }
+    // Smooth noise with a lattice point every `k` cells, wrapping with the grid.
+    let lattice = |x: i32, y: i32, k: i32, salt: i32| {
+        let n = CLOUD_PERIOD / k;
+        let (lx, ly) = (x / k, y / k);
+        let s = |f: f32| f * f * (3.0 - 2.0 * f);
+        let (ux, uy) = (s(((x - lx * k) as f32 + 0.5) / k as f32), s(((y - ly * k) as f32 + 0.5) / k as f32));
+        let (nx, ny) = ((lx + 1) % n, (ly + 1) % n);
+        let a = hash(lx, ly, salt) + (hash(nx, ly, salt) - hash(lx, ly, salt)) * ux;
+        let b = hash(lx, ny, salt) + (hash(nx, ny, salt) - hash(lx, ny, salt)) * ux;
+        a + (b - a) * uy
+    };
+    let mut field = Vec::with_capacity((CLOUD_PERIOD * CLOUD_PERIOD) as usize);
+    for y in 0..CLOUD_PERIOD {
+        for x in 0..CLOUD_PERIOD {
+            let v = lattice(x, y, 8, 41) * 0.68 + lattice(x, y, 2, 43) * 0.22 + hash(x, y, 47) * 0.1;
+            field.push((v * 255.0).round() as u8);
+        }
+    }
+    field
+}
 /// How many of the shadow cascades, nearest first, include small plants.
 const PLANT_SHADOW_CASCADES: usize = 2;
 /// A cached shadow map is redrawn early once the view has turned this far from it
@@ -434,7 +478,10 @@ impl Renderer {
     pub fn new(gpu: &Gpu, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         let device = &gpu.device;
         // Shaders work in voxels but know how big one is.
-        let common = format!("const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\n{}", include_str!("shaders/common.wgsl"));
+        let common = format!(
+            "const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\nconst CLOUD_CELL: f32 = {CLOUD_CELL:?};\nconst CLOUD_STEP: f32 = {CLOUD_STEP:?};\nconst CLOUD_STEPS: f32 = {CLOUD_STEPS:?};\nconst CLOUD_PERIOD: i32 = {CLOUD_PERIOD};\nconst CLOUD_MARCH: i32 = {CLOUD_MARCH};\n{}",
+            include_str!("shaders/common.wgsl")
+        );
 
         // --- Uniforms and the scene bind group (globals, shadows) -----------------
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
@@ -486,6 +533,32 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let cloud_size = wgpu::Extent3d {
+            width: CLOUD_PERIOD as u32,
+            height: CLOUD_PERIOD as u32,
+            depth_or_array_layers: 1,
+        };
+        let cloud_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cloud field"),
+            size: cloud_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            cloud_tex.as_image_copy(),
+            &cloud_field(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(CLOUD_PERIOD as u32),
+                rows_per_image: Some(CLOUD_PERIOD as u32),
+            },
+            cloud_size,
+        );
+        let cloud_view = cloud_tex.create_view(&Default::default());
         let scene_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene"),
             entries: &[
@@ -497,6 +570,11 @@ impl Renderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
+                },
+                // The cloud field: read where the trees' light is worked out, too.
+                wgpu::BindGroupLayoutEntry {
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ..texture_entry(4, wgpu::TextureSampleType::Float { filterable: false }, wgpu::TextureViewDimension::D2)
                 },
             ],
         });
@@ -519,6 +597,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&cloud_view),
                 },
             ],
         });
@@ -1460,6 +1542,12 @@ impl Renderer {
             .write_buffer(&self.shadows, 0, bytemuck::bytes_of(&Shadows { light_vp, texel: texels, span: spans }));
 
         let cam_wrapped = camera.pos.rem_euclid(glam::DVec3::splat(4096.0)).as_vec3();
+        // Where the camera stands on the cloud grid as it drifts, wrapped with the grid's
+        // pattern so the clouds never jump.
+        let drift = time as f64 * m(4.8) as f64;
+        let cloud_at = glam::DVec2::new(camera.pos.x + drift, camera.pos.z + drift * 0.35)
+            .rem_euclid(glam::DVec2::splat(CLOUD_CELL as f64 * CLOUD_PERIOD as f64))
+            .as_vec2();
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_right: v4(right * tan * aspect, 0.0),
@@ -1484,7 +1572,7 @@ impl Renderer {
             lights: nearest_glows(scene.particles),
             lamps: nearest_lamps(scene.lamps, camera.pos),
             season: [env.date, scene.ground.here.snow, scene.ground.here.frozen, scene.ground.here.snowline],
-            weather: [scene.ground.here.wet, scene.ground.here.highland, 0.0, 0.0],
+            weather: [scene.ground.here.wet, scene.ground.here.highland, cloud_at.x, cloud_at.y],
             sky_glow: v4(env.sky_glow, env.glow),
             sun_pos: v4(env.sun_pos, 0.0),
             air: [env.haze, env.haze_height, shafts, env.haziness()],

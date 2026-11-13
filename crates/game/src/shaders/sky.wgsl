@@ -31,6 +31,16 @@ fn stars(dir: vec3<f32>) -> f32 {
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     let dir = normalize(G.cam_fwd.xyz + in.ndc.x * G.cam_right.xyz + in.ndc.y * G.cam_up.xyz);
     var c = sky_color(dir);
+
+    // Clouds: blocks standing on a grid at a fixed height (see cloud_trace), out to where
+    // the haze has all but swallowed them. A cloud hides the sun, moon and stars behind
+    // it, however far off and hazy it is.
+    let cloud = cloud_seen(dir, 4.0 / max(G.fog.x * 2.5, 1e-7));
+    if (cloud.w >= 0.0) {
+        let fade = exp(-cloud.w * G.fog.x * 2.5 - haze_depth(dir * cloud.w, cloud.w) * 0.5);
+        return vec4<f32>(mix(c, cloud.rgb, fade), 1.0);
+    }
+
     let s = dot(dir, G.sun_dir.xyz);
     if (G.sun_color.w > 0.5) {
         // The sun.
@@ -39,25 +49,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // The moon, and stars that fade near the horizon.
         c += G.sun_color.rgb * (smoothstep(0.99975, 0.9999, s) * 60.0 + pow(max(s, 0.0), 300.0) * 3.0);
         c += vec3<f32>(0.9, 0.95, 1.0) * stars(dir) * smoothstep(0.0, 0.25, dir.y) * 0.08;
-    }
-
-    // Clouds: a layer at a fixed height, seen where the view ray meets it.
-    let plane_y = G.cascades.w;
-    if (abs(dir.y) > 0.01 && (plane_y > 0.0) == (dir.y > 0.0)) {
-        let t = plane_y / dir.y;
-        let hit = dir.xz * t;
-        let dist = length(vec3<f32>(hit.x, plane_y, hit.y));
-        let density = cloud_density(hit + G.cam_wrapped.xz);
-        // Lit from above by the sun, with the underside in sky-coloured shade.
-        // At dusk and dawn the low sun catches the cloud on its own side of the sky.
-        let toward = sunward(dir);
-        // There it takes the glow's colour in place of its own, not on top of it: added,
-        // the two came out white.
-        let plain = G.sun_color.rgb * (0.9 + 0.3 * max(G.sun_dir.y, 0.0)) * (1.0 - density * 0.5)
-            + G.sky_zenith.rgb * 0.8;
-        let lit = mix(plain, G.sky_glow.rgb * (1.0 - density * 0.3), G.sky_glow.w * 0.7 * toward * toward);
-        let fade = exp(-dist * G.fog.x * 2.5) * smoothstep(0.0, 0.03, abs(dir.y));
-        c = mix(c, lit, clamp(density * 1.4, 0.0, 1.0) * fade);
     }
     return vec4<f32>(c, 1.0);
 }
