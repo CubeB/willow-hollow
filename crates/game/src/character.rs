@@ -42,7 +42,7 @@ pub struct Look {
 /// The player.
 pub const WANDERER: Look = Look {
     skin: [0xd9, 0xa3, 0x7a],
-    hair: [0x3d, 0x2b, 0x1f],
+    hair: [0x9a, 0x5a, 0x2c],
     top: [0x5f, 0x7d, 0x3a],
     bottom: [0x6b, 0x4a, 0x33],
     boots: [0x3b, 0x2d, 0x25],
@@ -64,15 +64,17 @@ pub struct Pose {
     pub head: f32,
     /// How far the whole figure is raised, in voxels.
     pub lift: f32,
+    /// How far the body leans forward from the hips.
+    pub lean: f32,
 }
 
 impl Pose {
-    fn values(&self) -> [f32; 10] {
-        [self.leg[0], self.leg[1], self.shin[0], self.shin[1], self.arm[0], self.arm[1], self.fore[0], self.fore[1], self.head, self.lift]
+    fn values(&self) -> [f32; 11] {
+        [self.leg[0], self.leg[1], self.shin[0], self.shin[1], self.arm[0], self.arm[1], self.fore[0], self.fore[1], self.head, self.lift, self.lean]
     }
 
-    fn from_values(v: [f32; 10]) -> Self {
-        Self { leg: [v[0], v[1]], shin: [v[2], v[3]], arm: [v[4], v[5]], fore: [v[6], v[7]], head: v[8], lift: v[9] }
+    fn from_values(v: [f32; 11]) -> Self {
+        Self { leg: [v[0], v[1]], shin: [v[2], v[3]], arm: [v[4], v[5]], fore: [v[6], v[7]], head: v[8], lift: v[9], lean: v[10] }
     }
 
     /// Part of the way from this pose to `other`.
@@ -116,8 +118,20 @@ pub struct Gait {
     pub facing: f32,
 }
 
-/// Metres a second at which the stride is full.
-const FULL_STRIDE: f32 = 3.0;
+/// Metres a second below which a figure is only shuffling, and at which it is running
+/// flat out.
+const SHUFFLE: f32 = 1.0;
+const FLAT_OUT: f32 = 6.9;
+/// The arms' turn at the shoulder that puts the hands on the glider's bar (see
+/// [`GRIP`]), elbows straight.
+const REACH: f32 = -2.63;
+
+/// Where the hands hold the glider, from the feet: ahead and up, in voxels. The arms are
+/// five cells from shoulder to the middle of the hand.
+pub fn grip() -> (f32, f32) {
+    let arm = 5.0 * CELL;
+    (-arm * REACH.sin(), 13.5 * CELL - arm * REACH.cos())
+}
 
 impl Gait {
     pub fn new(facing: f32) -> Self {
@@ -134,15 +148,22 @@ impl Gait {
         let breath = (self.clock * 1.7).sin();
         match doing {
             Doing::Afoot(speed) if speed > 0.3 => {
-                let stride = (speed / FULL_STRIDE).min(1.0);
-                let a = 0.52 * stride.sqrt();
+                // From a shuffle through a jog to a run: the legs reach further, the back
+                // heel kicks up higher, the elbows bend and pump, the body leans into it.
+                let run = ((speed - SHUFFLE) / (FLAT_OUT - SHUFFLE)).clamp(0.0, 1.0);
+                let a = (0.45 + 0.4 * run) * (speed / SHUFFLE).min(1.0).sqrt();
+                let kick = 1.7 + 0.9 * run;
+                let elbow = 0.2 + 1.15 * run;
                 Pose {
                     leg: [-s * a, s * a],
-                    shin: [c.max(0.0) * a * 1.7, (-c).max(0.0) * a * 1.7],
-                    arm: [s * a * 0.85, -s * a * 0.85],
-                    fore: [-(0.12 + 0.45 * (-s).max(0.0) * stride), -(0.12 + 0.45 * s.max(0.0) * stride)],
+                    shin: [c.max(0.0) * a * kick, (-c).max(0.0) * a * kick],
+                    arm: [s * a * 0.9, -s * a * 0.9],
+                    fore: [-(elbow + 0.3 * (-s).max(0.0)), -(elbow + 0.3 * s.max(0.0))],
                     head: 0.0,
-                    lift: (c.abs() - 1.0) * m(0.03) * stride,
+                    // Highest with the legs at full reach, both feet off the ground; lowest
+                    // as one leg passes the other.
+                    lift: (s.abs() - 0.6) * m(0.05) * (0.4 + run),
+                    lean: 0.04 + 0.22 * run,
                 }
             }
             Doing::Afoot(_) => Pose {
@@ -157,33 +178,43 @@ impl Gait {
                 let k = (self.clock * 3.0).sin();
                 Pose { leg: [k * 0.35, -k * 0.35], shin: [0.3; 2], arm: [-1.2 + k * 0.5, -1.2 - k * 0.5], fore: [-0.4; 2], ..Default::default() }
             }
-            // Hanging from the wing's frame, legs trailing.
-            Doing::Gliding => Pose { leg: [0.45, 0.6], shin: [0.3, 0.2], arm: [-2.9; 2], fore: [-0.1; 2], ..Default::default() },
+            // Hanging from the wing's bar by straight arms, legs trailing.
+            Doing::Gliding => Pose { leg: [0.45, 0.6], shin: [0.3, 0.2], arm: [REACH; 2], ..Default::default() },
             Doing::Sitting => Pose { leg: [-1.45; 2], shin: [1.45; 2], arm: [-0.5; 2], fore: [-0.7; 2], ..Default::default() },
         }
     }
 
-    /// Moves the figure on by `dt` seconds of `doing`, turning it to face `heading` (a
-    /// camera's yaw) if it has one to turn to.
-    pub fn update(&mut self, doing: Doing, heading: Option<f32>, dt: f32) {
+    /// Moves the figure on by `dt` seconds of `doing`. `stride` is how far it is through
+    /// its steps, one to each whole number, a foot coming down as each is reached: the
+    /// same count the footsteps are sounded from. It turns to face `heading` (a camera's
+    /// yaw) if it has one to turn to, at once if it is `held` there.
+    pub fn update(&mut self, doing: Doing, stride: f32, heading: Option<f32>, held: bool, dt: f32) {
         self.clock += dt;
-        if let Doing::Afoot(speed) = doing {
-            // A step a little under a metre: quicker feet, not longer legs, when running.
-            self.phase = (self.phase + dt * (2.2 + speed * 0.9).min(9.0) * if speed > 0.3 { 1.0 } else { 0.0 }).rem_euclid(std::f32::consts::TAU);
-        }
+        // The legs are at full reach, the leading foot landing, as a step is counted.
+        self.phase = (std::f32::consts::PI * (stride + 0.5)).rem_euclid(std::f32::consts::TAU);
         let ease = |rate: f32| if dt > 0.0 { 1.0 - (-dt * rate).exp() } else { 1.0 };
-        self.pose = self.pose.toward(&self.wanted(doing), ease(14.0));
+        // The stride itself is followed closely, or it would lag the feet's sound; a
+        // change of what the figure is doing comes in a little slower.
+        let rate = if matches!(doing, Doing::Afoot(v) if v > 0.3) { 30.0 } else { 12.0 };
+        self.pose = self.pose.toward(&self.wanted(doing), ease(rate));
         if let Some(heading) = heading {
             let pi = std::f32::consts::PI;
             let turn = (heading - self.facing + pi).rem_euclid(2.0 * pi) - pi;
-            self.facing += turn * ease(10.0);
+            self.facing += turn * if held { 1.0 } else { ease(10.0) };
         }
     }
 
-    /// A figure caught in mid stride, for a still.
-    pub fn striding(facing: f32) -> Self {
+    /// A figure caught in mid stride at `speed` metres a second, for a still.
+    pub fn striding(facing: f32, speed: f32) -> Self {
         let mut g = Self { phase: 0.9, clock: 0.0, pose: Pose::default(), facing };
-        g.pose = g.wanted(Doing::Afoot(FULL_STRIDE));
+        g.pose = g.wanted(Doing::Afoot(speed));
+        g
+    }
+
+    /// A figure hanging from its glider, for a still.
+    pub fn gliding(facing: f32) -> Self {
+        let mut g = Self::new(facing);
+        g.pose = g.wanted(Doing::Gliding);
         g
     }
 }
@@ -234,6 +265,12 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, out:
     };
     // Where a joint `down` cells along a limb hung from `joint` at `pitch` has got to.
     let along = |joint: Vec3, pitch: f32, down: f32| joint + Vec3::new(0.0, -down * pitch.cos(), -down * pitch.sin());
+    // Where a point of the upper body has got to with the body leaning from the hips.
+    let hips = Vec3::new(0.0, 9.0, 0.0);
+    let leant = |p: Vec3| {
+        let (o, (sl, cl)) = (p - hips, pose.lean.sin_cos());
+        hips + Vec3::new(o.x, o.y * cl - o.z * sl, o.y * sl + o.z * cl)
+    };
 
     for (k, side) in [-1.0f32, 1.0].into_iter().enumerate() {
         // Thigh, then shin and boot from the knee.
@@ -251,7 +288,7 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, out:
             ],
         );
         // Upper arm, then forearm and hand from the elbow.
-        let shoulder = Vec3::new(side * 2.5, 13.5, 0.0);
+        let shoulder = leant(Vec3::new(side * 2.5, 13.5, 0.0));
         part(shoulder, pose.arm[k], 0.0, &[([-0.5, -2.5, -1.0], [1.0, 3.0, 2.0], look.top)]);
         let elbow = along(shoulder, pose.arm[k], 2.5);
         part(
@@ -271,20 +308,23 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, out:
         ([-2.0, 3.0, 1.0], [1.0, 2.0, 1.0], shade(look.accent, 0.92)),
     ];
     if look.pack {
+        // No two of these, nor any and the body or scarf, share a face: the bag stands
+        // clear below the scarf, its flap overhangs it, the bedroll rides behind the
+        // scarf's knot, and the straps stop short of the scarf and clear of its end.
         body.extend([
-            ([-1.5, 1.4, -2.6], [3.0, 3.0, 1.6], LEATHER),
-            ([-1.5, 3.8, -2.75], [3.0, 0.7, 1.75], shade(LEATHER, 1.18)),
-            ([-2.0, 4.5, -2.3], [4.0, 0.9, 1.0], ROLL),
-            ([-1.6, 1.0, 0.98], [0.5, 4.0, 0.1], strap),
-            ([1.1, 1.0, 0.98], [0.5, 4.0, 0.1], strap),
+            ([-1.4, 1.2, -2.5], [2.8, 2.7, 1.45], LEATHER),
+            ([-1.6, 3.9, -2.7], [3.2, 0.6, 1.65], shade(LEATHER, 1.18)),
+            ([-1.9, 4.5, -2.95], [3.8, 0.8, 0.85], ROLL),
+            ([-0.95, 1.05, 1.0], [0.45, 3.9, 0.08], strap),
+            ([1.2, 1.05, 1.0], [0.45, 3.9, 0.08], strap),
         ]);
     }
-    part(Vec3::new(0.0, 9.0, 0.0), 0.0, 0.0, &body);
+    part(hips, pose.lean, 0.0, &body);
 
     let eye = blend(look.skin, EYE, 0.7);
     part(
-        Vec3::new(0.0, 15.0, 0.0),
-        0.0,
+        leant(Vec3::new(0.0, 15.0, 0.0)),
+        pose.lean * 0.4,
         pose.head,
         &[
             ([-1.5, 0.0, -1.5], [3.0, 1.0, 3.0], look.skin),
@@ -335,7 +375,7 @@ mod tests {
 
     #[test]
     fn a_stride_swings_the_legs_apart_and_the_arms_against_them() {
-        let g = Gait::striding(0.0);
+        let g = Gait::striding(0.0, 4.0);
         let p = g.pose();
         assert!(p.leg[0] * p.leg[1] < 0.0 && p.arm[0] * p.arm[1] < 0.0);
         assert!(p.leg[0] * p.arm[0] < 0.0, "an arm swings with the other leg");
@@ -343,16 +383,52 @@ mod tests {
         // Standing still, it comes to rest upright.
         let mut g = g;
         for _ in 0..200 {
-            g.update(Doing::Afoot(0.0), None, 1.0 / 60.0);
+            g.update(Doing::Afoot(0.0), 0.0, None, false, 1.0 / 60.0);
         }
         assert!(g.pose().leg.iter().all(|l| l.abs() < 1e-3));
+    }
+
+    #[test]
+    fn a_foot_comes_down_as_each_step_is_counted_and_the_legs_change_over_between() {
+        let pose_at = |stride: f32| {
+            let mut g = Gait::new(0.0);
+            g.update(Doing::Afoot(4.0), stride, None, false, 0.0);
+            g.pose()
+        };
+        // At each count the legs are at full reach, the other leg leading from the last.
+        let (first, second) = (pose_at(1.0), pose_at(2.0));
+        assert!(first.leg[0] * second.leg[0] < 0.0 && (first.leg[0] + second.leg[0]).abs() < 1e-4);
+        let reach = first.leg[0].abs();
+        for k in 1..10 {
+            assert!(pose_at(1.0 + k as f32 / 10.0).leg[0].abs() < reach + 1e-4);
+        }
+        // Half way between, one leg is passing the other.
+        assert!(pose_at(1.5).leg[0].abs() < 1e-4);
+        // Running reaches further and leans more than jogging.
+        let pose_of = |speed: f32| Gait::striding(0.0, speed).pose();
+        assert!(pose_of(6.9).leg[0].abs() > pose_of(4.0).leg[0].abs() && pose_of(6.9).lean > pose_of(4.0).lean);
+    }
+
+    #[test]
+    fn the_hands_of_a_figure_gliding_are_at_the_grip() {
+        let g = Gait::gliding(0.0);
+        let out = boxes(&g.pose(), 0.0);
+        let (ahead, up) = grip();
+        // The hands: the two boxes of skin a cell tall and wide, two deep.
+        let skin = linear(WANDERER.skin);
+        let hands: Vec<_> = out.iter().filter(|b| b.color == skin && (b.size[0] - CELL).abs() < 1e-4 && (b.size[2] - 2.0 * CELL).abs() < 1e-4 && (b.size[1] - CELL).abs() < 1e-4).collect();
+        assert_eq!(hands.len(), 2);
+        for h in hands {
+            assert!((h.pos[0] - ahead).abs() < 0.02 && (h.pos[1] - up).abs() < 0.02, "hand at {:?}, grip {ahead} {up}", h.pos);
+            assert!((h.pos[2].abs() - 2.5 * CELL).abs() < 1e-3);
+        }
     }
 
     #[test]
     fn a_figure_turns_the_short_way_round_to_its_heading() {
         let mut g = Gait::new(3.0);
         for _ in 0..120 {
-            g.update(Doing::Afoot(2.0), Some(-3.0), 1.0 / 60.0);
+            g.update(Doing::Afoot(2.0), 0.0, Some(-3.0), false, 1.0 / 60.0);
         }
         let pi = std::f32::consts::PI;
         let off = (g.facing + 3.0 + pi).rem_euclid(2.0 * pi) - pi;

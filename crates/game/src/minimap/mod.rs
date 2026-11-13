@@ -71,10 +71,10 @@ const STRAY: i64 = 40;
 /// The corner map: how much ground it spans across its middle, how steeply it is looked
 /// down on, how far the player may walk from the middle of its model, in columns, and
 /// how long it waits, in seconds, before a new one is made for newly seen ground.
-const SMALL_SPAN: f64 = m64(380.0);
+const SMALL_SPAN: f64 = m64(130.0);
 const SMALL_PITCH: f32 = 0.95;
-const SMALL_STRAY: i64 = 12;
-const SMALL_EVERY: f32 = 0.75;
+const SMALL_STRAY: i64 = 16;
+const SMALL_EVERY: f32 = 1.5;
 /// Which model an answer from the relief thread is.
 const LARGE: u8 = 0;
 const SMALL: u8 = 1;
@@ -506,7 +506,7 @@ impl Minimap {
         if self.open || !self.corner || self.small_pending {
             return;
         }
-        let step = relief::MIN_STEP;
+        let step = relief::FINE_STEP;
         let centre = ((self.player.x / step as f64).round() as i64, (self.player.z / step as f64).round() as i64);
         let n = relief::SMALL as i64;
         if let Some(r) = &self.small {

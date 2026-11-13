@@ -32,10 +32,12 @@ use crate::farview;
 
 /// Columns per side of the large map's model, and of the corner map's. Whole tiles.
 pub const N: usize = 384;
-pub const SMALL: usize = 128;
+pub const SMALL: usize = 192;
 /// The narrowest and widest a column is, in voxels.
 pub const MIN_STEP: i32 = 16;
 pub const MAX_STEP: i32 = 512;
+/// The width of the corner map's columns, in voxels: fine enough to tell tree from tree.
+pub const FINE_STEP: i32 = 4;
 /// Columns to a side of the squares the voxel surface is sampled in.
 const TILE: usize = 32;
 /// A column nobody has seen.
@@ -103,7 +105,7 @@ impl Relief {
 
 /// How much taller than life the land is drawn with columns `step` voxels wide.
 pub fn tallness(step: i32) -> f32 {
-    (step as f32 / MIN_STEP as f32).powf(0.45)
+    (step as f32 / MIN_STEP as f32).powf(0.45).max(1.0)
 }
 
 #[derive(Clone, Copy)]
@@ -112,6 +114,8 @@ struct Tree {
     /// Blocks tall.
     height: f32,
     conifer: bool,
+    /// How many columns wide the sizes meant for the coarsest near columns come to.
+    spread: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +157,7 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
     let mid = |c: usize, o: i32| (o + c as i32) * step + step / 2;
     let key_of = |x: i32, z: i32| (x.div_euclid(MACRO_SIZE), z.div_euclid(MACRO_SIZE));
 
+    let spread = (MIN_STEP as f32 / step as f32).max(1.0);
     if step < MACRO_SIZE / TEX as i32 {
         // From the voxel world's surface, a square of columns at a time.
         for tz in (0..n).step_by(TILE) {
@@ -184,11 +189,14 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                             let tree = (col.cover == Cover::Land && col.clear > 6.0)
                                 .then(|| features::canopy(col.biome, mats))
                                 .flatten()
-                                .filter(|t| hash(wx, wz, 1) < (t.1 * 0.8).min(0.85))
+                                // As many trees to the acre whatever the columns' width.
+                                .filter(|t| hash(wx, wz, 1) < (t.1 * 0.8).min(0.85) / (spread * spread))
                                 .map(|(color, _, height)| Tree {
                                     color,
-                                    height: (height * OLD_VOXEL * 1.6 * (0.7 + 0.6 * hash(wx, wz, 2)) / step as f32).clamp(1.0, 9.0),
+                                    // Taller than life where a column is as wide as a tree.
+                                    height: (height * OLD_VOXEL * (1.0 + 0.6 / spread) * (0.7 + 0.6 * hash(wx, wz, 2)) / step as f32).clamp(1.0, 9.0 * spread),
                                     conifer: conifer(features::canopy_tree(col.biome)),
+                                    spread,
                                 });
                             Cell { top: block(col.ground), color: mats.get(surface).color.map(f32::from), water: false, tree }
                         };
@@ -254,6 +262,7 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                         color,
                         height: 0.45 + 0.4 * hash(wx, wz, 2),
                         conifer: false,
+                        spread: 1.0,
                     });
                     // The middle height of the ground the column covers, or a range seen
                     // from far off would be a row of spikes.
@@ -334,24 +343,32 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
             if let Some(tree) = cell.tree {
                 let shade = 0.9 + 0.2 * hash(wx, wz, 4);
                 let leaf = tree.color.map(|v| v as f32 * shade);
-                let (cx, cz) = (x0 + 0.5 + 0.3 * (hash(wx, wz, 5) - 0.5), z0 + 0.5 + 0.3 * (hash(wx, wz, 6) - 0.5));
+                let k = tree.spread;
+                let (cx, cz) = (x0 + 0.5 + 0.3 * k * (hash(wx, wz, 5) - 0.5), z0 + 0.5 + 0.3 * k * (hash(wx, wz, 6) - 0.5));
                 let h = tree.height;
                 if h < 1.0 {
                     // A wood too far off to tell its trees apart: a bump of canopy.
                     mesh.block(cx, cz, 0.42, y, y + h, leaf);
                 } else if tree.conifer {
-                    let skirt = y + 0.3;
-                    let waist = skirt + (h - 0.3) * 0.55;
-                    mesh.block(cx, cz, 0.12, y, skirt, TRUNK.map(f32::from));
-                    mesh.block(cx, cz, 0.42, skirt, waist, leaf);
-                    mesh.block(cx, cz, 0.24, waist, y + h, leaf.map(|v| v * 1.06));
+                    let skirt = y + (0.3 * k).min(h * 0.2);
+                    let waist = skirt + (y + h - skirt) * 0.5;
+                    mesh.block(cx, cz, 0.12 * k, y, skirt, TRUNK.map(f32::from));
+                    mesh.block(cx, cz, 0.42 * k, skirt, waist, leaf);
+                    mesh.block(cx, cz, 0.24 * k, waist, y + h, leaf.map(|v| v * 1.06));
                 } else {
                     let crown = (h * 0.62).max(0.9).min(h);
-                    let width = 0.42 + 0.22 * hash(wx, wz, 7);
+                    let width = (0.42 + 0.22 * hash(wx, wz, 7)) * k;
                     if h - crown > 0.05 {
-                        mesh.block(cx, cz, 0.14, y, y + h - crown, TRUNK.map(f32::from));
+                        mesh.block(cx, cz, 0.14 * k, y, y + h - crown, TRUNK.map(f32::from));
                     }
-                    mesh.block(cx, cz, width, y + h - crown, y + h, leaf);
+                    if k > 1.0 {
+                        // Big enough to have a shape: a broad crown with a smaller one on it.
+                        let shoulder = y + h - crown * 0.35;
+                        mesh.block(cx, cz, width, y + h - crown, shoulder, leaf);
+                        mesh.block(cx, cz, width * 0.62, shoulder, y + h, leaf.map(|v| v * 1.07));
+                    } else {
+                        mesh.block(cx, cz, width, y + h - crown, y + h, leaf);
+                    }
                 }
             }
         }
@@ -406,7 +423,7 @@ mod tests {
     #[test]
     fn only_what_has_been_seen_is_built_and_it_stands_on_a_foot_of_earth() {
         let world = GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
-        for step in [MIN_STEP, 128] {
+        for step in [FINE_STEP, MIN_STEP, 128] {
             let seen = |x: usize, z: usize| (150..230).contains(&x) && (160..220).contains(&z);
             let r = build(&world, &request(&world, step, seen));
             assert_eq!(r.version, 7);
@@ -418,7 +435,7 @@ mod tests {
             let lowest = r.tops.iter().filter(|&&t| t != UNSEEN).min().copied().expect("some seen") as f32;
             assert_eq!(lo, lowest - FOOT as f32, "step {step}");
             assert!(hi >= lowest);
-            assert!(r.vertices.iter().all(|v| (149.0..=231.0).contains(&v.pos[0]) && v.color[3] <= 4));
+            assert!(r.vertices.iter().all(|v| (146.0..=234.0).contains(&v.pos[0]) && v.color[3] <= 4));
             // A point in a seen column is found, one outside is not.
             let s = step as f64;
             let at = |x: usize, z: usize| ((r.origin.0 as f64 + x as f64 + 0.5) * s, (r.origin.1 as f64 + z as f64 + 0.5) * s);

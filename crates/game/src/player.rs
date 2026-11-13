@@ -141,8 +141,9 @@ pub struct Player {
     pub vel: Vec3,
     pub on_ground: bool,
     pub swimming: bool,
-    /// How far the eye currently lags below its true height after stepping up, so
-    /// steps read as a smooth rise rather than a jolt.
+    /// How far the eye currently lags below its true height after stepping up, or (below
+    /// nought) above it after stepping down, so steps read as a smooth rise and fall
+    /// rather than a jolt.
     step_lag: f32,
     pub mode: Mode,
     airspeed: f32,
@@ -417,6 +418,7 @@ impl Player {
             self.mode = Mode::Walk;
         }
         let gliding = self.mode == Mode::Glide;
+        let was_on_ground = self.on_ground;
         // Lean into turns; the camera rolls with it.
         let lean = if gliding { (controls.turn * 0.35).clamp(-0.5, 0.5) } else { 0.0 };
         self.bank += (lean - self.bank) * (1.0 - (-4.0 * dt).exp());
@@ -480,10 +482,23 @@ impl Player {
                 self.on_ground = false;
             }
         }
+        // Walking off a low ledge is a step down, not a fall: the feet go straight to the
+        // ground below, and the eye follows as it does up a step.
+        if was_on_ground && !self.on_ground && !gliding && !self.swimming && self.vel.y <= 0.0 {
+            let before = self.pos;
+            if self.slide(1, -STEP, v) {
+                self.step_lag = (self.step_lag - (before.y - self.pos.y) as f32).max(-m(1.2));
+                self.on_ground = true;
+                self.vel.y = 0.0;
+            } else {
+                self.pos = before;
+            }
+        }
         if self.on_ground && self.mode == Mode::Glide {
             self.mode = Mode::Walk;
         }
-        self.step_lag *= (-12.0 * dt).exp();
+        // The eye closes most of the gap quickly and the last of it gently.
+        self.step_lag *= (-9.0 * dt).exp();
     }
 }
 
@@ -859,6 +874,33 @@ mod tests {
             } else {
                 assert!(p.pos.x < 5.0, "walked through a {rise}-voxel wall");
                 assert!((p.pos.y - 10.0).abs() < 1e-2);
+            }
+        }
+    }
+
+    #[test]
+    fn walks_down_a_low_step_without_leaving_the_ground_and_the_eye_follows_smoothly() {
+        // Floor drops by `drop` voxels at x >= 5.
+        for (drop, stepped) in [(BLOCK, true), (BLOCK + 3, false)] {
+            let mut world = Fake(move |x, y, _| {
+                let top = if x >= 5 { 10 - drop } else { 10 };
+                if y < top { Kind::Solid } else { Kind::Air }
+            });
+            let mut p = Player::new(DVec3::new(0.5, 10.0, 0.5));
+            let (mut airborne, mut eye, mut jolt) = (false, p.eye().y, 0.0f64);
+            for k in 0..180 {
+                p.update(&mut world, forward(), 1.0 / 60.0);
+                // Once it has landed at the start.
+                if k > 10 {
+                    airborne |= !p.on_ground;
+                    jolt = jolt.max((p.eye().y - eye).abs());
+                }
+                eye = p.eye().y;
+            }
+            assert!(p.pos.x > 8.0 && (p.pos.y - (10 - drop) as f64).abs() < 1e-2, "{drop}: at {}", p.pos);
+            assert_eq!(airborne, !stepped, "a {drop}-voxel drop");
+            if stepped {
+                assert!(jolt < 0.4 * drop as f64, "the eye dropped {jolt} voxels in a frame");
             }
         }
     }
