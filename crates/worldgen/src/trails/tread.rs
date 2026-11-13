@@ -423,7 +423,7 @@ mod tests {
             c
         };
         let grid = |half_width: f32| -> Vec<Column> { (0..PAD * PAD).map(|i| col(i / PAD, half_width)).collect() };
-        let nose = |cols: &[Column], px: usize, pz: usize, steep: f32| crate::world::step_nose(cols, px, pz, steep, 0.3, 1, 0, 0);
+        let nose = |cols: &[Column], px: usize, pz: usize, steep: f32| crate::world::step_nose(cols, PAD, px, pz, steep, 0.3, 1, 0, 0);
         let path = grid(m(0.6));
         let mut rows = 0;
         for px in 1..PAD - 1 {

@@ -364,11 +364,12 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
 /// column standing above the next trail column along) is a log or a stone laid across
 /// the way, so the climb reads as a flight of rough steps. The columns at one height on
 /// a levelled trail run across it, so each edge is a row. Returns the step and which way
-/// is down from it. Needs all four neighbours, so only for the inner columns, which are
-/// the ones a chunk column draws.
+/// is down from it. `columns` is a square `n` wide. Needs all four neighbours, so only for
+/// the columns inside its outermost ring.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_nose(
     columns: &[Column],
+    n: usize,
     px: usize,
     pz: usize,
     steep: f32,
@@ -377,9 +378,9 @@ pub(crate) fn step_nose(
     wx0: i32,
     wz0: i32,
 ) -> Option<trails::tread::StepAt> {
-    let col = &columns[px * PAD + pz];
+    let col = &columns[px * n + pz];
     let w = col.worn.as_ref()?;
-    if steep < trails::tread::STEP_GRADE || px == 0 || pz == 0 || px == PAD - 1 || pz == PAD - 1 {
+    if steep < trails::tread::STEP_GRADE || px == 0 || pz == 0 || px == n - 1 || pz == n - 1 {
         return None;
     }
     let top = col.top();
@@ -389,15 +390,15 @@ pub(crate) fn step_nose(
         sides.rotate_left(2);
     }
     let down = sides.into_iter().find(|&(dx, dz)| {
-        let n = &columns[(px as i32 + dx) as usize * PAD + (pz as i32 + dz) as usize];
-        n.cover == Cover::Trail && n.top() < top
+        let next = &columns[(px as i32 + dx) as usize * n + (pz as i32 + dz) as usize];
+        next.cover == Cover::Trail && next.top() < top
     })?;
     let step = trails::tread::step(col, w, patch, seed, wx0 + px as i32, wz0 + pz as i32)?;
     // The log ends on a side across the way where the step's edge does not go on.
     let (ax, az) = (down.1.abs(), down.0.abs());
     let open = [-1i32, 1].map(|s| {
-        let n = &columns[(px as i32 + ax * s) as usize * PAD + (pz as i32 + az * s) as usize];
-        n.cover != Cover::Trail || n.top() != top
+        let next = &columns[(px as i32 + ax * s) as usize * n + (pz as i32 + az * s) as usize];
+        next.cover != Cover::Trail || next.top() != top
     });
     Some((step, down, open))
 }
@@ -515,11 +516,16 @@ impl GameWorld {
         let margin = features::MAX_REACH + 1;
         let sampler = Sampler::new(&continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
 
+        // The columns of the padded square, and one more all round it: the border columns
+        // are the next chunk column's own, and must come out here as they do there, which
+        // takes their neighbours on every side (for the slope, and for a trail's steps).
+        const WIDE: usize = PAD + 2;
+        let wide: Vec<Column> = (0..WIDE * WIDE).map(|i| sampler.column(lx0 - 1 + (i / WIDE) as i32, lz0 - 1 + (i % WIDE) as i32)).collect();
         let mut columns = Vec::with_capacity(PAD * PAD);
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for px in 0..PAD {
             for pz in 0..PAD {
-                let col = sampler.column(lx0 + px as i32, lz0 + pz as i32);
+                let col = wide[(px + 1) * WIDE + pz + 1];
                 let top = col.top();
                 lo = lo.min(top);
                 hi = hi.max(top).max(col.water_surface().unwrap_or(i32::MIN));
@@ -557,11 +563,9 @@ impl GameWorld {
             for pz in 0..PAD {
                 let top = columns[px * PAD + pz].top();
                 // Slope of the ground here, in voxels of rise per voxel.
-                let ground = |x: usize, z: usize| columns[x * PAD + z].ground;
-                let (x0, x1) = (px.saturating_sub(1), (px + 1).min(PAD - 1));
-                let (z0, z1) = (pz.saturating_sub(1), (pz + 1).min(PAD - 1));
-                let gx = (ground(x1, pz) - ground(x0, pz)) / (x1 - x0) as f32;
-                let gz = (ground(px, z1) - ground(px, z0)) / (z1 - z0) as f32;
+                let ground = |x: usize, z: usize| wide[x * WIDE + z].ground;
+                let gx = (ground(px + 2, pz + 1) - ground(px, pz + 1)) * 0.5;
+                let gz = (ground(px + 1, pz + 2) - ground(px + 1, pz)) * 0.5;
                 let steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
@@ -573,7 +577,7 @@ impl GameWorld {
                     skin.0 = mat::TURF;
                 }
                 let rocky = rocky.get(px * PAD + pz).copied().unwrap_or(false);
-                let step = step_nose(&columns, px, pz, steep, patch, self.seed, wx0, wz0);
+                let step = step_nose(&wide, WIDE, px + 1, pz + 1, steep, patch, self.seed, wx0 - 1, wz0 - 1);
                 if let Some((trails::tread::Step::Stone(v), _, _)) = step {
                     skin.0 = v;
                 }

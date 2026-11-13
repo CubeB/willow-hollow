@@ -265,7 +265,7 @@ fn overhangs_hang_from_faces_and_agree_across_chunks() {
             for (ax, bx) in [(PAD - 2, 0), (PAD - 1, 1)] {
                 for y in 0..PAD {
                     for z in 0..PAD {
-                        assert_eq!(a.get(ax, y, z), b.get(bx, y, z), "chunks {cx},{cz} and east differ");
+                        assert_eq!(a.get(ax, y, z), b.get(bx, y, z), "chunks {cx},{cz} and east differ at ax {ax} y {y} z {z} cy {cy} top {} cover {:?}", columns[ax * PAD + z].top(), columns[ax * PAD + z].cover);
                     }
                 }
             }
