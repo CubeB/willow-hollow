@@ -12,7 +12,7 @@
 //! (season::NEVER_SNOWS) never see snow at all.
 
 use glam::Vec3;
-use worldgen::{biome::Biome, noise, scale::VOXELS_PER_METRE};
+use worldgen::{biome::Biome, noise, scale::{VOXELS_PER_METRE, m}};
 
 use crate::{env::Environment, season};
 
@@ -586,5 +586,54 @@ mod tests {
             thaw.update(1.0, 0.01, 0.3, 24.0, 0.25, 1);
         }
         assert!(thaw.snowpack < 0.4);
+    }
+}
+
+/// The height of the clouds' base where the camera is: `CLOUD_HEIGHT` over low country,
+/// and lifted clear of the hilltops where the land round about stands higher, so that no
+/// cloud is ever cut through by a hill. It follows the camera slowly, as the clouds are
+/// seen to ride up over high ground on the way to it.
+#[derive(Default)]
+pub struct CloudBase {
+    /// Where the land was last looked over from, and the highest ground found there.
+    looked: Option<(glam::DVec3, f32)>,
+    now: Option<f32>,
+}
+
+impl CloudBase {
+    /// As far as clouds are drawn, and a little more.
+    const REACH: f32 = m(4500.0);
+    /// How far the camera goes before the land is looked over again.
+    const STRIDE: f64 = 400.0;
+
+    /// The base's height in voxels above sea level, `dt` seconds on from the last call.
+    pub fn update(&mut self, world: &worldgen::world::GameWorld, pos: glam::DVec3, dt: f32) -> f32 {
+        use worldgen::macro_layout::{MACRO_SIZE, cell_of};
+        if self.looked.is_none_or(|(at, _)| at.distance(pos) > Self::STRIDE) {
+            let (mx, mz) = cell_of(pos.x.floor() as i32, pos.z.floor() as i32);
+            // Never waited for: until the land is known the clouds stay where they are.
+            if let Some(c) = world.continent_if_ready(mx, mz) {
+                let cs = c.cell_size();
+                let (lx, lz) = ((pos.x - (mx * MACRO_SIZE) as f64) as f32 / cs, (pos.z - (mz * MACRO_SIZE) as f64) as f32 / cs);
+                let r = Self::REACH / cs;
+                let max = c.size as i32 - 1;
+                let mut highest = 0.0f32;
+                for z in ((lz - r) as i32).clamp(0, max)..=((lz + r) as i32).clamp(0, max) {
+                    for x in ((lx - r) as i32).clamp(0, max)..=((lx + r) as i32).clamp(0, max) {
+                        if (x as f32 + 0.5 - lx).hypot(z as f32 + 0.5 - lz) <= r {
+                            highest = highest.max(c.height[z as usize * c.size + x as usize]);
+                        }
+                    }
+                }
+                self.looked = Some((pos, highest * worldgen::scale::OLD_VOXEL));
+            }
+        }
+        let target = self.looked.map_or(crate::env::CLOUD_HEIGHT, |(_, highest)| crate::env::CLOUD_HEIGHT.max(highest + crate::env::CLOUD_CLEARANCE));
+        let now = match self.now {
+            Some(now) => now + (target - now) * (1.0 - (-0.2 * dt).exp()),
+            None => target,
+        };
+        self.now = self.looked.map(|_| now);
+        now
     }
 }

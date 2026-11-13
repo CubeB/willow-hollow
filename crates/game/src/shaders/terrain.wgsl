@@ -5,6 +5,7 @@ struct VIn {
     @location(2) offset: vec3<f32>,
     @location(3) origin: vec3<i32>,
     // Per chunk: voxels per cell of its mesh, and the distances between which it is shown.
+    // The scale is negative for a chunk's small plants, which give out with distance.
     @location(4) scale: f32,
     @location(5) band: vec2<f32>,
     // Per chunk: a grid of the biomes over it, for the snow (see grid_snow in ground.wgsl).
@@ -102,6 +103,44 @@ fn face_normal(face: u32) -> vec3<f32> {
 const FLAG_SKY: u32 = 1u;
 const FLAG_FOLIAGE: u32 = 8u;
 const FLAG_EMISSIVE: u32 = 16u;
+// Both at once, which nothing is: ground that takes the colour of the plant standing on
+// it when seen from afar (voxel::flags::WASH). Its vertices keep the colour's number where
+// others keep fractions of a voxel, and `vs` hands it on above the flags (<< 16).
+const FLAG_WASH: u32 = 24u;
+
+// The colour of ground that a small plant stands on, `voxel` its voxel and `centre` the
+// middle of it, camera-relative. Near to, the plant itself is drawn and the ground is its
+// own colour; as the plant gives out with distance (plant_reach) the ground takes its
+// colour instead, and keeps it from there to the horizon. So heather, bracken and flowers
+// lie over a far hillside in the same drifts they are found in on it, and the land does
+// not go bare a hundred metres from the camera.
+fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale: f32) -> vec3<f32> {
+    let body = G.wash_body[min(code, 63u)];
+    let bloom = G.wash_bloom[min(code, 63u)];
+    let kinds = vec2<u32>(u32(body.a), u32(bloom.a));
+    let share = fract(bloom.a) * 2.0;
+    var amount = fract(body.a) * 2.0;
+    if (scale < 1.5) {
+        let reach = PLANT_REACH * plant_reach(voxel.xz);
+        amount *= smoothstep(reach - PLANT_REACH * 0.22, reach, length(centre.xz));
+    }
+    if (amount <= 0.0) {
+        return ground;
+    }
+    // Plants are known to the seasons by their column alone.
+    let col = vec3<i32>(voxel.x, 0, voxel.z);
+    let s = G.season.x;
+    // No two plants quite alike. And darker than their own colours: a plant standing
+    // shades itself and the ground round it, where this is flat ground in the sun.
+    let h = hash3(voxel.zyx + vec3<i32>(3, 11, 5));
+    var c = season_apply(body.rgb, col, kinds.x, s, 0u) * (0.5 + 0.2 * h);
+    // Its flowers show on some columns and not on others, as bright specks in the dark
+    // of the leaves: mixed into every one, heather went a flat lilac.
+    if (fract(h * 17.0) < share && !season_gone(s, kinds.y, col, 0u)) {
+        c = mix(c, season_apply(bloom.rgb, col, kinds.y, s, 0u), 0.8);
+    }
+    return mix(ground, c, amount);
+}
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 // How far in from a face its voxel is looked for, in voxels: less than the thinnest
 // thing drawn (a skin an eighth of a voxel thick), and well clear of rounding.
@@ -129,17 +168,22 @@ fn vs(in: VIn) -> VOut {
     // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags.
     let tag = season_tag(in.b);
     out.flags = (in.b >> 24u) | (tag << 8u);
+    if ((out.flags & FLAG_WASH) == FLAG_WASH) {
+        local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
+        out.flags = (out.flags & ~FLAG_WASH) | (((in.a >> 23u) & 511u) << 16u);
+    }
+    let scale = abs(in.scale);
     out.local = local;
     out.band = in.band;
     out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
     out.grid0 = in.grid0;
     out.grid1 = in.grid1;
     out.slope = chunk_slope(in.slopes, local.xz / 32.0);
-    out.scale = in.scale;
-    var rel = local * in.scale + in.offset;
+    out.scale = scale;
+    var rel = local * scale + in.offset;
     out.still = rel;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
-        rel += leaf_sway(in.origin, local, in.scale);
+        rel += leaf_sway(in.origin, local, scale);
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);
@@ -155,8 +199,8 @@ fn vs(in: VIn) -> VOut {
     let kind = (in.b >> 29u) & 7u;
     if (kind != 0u && kind != PLANT_EVERGREEN && kind < 6u) {
         let cell = vec3<i32>(floor(local)) - vertex_corner(in.a);
-        var vox = in.origin / i32(in.scale) + cell;
-        let alt_m = f32(vox.y) * in.scale / VOXELS_PER_METRE;
+        var vox = in.origin / i32(scale) + cell;
+        let alt_m = f32(vox.y) * scale / VOXELS_PER_METRE;
         if (kind >= PLANT_GRASS) {
             vox.y = 0;
         }
@@ -169,10 +213,18 @@ fn vs(in: VIn) -> VOut {
             out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
         }
     }
+    if (in.scale < 0.0) {
+        // Small plants give out with distance a column at a time, each at its own (every
+        // corner of a plant's faces names its column: see split_at_voxels in mesh.rs).
+        let cell = vec3<i32>(floor(local)) - vertex_corner(in.a);
+        if (length(in.offset.xz + vec2<f32>(cell.xz) + 0.5) >= PLANT_REACH * plant_reach(in.origin.xz + cell.xz)) {
+            out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        }
+    }
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
     // Hashed per cell, so a coarse chunk counts its cells from its own corner.
-    out.origin = in.origin / i32(in.scale);
+    out.origin = in.origin / i32(scale);
     return out;
 }
 
@@ -218,9 +270,13 @@ fn shade(in: VOut) -> vec4<f32> {
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
-    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, in.flags >> 8u);
+    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, (in.flags >> 8u) & 63u);
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
     let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
+    let washed = (in.flags >> 16u) & 511u;
+    if (washed != 0u) {
+        base = wash(base, washed, voxel, centre, in.scale);
+    }
     let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
     base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
 

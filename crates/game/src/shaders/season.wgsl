@@ -74,6 +74,15 @@ fn season_leaf(s: f32, vox: vec3<i32>, maple: bool, tag: u32) -> Leaf {
     return out;
 }
 
+// How far off the small plants standing on the column `col` (world voxels) are still
+// drawn, as a share of PLANT_REACH. Each column has its own distance, so the plants thin
+// out over the last third of their reach, one here and one there, where all giving out
+// at one distance made an edge that moved over the ground with the camera. The ground
+// under each takes its colour as it goes (see `wash` in terrain.wgsl).
+fn plant_reach(col: vec2<i32>) -> f32 {
+    return 0.66 + 0.32 * season_hash(vec3<i32>(col.x, 77, col.y));
+}
+
 // Whether a plant of this kind has gone from the voxel `vox` this date: leaves that have
 // fallen, flowers that have died back. Used by the vertex shaders, so all the corners of a
 // face must name the same voxel. `tag` is its tree's (season_tree).

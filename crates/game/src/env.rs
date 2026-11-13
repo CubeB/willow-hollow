@@ -1,5 +1,5 @@
 use glam::Vec3;
-use worldgen::scale::VOXELS_PER_METRE;
+use worldgen::scale::{VOXELS_PER_METRE, m};
 
 /// Lighting and sky state for a moment in the day. All colours are linear.
 #[derive(Clone)]
@@ -30,11 +30,20 @@ pub struct Environment {
     /// The height of the low ground the mist lies on, in voxels above sea level.
     pub mist_floor: f32,
     pub clouds: f32,
+    /// The height of the clouds' flat bases above sea level, in voxels: `CLOUD_HEIGHT`
+    /// over low country, and higher where the hills round about would stand up into them.
+    pub cloud_base: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
     /// Time of year, 0 to 1 from the spring equinox.
     pub date: f32,
 }
+
+/// Height of the cloud base above sea level over low country, in voxels.
+pub const CLOUD_HEIGHT: f32 = m(240.0);
+/// How far the cloud base keeps above the highest ground round about (the thick of a
+/// cloud hangs a block or two below its base).
+pub const CLOUD_CLEARANCE: f32 = m(60.0);
 
 /// Haze at sea level in temperate air, per metre.
 const HAZE: f32 = 0.00030;
@@ -131,6 +140,7 @@ impl Environment {
             mist,
             mist_floor: 0.0,
             clouds: 0.45,
+            cloud_base: CLOUD_HEIGHT,
             sun_elevation: elev,
             date,
         }

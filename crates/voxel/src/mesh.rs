@@ -158,7 +158,8 @@ const N: usize = CHUNK as usize;
 /// A visible face awaiting merging. Zero means "no face"; equal non-zero keys can merge.
 /// bit 0: present, bit 1: water, bit 2: mergeable (uniform AO), bit 3: water surface
 /// beside a river, which carries the current at each corner (and so never merges),
-/// bits 8..32: colour, 32..40: flags, 40..48: four 2-bit AO values.
+/// bits 8..32: colour, 32..40: flags, 40..48: four 2-bit AO values, 48..57: the colour
+/// a plant gives the voxel from afar (see `mesh_chunk_under_sky`), 0 for none.
 type FaceKey = u64;
 
 thread_local! {
@@ -347,7 +348,7 @@ pub fn mesh_chunk(chunk: &PaddedChunk, mats: &Materials) -> ChunkMesh {
 /// indexed `x * PAD + z` in padded coordinates, like the voxels, or empty if all the
 /// water is still.
 pub fn mesh_chunk_with_currents(chunk: &PaddedChunk, mats: &Materials, currents: &[Current]) -> ChunkMesh {
-    mesh_chunk_under_sky(chunk, mats, currents, &[], &mut Falls::default())
+    mesh_chunk_under_sky(chunk, mats, currents, &[], &[], &mut Falls::default())
 }
 
 /// Marks each padded column (`x * PAD + z`) in `covered` that holds anything opaque or
@@ -375,7 +376,14 @@ fn roofs(mats: &Materials, v: crate::Voxel) -> bool {
 /// opaque face of a voxel with nothing above it, open to the sky, carries
 /// [`flags::SKY`], which is where snow settles. `falls` carries falling water down a
 /// column of chunks meshed from the top (see [`Falls`]).
-pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool], falls: &mut Falls) -> ChunkMesh {
+///
+/// `wash` (one per padded column, or empty) names the voxels that take the colour of a
+/// plant standing on them when seen from afar: in its low six bits the padded y of the
+/// column's voxel that does (0 for none), and above them which colour, 1..=511. Every face
+/// of such a voxel carries [`flags::WASH`] and, where other faces keep fractions and
+/// corner bits (`a` bits 23..=31), the colour's number.
+pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool], wash: &[u16], falls: &mut Falls) -> ChunkMesh {
+    assert!(wash.is_empty() || wash.len() == PAD * PAD, "one wash per padded column");
     assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
     assert!(covered.is_empty() || covered.len() == PAD * PAD, "one cover per padded column");
     const SOLID: u8 = Kind::Solid as u8;
@@ -451,6 +459,7 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         continue;
                     }
                     let roofed = !covered.is_empty() && covered[x * PAD + z];
+                    let washed = if wash.is_empty() { 0 } else { wash[x * PAD + z] };
                     // Solid and water masks of the neighbour each voxel's face looks at.
                     let (ns, nw, nl) = match face {
                         0 => (solid[x + 1][z], water[x + 1][z], leafy[x + 1][z]),
@@ -507,7 +516,13 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         // voxel at a time, stay one voxel each, so the shader can tell which
                         // voxel every corner of a face belongs to.
                         let single = droppable(m.plant);
+                        let mut tint = 0u64;
+                        if washed != 0 && (washed & 63) as usize == y && m.kind == Kind::Solid && !m.emissive {
+                            tint = (washed >> 6) as u64;
+                            fl |= flags::WASH;
+                        }
                         let key = 1
+                            | tint << 48
                             | (uniform && !single) as u64 * 4
                             | leaf_color_bits(m.color, m.plant) << 8
                             | (fl as u64) << 32
@@ -606,6 +621,28 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
     mesh
 }
 
+/// The `wash` [`mesh_chunk_under_sky`] takes for the chunk at height `cy` (in chunks), from
+/// each padded column's ground height (in world voxels) and colour number (0 for none).
+/// Only ground standing open to the air is washed: none under a trunk, a rock or water.
+pub fn wash_map(chunk: &PaddedChunk, mats: &Materials, cy: i32, columns: &[(i32, u8)]) -> Vec<u16> {
+    if columns.iter().all(|c| c.1 == 0) {
+        return Vec::new();
+    }
+    let voxels = chunk.voxels();
+    columns
+        .iter()
+        .enumerate()
+        .map(|(i, &(top, code))| {
+            let y = top - cy * CHUNK + 1;
+            if code == 0 || !(1..=CHUNK).contains(&y) {
+                return 0;
+            }
+            let above = mats.get(voxels[i * PAD + y as usize + 1]).kind;
+            if above == Kind::Air { y as u16 | (code as u16) << 6 } else { 0 }
+        })
+        .collect()
+}
+
 /// Whether the shader may drop a plant of this kind one voxel at a time (season.wgsl's
 /// `season_gone`, and grass buried in snow), which it decides at each corner of a face
 /// from the voxel the corner names.
@@ -627,14 +664,18 @@ fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<Piece>) {
     let kind = mats.get(b.voxel).plant;
     let start = out.len();
     out.push(Piece { b: *b, hidden: 0 });
-    if !droppable(kind) {
-        return;
-    }
+    // Every small plant goes a whole column at a time where it gives out with distance
+    // (see `plant_reach` in season.wgsl), so every box is cut where it crosses from one
+    // column into the next; only those the seasons drop need cutting across their height.
+    let whole = !droppable(kind);
     // Grass and flowers go a whole column at a time (see `vs` in terrain.wgsl), so the
     // pieces of one cut across its height are always there together, and the faces
     // where they meet are never seen. Leaves go voxel by voxel.
     let together = matches!(kind, plant::GRASS | plant::FLOWER);
     for axis in 0..3 {
+        if whole && axis == 1 {
+            continue;
+        }
         let mut k = start;
         while k < out.len() {
             let p = out[k].b;
@@ -658,6 +699,11 @@ fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<Piece>) {
                         hide_a |= 1 << 2;
                         hide_c |= 1 << 3;
                     }
+                } else if whole {
+                    // These pieces only ever part at the very end of the plants' reach,
+                    // too far off to see between them.
+                    hide_a |= 1 << (2 * axis);
+                    hide_c |= 1 << (2 * axis + 1);
                 }
                 out[k] = Piece { b: a, hidden: hide_a };
                 out.push(Piece { b: c, hidden: hide_c });
@@ -917,8 +963,9 @@ fn emit_quad(
             }
             shade = spill(i);
         }
+        let wash = ((key >> 48) & 0x1FF) as u32;
         Vertex {
-            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | shade << 21 | corner << 29 | current,
+            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | shade << 21 | corner << 29 | current | wash << 23,
             b,
         }
     };
@@ -1077,11 +1124,52 @@ mod tests {
                 assert_eq!(v[1], named[0][1], "{named:?}");
             }
         }
-        // A stone box is never cut.
+        // A stone box is cut only where it crosses from one column into the next (three
+        // columns along x here and two along z), and the faces between its pieces are not
+        // drawn: every corner of a face names one column, for giving out with distance.
         let mut mesh = ChunkMesh::default();
         let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0 };
         add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m);
-        assert_eq!(mesh.opaque.len(), 6 * 4);
+        assert_eq!(mesh.opaque.len(), (2 * 6 + 2 * 2 + 2 * 3) * 4);
+        for quad in mesh.opaque.chunks_exact(4) {
+            let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
+            assert!(named.iter().all(|v| v[0] == named[0][0] && v[2] == named[0][2]), "{named:?}");
+        }
+    }
+
+    #[test]
+    fn washed_ground_carries_its_colour_on_every_face_and_nothing_else_does() {
+        let (m, stone, _) = mats();
+        // A floor two deep with one block standing on it.
+        let mut chunk = PaddedChunk::new();
+        for x in 0..PAD {
+            for z in 0..PAD {
+                chunk.set(x, 1, z, stone);
+                chunk.set(x, 2, z, stone);
+            }
+        }
+        chunk.set(9, 3, 9, stone);
+        // The ground's height in each column, with a wash on three of them: one in the
+        // open, one under the block, and one a level too low to be the top.
+        let mut columns = vec![(1, 0u8); PAD * PAD];
+        columns[5 * PAD + 5] = (1, 7);
+        columns[9 * PAD + 9] = (1, 9);
+        columns[12 * PAD + 12] = (0, 11);
+        let wash = wash_map(&chunk, &m, 0, &columns);
+        assert_eq!(wash[5 * PAD + 5], 2 | 7 << 6);
+        assert_eq!(wash[9 * PAD + 9], 0, "nothing grows under a block");
+        let mesh = mesh_chunk_under_sky(&chunk, &m, &[], &[], &wash, &mut Falls::default());
+        let washed: Vec<&[Vertex]> = mesh.opaque.chunks_exact(4).filter(|q| (q[0].b >> 24) as u8 & flags::WASH == flags::WASH).collect();
+        // The top of the one washed voxel, alone: its sides are against its neighbours.
+        assert_eq!(washed.len(), 1);
+        for v in washed[0] {
+            assert_eq!(v.a >> 23, 7, "the colour's number, where other faces keep fractions");
+            assert_eq!((v.a >> 18) & 7, 2);
+        }
+        let xs: Vec<u32> = washed[0].iter().map(|v| v.a & 63).collect();
+        assert_eq!((xs.iter().min(), xs.iter().max()), (Some(&4), Some(&5)), "one voxel wide: it never merges with bare ground");
+        // With no wash at all the map is empty, and the floor merges as it always did.
+        assert!(wash_map(&chunk, &m, 0, &vec![(1, 0u8); PAD * PAD]).is_empty());
     }
 
     #[test]
@@ -1491,8 +1579,8 @@ mod tests {
             _ => crate::AIR,
         };
         let mut falls = Falls::default();
-        let upper = mesh_chunk_under_sky(&chunk_of(world, [0, 1, 0]), &m, &[], &[], &mut falls);
-        let lower = mesh_chunk_under_sky(&chunk_of(world, [0, 0, 0]), &m, &[], &[], &mut falls);
+        let upper = mesh_chunk_under_sky(&chunk_of(world, [0, 1, 0]), &m, &[], &[], &[], &mut falls);
+        let lower = mesh_chunk_under_sky(&chunk_of(world, [0, 0, 0]), &m, &[], &[], &[], &mut falls);
         assert!(falls.through.is_empty(), "the fall ended in the pool");
         // Each row of the sheet, by its height in the world, with its code and foot.
         let mut rows = std::collections::BTreeMap::new();

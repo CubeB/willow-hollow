@@ -20,7 +20,8 @@ struct Globals {
     // camera-relative position gives a stable world-anchored coordinate.
     cam_wrapped: vec4<f32>,
     // Ground mist: x strength, y height falloff, z the level it is thickest below
-    // (camera-relative y), w unused.
+    // (camera-relative y). w: the level of the clouds' field above which there is cloud
+    // (see cloud_column), which the cover sets.
     mist: vec4<f32>,
     // Cascade far distances (view depth) in xyz; w = cloud layer height, camera-relative.
     cascades: vec4<f32>,
@@ -47,6 +48,13 @@ struct Globals {
     // Each biome's ground, by biome id: x snow at sea level, y ice on still water, z how
     // much more snow the hills hold, w the summit snowline (see ground.wgsl).
     snow: array<vec4<f32>, 24>,
+    // The colours small plants give the ground they stand on from afar, by the number a
+    // washed face carries (see `wash` in terrain.wgsl): the plant's leaves, then its
+    // flowers. rgb: the colour. w: the plant kind in its whole part; in the rest, half of
+    // how much of the ground's colour the plant takes (leaves), or half the flowers' share
+    // of the plant's colour.
+    wash_body: array<vec4<f32>, 64>,
+    wash_bloom: array<vec4<f32>, 64>,
 };
 
 struct Shadows {
@@ -61,7 +69,9 @@ struct Shadows {
 @group(0) @binding(1) var<uniform> S: Shadows;
 @group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
-// The clouds' field, a value for each cell of their grid (see cloud_blocks).
+// The clouds' field, a value for each cell of their grid (see cloud_column). Each coarser
+// level of it holds the highest value in each square of cells: level CLOUD_LEVEL in
+// squares of CLOUD_COARSE, the last level (CLOUD_LEVELS - 1) in the whole grid.
 @group(0) @binding(4) var cloud_field: texture_2d<f32>;
 
 fn hash3(p: vec3<i32>) -> f32 {
@@ -100,62 +110,127 @@ fn fbm(p: vec2<f32>) -> f32 {
     return v;
 }
 
-// Clouds are built of blocks, like the land: columns on a grid of CLOUD_CELL-wide cells,
-// each standing up to CLOUD_STEPS blocks of CLOUD_STEP above a flat base at the cloud
-// layer's height (G.cascades.w, camera-relative). So they have flat bottoms, straight
-// sides and stepped tops. The grid is anchored to the world and drifts with the wind:
-// G.weather.zw is where the camera stands on it, in voxels, wrapped every CLOUD_PERIOD
-// cells (and so is the pattern, so the wrap never shows).
+// Clouds are built of cubes, like the land, CLOUD_CELL across and CLOUD_STEP tall, on a
+// grid that is anchored to the world and drifts with the wind. Over each cell of the grid
+// stands one column of them: up from the cloud base (G.cascades.w, camera-relative) in a
+// heap, highest in the middle of a cloud and stepping down to its edge, and a block or two
+// down below the base under the thick of it. So a cloud has a flat bottom with a stepped
+// rim, sides that stand straight, and a top that rises in terraces. G.weather.zw is where
+// the camera stands on the grid, in voxels, wrapped every CLOUD_PERIOD cells (and so is
+// the pattern, so the wrap never shows).
 
 // A cell's place on the grid, wrapped into 0..CLOUD_PERIOD.
 fn cloud_wrap(c: vec2<i32>) -> vec2<i32> {
     return ((c % CLOUD_PERIOD) + CLOUD_PERIOD) % CLOUD_PERIOD;
 }
 
-// How many blocks high the cloud over a (wrapped) cell stands, 0 where there is none.
-// The field (render::cloud_field) heaps the cells a few hundred metres across with ragged
-// edges, highest in the middle; G.fog.z, the cover, is near enough the share of the sky
-// they fill.
-fn cloud_blocks(c: vec2<i32>) -> f32 {
-    let cover = G.fog.z;
-    if (cover < 0.01) {
-        return 0.0;
-    }
-    let v = textureLoad(cloud_field, c, 0).r;
-    // Where in the spread of `v` the cover leaves its edge (worked out from its spread).
-    let x = cover * 2.0 - 1.0;
-    let edge = 0.5 - 0.21 * x - 0.08 * x * x * x + (1.0 - smoothstep(0.0, 0.1, cover)) * 0.2 - smoothstep(0.9, 1.0, cover) * 0.3;
-    if (v < edge) {
-        return 0.0;
-    }
-    return clamp(1.0 + floor((v - max(edge, 0.3)) * 14.0), 1.0, CLOUD_STEPS);
+// The column of cloud over a (wrapped) cell: how many blocks below the base it hangs
+// (x, zero or less) and how many above it stands (y); both 0 where there is none.
+// The field (render::cloud_field) is high in the middle of each heap, and G.mist.w is the
+// level the cover leaves its edge at: all the field above that is cloud, thicker the
+// further above. The square root makes the sides steep and the tops broad, as a heap of
+// cumulus is.
+fn cloud_column(c: vec2<i32>) -> vec2<f32> {
+    return cloud_heap(textureLoad(cloud_field, c, 0).r);
 }
 
-// The cloud over a camera-relative xz position: how many blocks high.
-fn cloud_blocks_at(rel_xz: vec2<f32>) -> f32 {
-    return cloud_blocks(cloud_wrap(vec2<i32>(floor((rel_xz + G.weather.zw) / CLOUD_CELL))));
+// The column where the field stands at `v`. It only grows with `v`, so the highest value
+// in a stretch of the grid gives the tallest and deepest column in it.
+fn cloud_heap(v: f32) -> vec2<f32> {
+    let d = v - G.mist.w;
+    if (d <= 0.0) {
+        return vec2<f32>(0.0);
+    }
+    let top = clamp(ceil(CLOUD_STEPS * sqrt(d * 3.2)), 1.0, CLOUD_STEPS);
+    let belly = floor(CLOUD_BELLY * smoothstep(0.03, 0.14, d) + 0.5);
+    return vec2<f32>(-belly, top);
+}
+
+// The cloud over a camera-relative xz position: its column, as cloud_column gives it.
+fn cloud_column_at(rel_xz: vec2<f32>) -> vec2<f32> {
+    return cloud_column(cloud_wrap(vec2<i32>(floor((rel_xz + G.weather.zw) / CLOUD_CELL))));
 }
 
 // The clouds as they fall on the ground: the same cells, so the shadow has the cloud's
 // blocky edge, and a thick cloud casts a deeper one. One cell's worth of work, as this
 // runs for every pixel of terrain.
 fn cloud_shadow(rel_xz: vec2<f32>) -> f32 {
-    let b = cloud_blocks_at(rel_xz);
-    return select(0.0, 0.62 + 0.07 * b, b > 0.0);
+    let col = cloud_column_at(rel_xz);
+    let thick = col.y - col.x;
+    return select(0.0, min(0.5 + 0.03 * thick, 0.86), thick > 0.0);
+}
+
+// The fine part of cloud_trace: a view ray's way across the cells of one coarse square of
+// the grid, from `ta` to `tb` along it, having come in through a face whose normal is `n`.
+fn cloud_trace_fine(dir: vec3<f32>, ta: f32, tb: f32, n_in: vec3<f32>) -> vec4<f32> {
+    let b0 = G.cascades.w;
+    let pc = (dir.xz * (ta + 0.01) + G.weather.zw) / CLOUD_CELL;
+    var cell = vec2<i32>(floor(pc));
+    let up = dir.xz >= vec2<f32>(0.0);
+    let step = select(vec2<i32>(-1), vec2<i32>(1), up);
+    let span = CLOUD_CELL / max(abs(dir.xz), vec2<f32>(1e-6));
+    let into = pc - floor(pc);
+    var next = ta + select(into, 1.0 - into, up) * span;
+    var t = ta;
+    var n = n_in;
+    for (var i = 0; i < 2 * CLOUD_COARSE + 2; i++) {
+        let out = min(min(next.x, next.y), tb);
+        let col = cloud_column(cloud_wrap(cell));
+        if (col.y > 0.0) {
+            let top = b0 + col.y * CLOUD_STEP;
+            let bottom = b0 + col.x * CLOUD_STEP;
+            let ya = dir.y * t;
+            let yb = dir.y * out;
+            // In the column on coming into the cell: through its side (or, at the very
+            // start, the camera is in it).
+            if (ya <= top && ya >= bottom) {
+                return vec4<f32>(n, t);
+            }
+            // Or down through its top, or up through its bottom, before leaving the cell.
+            if (ya > top && yb <= top) {
+                return vec4<f32>(0.0, 1.0, 0.0, top / dir.y);
+            }
+            if (ya < bottom && yb >= bottom) {
+                return vec4<f32>(0.0, -1.0, 0.0, bottom / dir.y);
+            }
+        }
+        if (out >= tb) {
+            break;
+        }
+        if (next.x < next.y) {
+            cell.x += step.x;
+            t = next.x;
+            next.x += span.x;
+            n = vec3<f32>(-f32(step.x), 0.0, 0.0);
+        } else {
+            cell.y += step.y;
+            t = next.y;
+            next.y += span.y;
+            n = vec3<f32>(0.0, 0.0, -f32(step.y));
+        }
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
 }
 
 // Where a view ray from the camera first meets a cloud, within `far`: xyz the face it
 // meets (zero if the camera is inside one), w how far along the ray, or -1 for none.
-// It steps from cell to cell across the grid (as a voxel raycast does) through the slab
-// the clouds stand in, so it costs little where the ray meets a cloud soon, and gives up
-// after CLOUD_MARCH cells: that far off, a ray grazing the slab is lost in haze anyway.
+// It steps across the grid as a voxel raycast does, through the slab the clouds stand
+// in: first over squares of CLOUD_COARSE cells, whose highest value the field's coarser
+// level holds, and only in a square that holds any cloud from cell to cell. It gives up
+// after CLOUD_MARCH squares: that far off, a ray grazing the slab is lost in haze anyway.
 fn cloud_trace(dir: vec3<f32>, far: f32) -> vec4<f32> {
     let miss = vec4<f32>(0.0, 0.0, 0.0, -1.0);
     if (G.fog.z < 0.01) {
         return miss;
     }
-    let b0 = G.cascades.w;
-    let b1 = b0 + CLOUD_STEPS * CLOUD_STEP;
+    // The slab the clouds stand in today: as deep and as tall as the tallest of them all,
+    // which the field's last level holds.
+    let tallest = cloud_heap(textureLoad(cloud_field, vec2<i32>(0), CLOUD_LEVELS - 1).r);
+    if (tallest.y <= 0.0) {
+        return miss;
+    }
+    let b0 = G.cascades.w + tallest.x * CLOUD_STEP;
+    let b1 = G.cascades.w + tallest.y * CLOUD_STEP;
     var t0 = 0.0;
     var t1 = far;
     var n = vec3<f32>(0.0);
@@ -177,27 +252,32 @@ fn cloud_trace(dir: vec3<f32>, far: f32) -> vec4<f32> {
     if (t0 >= t1) {
         return miss;
     }
-    let pc = (dir.xz * t0 + G.weather.zw) / CLOUD_CELL;
+    let size = CLOUD_CELL * f32(CLOUD_COARSE);
+    let pc = (dir.xz * t0 + G.weather.zw) / size;
     var cell = vec2<i32>(floor(pc));
     let up = dir.xz >= vec2<f32>(0.0);
     let step = select(vec2<i32>(-1), vec2<i32>(1), up);
-    // How far along the ray one cell is, each way, and to the first edge each way.
-    let span = CLOUD_CELL / max(abs(dir.xz), vec2<f32>(1e-6));
+    // How far along the ray one square is, each way, and to the first edge each way.
+    let span = size / max(abs(dir.xz), vec2<f32>(1e-6));
     let into = pc - floor(pc);
     var next = t0 + select(into, 1.0 - into, up) * span;
     var t = t0;
+    let squares = CLOUD_PERIOD / CLOUD_COARSE;
     for (var i = 0; i < CLOUD_MARCH; i++) {
         let out = min(min(next.x, next.y), t1);
-        let blocks = cloud_blocks(cloud_wrap(cell));
-        if (blocks > 0.0) {
-            let top = b0 + blocks * CLOUD_STEP;
-            // The ray stays in the slab, so it is in the cloud if it is below the top on
-            // coming into the cell, or comes down through the top before leaving it.
-            if (dir.y * t <= top) {
-                return vec4<f32>(n, t);
-            }
-            if (dir.y < 0.0 && dir.y * out <= top) {
-                return vec4<f32>(0.0, 1.0, 0.0, top / dir.y);
+        let c = ((cell % squares) + squares) % squares;
+        // The tallest column in the square: the ray may pass clean over or under it all.
+        let heap = cloud_heap(textureLoad(cloud_field, c, CLOUD_LEVEL).r);
+        if (heap.y > 0.0) {
+            let top = G.cascades.w + heap.y * CLOUD_STEP;
+            let bottom = G.cascades.w + heap.x * CLOUD_STEP;
+            let ya = dir.y * t;
+            let yb = dir.y * out;
+            if (min(ya, yb) <= top && max(ya, yb) >= bottom) {
+                let hit = cloud_trace_fine(dir, t, out, n);
+                if (hit.w >= 0.0) {
+                    return hit;
+                }
             }
         }
         if (out >= t1) {
@@ -218,42 +298,83 @@ fn cloud_trace(dir: vec3<f32>, far: f32) -> vec4<f32> {
     return miss;
 }
 
+// How much of the sun gets to a point on a cloud past the cloud between it and the sun:
+// the heaps toward the sun, looked for at three distances, each taking some of it. So
+// the sunward side of a heap is bright, the far side and the hollows between heaps grey.
+fn cloud_sunlit(p: vec3<f32>, sun: vec3<f32>) -> f32 {
+    var lit = 1.0;
+    let flat_sun = sun / max(length(sun.xz), 0.25);
+    for (var i = 1; i <= 3; i++) {
+        let q = p + flat_sun * (CLOUD_CELL * (f32(i * i) + 0.5));
+        let col = cloud_column_at(q.xz);
+        let over = G.cascades.w + col.y * CLOUD_STEP - q.y;
+        if (col.y > 0.0 && over > 0.0) {
+            lit *= 1.0 - 0.32 * smoothstep(0.0, 2.0 * CLOUD_STEP, over);
+        }
+    }
+    return lit;
+}
+
+// How much of a cloud shows where a view ray meets it: all of it, but for the thin outer
+// rim, which the sky shows through a little. Set by cloud_seen.
+var<private> cloud_alpha: f32;
+
 // The cloud a view ray meets within `far`: its colour in rgb, before any haze, and in w
 // how far along the ray, or -1 for none.
 fn cloud_seen(dir: vec3<f32>, far: f32) -> vec4<f32> {
+    cloud_alpha = 1.0;
     let hit = cloud_trace(dir, far);
     if (hit.w < 0.0) {
         return hit;
     }
     let n = hit.xyz;
     let p = dir * hit.w;
-    // How high up the slab, 0 at the cloud base and 1 at the highest tops.
-    let up = clamp((p.y - G.cascades.w) / (CLOUD_STEPS * CLOUD_STEP), 0.0, 1.0);
+    let base = G.cascades.w;
+    // The column the face belongs to, a little way in from it.
+    let inside = p - n * (0.25 * CLOUD_CELL);
+    let cell = vec2<i32>(floor((inside.xz + G.weather.zw) / CLOUD_CELL));
+    let col = cloud_column(cloud_wrap(cell));
+    let thick = max(col.y - col.x, 1.0);
+    // Which block up the column, and how far up that block.
+    let level = (inside.y - base) / CLOUD_STEP;
+    let row = floor(level);
+    // How high up its own cloud, 0 at the bottom and 1 at the top of the column.
+    let up = clamp((level - col.x) / thick, 0.0, 1.0);
+    // And how high in the whole layer: the tall heaps stand in more light.
+    let high = clamp(level / CLOUD_STEPS, 0.0, 1.0);
     let sun = G.sun_dir.xyz;
-    // A taller cloud a little way toward the sun shades this face: low sun only, as a
-    // high one looks over it.
-    var shade = 1.0;
-    if (sun.y > 0.0) {
-        let reach = CLOUD_CELL * 0.8 / max(length(sun.xz), 0.1);
-        let q = p + n * 0.5 + sun * reach;
-        let over = G.cascades.w + cloud_blocks_at(q.xz) * CLOUD_STEP;
-        shade = select(1.0, 0.45, q.y < over);
-    }
-    let lit_by = max(dot(n, sun), 0.0) * shade;
-    // Sky light from above, less on the sides and least underneath; the lower on a side,
-    // the less of the sky it sees past the cloud around it. So too, a little, the lower
-    // tops, which tells one step of them from the next seen from above.
-    let sky = mix(G.sky_horizon.rgb, G.sky_zenith.rgb, 0.5 + 0.5 * n.y);
-    let open = select(0.7 + 0.3 * up, 0.88 + 0.12 * up, n.y > 0.5);
-    var color = (G.sun_color.rgb * (0.4 + 0.8 * lit_by) + sky * (0.6 + 0.2 * n.y)) * open;
+    let shade = cloud_sunlit(p + n * (0.3 * CLOUD_CELL), sun);
+    // A cloud is lit through as well as on: its faces turned from the sun are not dark.
+    let facing = dot(n, sun);
+    let lit_by = (0.3 + 0.7 * max(facing, 0.0)) * shade;
+    // The sky's light, most from above. Cloud is white, so it takes the sky's colour
+    // where the sun does not reach: blue-grey in the shade and violet underneath.
+    let sky = mix(G.sky_horizon.rgb, G.sky_zenith.rgb, 0.45 + 0.35 * n.y);
+    // Each block a shade its own, and each darker toward its foot, so the blocks tell.
+    let own = 0.96 + 0.08 * hash3(vec3<i32>(cell.x, i32(row), cell.y));
+    let foot = 0.93 + 0.07 * fract(level);
+    // How far above the edge of its cloud the field stands here.
+    let d = textureLoad(cloud_field, cloud_wrap(cell), 0).r - G.mist.w;
+    var color = vec3<f32>(0.0);
     if (n.y < -0.5) {
         // The flat underside, in the cloud's own shade: greyer the thicker the cover, and
         // the thicker the cloud above, so from below its heaps show in the grey.
-        let thick = cloud_blocks_at(p.xz + dir.xz * 0.5);
-        color = (G.sun_color.rgb * 0.2 + sky * 0.55) * (1.0 - 0.3 * G.fog.z) * (1.04 - 0.04 * thick);
+        let deep = clamp(thick / (CLOUD_STEPS + CLOUD_BELLY), 0.0, 1.0);
+        // Under a sky all cloud every column is as thick as the next, and the heavier
+        // stretches of it show by the field itself, in steps.
+        let heavy = floor(clamp(d - 0.3, 0.0, 0.3) * 20.0) / 6.0;
+        color = (G.sun_color.rgb * 0.13 + sky * vec3<f32>(0.5, 0.5, 0.58)) * (1.0 - 0.22 * G.fog.z) * (1.0 - 0.3 * deep) * (1.0 - 0.22 * heavy) * own;
     } else if (dot(n, n) < 0.5) {
         // Inside the cloud: grey-white all round.
         color = G.sun_color.rgb * 0.45 + sky * 0.7;
+    } else if (n.y > 0.5) {
+        // Tops: the brightest of it, the low ones among taller heaps a little less.
+        color = (G.sun_color.rgb * (0.3 + 1.05 * lit_by) + sky * 0.5) * (0.9 + 0.1 * high) * own;
+    } else {
+        // Sides: darker toward the foot of the cloud, where less of the sky is seen.
+        // The foot of a cloud is nearly as dark as its underside.
+        let rise = smoothstep(0.0, 1.0, up);
+        color = (G.sun_color.rgb * (0.12 + 0.2 * rise + 0.95 * lit_by * (0.45 + 0.55 * rise)) + sky * vec3<f32>(0.5, 0.5, 0.56)) * foot * own;
     }
     // At dusk and dawn the low sun catches the cloud on its own side of the sky, and it
     // takes the glow's colour in place of its own, not on top of it: added, the two came
@@ -261,6 +382,8 @@ fn cloud_seen(dir: vec3<f32>, far: f32) -> vec4<f32> {
     let toward = sunward(dir);
     let glow = G.sky_glow.rgb * (0.75 + 0.35 * lit_by + 0.1 * n.y);
     color = mix(color, glow, G.sky_glow.w * 0.7 * toward * toward * select(1.0, 0.5, n.y < -0.5));
+    // The outermost blocks of a cloud are thin stuff, and the sky shows through them.
+    cloud_alpha = 0.72 + 0.28 * smoothstep(0.0, 0.035, d);
     // Moonlit cloud is only a little lighter than the night sky.
     return vec4<f32>(color * (0.7 + 0.3 * G.sun_color.w), hit.w);
 }
@@ -348,12 +471,12 @@ fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
     // Cloud between the camera and the point (from above the clouds, or a summit up in
     // them) hides it, and is what the haze lies over instead. Only where the line of
     // sight reaches the cloud slab, which from the ground under the clouds it never does.
-    let b0 = G.cascades.w;
-    if (G.fog.z >= 0.01 && max(rel.y, 0.0) >= b0 && min(rel.y, 0.0) <= b0 + CLOUD_STEPS * CLOUD_STEP) {
+    let b0 = G.cascades.w - CLOUD_BELLY * CLOUD_STEP;
+    if (G.fog.z >= 0.01 && max(rel.y, 0.0) >= b0 && min(rel.y, 0.0) <= G.cascades.w + CLOUD_STEPS * CLOUD_STEP) {
         let dir = rel / max(dist, 1e-4);
         let cloud = cloud_seen(dir, dist);
         if (cloud.w >= 0.0) {
-            color = cloud.rgb;
+            color = mix(color, cloud.rgb, cloud_alpha);
             // (Not quite nothing inside a cloud, so the haze below has a direction.)
             dist = max(cloud.w, 1.0);
             rel = dir * dist;

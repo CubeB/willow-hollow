@@ -511,6 +511,8 @@ struct Running {
     mist_floor: Option<f32>,
     mist_target: f32,
     weather: weather::Weather,
+    /// How high the clouds stand here (clear of the hills).
+    cloud_base: weather::CloudBase,
     audio: Option<Audio>,
     /// The settings in force.
     settings: Settings,
@@ -707,6 +709,7 @@ impl Running {
             mist_floor: None,
             mist_target: 0.0,
             weather: weather::Weather::new(opts.weather),
+            cloud_base: weather::CloudBase::default(),
             audio: if opts.audio { Audio::start(settings.volume) } else { None },
             settings,
             saved,
@@ -1256,6 +1259,7 @@ impl Running {
         let lamps: Vec<DVec3> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| p.as_dvec3()).collect();
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
+        lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
         // The eye takes a couple of seconds to open up in the dark, and less to close
         // again in the light.
@@ -1688,6 +1692,7 @@ fn main() -> Result<()> {
         // Screenshots are clear unless a weather is asked for.
         let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
+        env.cloud_base = weather::CloudBase::default().update(&world, camera.pos, 0.0);
         if let Some(metres) = opts.picked {
             let (reach, x, z) = (m(metres) as i32, camera.pos.x.floor() as i32, camera.pos.z.floor() as i32);
             let all = world.flowers_in(x - reach, z - reach, 2 * reach + 1);

@@ -927,7 +927,51 @@ pub const MAX_REACH: i32 = if GIANTS.reach > 2 * SMALL.reach { GIANTS.reach } el
 /// Flowers and heather: drifts of colour on grass, one species per drift. The colour
 /// stands for a flower of that colour, which `plants::flower_at` names by the biome.
 pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxel> {
-    let (kinds, density): (&[Voxel], f32) = match biome {
+    let (kinds, density) = flower_kinds(biome)?;
+    // A fast noise marks the drifts; a slow one chooses what grows in each.
+    let patch = fbm2(seed ^ 0xf10a, x as f64 / m64(27.2), z as f64 / m64(27.2), 2, 2.0, 0.5);
+    if patch < 0.22 {
+        return None;
+    }
+    let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
+    // Too high a roll for even a carpet: the slow noise need not be worked out.
+    if roll >= density * edge * 2.2 {
+        return None;
+    }
+    let kind = drift_kind(kinds, x, z, seed);
+    (roll < drift_density(biome, kind, density) * edge).then_some(kind)
+}
+
+/// The flower of the drift at `(x, z)`, as [`flower`] chooses it, and the share of the
+/// drift's columns that carry one: what a drift looks like from too far off to tell its
+/// columns apart.
+pub fn flower_drift(biome: Biome, x: i32, z: i32, seed: u32) -> Option<(Voxel, f32)> {
+    let (kinds, density) = flower_kinds(biome)?;
+    let patch = fbm2(seed ^ 0xf10a, x as f64 / m64(27.2), z as f64 / m64(27.2), 2, 2.0, 0.5);
+    if patch < 0.22 {
+        return None;
+    }
+    let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
+    let kind = drift_kind(kinds, x, z, seed);
+    Some((kind, (drift_density(biome, kind, density) * edge).min(1.0)))
+}
+
+/// Which of a biome's flowers the drift at `(x, z)` grows.
+fn drift_kind(kinds: &[Voxel], x: i32, z: i32, seed: u32) -> Voxel {
+    let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
+    kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)]
+}
+
+/// How thickly a drift of `kind` grows, where the biome's flowers grow at `density`.
+fn drift_density(biome: Biome, kind: Voxel, density: f32) -> f32 {
+    // Bluebells carpet the floor of a broadleaf wood, thicker than other flowers grow.
+    let carpet = kind == mat::FLOWER_BLUE && matches!(biome, Biome::Deciduous | Biome::Woodland | Biome::BirchGrove);
+    if carpet { density * 2.2 } else { density }
+}
+
+/// The flowers a biome's drifts grow, and the share of a drift's columns that carry one.
+fn flower_kinds(biome: Biome) -> Option<(&'static [Voxel], f32)> {
+    Some(match biome {
         Biome::Grassland => (
             &[mat::FLOWER_YELLOW, mat::FLOWER_WHITE, mat::FLOWER_RED, mat::FLOWER_BLUE, mat::FLOWER_PURPLE],
             0.28,
@@ -947,23 +991,7 @@ pub fn flower(biome: Biome, x: i32, z: i32, seed: u32, roll: f32) -> Option<Voxe
         // Desert marigold, thinly, where the sand holds a little water after rain.
         Biome::Desert | Biome::RedRock => (&[mat::FLOWER_YELLOW], 0.035),
         _ => return None,
-    };
-    // A fast noise marks the drifts; a slow one chooses what grows in each.
-    let patch = fbm2(seed ^ 0xf10a, x as f64 / m64(27.2), z as f64 / m64(27.2), 2, 2.0, 0.5);
-    if patch < 0.22 {
-        return None;
-    }
-    let edge = ((patch - 0.22) / 0.2).clamp(0.3, 1.0);
-    // Too high a roll for even a carpet: the slow noise need not be worked out.
-    if roll >= density * edge * 2.2 {
-        return None;
-    }
-    let which = fbm2(seed ^ 0xf10b, x as f64 / m64(128.0), z as f64 / m64(128.0), 2, 2.0, 0.5) * 0.5 + 0.5;
-    let kind = kinds[((which * kinds.len() as f32) as usize).min(kinds.len() - 1)];
-    // Bluebells carpet the floor of a broadleaf wood, thicker than other flowers grow.
-    let carpet = kind == mat::FLOWER_BLUE && matches!(biome, Biome::Deciduous | Biome::Woodland | Biome::BirchGrove);
-    let density = if carpet { density * 2.2 } else { density };
-    (roll < density * edge).then_some(kind)
+    })
 }
 
 #[cfg(test)]

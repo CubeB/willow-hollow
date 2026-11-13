@@ -12,7 +12,7 @@ use std::{
 use crate::gfx::Gpu;
 
 /// The stretches of a frame on the GPU, in the order they run.
-pub const GPU_SPANS: [&str; 10] = ["shadow 1", "shadow 2", "shadow 3", "sky", "far", "terrain", "water", "shafts", "bloom", "tonemap"];
+pub const GPU_SPANS: [&str; 10] = ["shadow 1", "shadow 2", "shadow 3", "far", "terrain", "sky", "water", "shafts", "bloom", "tonemap"];
 const STAMPS: u32 = GPU_SPANS.len() as u32 + 1;
 const STAMP_BYTES: u64 = 8;
 /// Results take a few frames to come back, so several can be on their way at once.

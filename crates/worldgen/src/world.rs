@@ -490,6 +490,20 @@ impl World for GameWorld {
 }
 
 impl GameWorld {
+    /// The colour the plant growing on a column gives its ground from afar (see
+    /// [`features::plants::wash_at`]), for whoever draws the ground without generating
+    /// it: `surface` is the column's top voxel, `(x, z)` where it is in the world.
+    pub fn wash_at(&self, col: &Column, surface: Voxel, x: i32, z: i32) -> u8 {
+        let mut growing = surface;
+        if surface == mat::ground_cover(col.biome) && col.cover == Cover::Land {
+            let roll = unit(hash3(self.seed ^ 0x5cf, x, col.top(), z));
+            if let Some(f) = features::flower(col.biome, x, z, self.seed, roll) {
+                growing = f;
+            }
+        }
+        features::plants::wash_at(col, growing, x, z, self.seed)
+    }
+
     /// [`World::generate_column`] without the small plants: the same voxels, currents,
     /// trees and so on, and `plants` left empty. Growing the plants is most of the work
     /// of a column, so this is several times quicker, for whoever only needs the shape
@@ -554,6 +568,7 @@ impl GameWorld {
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         let mut plants = Vec::new();
+        let mut wash = Vec::with_capacity(PAD * PAD);
         // The columns here whose flower has been picked.
         let picked: Vec<(i32, i32)> = {
             let all = self.picked.read().expect("picked columns poisoned");
@@ -588,6 +603,8 @@ impl GameWorld {
                     growing = f;
                 }
                 // The border columns belong to neighbouring chunk columns.
+                let own = !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32));
+                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }));
                 if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
@@ -876,6 +893,7 @@ impl GameWorld {
                 surf,
                 currents,
                 plants,
+                wash,
                 trees: placements,
             };
         }
@@ -951,6 +969,7 @@ impl GameWorld {
             surf,
             currents,
             plants,
+            wash,
             trees: placements,
         }
     }

@@ -43,23 +43,31 @@ const GROUND_SLACK: f32 = m(12.0);
 const CASCADES: usize = 3;
 /// View-depth at which each shadow cascade ends.
 const CASCADE_ENDS: [f32; CASCADES] = [m(32.0), m(128.0), m(512.0)];
-/// Height of the cloud layer above sea level.
-const CLOUD_HEIGHT: f32 = m(240.0);
 /// The clouds' blocks (see cloud_trace in common.wgsl): how wide each cell of their grid,
-/// how tall each block, how many blocks the tallest stands, and how many cells before
-/// the grid's pattern comes round again (a power of two).
-const CLOUD_CELL: f32 = m(24.0);
-const CLOUD_STEP: f32 = m(15.0);
-const CLOUD_STEPS: f32 = 4.0;
-const CLOUD_PERIOD: i32 = 1024;
-/// The most cells a view ray crosses looking for a cloud.
+/// how tall each block (cubes), how many blocks the tallest heap stands above the cloud
+/// base and how many the thickest hangs below it, and how many cells before the grid's
+/// pattern comes round again (a power of two).
+const CLOUD_CELL: f32 = m(8.0);
+const CLOUD_STEP: f32 = m(8.0);
+const CLOUD_STEPS: f32 = 14.0;
+pub const CLOUD_BELLY: f32 = 2.0;
+const CLOUD_PERIOD: i32 = 2048;
+/// A view ray looking for a cloud crosses the grid in squares of this many cells (two to
+/// the `CLOUD_LEVEL`), going cell by cell only through a square that holds any cloud;
+/// and the most squares it crosses.
+const CLOUD_LEVEL: u32 = 3;
+const CLOUD_COARSE: i32 = 1 << CLOUD_LEVEL;
+/// How many levels the clouds' field has, each half the size of the last, down to one cell.
+const CLOUD_LEVELS: u32 = CLOUD_PERIOD.trailing_zeros() + 1;
 const CLOUD_MARCH: i32 = 64;
+/// How many amounts of cover `cloud_edges` holds the field's level for.
+const CLOUD_COVERS: usize = 33;
 
 /// The clouds' field, a byte for each cell of their grid, row by row: high where cloud
 /// stands first as the cover grows (see cloud_blocks in common.wgsl). Heaps a few hundred
 /// metres across with ragged edges, wrapping round at the grid's edge. It never changes,
 /// so it is worked out once here and not for every pixel that looks for a cloud.
-fn cloud_field() -> Vec<u8> {
+fn cloud_field() -> (Vec<Vec<u8>>, [f32; CLOUD_COVERS]) {
     fn hash(x: i32, y: i32, z: i32) -> f32 {
         let mut h = (x as u32).wrapping_mul(0x8da6b343).wrapping_add((y as u32).wrapping_mul(0xd8163841)).wrapping_add((z as u32).wrapping_mul(0xcb1ab31f));
         h ^= h >> 15;
@@ -80,15 +88,83 @@ fn cloud_field() -> Vec<u8> {
         let b = hash(lx, ny, salt) + (hash(nx, ny, salt) - hash(lx, ny, salt)) * ux;
         a + (b - a) * uy
     };
-    let mut field = Vec::with_capacity((CLOUD_PERIOD * CLOUD_PERIOD) as usize);
+    // Smooth noise folded about its middle: round bumps with creases between them, as the
+    // top of a heap of cumulus has.
+    let billow = |x: i32, y: i32, k: i32, salt: i32| (lattice(x, y, k, salt) * 2.0 - 1.0).abs();
+    let n = CLOUD_PERIOD as usize;
+    let mut field = Vec::with_capacity(n * n);
     for y in 0..CLOUD_PERIOD {
         for x in 0..CLOUD_PERIOD {
-            let v = lattice(x, y, 8, 41) * 0.68 + lattice(x, y, 2, 43) * 0.22 + hash(x, y, 47) * 0.1;
-            field.push((v * 255.0).round() as u8);
+            // Where the heaps stand (half a kilometre across, gathered in broader
+            // stretches with clearer sky between), then their bulges, then their bumps.
+            let mass = lattice(x, y, 256, 39) * 0.2 + lattice(x, y, 64, 41) * 0.36 + lattice(x, y, 32, 43) * 0.18;
+            let bumps = billow(x, y, 16, 45) * 0.15 + billow(x, y, 8, 47) * 0.07;
+            field.push(((mass + bumps) * 255.0).round().clamp(0.0, 255.0) as u8);
         }
     }
-    field
+    // For each amount of cover, the level that leaves that share of the field above it.
+    let mut counts = [0usize; 256];
+    for &v in &field {
+        counts[v as usize] += 1;
+    }
+    let edges = std::array::from_fn(|i| {
+        let wanted = (i as f32 / (CLOUD_COVERS - 1) as f32 * field.len() as f32) as usize;
+        let mut above = 0;
+        let mut level = 255;
+        while level > 0 && above + counts[level] <= wanted {
+            above += counts[level];
+            level -= 1;
+        }
+        // Between two of the field's bytes, so that neither is on the edge itself.
+        if i == CLOUD_COVERS - 1 { -0.01 } else { (level as f32 + 0.5) / 255.0 }
+    });
+    // Coarser levels, each cell the highest of the four under it.
+    let mut levels = vec![field];
+    for l in 1..CLOUD_LEVELS as usize {
+        let (side, last) = (n >> l, &levels[l - 1]);
+        let mut next = Vec::with_capacity(side * side);
+        for y in 0..side {
+            for x in 0..side {
+                let at = |dx: usize, dy: usize| last[(2 * y + dy) * side * 2 + 2 * x + dx];
+                next.push(at(0, 0).max(at(1, 0)).max(at(0, 1)).max(at(1, 1)));
+            }
+        }
+        levels.push(next);
+    }
+    (levels, edges)
 }
+
+/// The level of the clouds' field that this much cover (0..1) leaves its edge at.
+fn cloud_edge(edges: &[f32; CLOUD_COVERS], cover: f32) -> f32 {
+    let at = cover.clamp(0.0, 1.0) * (CLOUD_COVERS - 1) as f32;
+    let i = (at as usize).min(CLOUD_COVERS - 2);
+    edges[i] + (edges[i + 1] - edges[i]) * (at - i as f32)
+}
+/// Entries in the globals' tables of the colours small plants give the ground they stand
+/// on from afar (see `wash` in terrain.wgsl, and `worldgen::features::plants::washes`).
+const WASH_SLOTS: usize = 64;
+
+/// Those tables: for the wash numbered `i`, its leaves' colour (linear) and its flowers',
+/// each with its plant kind, which the seasons go by, in the whole part of `w`; in the
+/// rest of `w`, half of how much of the ground's colour the plant takes the place of, and
+/// half the flowers' share of it.
+fn wash_tables() -> ([[f32; 4]; WASH_SLOTS], [[f32; 4]; WASH_SLOTS]) {
+    let mats = worldgen::materials::build();
+    let all = worldgen::features::plants::washes();
+    assert!(all.len() < WASH_SLOTS, "more washes than the globals hold");
+    let linear = |c: [f32; 3]| c.map(|v| (v / 255.0).powf(2.2));
+    let colour = |v: voxel::Voxel| mats.get(v).color.map(|c| c as f32);
+    let (mut body, mut bloom) = ([[0.0; 4]; WASH_SLOTS], [[0.0; 4]; WASH_SLOTS]);
+    for (i, w) in all.iter().enumerate() {
+        let (a, b) = (colour(w.body.0), colour(w.body.1));
+        let [r, g, bl] = linear(std::array::from_fn(|k| a[k] + (b[k] - a[k]) * w.body.2));
+        body[i + 1] = [r, g, bl, mats.get(w.body.0).plant as f32 + w.cover.clamp(0.0, 1.0) * 0.5];
+        let [r, g, bl] = linear(colour(w.bloom.0));
+        bloom[i + 1] = [r, g, bl, mats.get(w.bloom.0).plant as f32 + w.bloom.1.clamp(0.0, 1.0) * 0.5];
+    }
+    (body, bloom)
+}
+
 /// How many of the shadow cascades, nearest first, include small plants.
 const PLANT_SHADOW_CASCADES: usize = 2;
 /// A cached shadow map is redrawn early once the view has turned this far from it
@@ -133,6 +209,9 @@ struct Globals {
     /// Each biome's ground, by biome id: x snow at sea level, y ice on water, z how much
     /// more snow the hills hold, w the summit snowline in metres (see ground.wgsl).
     snow: [[f32; 4]; SNOW_SLOTS],
+    /// The colours small plants give the ground from afar (see `wash_tables`).
+    wash_body: [[f32; 4]; WASH_SLOTS],
+    wash_bloom: [[f32; 4]; WASH_SLOTS],
 }
 
 /// Entries in the globals' snow table: every biome, rounded up.
@@ -350,6 +429,10 @@ fn make_target(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu:
 pub struct Renderer {
     width: u32,
     height: u32,
+    /// The level of the clouds' field each amount of cover leaves its edge at.
+    cloud_edges: [f32; CLOUD_COVERS],
+    /// The colours small plants give the ground from afar (see `wash_tables`).
+    wash: ([[f32; 4]; WASH_SLOTS], [[f32; 4]; WASH_SLOTS]),
     globals: wgpu::Buffer,
     shadows: wgpu::Buffer,
     scene_bind: wgpu::BindGroup,
@@ -479,7 +562,7 @@ impl Renderer {
         let device = &gpu.device;
         // Shaders work in voxels but know how big one is.
         let common = format!(
-            "const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\nconst CLOUD_CELL: f32 = {CLOUD_CELL:?};\nconst CLOUD_STEP: f32 = {CLOUD_STEP:?};\nconst CLOUD_STEPS: f32 = {CLOUD_STEPS:?};\nconst CLOUD_PERIOD: i32 = {CLOUD_PERIOD};\nconst CLOUD_MARCH: i32 = {CLOUD_MARCH};\n{}",
+            "const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\nconst CLOUD_CELL: f32 = {CLOUD_CELL:?};\nconst CLOUD_STEP: f32 = {CLOUD_STEP:?};\nconst CLOUD_STEPS: f32 = {CLOUD_STEPS:?};\nconst CLOUD_PERIOD: i32 = {CLOUD_PERIOD};\nconst CLOUD_MARCH: i32 = {CLOUD_MARCH};\nconst CLOUD_BELLY: f32 = {CLOUD_BELLY:?};\nconst CLOUD_LEVEL: i32 = {CLOUD_LEVEL};\nconst CLOUD_COARSE: i32 = {CLOUD_COARSE};\nconst CLOUD_LEVELS: i32 = {CLOUD_LEVELS};\n{}",
             include_str!("shaders/common.wgsl")
         );
 
@@ -541,23 +624,27 @@ impl Renderer {
         let cloud_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cloud field"),
             size: cloud_size,
-            mip_level_count: 1,
+            mip_level_count: CLOUD_LEVELS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::R8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        gpu.queue.write_texture(
-            cloud_tex.as_image_copy(),
-            &cloud_field(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(CLOUD_PERIOD as u32),
-                rows_per_image: Some(CLOUD_PERIOD as u32),
-            },
-            cloud_size,
-        );
+        let (cloud_levels, cloud_edges) = cloud_field();
+        for (level, texels) in cloud_levels.iter().enumerate() {
+            let side = CLOUD_PERIOD as u32 >> level;
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { mip_level: level as u32, ..cloud_tex.as_image_copy() },
+                texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(side),
+                    rows_per_image: Some(side),
+                },
+                wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            );
+        }
         let cloud_view = cloud_tex.create_view(&Default::default());
         let scene_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene"),
@@ -722,7 +809,10 @@ impl Renderer {
                 buffers: &[],
             },
             primitive: fullscreen_triangle(),
-            depth_stencil: depth_state(false, wgpu::CompareFunction::Always),
+            // Drawn after the land, and only where none of it was (the depth still as it
+            // was cleared, which is where the sky's one triangle lies): looking for the
+            // clouds along a view ray is too much work to do behind a hillside.
+            depth_stencil: depth_state(false, wgpu::CompareFunction::Equal),
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &sky_module,
@@ -734,7 +824,8 @@ impl Renderer {
             cache: None,
         });
 
-        let terrain_module = shader(device, "terrain", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
+        let plant_reach = format!("const PLANT_REACH: f32 = {PLANT_REACH:?};");
+        let terrain_module = shader(device, "terrain", format!("{common}\n{plant_reach}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/terrain.wgsl")));
         let vertex_attrs = wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32];
         let instance_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Sint32x3, 4 => Float32, 5 => Float32x2, 6 => Uint32x4, 7 => Uint32x4, 8 => Uint32x2];
         let terrain_buffers = [
@@ -819,7 +910,7 @@ impl Renderer {
             cache: None,
         });
 
-        let shadow_module = shader(device, "shadow", format!("{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/shadow.wgsl")));
+        let shadow_module = shader(device, "shadow", format!("{plant_reach}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/shadow.wgsl")));
         let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow"),
             layout: Some(&shadow_layout),
@@ -1240,6 +1331,8 @@ impl Renderer {
         Self {
             width,
             height,
+            cloud_edges,
+            wash: wash_tables(),
             globals,
             shadows,
             scene_bind,
@@ -1561,12 +1654,12 @@ impl Renderer {
             // w: how far the tree models reach, for the far view's forest height.
             cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, impostors::REACH],
             // The mist is thickest up to a little over the low ground, and thins above.
-            mist: [env.mist, m(22.0), env.mist_floor + m(5.0) - camera.pos.y as f32, 0.0],
+            mist: [env.mist, m(22.0), env.mist_floor + m(5.0) - camera.pos.y as f32, cloud_edge(&self.cloud_edges, env.clouds)],
             cascades: [
                 CASCADE_ENDS[0],
                 CASCADE_ENDS[1],
                 CASCADE_ENDS[2],
-                CLOUD_HEIGHT - camera.pos.y as f32,
+                env.cloud_base - camera.pos.y as f32,
             ],
             wind: v4(scene.wind, 0.0),
             lights: nearest_glows(scene.particles),
@@ -1580,6 +1673,8 @@ impl Renderer {
                 let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
                 [g.snow, g.frozen, g.highland, g.snowline]
             }),
+            wash_body: self.wash.0,
+            wash_bloom: self.wash.1,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -1660,12 +1755,20 @@ impl Renderer {
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
                 let (terrain, plants) = (&chunk.faces[..=6], &chunk.faces[6..]);
-                // Plants are too small to matter from further away.
-                let near = center.length() < PLANT_REACH;
+                // Plants are too small to matter from further away. They give out one by
+                // one over the last of their reach (plant_reach in season.wgsl), which the
+                // shaders know them for by an instance of their own with its scale negative.
+                let near = chunk.level == 0 && nearest < PLANT_REACH * 0.98 && plants[6] > plants[0];
+                let plant_index = instances.len() as u32;
+                if near {
+                    let mut own = instances[index as usize];
+                    own.scale = -own.scale;
+                    instances.push(own);
+                }
                 for (i, (list, _)) in casters.iter_mut().zip(casts).enumerate().filter(|(_, (_, casts))| *casts) {
                     push_faces(list, mesh, terrain, if i == CASCADES - 1 { far_casters } else { toward_sun }, index);
                     if near && i < PLANT_SHADOW_CASCADES {
-                        push_faces(list, mesh, plants, toward_sun, index);
+                        push_faces(list, mesh, plants, toward_sun, plant_index);
                     }
                 }
                 if visible {
@@ -1674,7 +1777,7 @@ impl Renderer {
                     let list = if inside { &mut opaque } else { &mut opaque_edge };
                     push_faces(list, mesh, terrain, seen, index);
                     if near {
-                        push_faces(list, mesh, plants, seen, index);
+                        push_faces(list, mesh, plants, seen, plant_index);
                     }
                 }
             }
@@ -1875,11 +1978,6 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.scene_bind, &[]);
-            pass.set_pipeline(&self.sky);
-            pass.draw(0..3, 0..1);
-            if let Some(t) = &self.timer {
-                t.mark_in_pass(&mut pass, 4);
-            }
 
             // Far view first: land tiles, then river ribbons and the sea over them.
             pass.set_vertex_buffer(1, self.instances.slice(..));
@@ -1913,7 +2011,7 @@ impl Renderer {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
             }
             if let Some(t) = &self.timer {
-                t.mark_in_pass(&mut pass, 5);
+                t.mark_in_pass(&mut pass, 4);
             }
 
             pass.set_pipeline(&self.opaque_inside);
@@ -1928,6 +2026,12 @@ impl Renderer {
                 pass.set_vertex_buffer(1, self.prop_instances.slice(..));
                 pass.draw(0..36, 0..prop_count as u32);
             }
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 5);
+            }
+            // The sky last, behind everything (see its pipeline).
+            pass.set_pipeline(&self.sky);
+            pass.draw(0..3, 0..1);
             if let Some(t) = &self.timer {
                 t.mark_in_pass(&mut pass, 6);
             }
@@ -2285,4 +2389,45 @@ pub fn screenshot(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cloud_field_gives_each_cover_its_share_of_the_sky() {
+        let (levels, edges) = cloud_field();
+        let field = &levels[0];
+        assert_eq!(levels.len(), CLOUD_LEVELS as usize);
+        assert_eq!(levels.last().map(Vec::len), Some(1));
+        for cover in [0.1f32, 0.3, 0.6, 0.9] {
+            let edge = cloud_edge(&edges, cover);
+            let share = field.iter().filter(|&&v| v as f32 / 255.0 > edge).count() as f32 / field.len() as f32;
+            assert!((share - cover).abs() < 0.03, "cover {cover}: {share} of the sky");
+        }
+        // A sky all cloud leaves no cell out, and more cover never means less cloud.
+        assert!(cloud_edge(&edges, 1.0) < 0.0);
+        assert!(edges.windows(2).all(|w| w[1] <= w[0]));
+        // Each coarser cell holds the highest of the cells under it, to the one at the top.
+        let side = CLOUD_PERIOD as usize;
+        let coarse = &levels[CLOUD_LEVEL as usize];
+        let highest = (0..CLOUD_COARSE as usize).flat_map(|y| (0..CLOUD_COARSE as usize).map(move |x| (x, y))).map(|(x, y)| field[y * side + x]).max();
+        assert_eq!(Some(coarse[0]), highest);
+        assert_eq!(levels.last().map(|l| l[0]), field.iter().copied().max());
+    }
+
+    #[test]
+    fn every_wash_has_a_place_in_the_globals() {
+        let (body, bloom) = wash_tables();
+        let n = worldgen::features::plants::washes().len();
+        assert!(n > 10 && n < WASH_SLOTS);
+        assert_eq!(body[0], [0.0; 4]);
+        for i in 1..=n {
+            // A plant kind in the whole part, and half a share in the rest.
+            assert!(body[i][3].fract() > 0.0 && body[i][3].fract() <= 0.5, "{:?}", body[i]);
+            assert!(bloom[i][3].fract() <= 0.5);
+            assert!(body[i][..3].iter().all(|c| (0.0..=1.0).contains(c)));
+        }
+    }
 }

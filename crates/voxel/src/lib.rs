@@ -99,6 +99,9 @@ pub mod flags {
     pub const FOLIAGE: u8 = 1 << 3;
     /// Lantern glass and embers: shines at night regardless of the light falling on it.
     pub const EMISSIVE: u8 = 1 << 4;
+    /// Both of the two above at once, which nothing is: solid ground that takes the colour
+    /// of the plant standing on it when seen from afar (see `mesh_chunk_under_sky`).
+    pub const WASH: u8 = FOLIAGE | EMISSIVE;
     /// Three bits saying what kind of plant this is (see [`plant`](super::plant)), so the
     /// seasons can treat a maple, a tuft of grass and a pine each their own way.
     pub const PLANT_SHIFT: u8 = 5;

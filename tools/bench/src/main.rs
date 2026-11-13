@@ -135,7 +135,8 @@ fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32, overlaps:
             let mut roof = vec![false; voxel::PAD * voxel::PAD];
             let (lib, mats) = (world.library(), world.materials());
             for (cy, chunk) in out.chunks.iter().rev() {
-                let mut m = mesh_chunk_under_sky(chunk, mats, &out.currents, &roof, &mut falls);
+                let wash = voxel::mesh::wash_map(chunk, mats, *cy, &out.wash);
+                let mut m = mesh_chunk_under_sky(chunk, mats, &out.currents, &roof, &wash, &mut falls);
                 cover_columns(chunk, mats, &mut roof);
                 let corner = [(cx + dx) * CHUNK, *cy * CHUNK, (cz + dz) * CHUNK];
                 let t = Instant::now();

@@ -463,7 +463,14 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     let centre = glam::Vec2::new((i % c.size) as f32 + 0.5, (i / c.size) as f32 + 0.5) * cs;
     let sand = surface::beach_share(c, centre, c.height[i] * OLD_VOXEL);
     let beach = sand > 0.5;
-    let mut ground = mix(color(mat::ground_cover(biome)), color(mat::SAND), sand);
+    let mut ground = color(mat::ground_cover(biome));
+    // Drifts of flowers and beds of heather colour the land they lie over, as the ground
+    // under each plant is coloured nearer to (see `wash` in terrain.wgsl).
+    let (wx, wz) = (c.desc.mx * MACRO_SIZE + centre.x as i32, c.desc.mz * MACRO_SIZE + centre.y as i32);
+    if let Some((tint, share)) = features::plants::far_wash(biome, wx, wz, c.desc.world_seed, mats) {
+        ground = mix(ground, tint, share);
+    }
+    ground = mix(ground, color(mat::SAND), sand);
     // The voxel world's snow line wanders by 0.015 either way of 0.10.
     let snow = ((0.115 - c.temperature[i]) / 0.03).clamp(0.0, 1.0) * (1.0 - sand);
     ground = mix(ground, color(mat::SNOW), snow);

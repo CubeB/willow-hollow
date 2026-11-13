@@ -38,7 +38,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     let cloud = cloud_seen(dir, 4.0 / max(G.fog.x * 2.5, 1e-7));
     if (cloud.w >= 0.0) {
         let fade = exp(-cloud.w * G.fog.x * 2.5 - haze_depth(dir * cloud.w, cloud.w) * 0.5);
-        return vec4<f32>(mix(c, cloud.rgb, fade), 1.0);
+        let hidden = fade * cloud_alpha;
+        // The sun behind the thin edge of a cloud lights it up.
+        let s = dot(dir, G.sun_dir.xyz);
+        let behind = G.sun_color.rgb * (pow(max(s, 0.0), 300.0) * 2.0) * (1.0 - cloud_alpha * 0.6);
+        return vec4<f32>(mix(c, cloud.rgb, hidden) + behind * fade, 1.0);
     }
 
     let s = dot(dir, G.sun_dir.xyz);

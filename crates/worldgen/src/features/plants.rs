@@ -526,6 +526,132 @@ pub fn flower_at(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32) -> Opt
     }
 }
 
+/// The colour a plant gives the ground it stands on, seen from too far off for the plant
+/// itself to be drawn: the ground under it is drawn in the plant's colours instead, so a
+/// moor's heather and a meadow's flowers still show as drifts of colour across a far
+/// hillside, where each stood. (See `wash` in the game's terrain shader.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wash {
+    /// The leaves and stems: two materials, and the share of the second.
+    pub body: (Voxel, Voxel, f32),
+    /// The flowers or heads, and how much of the plant's colour is theirs (0 with none).
+    /// The seasons take them away as they do the flowers themselves.
+    pub bloom: (Voxel, f32),
+    /// How much of the ground's colour gives way to the plant's.
+    pub cover: f32,
+}
+
+fn wash_of(growth: &Growth) -> Option<Wash> {
+    let w = |body: (Voxel, Voxel, f32), bloom: (Voxel, f32), cover: f32| Some(Wash { body, bloom, cover });
+    let none = (voxel::AIR, 0.0);
+    match *growth {
+        Growth::Grass(kind, ref sward) => match kind {
+            Grass::Lawn => w((sward.main, sward.other, 0.3), none, 0.7),
+            Grass::Meadow => w((sward.main, sward.other, 0.3), (mat::SEED_HEAD, 0.3), 0.6),
+            Grass::Broad => w((mat::TUFT_LUSH, mat::TUFT, 0.3), none, 0.7),
+            Grass::Bunch => w((mat::TUFT_STRAW, mat::TUFT_DRY, 0.4), none, 0.7),
+            Grass::Alpine => w((sward.main, sward.other, 0.25), none, 0.45),
+            Grass::Sedge => w((mat::TUFT_SEDGE, mat::TUFT_LUSH, 0.25), none, 0.65),
+        },
+        Growth::Tussock => w((mat::TUFT_STRAW, mat::TUFT_DRY, 0.4), none, 0.7),
+        Growth::Reeds => w((mat::REED, mat::REED, 0.0), (mat::REED_HEAD, 0.25), 0.8),
+        Growth::Lily => None,
+        Growth::Wintergreen(Wintergreen::Fern) => w((mat::FERN, mat::FERN_TIP, 0.3), none, 0.85),
+        Growth::Wintergreen(Wintergreen::Rush) => w((mat::WOODRUSH, mat::WOODRUSH, 0.0), none, 0.8),
+        Growth::Wintergreen(Wintergreen::Heather) => w((mat::HEATHER_GREEN, mat::HEATHER_RUST, 0.3), none, 0.9),
+        Growth::Flower(f) => match f {
+            Flower::WaterLily | Flower::FlyAgaric | Flower::PennyBun => None,
+            Flower::Heather => w((mat::HEATHER_GREEN, mat::HEATHER_RUST, 0.15), (mat::BLOOM_PURPLE, 0.4), 0.9),
+            Flower::CottonGrass => w((mat::TUFT_SEDGE, mat::TUFT_DRY, 0.3), (mat::BLOOM_WHITE, 0.35), 0.5),
+            Flower::Thrift => w((mat::TUFT_ALPINE, mat::TUFT, 0.3), (mat::BLOOM_PINK, 0.45), 0.7),
+            Flower::DesertMarigold => w((mat::TUFT_ALPINE, mat::TUFT_DRY, 0.5), (mat::BLOOM_GOLD, 0.4), 0.6),
+            Flower::Foxglove | Flower::Lupin | Flower::Poppy | Flower::Thistle | Flower::Heliconia | Flower::Bluebell | Flower::FlagIris => {
+                w((mat::TUFT_LUSH, mat::TUFT, 0.3), (f.petals(), 0.6), 0.6)
+            }
+            _ => w((mat::TUFT_LUSH, mat::TUFT, 0.3), (f.petals(), 0.5), 0.5),
+        },
+    }
+}
+
+/// Every wash there is. A column's is named by its place in this list plus one (see
+/// [`wash_at`]), 0 being none.
+pub fn washes() -> &'static [Wash] {
+    static ALL: std::sync::OnceLock<Vec<Wash>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all: Vec<Wash> = Vec::new();
+        let mut add = |g: Growth| {
+            if let Some(w) = wash_of(&g)
+                && !all.contains(&w)
+            {
+                all.push(w);
+            }
+        };
+        for biome in Biome::ALL {
+            if let Some(s) = sward(biome) {
+                for kind in [s.common, s.drift, Grass::Sedge, Grass::Alpine] {
+                    add(Growth::Grass(kind, sward(biome).expect("the biome has a sward")));
+                }
+            }
+        }
+        add(Growth::Tussock);
+        add(Growth::Reeds);
+        for kind in [Wintergreen::Fern, Wintergreen::Rush, Wintergreen::Heather] {
+            add(Growth::Wintergreen(kind));
+        }
+        for &f in Flower::ALL {
+            add(Growth::Flower(f));
+        }
+        assert!(all.len() < 256, "a wash is named in a byte");
+        all
+    })
+}
+
+/// The wash of whatever [`grow`] builds on the column at `(x, z)` for the same arguments:
+/// its place in [`washes`] plus one, or 0 where nothing grows or what does is too slight to
+/// colour the ground. Works out what grows there without building it, which is most of
+/// the work.
+pub fn wash_at(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32) -> u8 {
+    let Some(growth) = decide(col, surface, x, z, seed, unit(column_hash(seed, x, z))) else {
+        return 0;
+    };
+    let Some(wash) = wash_of(&growth) else {
+        return 0;
+    };
+    washes().iter().position(|w| *w == wash).map_or(0, |i| i as u8 + 1)
+}
+
+/// The colour the flowers and heather round `(x, z)` give the land seen from beyond the
+/// voxels, where a stretch of ground is all one colour: that colour (sRGB) and how much
+/// of the ground's it takes the place of. It follows the drifts the flowers grow in
+/// ([`super::flower_drift`]) and the moor's beds of heather, so a far moor is patched
+/// with heather as a near one is.
+pub fn far_wash(biome: Biome, x: i32, z: i32, seed: u32, mats: &voxel::Materials) -> Option<([f32; 3], f32)> {
+    let (growth, share) = match super::flower_drift(biome, x, z, seed) {
+        Some((mat::HEATHER, share)) => (Growth::Flower(Flower::Heather), share),
+        Some((surface, share)) => (Growth::Flower(species(biome, surface, patch(seed, 0xa17e, x, z, 96.0) > 0.0)?), share),
+        None => {
+            // Heather out of flower, in its beds (see `wintergreen_at`).
+            let heather = match biome {
+                Biome::Heath => 0.05,
+                Biome::Bog => 0.03,
+                Biome::Moor => 0.06,
+                _ => return None,
+            };
+            let n = patch(seed, 0x4ea7, x, z, 16.0);
+            let share = (heather * 12.0f32).min(1.0) * BED_SHARE * ((n - 0.22) / 0.2).clamp(0.0, 1.0);
+            (Growth::Wintergreen(Wintergreen::Heather), share)
+        }
+    };
+    let w = wash_of(&growth)?;
+    let colour = |v: Voxel| mats.get(v).color.map(f32::from);
+    let mix = |a: [f32; 3], b: [f32; 3], t: f32| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t);
+    let body = mix(colour(w.body.0), colour(w.body.1), w.body.2);
+    // Less of the flowers than in summer: this colour is the same all year.
+    let all = mix(body, colour(w.bloom.0), w.bloom.1 * 0.7);
+    // Darker than the plant's own colours, as its wash on the nearer ground is.
+    Some((all.map(|v| v * 0.8), (share * 2.0).min(1.0) * w.cover))
+}
+
 /// Lays out boxes in cells relative to the corner of one voxel.
 struct Plot<'a> {
     origin: [i32; 3],
@@ -1420,6 +1546,62 @@ mod tests {
 
         let tundra = column(Cover::Land, Biome::Tundra);
         assert!(grown(&tundra, mat::ground_cover(Biome::Tundra)).iter().any(|p| p.voxel == mat::TUFT_ALPINE));
+    }
+
+    #[test]
+    fn a_wash_is_given_wherever_a_plant_that_shows_from_afar_grows() {
+        for (biome, surface) in [(Biome::Moor, mat::HEATHER), (Biome::Moor, mat::GRASS_MOOR), (Biome::Grassland, mat::FLOWER_RED), (Biome::Deciduous, mat::GRASS)] {
+            let col = column(Cover::Land, biome);
+            let surface = if surface == mat::GRASS_MOOR || surface == mat::GRASS { mat::ground_cover(biome) } else { surface };
+            let (mut washed, mut bare) = (0, 0);
+            for x in 0..60 {
+                for z in 0..60 {
+                    let mut out = Vec::new();
+                    grow(&col, surface, x, z, 7, &mut out);
+                    let code = wash_at(&col, surface, x, z, 7);
+                    assert!(usize::from(code) <= washes().len());
+                    // Everything these grow shows from afar, so a wash goes with every plant.
+                    // (Now and then a heather comes up with no cushions at all.)
+                    assert!(code != 0 || out.is_empty(), "{biome:?} at {x},{z}");
+                    if code != 0 { washed += 1 } else { bare += 1 }
+                }
+            }
+            assert!(washed > 20, "{biome:?}: {washed} washed, {bare} bare");
+        }
+        // Flowering heather and heather out of flower are told apart, and each wash is listed once.
+        let all = washes();
+        assert!(all.iter().any(|w| w.bloom.0 == mat::BLOOM_PURPLE && w.body.0 == mat::HEATHER_GREEN));
+        assert!(all.iter().any(|w| w.bloom.1 == 0.0 && w.body.0 == mat::HEATHER_GREEN));
+        for (i, w) in all.iter().enumerate() {
+            assert!(!all[..i].contains(w));
+            assert!(w.cover > 0.0 && w.cover <= 1.0 && (0.0..=1.0).contains(&w.bloom.1));
+        }
+        // Lily pads lie on water and mushrooms are too few: neither colours the ground.
+        assert!(wash_of(&Growth::Lily).is_none() && wash_of(&Growth::Flower(Flower::FlyAgaric)).is_none());
+    }
+
+    #[test]
+    fn far_land_takes_the_colour_of_its_drifts() {
+        let mats = mat::build();
+        let (mut tinted, mut heather) = (0, 0);
+        for x in 0..80 {
+            for z in 0..80 {
+                if let Some((colour, share)) = far_wash(Biome::Moor, x * 40, z * 40, 3, &mats) {
+                    assert!((0.0..=1.0).contains(&share) && colour.iter().all(|c| (0.0..=255.0).contains(c)));
+                    if share > 0.05 {
+                        tinted += 1;
+                        // Heather in flower is more purple than the moor's grass is.
+                        if colour[2] > colour[1] {
+                            heather += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tinted > 300 && tinted < 5000, "{tinted} of 6400 cells tinted");
+        assert!(heather > 50, "{heather} cells of flowering heather");
+        // Bare lava grows nothing to colour it.
+        assert!(far_wash(Biome::Volcanic, 100, 100, 3, &mats).is_none());
     }
 
     #[test]

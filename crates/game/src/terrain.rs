@@ -14,7 +14,7 @@ use std::{
 use glam::{DVec3, IVec3};
 use voxel::{
     CHUNK,
-    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees},
+    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees, wash_map},
 };
 use worldgen::{Cascade, SpringMark, Surf, World, features, scale::m, world::GameWorld};
 
@@ -733,7 +733,8 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         .zip(&roofs)
         .rev()
         .map(|((cy, chunk), roof)| {
-            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof, &mut falls);
+            let wash = wash_map(chunk, world.materials(), *cy, &output.wash);
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &output.currents, roof, &wash, &mut falls);
             let origin = [col.1 * CHUNK * CELLS, *cy * CHUNK * CELLS, col.2 * CHUNK * CELLS];
             // Run even with no plants: it also records where each face group ends.
             let inside = output.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
@@ -766,7 +767,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
 /// A column of one of the coarse rings: no plants, cascades or spray this far out.
 fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> ColumnResult {
     let t0 = Instant::now();
-    let (chunks, trees) = lod::generate(world, models, col.0, col.1, col.2);
+    let (chunks, trees, wash) = lod::generate(world, models, col.0, col.1, col.2);
     let t1 = Instant::now();
     // Trunks in coarse cells, for giving each tree's leaves its own date: here simply the
     // nearest tree's, as coarse cells are too big to say exactly.
@@ -779,7 +780,8 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         .zip(&roofs)
         .rev()
         .map(|((cy, chunk), roof)| {
-            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &[], roof, &mut falls);
+            let wash = wash_map(chunk, world.materials(), *cy, &wash);
+            let mut mesh = mesh_chunk_under_sky(chunk, world.materials(), &[], roof, &wash, &mut falls);
             tag_trees(&mut mesh, [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK], |q| {
                 trunks
                     .iter()
