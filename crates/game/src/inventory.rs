@@ -10,7 +10,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use voxel::Voxel;
-use worldgen::materials as mat;
+use worldgen::{features::plants::Flower, materials as mat};
 
 /// Slots in a pack, and how many across the window shows them.
 pub const SLOTS: usize = 24;
@@ -84,17 +84,44 @@ impl Item {
     }
 }
 
-/// What can be gathered from voxel `v`, if anything: the flowers the ground carries, and
-/// what the bushes bear.
+/// A flower or a mushroom, picked.
+pub fn of_flower(f: Flower) -> Item {
+    let (about, shape) = match f {
+        Flower::Pimpernel => ("It shuts before rain, so they say, and is seldom wrong.", Shape::Flower),
+        Flower::Cinquefoil => ("Five petals and five leaves to a hand, low in the grass.", Shape::Flower),
+        Flower::Stitchwort => ("White stars on stems too thin to hold them up alone.", Shape::Flower),
+        Flower::Violet => ("Sweet for a breath, and then the scent is gone.", Shape::Flower),
+        Flower::Speedwell => ("The colour of the sky an hour after rain.", Shape::Flower),
+        Flower::Campion => ("Soft pink, and out from spring until the frost.", Shape::Flower),
+        Flower::Heather => ("A sprig from the open moor. It keeps its colour dried.", Shape::Sprig),
+        Flower::WaterLily => ("Lifted dripping from the still water.", Shape::Flower),
+        Flower::FlyAgaric => ("Red and white-spotted. For looking at, not for eating.", Shape::Mushroom),
+        Flower::PennyBun => ("Fat and brown as a loaf, and as good.", Shape::Mushroom),
+        Flower::Bluebell => ("One bell from a wood that was blue with them.", Shape::Spike),
+        Flower::Foxglove => ("A spire of speckled bells. The bees climb right inside.", Shape::Spike),
+        Flower::Primrose => ("Pale as butter, and among the first of the year.", Shape::Flower),
+        Flower::Daisy => ("It opens with the day and shuts at dusk.", Shape::Flower),
+        Flower::Buttercup => ("Hold it under a chin and see the gold.", Shape::Flower),
+        Flower::Poppy => ("Scarlet silk that drops its petals in a day.", Shape::Flower),
+        Flower::Lupin => ("A tall spike over leaves like open hands.", Shape::Spike),
+        Flower::CottonGrass => ("A white tuft from the wet moor, soft as down.", Shape::Sprig),
+        Flower::MarshMarigold => ("Kingcups: gold cups from the edge of the water.", Shape::Flower),
+        Flower::FlagIris => ("A yellow flag from among the sword leaves by the stream.", Shape::Flower),
+        Flower::Thrift => ("A pink pompom from a cushion by the sea.", Shape::Sprig),
+        Flower::Gentian => ("A blue so deep it looks cut from the evening sky.", Shape::Flower),
+        Flower::Edelweiss => ("A grey felted star, found alone, high up. A thing to keep.", Shape::Flower),
+        Flower::Orchid => ("Pale, with a dark lip, from the dim of the rainforest.", Shape::Spike),
+        Flower::Heliconia => ("Red bracts tipped with gold, like a row of beaks.", Shape::Spike),
+        Flower::DesertMarigold => ("Gold over grey wool, where little else will grow.", Shape::Flower),
+        Flower::Thistle => ("A purple brush, taken with care.", Shape::Spike),
+    };
+    Item::new(f.id(), f.name(), about, f.color(), shape)
+}
+
+/// What can be gathered from voxel `v`, if anything: what the bushes and the reed beds
+/// bear. (Flowers are not voxels: see [`of_flower`].)
 pub fn of_voxel(v: Voxel, materials: &voxel::Materials) -> Option<Item> {
     let (id, name, about, shape) = match v {
-        mat::FLOWER_RED => ("red-wildflower", "Red wildflower", "Bright in the grass, and gone by the first frost.", Shape::Flower),
-        mat::FLOWER_YELLOW => ("yellow-wildflower", "Yellow wildflower", "It turns to follow the sun through the day.", Shape::Flower),
-        mat::FLOWER_WHITE => ("white-wildflower", "White wildflower", "Small and plain, and everywhere in a good year.", Shape::Flower),
-        mat::FLOWER_PURPLE => ("purple-wildflower", "Purple wildflower", "The bees go to these before any other.", Shape::Spike),
-        mat::FLOWER_BLUE => ("blue-wildflower", "Blue wildflower", "The colour of the sky an hour after rain.", Shape::Flower),
-        mat::FLOWER_PINK => ("pink-wildflower", "Pink wildflower", "Soft as it looks. It does not last long picked.", Shape::Flower),
-        mat::HEATHER => ("heather", "Heather", "A sprig from the open moor. It keeps its colour dried.", Shape::Sprig),
         mat::GORSE_BLOOM => ("gorse-blossom", "Gorse blossom", "It smells of coconut, and was hard won from the thorns.", Shape::Sprig),
         mat::HOLLY_BERRY => ("holly-berries", "Holly berries", "For looking at, not for eating.", Shape::Berries),
         mat::IVY_BERRY => ("ivy-berries", "Ivy berries", "Ripe in the dead of winter, when the birds need them.", Shape::Berries),
@@ -377,7 +404,7 @@ pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
                 }
                 None => {
                     let hint = if pack.slots().iter().all(Option::is_none) {
-                        "Nothing yet. Press E by a flower, a berry bush or a reed bed to gather from it."
+                        "Nothing yet. Press E by a flower or a mushroom to gather it."
                     } else {
                         "Click a thing to read about it. Drag it to another slot to move it."
                     };
@@ -481,6 +508,33 @@ mod tests {
     }
 
     #[test]
+    fn the_world_tells_which_flowers_stand_where_the_same_each_time() {
+        let world = worldgen::world::GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
+        let c = world.continent(0, 0);
+        // Squares of land across the continent: somewhere among them flowers grow.
+        let cs = c.cell_size() as i32;
+        let mut found = Vec::new();
+        for i in (0..c.size * c.size).step_by(97) {
+            if !c.ocean[i] && c.height[i] > 4.0 {
+                let (x, z) = ((i % c.size) as i32 * cs, (i / c.size) as i32 * cs);
+                let here = world.flowers_in(x, z, 24);
+                assert_eq!(here, world.flowers_in(x, z, 24));
+                assert!(here.iter().all(|((fx, fz), _)| (x..x + 24).contains(fx) && (z..z + 24).contains(fz)));
+                // A smaller square inside it names the same flowers on the columns they share.
+                let inner = world.flowers_in(x + 5, z + 7, 10);
+                assert!(inner.iter().all(|f| here.contains(f)), "at {x},{z}");
+                found.extend(here);
+            }
+            if found.len() > 200 {
+                break;
+            }
+        }
+        assert!(found.len() > 200, "only {} flowers found", found.len());
+        let kinds: HashSet<&str> = found.iter().map(|f| f.1.id()).collect();
+        assert!(kinds.len() >= 2, "{kinds:?}");
+    }
+
+    #[test]
     fn only_so_many_gathered_spots_are_remembered() {
         let mut pack = Pack::new();
         for k in 0..REMEMBERED as i32 + 10 {
@@ -492,8 +546,13 @@ mod tests {
     #[test]
     fn the_flowers_of_the_ground_can_be_gathered_and_the_ground_cannot() {
         let mats = mat::build();
-        let heather = of_voxel(mat::HEATHER, &mats).expect("heather");
-        assert_eq!((heather.id.as_str(), heather.color), ("heather", mats.get(mat::HEATHER).color));
+        let berries = of_voxel(mat::HOLLY_BERRY, &mats).expect("holly berries");
+        assert_eq!((berries.id.as_str(), berries.color), ("holly-berries", mats.get(mat::HOLLY_BERRY).color));
+        // Every flower makes a thing of its own, with something to say for itself.
+        let things: Vec<Item> = Flower::ALL.iter().map(|f| of_flower(*f)).collect();
+        let ids: HashSet<&str> = things.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids.len(), Flower::ALL.len());
+        assert!(things.iter().all(|t| !t.name.is_empty() && t.about.len() > 10 && !t.about.contains('|')));
         assert!(of_voxel(mat::GRASS, &mats).is_none() && of_voxel(mat::STONE, &mats).is_none() && of_voxel(voxel::AIR, &mats).is_none());
         // Every picture is eight squares each way.
         for (shape, word) in Shape::ALL {

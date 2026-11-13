@@ -116,6 +116,44 @@ impl GameWorld {
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
     }
 
+    /// The flowers and mushrooms growing on the columns of the square from `(x0, z0)`,
+    /// `span` voxels each way, as the chunks have them, each with its column. For
+    /// gathering; it leaves out what only the chunk knows (rock standing on the ground,
+    /// the turf about a tor, a stone step), so now and then it names a flower that a
+    /// boulder sits on. Nothing where the square crosses onto another continent.
+    pub fn flowers_in(&self, x0: i32, z0: i32, span: i32) -> Vec<((i32, i32), features::plants::Flower)> {
+        let (mx, mz) = cell_of(x0, z0);
+        if span <= 0 || cell_of(x0 + span, z0 + span) != (mx, mz) {
+            return Vec::new();
+        }
+        let Some(c) = self.continent_if_ready(mx, mz) else { return Vec::new() };
+        let (lx0, lz0) = (x0 - mx * MACRO_SIZE - 1, z0 - mz * MACRO_SIZE - 1);
+        let n = (span + 2) as usize;
+        let sampler = Sampler::new(&c, self.seed, lx0, lz0, span + 2);
+        let columns: Vec<Column> = (0..n * n).map(|i| sampler.column(lx0 + (i / n) as i32, lz0 + (i % n) as i32)).collect();
+        let mut out = Vec::new();
+        for px in 1..n - 1 {
+            for pz in 1..n - 1 {
+                let col = &columns[px * n + pz];
+                let (wx, wz) = (x0 - 1 + px as i32, z0 - 1 + pz as i32);
+                let ground = |x: usize, z: usize| columns[x * n + z].ground;
+                let steep = ((ground(px + 1, pz) - ground(px - 1, pz)) * 0.5).hypot((ground(px, pz + 1) - ground(px, pz - 1)) * 0.5);
+                let roll = unit(hash3(self.seed ^ 0x5cf, wx, col.top(), wz));
+                let patch = crate::surface::ground_patch(self.seed, wx as f64, wz as f64);
+                let mut growing = surface_materials(col, steep, roll, patch).0;
+                if growing == mat::ground_cover(col.biome) && col.cover == Cover::Land
+                    && let Some(f) = features::flower(col.biome, wx, wz, self.seed, roll)
+                {
+                    growing = f;
+                }
+                if let Some(f) = features::plants::flower_at(col, growing, wx, wz, self.seed) {
+                    out.push(((wx, wz), f));
+                }
+            }
+        }
+        out
+    }
+
     /// A good place to begin: on the bank of a river in the origin continent, in a
     /// valley with high ground around it, looking at the water.
     pub fn spawn_point(&self) -> Spawn {

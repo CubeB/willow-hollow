@@ -776,6 +776,19 @@ impl Running {
         let span = reach.ceil() as i32;
         let mats = self.world.materials();
         let mut best: Option<(f64, (i32, i32), inventory::Item)> = None;
+        // The flowers and mushrooms, which stand on the ground; those on ground far above
+        // or below the feet are out of reach.
+        for ((x, z), flower) in self.world.flowers_in(cx - span, cz - span, 2 * span + 1) {
+            let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
+            if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+                continue;
+            }
+            let ground = (feet - 4..=feet + 3).rev().find(|&y| mats.get(self.voxels.voxel(x, y, z)).kind == voxel::Kind::Solid);
+            if ground.is_some_and(|y| (y - feet).abs() <= 3) {
+                best = Some((d, (x, z), inventory::of_flower(flower)));
+            }
+        }
+        // And what the bushes bear.
         for z in cz - span..=cz + span {
             for x in cx - span..=cx + span {
                 let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
@@ -1690,12 +1703,14 @@ fn main() -> Result<()> {
         let mut sample = opts.shot_pack.then(|| {
             use worldgen::materials as mat;
             let mut pack = inventory::Pack::new();
-            let kinds = [mat::FLOWER_RED, mat::HEATHER, mat::FLOWER_BLUE, mat::HOLLY_BERRY, mat::REED_HEAD, mat::FLOWER_YELLOW, mat::GORSE_BLOOM, mat::FLOWER_PURPLE, mat::IVY_BERRY, mat::FLOWER_WHITE, mat::FLOWER_PINK];
-            for (k, v) in kinds.into_iter().enumerate() {
-                let item = inventory::of_voxel(v, world.materials()).expect("a thing to gather");
-                for _ in 0..[12, 3, 1, 7, 2, 31, 1, 5, 4, 1, 9][k] {
-                    pack.add(&item);
+            use worldgen::features::plants::Flower;
+            for (k, f) in Flower::ALL.iter().enumerate() {
+                for _ in 0..[12, 3, 1, 7, 2, 31, 1, 5, 4][k % 9] {
+                    pack.add(&inventory::of_flower(*f));
                 }
+            }
+            for v in [mat::HOLLY_BERRY, mat::REED_HEAD] {
+                pack.add(&inventory::of_voxel(v, world.materials()).expect("a thing to gather"));
             }
             pack.shift(10, 14);
             let mut view = inventory::View::default();
