@@ -57,6 +57,11 @@ const SHELTER_REACH: f32 = 2400.0;
 /// Half-width, in metres, of the country whose mean height and slope say whether it is a
 /// broad upland (see [`Site::broad_slope`]).
 const BROAD_REACH: f32 = 250.0;
+/// Half-width, in metres, of the ground whose mean slope is a spot's slope.
+const LOCAL_REACH: f32 = 60.0;
+/// Least area, in square metres, of a patch of one biome. A smaller patch is a speck no
+/// walker would notice as a place of its own, and is handed to the country around it.
+const LEAST_PATCH: f32 = 150_000.0;
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -102,6 +107,10 @@ pub(super) fn classify(
     let broad_slope = super::box_mean(&slopes, w, broad);
     let heights: Vec<f32> = height.iter().map(|h| h.max(0.0)).collect();
     let broad_height = super::box_mean(&heights, w, broad);
+    // The slope a biome answers to is that of the ground for a few dozen metres around,
+    // not of one cell: otherwise every hummock on a floodplain breaks its marsh into
+    // specks.
+    let local_slope = super::box_mean(&slopes, w, (LOCAL_REACH / metres).round() as usize);
 
     let mut out = vec![Biome::Ocean as u8; n];
     for z in 0..w {
@@ -118,7 +127,7 @@ pub(super) fn classify(
                 temperature: temperature[i],
                 rain: rain[i],
                 height: height[i],
-                slope: if ring { 0.1 } else { slope(level, height, x, z) },
+                slope: if ring { 0.1 } else { local_slope[i] },
                 wet: if ring { 0.0 } else { wet[i] },
                 coast: if ring { 0.0 } else { coast[i] },
                 shelter: if ring { 0.0 } else { 1.0 - smoothstep(0.36, 0.56, open[i]) },
@@ -130,7 +139,83 @@ pub(super) fn classify(
             out[i] = Biome::select(&site) as u8;
         }
     }
+    absorb_specks(level, &mut out, (LEAST_PATCH / (metres * metres)).round() as usize);
     out
+}
+
+/// Hands each patch of one biome smaller than `least` cells to the land biome it shares
+/// the most edge with, so the map is made of places rather than confetti. Snow, the
+/// meadows under it and volcanic ground keep their small patches: they mark summits and
+/// cones, however small. So does any patch on the border ring, whose biome the cell next
+/// door must agree on. Each round judges every patch against the map as it stood before
+/// the round, so the outcome does not hang on the order patches are visited in; a second
+/// round settles specks whose neighbours were all specks themselves.
+fn absorb_specks(level: &Level, biome: &mut [u8], least: usize) {
+    let w = level.w;
+    let n = w * w;
+    let keep = |b: u8| b == Biome::Alpine as u8 || b == Biome::AlpineMeadow as u8 || b == Biome::Volcanic as u8;
+    // The cells beside `i` that lie on the grid.
+    let around = |i: usize| {
+        let (x, z) = (i % w, i / w);
+        [(x > 0, i.wrapping_sub(1)), (x + 1 < w, i + 1), (z > 0, i.wrapping_sub(w)), (z + 1 < w, i + w)]
+            .into_iter()
+            .filter_map(|(inside, j)| inside.then_some(j))
+    };
+    let mut seen = vec![false; n];
+    let mut cells: Vec<usize> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    for _ in 0..2 {
+        seen.fill(false);
+        let mut changes: Vec<(usize, u8)> = Vec::new();
+        for start in 0..n {
+            if level.ocean[start] || seen[start] {
+                continue;
+            }
+            let b = biome[start];
+            cells.clear();
+            seen[start] = true;
+            stack.push(start);
+            let mut ring = false;
+            while let Some(i) = stack.pop() {
+                cells.push(i);
+                let (x, z) = (i % w, i / w);
+                ring |= x == 0 || z == 0 || x == w - 1 || z == w - 1;
+                for j in around(i) {
+                    if !level.ocean[j] && !seen[j] && biome[j] == b {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            if ring || keep(b) || cells.len() >= least {
+                continue;
+            }
+            // The biome along the most of its edge.
+            let mut edge = [0u32; Biome::ALL.len()];
+            for &i in &cells {
+                for j in around(i) {
+                    if !level.ocean[j] && biome[j] != b {
+                        edge[biome[j] as usize] += 1;
+                    }
+                }
+            }
+            let mut best = None;
+            for (k, &count) in edge.iter().enumerate() {
+                if count > 0 && best.is_none_or(|(_, c)| count > c) {
+                    best = Some((k, count));
+                }
+            }
+            if let Some((k, _)) = best {
+                changes.extend(cells.iter().map(|&i| (i, k as u8)));
+            }
+        }
+        if changes.is_empty() {
+            break;
+        }
+        for (i, b) in changes {
+            biome[i] = b;
+        }
+    }
 }
 
 /// Heaps the sand of a dune sea into ridges across the wind, once drainage is settled.
