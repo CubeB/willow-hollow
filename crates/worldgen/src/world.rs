@@ -120,6 +120,26 @@ impl GameWorld {
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
     }
 
+    /// The small delights left beside the trails (see [`trails::delights`]) within
+    /// `reach` voxels of the column at `(x, z)`, each with the world voxel its foot
+    /// stands in. Never blocks: nothing from a continent not yet simulated. This is how
+    /// the game finds the wind chimes near the player, for when they have a sound.
+    pub fn delights_near(&self, x: i32, z: i32, reach: i32) -> Vec<(trails::delights::Delight, IVec3)> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
+                out.extend(c.trails.delights.iter().map(|d| (d.kind, d.at + origin)).filter(|(_, at)| {
+                    let (dx, dz) = ((at.x - x) as i64, (at.z - z) as i64);
+                    dx * dx + dz * dz <= reach as i64 * reach as i64
+                }));
+            }
+        }
+        out
+    }
+
     /// Picks what grows on the column at `(x, z)`: columns built from now on have nothing
     /// growing there, and [`Self::flowers_in`] no longer names it. Whoever shows the
     /// column must build it again to see it gone.

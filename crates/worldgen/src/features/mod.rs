@@ -325,6 +325,30 @@ fn flora(biome: Biome) -> Flora {
     }
 }
 
+/// The bark of the trees a biome's builders have to hand: its commonest tree, where it
+/// is wooded enough to build from. `None` in open country, where timber is carried in.
+pub fn timber(biome: Biome) -> Option<voxel::Voxel> {
+    let fl = flora(biome);
+    if fl.giant_density.max(fl.tree_density) < 0.2 {
+        return None;
+    }
+    let list = if fl.giant_density > fl.tree_density { fl.giants } else { fl.trees };
+    let (species, _) = list.iter().max_by(|a, b| a.1.total_cmp(&b.1))?;
+    Some(match species {
+        Species::Oak | Species::ElderOak | Species::Maple | Species::Cherry | Species::HolmOak => mat::BARK_OAK,
+        Species::Birch => mat::BARK_BIRCH,
+        Species::Spruce | Species::TallPine => mat::BARK_PINE,
+        Species::ScotsPine => mat::BARK_SCOTS,
+        Species::Redwood => mat::BARK_REDWOOD,
+        Species::Jungle | Species::Kapok => mat::BARK_JUNGLE,
+        Species::Willow => mat::BARK_WILLOW,
+        Species::Acacia => mat::BARK_ACACIA,
+        Species::Baobab => mat::BARK_BAOBAB,
+        Species::Palm => mat::BARK_PALM,
+        _ => return None,
+    })
+}
+
 /// Canopy colour, relative cover and height in 0.8 m blocks of a biome's forest, for
 /// drawing it from afar.
 pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {

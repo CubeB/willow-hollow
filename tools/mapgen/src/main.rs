@@ -435,10 +435,10 @@ fn print_trail_poi(c: &Continent, seed: u32) {
     use worldgen::{surface::Sampler, trails::build::class_of};
     let local = |x: f32, z: f32| (c.desc.mx * MACRO_SIZE + x as i32, c.desc.mz * MACRO_SIZE + z as i32);
     let column = |x: f32, z: f32| Sampler::new(c, seed, x as i32, z as i32, 1).column(x as i32, z as i32);
-    for (kind, at) in &c.trails.markers {
-        let (x, z) = local(at.x as f32, at.z as f32);
-        // A place to look at it from: on its trail, a few metres back along it.
-        let (mx, mz) = (at.x as f32 + 0.5, at.z as f32 + 0.5);
+    // A place to look at something beside a trail from: on its trail, a few metres back
+    // along it, with the way to face.
+    let view = |ax: i32, az: i32| {
+        let (mx, mz) = (ax as f32 + 0.5, az as f32 + 0.5);
         let mut best = (f32::MAX, 0, 0);
         for (n, line) in c.trails.lines.iter().enumerate() {
             for (k, p) in line.iter().enumerate() {
@@ -452,8 +452,18 @@ fn print_trail_poi(c: &Continent, seed: u32) {
         let back = line[best.2.saturating_sub(1)];
         let (vx, vz) = local(back.x, back.y);
         let yaw = (mz - back.y).atan2(mx - back.x).to_degrees();
-        println!("  poi marker     {x},{z}  {kind:?}  view {vx},{vz} yaw {yaw:.0}");
+        format!("view {vx},{vz} yaw {yaw:.0}")
+    };
+    for (kind, at) in &c.trails.markers {
+        let (x, z) = local(at.x as f32, at.z as f32);
+        println!("  poi marker     {x},{z}  {kind:?}  {}", view(at.x, at.z));
     }
+    // The small delights: few enough that each is worth going to see.
+    for d in &c.trails.delights {
+        let (x, z) = local(d.at.x as f32, d.at.z as f32);
+        println!("  poi delight    {x},{z}  {:?} at {}, for {}  {}", d.kind, d.at.y, d.kind.reason(), view(d.at.x, d.at.z));
+    }
+    println!("  {} delights beside {} markers", c.trails.delights.len(), c.trails.markers.len());
     for (line, widths) in c.trails.lines.iter().zip(&c.trails.line_widths) {
         for k in (4..line.len().saturating_sub(4)).step_by(32) {
             let (a, b) = (column(line[k - 1].x, line[k - 1].y), column(line[k + 1].x, line[k + 1].y));

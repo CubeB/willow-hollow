@@ -21,7 +21,6 @@ use voxel::{
 use super::build::{TrailClass, class_of};
 use crate::{
     biome::Biome,
-    features::landmarks::Palette,
     materials as mat,
     noise::{hash2, perlin2},
     scale::{m, m64},
@@ -209,7 +208,8 @@ pub fn step(col: &Column, w: &Worn, patch: f32, seed: u32, wx: i32, wz: i32) -> 
     }
     let ground = tread(col, w, patch);
     let log = Step::Log(if ground == Tread::Needles { mat::BARK_PINE } else { mat::BARK_OAK });
-    let stone = Step::Stone(Palette::of(col.biome).stone);
+    // Stone steps are of the rock the path climbs over.
+    let stone = Step::Stone(mat::masonry(crate::surface::local_rock(seed, col.biome, wx, col.top(), wz)).0);
     Some(match ground {
         Tread::Bog | Tread::Snow | Tread::Ash => return None,
         Tread::Rock | Tread::Gravel | Tread::Sand => stone,
@@ -463,7 +463,9 @@ mod tests {
             c.worn.as_mut().unwrap().under = Cover::Scree;
         }
         let stone = (1..PAD - 1).find_map(|px| nose(&scree, px, 5, 0.5));
-        assert_eq!(stone.map(|s| s.0), Some(Step::Stone(Palette::of(Biome::Deciduous).stone)));
+        // Of the rock in the ground there: one of the grey beds of a broadleaf wood.
+        let beds = [mat::STONE, mat::ROCK_DARK, mat::ROCK_PALE, mat::ROCK_BROWN];
+        assert!(matches!(stone.map(|s| s.0), Some(Step::Stone(v)) if beds.contains(&v)), "{:?}", stone.map(|s| s.0));
     }
 
     #[test]

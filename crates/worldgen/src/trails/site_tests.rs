@@ -11,6 +11,7 @@ use super::{CLEARING, Network, Pad, Reason};
 use crate::{
     continent::{Continent, SimConfig},
     features::{self, landmarks::Landmark, trees::Species},
+    materials as mat,
     scale::m,
     surface::{Cover, Sampler, TERRACE_RING},
     world::GameWorld,
@@ -325,4 +326,93 @@ fn trees_are_felled_about_kept_sites_and_grow_back_about_old_ones() {
     assert!(far > 20.0, "too few trees about the sites to judge: {far}");
     assert!(near_d < far_d * 0.6, "trees stand as thick by kept sites ({near_d:.2}) as further out ({far_d:.2})");
     assert!(stumps > 0, "no stumps left about kept sites");
+}
+
+/// The rocks of the strata, and so of everything built (#119).
+const ROCKS: [voxel::Voxel; 13] = [
+    mat::STONE,
+    mat::ROCK_DARK,
+    mat::ROCK_PALE,
+    mat::ROCK_BROWN,
+    mat::SANDSTONE,
+    mat::SANDSTONE_DARK,
+    mat::SANDSTONE_RED,
+    mat::RED_ROCK,
+    mat::RED_ROCK_DARK,
+    mat::GRANITE,
+    mat::GRANITE_GREY,
+    mat::GRANITE_PALE,
+    mat::BASALT,
+];
+
+#[test]
+fn the_rock_of_a_place_is_the_rock_of_its_country() {
+    use crate::{biome::Biome, features::landmarks::Palette};
+    let granite = [mat::GRANITE, mat::GRANITE_GREY, mat::GRANITE_PALE];
+    let red = [mat::RED_ROCK, mat::RED_ROCK_DARK, mat::SANDSTONE_RED, mat::SANDSTONE, mat::SANDSTONE_DARK];
+    let grey = [mat::STONE, mat::ROCK_DARK, mat::ROCK_PALE, mat::ROCK_BROWN];
+    let mut woods = std::collections::HashSet::new();
+    for k in 0..400 {
+        let (x, y, z) = (k * 173 - 30_000, 40 + k % 160, k * 91 + 7);
+        let at = |biome| Palette::at(9, biome, x, y, z);
+        let moor = at(Biome::Moor);
+        assert!(granite.contains(&moor.stone) && granite.contains(&moor.stone_dark), "moor built of {:?}", moor.stone);
+        let rr = at(Biome::RedRock);
+        assert!(red.contains(&rr.stone) && red.contains(&rr.stone_dark), "red rock country built of {:?}", rr.stone);
+        // Sandstone country is sandstone, never the odd grey bed among it.
+        let sand = [mat::SANDSTONE, mat::SANDSTONE_DARK, mat::SANDSTONE_RED, mat::RED_ROCK];
+        for dry in [Biome::Desert, Biome::DuneSea, Biome::Savanna, Biome::Heath] {
+            let p = at(dry);
+            assert!(sand.contains(&p.stone) && sand.contains(&p.stone_dark), "{dry:?} built of {:?} and {:?}", p.stone, p.stone_dark);
+        }
+        let wood = at(Biome::Deciduous);
+        assert!(grey.contains(&wood.stone) && grey.contains(&wood.stone_dark));
+        woods.insert(wood.stone);
+        assert_eq!(at(Biome::Volcanic).stone, mat::BASALT);
+        // The stone is the bed a cliff there shows, and the second stone differs from it.
+        for biome in Biome::ALL {
+            let p = at(biome);
+            assert_eq!(p.stone, mat::masonry(crate::surface::local_rock(9, biome, x, y, z)).0);
+            assert_ne!(p.stone, p.stone_dark);
+            assert!(ROCKS.contains(&p.stone) && ROCKS.contains(&p.stone_dark));
+        }
+    }
+    assert!(woods.len() >= 3, "every wood is built of the same stone: {woods:?}");
+    // Timber is the trees of the country where it is wooded.
+    assert_eq!(Palette::at(9, Biome::BirchGrove, 0, 60, 0).wood, mat::BARK_BIRCH);
+    assert_eq!(Palette::at(9, Biome::OldGrowth, 0, 60, 0).wood, mat::BARK_REDWOOD);
+    assert_eq!(Palette::at(9, Biome::Desert, 0, 60, 0).wood, Palette::of(Biome::Desert).wood);
+}
+
+#[test]
+fn sites_are_built_of_the_rock_under_them() {
+    use crate::{features::landmarks::Palette, macro_layout::MACRO_SIZE};
+    let w = world();
+    let c = w.continent(0, 0);
+    let net = &c.trails;
+    let (mut judged, mut stones) = (0, std::collections::HashSet::new());
+    for s in &net.sites {
+        let biome = Sampler::new(&c, w.seed(), s.x, s.z, 1).column(s.x, s.z).biome;
+        let want = Palette::at(w.seed(), biome, c.desc.mx * MACRO_SIZE + s.x, s.y - 1, c.desc.mz * MACRO_SIZE + s.z);
+        let r = s.kind.radius() as i32;
+        let (mut own, mut other) = (0, 0);
+        for stamp in &net.stamps {
+            for &(q, v) in &stamp.voxels {
+                if (q.x - s.x).abs() > r || (q.z - s.z).abs() > r || !ROCKS.contains(&v) {
+                    continue;
+                }
+                if v == want.stone || v == want.stone_dark { own += 1 } else { other += 1 }
+            }
+        }
+        if own + other < 20 {
+            continue;
+        }
+        judged += 1;
+        stones.insert(want.stone);
+        // A lantern or a marker a little up or down the hill may stand on another bed.
+        assert!(other * 10 <= own, "{:?} at {},{}: {other} blocks of other rock to {own} of {:?}", s.kind, s.x, s.z, want.stone);
+    }
+    println!("{judged} sites of {} judged, built of {stones:?}", net.sites.len());
+    assert!(judged >= 10, "too few sites with stonework to judge: {judged}");
+    assert!(stones.len() >= 3, "every site is built of the same stone: {stones:?}");
 }

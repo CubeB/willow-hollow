@@ -53,23 +53,28 @@ pub struct Model {
 }
 
 impl Model {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Model { voxels: Vec::new(), fine: Vec::new() }
     }
 
     /// A fixed box, in cells from the corner of model voxel 0.
-    fn b(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel) {
-        debug_assert!(lo.0 < hi.0 && lo.1 < hi.1 && lo.2 < hi.2, "empty marker part");
-        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo: false, sway_hi: false, thin: 0, season: 0 });
+    pub(super) fn b(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel) {
+        self.part(lo, hi, v, false, false);
     }
 
-    fn vox(&mut self, x: i32, y: i32, z: i32, v: Voxel) {
+    /// A box whose bottom (`sway_lo`) or top (`sway_hi`) moves in the wind.
+    pub(super) fn part(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel, sway_lo: bool, sway_hi: bool) {
+        debug_assert!(lo.0 < hi.0 && lo.1 < hi.1 && lo.2 < hi.2, "empty marker part");
+        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo, sway_hi, thin: 0, season: 0 });
+    }
+
+    pub(super) fn vox(&mut self, x: i32, y: i32, z: i32, v: Voxel) {
         self.voxels.push((IVec3::new(x, y, z), v));
     }
 }
 
 /// Depth of every marker's footing below the ground it stands on, in voxels.
-const FOOTING: i32 = 2;
+pub(super) const FOOTING: i32 = 2;
 
 /// Builds a marker from the palette of the country it stands in, varied by `seed`.
 pub fn model(kind: Marker, p: &Palette, seed: u32) -> Model {
@@ -173,7 +178,7 @@ const MIN_GAP: usize = 30;
 
 /// Whether a trail crosses stony ground at a column of the bare land: rock, scree, the
 /// high bare country, or anywhere as high as trails have thinned to mountain paths.
-fn stony(col: &Column) -> bool {
+pub(super) fn stony(col: &Column) -> bool {
     matches!(col.cover, Cover::Cliff | Cover::Scree | Cover::Shingle | Cover::Boulders)
         || matches!(col.biome, Biome::Alpine | Biome::Tundra | Biome::AlpineMeadow | Biome::Volcanic | Biome::RedRock)
         || col.ground > super::build::HIGH.1
@@ -196,7 +201,7 @@ pub struct Trail<'a> {
 }
 
 impl Trail<'_> {
-    fn carried(&self, i: usize) -> bool {
+    pub(super) fn carried(&self, i: usize) -> bool {
         self.carried.iter().any(|&(a, b)| (a.saturating_sub(6)..=b + 6).contains(&i))
     }
 
@@ -217,7 +222,7 @@ impl Trail<'_> {
 
     /// Height of the ground that will be at `q` once the trail is down: the bare
     /// ground drawn toward the nearest point of this trail as its shoulder draws it.
-    fn ground_at(&self, bare: &Column, q: Vec2, i: usize) -> f32 {
+    pub(super) fn ground_at(&self, bare: &Column, q: Vec2, i: usize) -> f32 {
         let (lo, hi) = (i.saturating_sub(24), (i + 25).min(self.pts.len()));
         let nearest = (lo..hi)
             .filter(|&k| self.worn[k] > 0.0)
@@ -229,7 +234,7 @@ impl Trail<'_> {
     }
 
     /// Whether any column in `foot` is on the walked way of this trail near step `i`.
-    fn on_way(&self, foot: &[IVec2], i: usize) -> bool {
+    pub(super) fn on_way(&self, foot: &[IVec2], i: usize) -> bool {
         let (lo, hi) = (i.saturating_sub(40), (i + 40).min(self.pts.len()));
         foot.iter().any(|c| {
             let c = c.as_vec2() + 0.5;
@@ -342,7 +347,7 @@ fn place(c: &Continent, seed: u32, t: &Trail, i: usize, kind: Marker, taken: &[V
             _ => turns_toward(-normal * side),
         };
         let biome = bare.biome;
-        let palette = Palette::of(biome).varied(hash2(seed ^ 0x3a81, x >> 6, z >> 6));
+        let palette = super::build::palette_at(c, seed, biome, x, ground, z).varied(hash2(seed ^ 0x3a81, x >> 6, z >> 6));
         let m = model(kind, &palette, pick);
         let origin = IVec3::new(x, ground + 1, z);
         let voxels: Vec<(IVec3, Voxel)> = m.voxels.iter().map(|&(p, v)| (origin + rotate(p, turns), v)).collect();
@@ -376,7 +381,7 @@ fn place(c: &Continent, seed: u32, t: &Trail, i: usize, kind: Marker, taken: &[V
 }
 
 /// Quarter turns that best point a model's +X along `d`.
-fn turns_toward(d: Vec2) -> u32 {
+pub(super) fn turns_toward(d: Vec2) -> u32 {
     let axes = [vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(0.0, -1.0)];
     (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
 }
