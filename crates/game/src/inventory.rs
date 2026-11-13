@@ -1,13 +1,13 @@
 //! The pack: what the player has gathered on their way, and the window that shows it.
 //!
 //! A pack is a few rows of slots, each holding a stack of one kind of thing. Things are
-//! gathered with the interact key from what grows within reach; the world itself is not
-//! changed by it, so each spot gives only once (the pack remembers where). The window
+//! gathered with the interact key from what grows within reach. The pack remembers where
+//! and when, so a picked flower stays gone, and grows back a year or two on. The window
 //! shows the slots as a grid of small pictures drawn in squares, as everything here is:
 //! drag one onto another to move, join or swap them, click one to read about it or let
 //! it go. A pack is kept with its world's save.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use voxel::Voxel;
 use worldgen::{features::plants::Flower, materials as mat};
@@ -17,9 +17,9 @@ pub const SLOTS: usize = 24;
 pub const ACROSS: usize = 6;
 /// Most of one kind a slot holds.
 pub const STACK: u32 = 99;
-/// How many gathered spots are remembered; the oldest are forgotten first, by which
-/// time they are a long walk behind.
-const REMEMBERED: usize = 4000;
+/// How many gathered spots are remembered; the oldest are forgotten first (and so grow
+/// back early), by which time they are a long walk behind.
+const REMEMBERED: usize = 20_000;
 
 /// How a thing is drawn in its slot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -139,9 +139,13 @@ pub struct Stack {
 
 pub struct Pack {
     slots: Vec<Option<Stack>>,
-    /// The columns of the world already gathered from, and the order they were.
-    gathered: HashSet<(i32, i32)>,
+    /// The columns of the world gathered from and not yet grown back, each with when it
+    /// was (in `years`), and the order they were.
+    gathered: HashMap<(i32, i32), f64>,
     order: VecDeque<(i32, i32)>,
+    /// How long this world has been walked, in its own years: the clock that what was
+    /// gathered grows back by.
+    years: f64,
     /// Changed since it was last saved.
     pub unsaved: bool,
 }
@@ -154,7 +158,7 @@ impl Default for Pack {
 
 impl Pack {
     pub fn new() -> Self {
-        Self { slots: vec![None; SLOTS], gathered: HashSet::new(), order: VecDeque::new(), unsaved: false }
+        Self { slots: vec![None; SLOTS], gathered: HashMap::new(), order: VecDeque::new(), years: 0.0, unsaved: false }
     }
 
     pub fn slots(&self) -> &[Option<Stack>] {
@@ -211,20 +215,55 @@ impl Pack {
 
     /// Whether the column at `(x, z)` has been gathered from.
     pub fn gathered(&self, x: i32, z: i32) -> bool {
-        self.gathered.contains(&(x, z))
+        self.gathered.contains_key(&(x, z))
     }
 
-    /// Remembers that the column at `(x, z)` has been gathered from.
-    pub fn mark(&mut self, x: i32, z: i32) {
-        if self.gathered.insert((x, z)) {
-            self.order.push_back((x, z));
-            if self.order.len() > REMEMBERED
-                && let Some(old) = self.order.pop_front()
-            {
-                self.gathered.remove(&old);
-            }
-            self.unsaved = true;
+    /// Every column gathered from and not yet grown back.
+    pub fn spots(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.order.iter().copied()
+    }
+
+    /// Remembers that the column at `(x, z)` has been gathered from, now. The spot
+    /// forgotten to make room for it, if one was, which is free to grow back.
+    pub fn mark(&mut self, x: i32, z: i32) -> Option<(i32, i32)> {
+        self.mark_at(x, z, self.years)
+    }
+
+    fn mark_at(&mut self, x: i32, z: i32, when: f64) -> Option<(i32, i32)> {
+        if self.gathered.insert((x, z), when).is_some() {
+            return None;
         }
+        self.unsaved = true;
+        self.order.push_back((x, z));
+        let old = (self.order.len() > REMEMBERED).then(|| self.order.pop_front()).flatten()?;
+        self.gathered.remove(&old);
+        Some(old)
+    }
+
+    /// How long after it is gathered the spot at `(x, z)` has grown back, in years: one
+    /// to two, each spot its own.
+    pub fn grows_back_after(x: i32, z: i32) -> f64 {
+        1.0 + worldgen::noise::unit(worldgen::noise::hash3(0x9e0b, x, 0, z)) as f64
+    }
+
+    /// Moves the world's clock on by `years`, and takes out of the gathered spots those
+    /// that have grown back by now, which it returns.
+    pub fn pass(&mut self, years: f64) -> Vec<(i32, i32)> {
+        if self.gathered.is_empty() {
+            return Vec::new();
+        }
+        self.years += years;
+        self.unsaved |= years > 0.0;
+        let now = self.years;
+        let back: Vec<(i32, i32)> = self.gathered.iter().filter(|&(&(x, z), &when)| now >= when + Self::grows_back_after(x, z)).map(|(at, _)| *at).collect();
+        if !back.is_empty() {
+            for at in &back {
+                self.gathered.remove(at);
+            }
+            let gathered = &self.gathered;
+            self.order.retain(|at| gathered.contains_key(at));
+        }
+        back
     }
 
     /// The pack as a save holds it: a line to a slot, each telling all there is to know
@@ -238,8 +277,11 @@ impl Pack {
                 out += &format!("slot {i} = {}|{}|{r},{g},{b}|{}|{}|{}\n", s.count, s.item.shape.word(), clean(&s.item.id), clean(&s.item.name), clean(&s.item.about));
             }
         }
+        if !self.order.is_empty() {
+            out += &format!("years = {}\n", self.years);
+        }
         for chunk in self.order.iter().collect::<Vec<_>>().chunks(64) {
-            let spots: Vec<String> = chunk.iter().map(|(x, z)| format!("{x},{z}")).collect();
+            let spots: Vec<String> = chunk.iter().map(|at| format!("{},{},{}", at.0, at.1, self.gathered[*at])).collect();
             out += &format!("gathered = {}\n", spots.join(";"));
         }
         out
@@ -251,12 +293,17 @@ impl Pack {
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             let (key, value) = (key.trim(), value.trim());
-            if key == "gathered" {
+            if key == "years" {
+                pack.years = value.parse::<f64>().ok().filter(|y| y.is_finite() && *y >= 0.0).unwrap_or(0.0);
+            } else if key == "gathered" {
+                // Each spot with when it was gathered; an older save has only the spot.
                 for spot in value.split(';') {
-                    if let Some((x, z)) = spot.split_once(',')
-                        && let (Ok(x), Ok(z)) = (x.trim().parse(), z.trim().parse())
+                    let mut parts = spot.split(',').map(str::trim);
+                    if let (Some(x), Some(z)) = (parts.next(), parts.next())
+                        && let (Ok(x), Ok(z)) = (x.parse(), z.parse())
                     {
-                        pack.mark(x, z);
+                        let when = parts.next().and_then(|w| w.parse::<f64>().ok()).filter(|w| w.is_finite()).unwrap_or(0.0);
+                        pack.mark_at(x, z, when);
                     }
                 }
             } else if let Some(at) = key.strip_prefix("slot ").and_then(|n| n.trim().parse::<usize>().ok()) {
@@ -436,6 +483,7 @@ pub fn show(ctx: &egui::Context, pack: &mut Pack, view: &mut View) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn thing(id: &str) -> Item {
         Item::new(id, "A thing", "About it.", [200, 100, 50], Shape::Flower)
@@ -505,6 +553,36 @@ mod tests {
         assert_eq!((reed.item.shape, reed.item.color, reed.item.about.as_str()), (Shape::Reed, [112, 84, 54], "A velvet head   from the water's edge."));
         assert!(back.gathered(-100, 0) && back.gathered(347, -149) && !back.gathered(5, 5));
         assert_eq!(back.to_text(), text.replace(" | ", "   "));
+        // A save from before spots had dates still reads.
+        assert!(Pack::from_text("gathered = 4,5;6,-7\n").gathered(6, -7));
+    }
+
+    #[test]
+    fn what_was_gathered_grows_back_in_a_year_or_two() {
+        let mut pack = Pack::new();
+        assert!(pack.pass(5.0).is_empty());
+        for k in 0..200 {
+            pack.mark(k, 7 - k);
+        }
+        // Nothing within the year; all of it within two; each spot in its own time.
+        assert!(pack.pass(0.99).is_empty());
+        let mut back = 0;
+        let mut seen = Vec::new();
+        for _ in 0..21 {
+            let now = pack.pass(0.05);
+            back += now.len();
+            seen.push(now.len());
+            assert!(now.iter().all(|&(x, z)| !pack.gathered(x, z)));
+        }
+        assert_eq!(back, 200, "{seen:?}");
+        assert!(seen.iter().filter(|n| **n > 0).count() > 10, "{seen:?}");
+        assert_eq!(pack.spots().count(), 0);
+        // The clock and the dates come back from a save.
+        pack.mark(1, 2);
+        pack.pass(0.5);
+        let mut again = Pack::from_text(&pack.to_text());
+        assert!(again.gathered(1, 2));
+        assert_eq!(again.pass(Pack::grows_back_after(1, 2) - 0.5 + 1e-6), vec![(1, 2)]);
     }
 
     #[test]

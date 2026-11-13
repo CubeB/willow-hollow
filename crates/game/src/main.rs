@@ -107,6 +107,8 @@ struct Options {
     shot_map: Option<Option<f64>>,
     /// Show the pack's window on a screenshot, with a few things in it.
     shot_pack: bool,
+    /// Pick every flower within this many metres of the camera before a screenshot.
+    picked: Option<f32>,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
 }
@@ -137,6 +139,7 @@ impl Default for Options {
             ambient: 8.0,
             shot_map: None,
             shot_pack: false,
+            picked: None,
             walked: Vec::new(),
         }
     }
@@ -167,6 +170,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --map FILE            write a map of the continent around the start to a PNG, then exit
   --minimap             draw the corner map on a screenshot
   --pack                show the pack's window on a screenshot, with a few things in it
+  --picked M            pick every flower within M metres before a screenshot
   --bigmap KM           draw the large map, KM across, on a screenshot
   --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
                         to the start
@@ -238,6 +242,7 @@ fn parse_args() -> Result<Options> {
             "--map" => o.map = Some(value()?.into()),
             "--minimap" => o.shot_map = Some(None),
             "--pack" => o.shot_pack = true,
+            "--picked" => o.picked = Some(value()?.parse()?),
             "--bigmap" => o.shot_map = Some(Some(m64(value()?.parse::<f64>()? * 1000.0))),
             "--walked" => {
                 for p in value()?.split(';') {
@@ -313,6 +318,9 @@ fn fullscreen(on: bool) -> Option<winit::window::Fullscreen> {
     on.then_some(winit::window::Fullscreen::Borderless(None))
 }
 
+/// How far round the camera (metres) flowers are looked for, for butterflies to rise from.
+const BUTTERFLY_REACH: f32 = 12.0;
+
 /// How close a boat must be to climb aboard.
 const BOARD_REACH: f64 = m64(4.8);
 
@@ -335,15 +343,14 @@ fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
     })
 }
 
-/// Samples voxels around the camera for leaves (to shed) and flowers (for butterflies),
-/// and reads the biome. Cheap enough to do every couple of seconds.
+/// Samples voxels around the camera for leaves (to shed), asks the world which flowers
+/// stand near (for butterflies), and reads the biome. Cheap enough to do every couple of seconds.
 fn scan_surroundings(
     world: &GameWorld,
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
 ) -> Scan {
-    use worldgen::materials as mat;
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;
     let (mut leaves, mut flowers) = (Vec::new(), Vec::new());
@@ -387,16 +394,18 @@ fn scan_surroundings(
                 break;
             }
             if kind == voxel::Kind::Solid {
-                if matches!(
-                    v,
-                    mat::FLOWER_RED | mat::FLOWER_YELLOW | mat::FLOWER_WHITE | mat::FLOWER_PURPLE
-                        | mat::FLOWER_BLUE | mat::FLOWER_PINK | mat::HEATHER
-                ) {
-                    flowers.push((DVec3::new(x as f64, y as f64, z as f64), to_linear(mats.get(v).color)));
-                }
                 break;
             }
             below = v;
+        }
+    }
+    // The flowers are plants standing on the ground, not voxels of it: the world names
+    // them. Mushrooms draw no butterflies, and a picked flower is no longer there.
+    let reach = m(BUTTERFLY_REACH) as i32;
+    for (at, flower) in world.flowers_standing(cx - reach, cz - reach, 2 * reach + 1) {
+        use worldgen::features::plants::Flower;
+        if !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) && (at.y as f64 - camera.y).abs() < m64(12.0) {
+            flowers.push((at.as_dvec3(), to_linear(flower.color())));
         }
     }
     (biome, leaves, flowers, low_ground(world, cx, cz))
@@ -504,6 +513,10 @@ struct Running {
     reach_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
+    /// Game years gone by since what was gathered was last looked over for regrowth,
+    /// and how long until it is looked over again.
+    grown: f64,
+    grow_timer: f32,
     quit: bool,
     /// Distance walked since the last footstep, and how many there have been.
     stride: f32,
@@ -598,6 +611,10 @@ impl Running {
         // and the GPU, instead of waiting its turn after them.
         log::info!("world seed {0} (run with --seed {0} to come back to it)", settings.seed);
         let world = Arc::new(GameWorld::new(settings.seed));
+        // What was picked before is still gone.
+        for (x, z) in pack.spots() {
+            world.pick(x, z);
+        }
         let first_column = opts.over.map(|(x, z, _)| (x, z)).or(progress.map(|p| (p.pos.x.floor() as i32, p.pos.z.floor() as i32)));
         let warming = world.clone();
         std::thread::spawn(move || {
@@ -685,6 +702,8 @@ impl Running {
             within_reach: None,
             reach_timer: 0.0,
             notice: None,
+            grown: 0.0,
+            grow_timer: 0.0,
             quit: false,
             stride: 0.0,
             steps: 0,
@@ -815,7 +834,13 @@ impl Running {
     fn gather(&mut self) {
         let Some(((x, z), item)) = self.find_within_reach() else { return };
         let word = if self.pack.add(&item) {
-            self.pack.mark(x, z);
+            // It is gone from where it grew, until it grows back.
+            if let Some((ox, oz)) = self.pack.mark(x, z) {
+                self.world.regrow(ox, oz);
+                self.streamer.replant(ox, oz);
+            }
+            self.world.pick(x, z);
+            self.streamer.replant(x, z);
             format!("{}  \u{d7} {}", item.name, self.pack.count(&item.id))
         } else {
             "Your pack is full".to_string()
@@ -1107,7 +1132,22 @@ impl Running {
             let date = season::advance(self.env.date, days, self.settings.year_days);
             self.env = Environment::at(self.env.time + days * 24.0, date);
         }
+        // What was gathered a year or two ago has grown back: looked over now and then.
+        self.grown += (days / self.settings.year_days.max(1.0)) as f64;
+        self.grow_timer -= dt;
+        if self.grow_timer <= 0.0 {
+            self.grow_timer = 1.0;
+            for (x, z) in self.pack.pass(std::mem::take(&mut self.grown)) {
+                self.world.regrow(x, z);
+                self.streamer.replant(x, z);
+            }
+        }
         self.save_timer -= dt;
+        // On white ground what falls is snow.
+        let white = self.weather.ground(self.env.date, self.warmth).depth(self.camera.pos.y as f32 / worldgen::scale::VOXELS_PER_METRE);
+        // (And in the cold biomes all winter, whatever lies.)
+        let cold = self.warmth < 0.0 && season::snow_cover(self.env.date) > 0.5;
+        self.weather.snowy = if cold { 1.0 } else { ((white - 0.1) / 0.1).clamp(0.0, 1.0) };
         self.weather.update(dt, days, self.env.date, self.settings.year_days, self.warmth, self.settings.seed);
         self.warmth += (season::warmth(self.biome) - self.warmth) * (1.0 - (-0.4 * dt).exp());
         // The air changes more slowly than the ground: haze does not end at a biome's edge.
@@ -1631,6 +1671,14 @@ fn main() -> Result<()> {
         // Screenshots are clear unless a weather is asked for.
         let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
+        if let Some(metres) = opts.picked {
+            let (reach, x, z) = (m(metres) as i32, camera.pos.x.floor() as i32, camera.pos.z.floor() as i32);
+            let all = world.flowers_in(x - reach, z - reach, 2 * reach + 1);
+            log::info!("picking {} flowers", all.len());
+            for ((x, z), _) in all {
+                world.pick(x, z);
+            }
+        }
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());

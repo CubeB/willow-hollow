@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 use glam::{IVec3, Vec3};
@@ -43,6 +43,9 @@ pub struct GameWorld {
     placed: features::PlaceCache,
     /// The moor's tors and stonework laid out lately, by world cell.
     tors: features::tor::Cache,
+    /// The columns whose flower has been picked: nothing grows on them until it is
+    /// back (see `pick`).
+    picked: RwLock<HashSet<(i32, i32)>>,
 }
 
 impl GameWorld {
@@ -61,6 +64,7 @@ impl GameWorld {
             caves: Default::default(),
             placed: Default::default(),
             tors: Default::default(),
+            picked: Default::default(),
         }
     }
 
@@ -116,12 +120,31 @@ impl GameWorld {
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
     }
 
+    /// Picks what grows on the column at `(x, z)`: columns built from now on have nothing
+    /// growing there, and [`Self::flowers_in`] no longer names it. Whoever shows the
+    /// column must build it again to see it gone.
+    pub fn pick(&self, x: i32, z: i32) {
+        self.picked.write().expect("picked columns poisoned").insert((x, z));
+    }
+
+    /// Lets the column at `(x, z)` grow again what was picked from it.
+    pub fn regrow(&self, x: i32, z: i32) {
+        self.picked.write().expect("picked columns poisoned").remove(&(x, z));
+    }
+
     /// The flowers and mushrooms growing on the columns of the square from `(x0, z0)`,
     /// `span` voxels each way, as the chunks have them, each with its column. For
     /// gathering; it leaves out what only the chunk knows (rock standing on the ground,
     /// the turf about a tor, a stone step), so now and then it names a flower that a
-    /// boulder sits on. Nothing where the square crosses onto another continent.
+    /// boulder sits on. Nothing where the square crosses onto another continent, and
+    /// nothing that has been picked.
     pub fn flowers_in(&self, x0: i32, z0: i32, span: i32) -> Vec<((i32, i32), features::plants::Flower)> {
+        self.flowers_standing(x0, z0, span).into_iter().map(|(at, f)| ((at.x, at.z), f)).collect()
+    }
+
+    /// As [`Self::flowers_in`], each with the voxel its flower stands in: the one above
+    /// the ground of its column.
+    pub fn flowers_standing(&self, x0: i32, z0: i32, span: i32) -> Vec<(IVec3, features::plants::Flower)> {
         let (mx, mz) = cell_of(x0, z0);
         if span <= 0 || cell_of(x0 + span, z0 + span) != (mx, mz) {
             return Vec::new();
@@ -131,11 +154,15 @@ impl GameWorld {
         let n = (span + 2) as usize;
         let sampler = Sampler::new(&c, self.seed, lx0, lz0, span + 2);
         let columns: Vec<Column> = (0..n * n).map(|i| sampler.column(lx0 + (i / n) as i32, lz0 + (i % n) as i32)).collect();
+        let picked = self.picked.read().expect("picked columns poisoned");
         let mut out = Vec::new();
         for px in 1..n - 1 {
             for pz in 1..n - 1 {
                 let col = &columns[px * n + pz];
                 let (wx, wz) = (x0 - 1 + px as i32, z0 - 1 + pz as i32);
+                if picked.contains(&(wx, wz)) {
+                    continue;
+                }
                 let ground = |x: usize, z: usize| columns[x * n + z].ground;
                 let steep = ((ground(px + 1, pz) - ground(px - 1, pz)) * 0.5).hypot((ground(px, pz + 1) - ground(px, pz - 1)) * 0.5);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx, col.top(), wz));
@@ -147,7 +174,7 @@ impl GameWorld {
                     growing = f;
                 }
                 if let Some(f) = features::plants::flower_at(col, growing, wx, wz, self.seed) {
-                    out.push(((wx, wz), f));
+                    out.push((IVec3::new(wx, col.top() + 1, wz), f));
                 }
             }
         }
@@ -521,6 +548,11 @@ impl GameWorld {
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         let mut plants = Vec::new();
+        // The columns here whose flower has been picked.
+        let picked: Vec<(i32, i32)> = {
+            let all = self.picked.read().expect("picked columns poisoned");
+            all.iter().copied().filter(|&(x, z)| (wx0..wx0 + PAD as i32).contains(&x) && (wz0..wz0 + PAD as i32).contains(&z)).collect()
+        };
         for px in 0..PAD {
             for pz in 0..PAD {
                 let top = columns[px * PAD + pz].top();
@@ -552,7 +584,7 @@ impl GameWorld {
                     growing = f;
                 }
                 // The border columns belong to neighbouring chunk columns.
-                if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) {
+                if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     if plants.len() == grown {

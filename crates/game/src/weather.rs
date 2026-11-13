@@ -60,6 +60,9 @@ pub struct Weather {
     pub snowpack: f32,
     /// Ice on still water, 0..1.
     pub ice: f32,
+    /// How much the ground where the camera is lies under snow, 0..1, as the caller
+    /// last told it: on white ground what falls is snow.
+    pub snowy: f32,
     forced: Option<Forced>,
     /// The date and warmth `lying` was last worked out for, and what it gave.
     lying_for: Option<(f32, f32)>,
@@ -183,6 +186,15 @@ pub fn lying(date: f32, year_days: f32, warmth: f32, seed: u32) -> (f32, f32) {
     (snow, ice)
 }
 
+/// What falls where the camera is, as (rain, snow), of the `rain` and `snow` the date
+/// calls for: one or the other, never the two together as sleet, and snow wherever the
+/// ground is white (`snowy`, 0..1), be it a cold biome in winter or a summit above the
+/// snowline, though the air at sea level is mild enough for rain.
+pub fn falling(rain: f32, snow: f32, snowy: f32) -> (f32, f32) {
+    let all = rain + snow;
+    if snowy >= 0.5 || snow >= rain { (0.0, all) } else { (all, 0.0) }
+}
+
 /// Game days between two dates, the short way round the year.
 fn days_apart(a: f32, b: f32, year_days: f32) -> f32 {
     (a - b).rem_euclid(1.0).min((b - a).rem_euclid(1.0)) * year_days.max(1.0)
@@ -201,7 +213,7 @@ fn forced_sky(f: Forced) -> Sky {
 
 impl Weather {
     pub fn new(forced: Option<Forced>) -> Self {
-        let mut w = Self { now: Sky::default(), wet: 0.0, snowpack: 0.0, ice: 0.0, forced, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
+        let mut w = Self { now: Sky::default(), wet: 0.0, snowpack: 0.0, ice: 0.0, snowy: 0.0, forced, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
         if let Some(f) = forced {
             // A forced weather is already in place, and has been for a while.
             w.now = forced_sky(f);
@@ -275,7 +287,10 @@ impl Weather {
             self.settle(date, year_days, warmth, seed);
         }
         let (lying_snow, lying_ice) = self.lying_now(date, year_days, warmth, seed);
-        let target = self.forced.map_or_else(|| natural(date, year_days, warmth, seed), forced_sky);
+        let mut target = self.forced.map_or_else(|| natural(date, year_days, warmth, seed), forced_sky);
+        if self.forced.is_none() {
+            (target.rain, target.snow) = falling(target.rain, target.snow, self.snowy);
+        }
         let ease = 1.0 - (-dt / 8.0).exp();
         let s = &mut self.now;
         s.rain += (target.rain - s.rain) * ease;
@@ -436,6 +451,24 @@ mod tests {
         assert!(dull.clouds > clear.clouds && dull.haze > clear.haze);
         Weather::new(None).apply(&mut clear);
         assert_eq!(Forced::named("storm"), Some(Forced::Storm));
+    }
+
+    #[test]
+    fn it_snows_on_white_ground_and_never_sleets() {
+        assert_eq!(falling(0.6, 0.0, 1.0), (0.0, 0.6));
+        assert_eq!(falling(0.6, 0.0, 0.0), (0.6, 0.0));
+        assert_eq!(falling(0.25, 0.5, 0.0), (0.0, 0.75));
+        assert_eq!(falling(0.5, 0.25, 0.0), (0.75, 0.0));
+        // Through a winter on snowy ground nothing but snow comes down.
+        let mut w = Weather::new(None);
+        w.snowy = 1.0;
+        let mut fell = 0.0;
+        for i in 0..3000 {
+            w.update(20.0, 0.0, 0.68 + 0.3 * i as f32 / 3000.0, 24.0, 0.25, 2);
+            assert!(w.now.rain < 1e-3, "rain {} on snowy ground", w.now.rain);
+            fell += w.now.snow;
+        }
+        assert!(fell > 50.0, "little snow fell: {fell}");
     }
 
     #[test]

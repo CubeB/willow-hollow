@@ -472,6 +472,16 @@ impl Streamer {
         self.stats.arena_bytes = self.arena.capacity_bytes();
     }
 
+    /// Builds again the column the voxel column `(x, z)` stands in, as soon as may be:
+    /// something on it has been picked, or has grown back. What is there stays until
+    /// the new one is ready.
+    pub fn replant(&mut self, x: i32, z: i32) {
+        let col = (0, x.div_euclid(CHUNK), z.div_euclid(CHUNK));
+        if self.columns.contains_key(&col) && !self.wanted.contains(&col) {
+            self.wanted.push(col);
+        }
+    }
+
     /// Blocks until everything in range is loaded (used for screenshots).
     pub fn wait_idle(&mut self, gpu: &Gpu, cam: DVec3) {
         loop {

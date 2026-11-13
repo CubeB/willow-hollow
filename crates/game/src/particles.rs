@@ -74,6 +74,8 @@ enum PKind {
     Droplet,
     Rain,
     Snow,
+    /// A speck thrown up where a raindrop lands.
+    Splash,
     /// Rising from a spring's floor; it pops into a ripple at the surface.
     Bubble,
     /// A speck of a ring spreading out across a spring's surface.
@@ -201,7 +203,7 @@ pub struct Surroundings<'a> {
     pub surf: &'a [Surf],
     /// Places in the trees near the player that leaves fall from, refreshed by the caller.
     pub leaves: &'a [LeafSite],
-    /// Flower voxels near the player.
+    /// Flowers in bloom near the player: the voxel each stands in, and its colour.
     pub flowers: &'a [(DVec3, [f32; 3])],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
@@ -231,6 +233,8 @@ const MAX_PARTICLES: usize = 8000;
 const MAX_FALLING: usize = 1500;
 /// How far off (voxels, across) a falling leaf is let go of, being out of sight.
 const LEAF_REACH: f64 = 110.0 * VOXELS_PER_METRE as f64;
+/// How far off (voxels) a raindrop's splash is still drawn.
+const SPLASH_REACH: f64 = 11.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
 const RAIN_COUNT: f32 = 2200.0;
 const SNOW_COUNT: f32 = 1500.0;
@@ -492,8 +496,9 @@ impl Particles {
             }
         }
 
-        // Pollen and dust catching the daylight.
-        if day && self.count(PKind::Mote) < 160 && self.unit() < dt * 6.0 {
+        // Pollen and dust catching the daylight, which rain and snow lay.
+        let dry = s.rain + s.snow < 0.05;
+        if day && dry && self.count(PKind::Mote) < 160 && self.unit() < dt * 6.0 {
             let (x, z) = (self.range(-14.0, 14.0) * U, self.range(-14.0, 14.0) * U);
             if let Some(ground) = ground_below(voxels, s.camera + DVec3::new(x as f64, (10.0 * U) as f64, z as f64), (30.0 * U) as i32) {
                 let particle = Particle {
@@ -513,8 +518,9 @@ impl Particles {
             }
         }
 
-        // Butterflies over the flowers.
-        if day && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 18 && self.unit() < dt * 0.8 {
+        // Butterflies over the flowers, while they are out and the day is dry.
+        let in_flower = s.date > 0.08 && s.date < 0.66;
+        if day && in_flower && dry && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 18 && self.unit() < dt * 0.8 {
             let (pos, color) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
             let particle = Particle {
                 kind: PKind::Butterfly,
@@ -522,7 +528,7 @@ impl Particles {
                 vel: Vec3::ZERO,
                 age: 0.0,
                 life: self.range(18.0, 30.0),
-                size: Vec3::new(0.3, 0.05, 0.22),
+                size: Vec3::new(0.17, 0.02, 0.2),
                 color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
@@ -570,7 +576,8 @@ impl Particles {
         // --- Simulation -----------------------------------------------------------
         let wind = self.wind.vector;
         let t = s.time as f32;
-        let mut splashes: Vec<DVec3> = Vec::new();
+        // Where raindrops landed this frame, and whether on water.
+        let mut splashes: Vec<(DVec3, bool)> = Vec::new();
         let mut pops: Vec<DVec3> = Vec::new();
         for p in &mut self.particles {
             p.age += dt;
@@ -584,13 +591,13 @@ impl Particles {
                     p.vel.z += (drift.z + sway * 0.6 - p.vel.z) * (1.0 - (-2.0 * dt).exp());
                     p.pos += (p.vel * U * dt).as_dvec3();
                     let at = p.pos.floor().as_ivec3();
-                    match voxels.kind(at.x, at.y, at.z) {
-                        Kind::Solid | Kind::Foliage => p.age = p.life,
-                        Kind::Water => {
-                            p.age = p.life;
-                            splashes.push(p.pos);
+                    let hit = voxels.kind(at.x, at.y, at.z);
+                    if matches!(hit, Kind::Solid | Kind::Foliage | Kind::Water) {
+                        p.age = p.life;
+                        // A drop splashes on the top of what it lands on.
+                        if rain {
+                            splashes.push((DVec3::new(p.pos.x, at.y as f64 + 1.03, p.pos.z), hit == Kind::Water));
                         }
-                        _ => {}
                     }
                 }
                 PKind::Bubble => {
@@ -607,7 +614,7 @@ impl Particles {
                     p.pos += (p.vel * U * dt).as_dvec3();
                     p.vel *= (-1.5 * dt).exp();
                 }
-                PKind::Spray | PKind::Droplet => {
+                PKind::Spray | PKind::Droplet | PKind::Splash => {
                     p.vel.y -= 9.0 * dt;
                     p.pos += (p.vel * U * dt).as_dvec3();
                 }
@@ -747,28 +754,57 @@ impl Particles {
                     let bob = (t * 7.0 + p.phase).sin() * 0.9;
                     p.vel += (Vec3::new(wander.x, bob + 0.1, wander.z) - p.vel) * (1.0 - (-4.0 * dt).exp());
                     p.pos += (p.vel * U * dt).as_dvec3();
-                    // Wings: the body flattens and widens as it flaps.
-                    p.size.x = 0.18 + 0.2 * ((t * 14.0 + p.phase).sin()).abs();
+                    // It heads the way it goes, turning no faster than a butterfly can.
+                    if p.vel.x.hypot(p.vel.z) > 0.05 {
+                        let want = (-p.vel.x).atan2(p.vel.z);
+                        let off = (want - p.rot.x + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                        p.rot.x += off * (1.0 - (-6.0 * dt).exp());
+                    }
                 }
             }
         }
-        // A few of the drops that hit water throw up a speck.
-        for (i, at) in splashes.into_iter().enumerate() {
-            if i % 5 == 0 {
+        // Each drop that lands throws up a few specks, which hop and fall back; on water
+        // some leave a ring as well. Only those near enough to be seen as more than rain.
+        for (i, (at, water)) in splashes.into_iter().enumerate() {
+            if (at - s.camera).length() > SPLASH_REACH {
+                continue;
+            }
+            for _ in 0..if self.unit() < 0.5 { 2 } else { 3 } {
+                let (a, out, up) = (self.range(0.0, std::f32::consts::TAU), self.range(0.3, 1.1), self.range(1.3, 2.6));
                 let particle = Particle {
-                    kind: PKind::Droplet,
+                    kind: PKind::Splash,
                     pos: at,
-                    vel: Vec3::new(self.range(-0.6, 0.6), self.range(1.0, 2.2), self.range(-0.6, 0.6)),
+                    vel: Vec3::new(a.cos() * out, up, a.sin() * out),
                     age: 0.0,
-                    life: self.range(0.15, 0.3),
-                    size: Vec3::splat(0.04),
-                    color: [0.8, 0.9, 0.98],
-                    phase: 0.0,
+                    // Until it is back down where it began (it falls at 9 a second squared).
+                    life: 2.0 * up / 9.0,
+                    size: Vec3::splat(self.range(0.03, 0.055)),
+                    color: [0.8, 0.88, 0.96],
+                    phase: a,
                     settled: false,
                     rot: Vec3::ZERO,
                     spin: Vec4::ZERO,
                 };
                 self.spawn(particle);
+            }
+            if water && i % 3 == 0 {
+                for k in 0..6 {
+                    let a = k as f32 * std::f32::consts::TAU / 6.0;
+                    let particle = Particle {
+                        kind: PKind::Ripple,
+                        pos: at,
+                        vel: Vec3::new(a.cos(), 0.0, a.sin()) * 0.5,
+                        age: 0.0,
+                        life: 0.6,
+                        size: Vec3::new(0.06, 0.02, 0.06),
+                        color: [0.9, 0.96, 1.0],
+                        phase: a,
+                        settled: false,
+                        rot: Vec3::ZERO,
+                        spin: Vec4::ZERO,
+                    };
+                    self.spawn(particle);
+                }
             }
         }
         // Each bubble that reaches the surface spreads a small ring.
@@ -823,6 +859,11 @@ impl Particles {
                     alpha *= 0.35 * near_fade(p.pos, s.camera);
                     glow = 0.25 + 0.9 * s.sun_elevation.clamp(0.0, 1.0);
                 }
+                PKind::Splash => {
+                    // Lit as the rain is, and gone as it comes down again.
+                    alpha = 0.55 * (1.0 - p.age / p.life).sqrt();
+                    glow = 0.25 + 0.9 * s.sun_elevation.clamp(0.0, 1.0);
+                }
                 PKind::Snow => {
                     alpha *= near_fade(p.pos, s.camera);
                     glow = 0.35 + 1.1 * s.sun_elevation.clamp(0.0, 1.0);
@@ -834,6 +875,33 @@ impl Particles {
                 _ => {}
             }
             let (yaw, tilt) = match p.kind {
+                PKind::Butterfly => {
+                    // Two wings hinged along the body, clapping up over it and down flat.
+                    let up = 0.15 + 1.1 * (0.5 + 0.5 * (t * 16.0 + p.phase).sin());
+                    let rel = (p.pos - s.camera).as_vec3();
+                    for side in [1.0f32, -1.0] {
+                        let roll = side * up;
+                        let centre = Vec3::new(side * roll.cos(), side * roll.sin(), 0.0) * (p.size.x * 0.5 * U);
+                        self.instances.push(ParticleInstance {
+                            pos: (rel + turn(centre, p.rot.x, [0.0, 0.0])).to_array(),
+                            yaw: p.rot.x,
+                            size: (p.size * U).to_array(),
+                            glow,
+                            color: [color[0], color[1], color[2], alpha],
+                            tilt: [0.0, roll],
+                        });
+                    }
+                    // A dark body between them.
+                    self.instances.push(ParticleInstance {
+                        pos: rel.to_array(),
+                        yaw: p.rot.x,
+                        size: [0.03 * U, 0.03 * U, p.size.z * U],
+                        glow,
+                        color: [0.03, 0.025, 0.02, alpha],
+                        tilt: [0.0, 0.0],
+                    });
+                    continue;
+                }
                 PKind::Leaf => {
                     // Fading slowly where it lies.
                     if p.settled {
@@ -1256,6 +1324,35 @@ mod leaf_tests {
             }
         }
         panic!("the leaves never came down");
+    }
+
+    #[test]
+    fn rain_splashes_where_it_lands_and_butterflies_keep_to_flowers_in_bloom() {
+        use super::*;
+        let mut p = Particles::new();
+        let camera = DVec3::new(0.0, 4.0, 0.0);
+        for step in 0..60 * 4 {
+            let mut s = still_air(camera, step as f64 / 60.0);
+            s.rain = 1.0;
+            p.update(1.0 / 60.0, &s, &mut Ground);
+        }
+        let splashes: Vec<_> = p.particles.iter().filter(|q| q.kind == PKind::Splash).collect();
+        assert!(splashes.len() > 30, "only {} splashes", splashes.len());
+        // They start on the ground and stay near it.
+        assert!(splashes.iter().all(|q| q.pos.y > -0.3 && q.pos.y < 2.0), "{:?}", splashes.iter().map(|q| q.pos.y).fold((f64::MAX, f64::MIN), |r, y| (r.0.min(y), r.1.max(y))));
+        // Butterflies: over flowers on a dry day in the flowering months, and not otherwise.
+        let flowers = [(DVec3::new(3.0, 0.0, 3.0), [0.8, 0.2, 0.2])];
+        let count = |date: f32, rain: f32, sun: f32| {
+            let mut p = Particles::new();
+            for step in 0..60 * 30 {
+                let mut s = still_air(camera, step as f64 / 60.0);
+                (s.flowers, s.date, s.rain, s.sun_elevation) = (&flowers, date, rain, sun);
+                p.update(1.0 / 60.0, &s, &mut Ground);
+            }
+            p.count(PKind::Butterfly)
+        };
+        assert!(count(0.25, 0.0, 0.6) > 5);
+        assert_eq!((count(0.85, 0.0, 0.6), count(0.25, 0.6, 0.6), count(0.25, 0.0, -0.3)), (0, 0, 0));
     }
 
     #[test]

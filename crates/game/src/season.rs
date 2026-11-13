@@ -138,6 +138,16 @@ impl Ground {
         Self { snow: lying.clamp(0.0, 1.0), frozen: ice.clamp(0.0, 1.0), wet, highland, snowline }
     }
 
+    /// How deep the snow lies on ground `alt_m` metres up, 0 for none and 1 or more for
+    /// white: ground.wgsl's `snow_depth`, for whoever asks what the ground looks like.
+    pub fn depth(&self, alt_m: f32) -> f32 {
+        let whole = ((alt_m - 35.0) / (110.0 - 35.0)).clamp(0.0, 1.0);
+        let whole = whole * whole * (3.0 - 2.0 * whole);
+        let lying = self.snow * (1.0 + alt_m.max(0.0) * 0.01) * (0.34 + (1.0 - 0.34) * whole);
+        let hills = self.highland * (alt_m - 25.0).max(0.0) * 0.003;
+        lying + hills + (alt_m - self.snowline).max(0.0) * 0.008
+    }
+
     /// The height of the year-round summit snow, metres: lower in the cold, and only on
     /// real high mountains where it never snows below. Biomes already go colder with
     /// height (Alpine is the high summits), so summer snow is kept to those: 320 m in the
