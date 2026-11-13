@@ -288,6 +288,8 @@ pub struct Minimap {
     aim: Option<f32>,
     /// The time of day to show on the large map, in hours.
     pub hour: f32,
+    /// Where the player has camped, in world voxels: each is marked.
+    pub camps: Vec<DVec2>,
     /// The large map's model, the one being made, and a count of what has changed the
     /// land shown since the game began.
     relief: Option<Relief>,
@@ -390,6 +392,7 @@ impl Minimap {
             pitch: PITCH,
             aim: None,
             hour: 12.0,
+            camps: Vec::new(),
             relief: None,
             relief_ask,
             relief_pending: false,
@@ -1039,6 +1042,17 @@ impl Minimap {
                 g.size = [5.0 * f.s, 14.0 * f.s];
                 g.dir = dir.into();
                 out.push(g);
+            }
+        }
+        // The player's own camps: where a fire of theirs has burned.
+        for &camp in &self.camps {
+            if let Some((p, true)) = place(camp)
+                && f.edge(p) < -3.0
+            {
+                icons.push(Instance::new(gpu::TRIANGLE, p.into(), icon * 0.9, [0.93, 0.50, 0.16, 1.0]));
+                if self.open {
+                    labels.push(Label { pos: [p.x, p.y - icon - 9.0 * f.s], text: "Camp".into(), size: 13.5 * f.s, color: [255, 226, 184, 255], left: false, right: false });
+                }
             }
         }
         out.extend(icons);

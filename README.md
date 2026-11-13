@@ -24,6 +24,8 @@ The simulation is much coarser than the voxels, so rivers aren't read straight o
 
 **Wild flowers.** There are twenty-seven kinds, each in the places it would really grow: bluebells carpeting the broadleaf woods, poppies and buttercups in the meadows, heather and foxgloves on the moor, kingcups and flag irises by the streams, thrift on the dunes, gentians high up. You can pick them, and mushrooms, berries, gorse blossom and reed mace too, and carry them in your pack. A flower you pick stays picked, and grows back a year or two later.
 
+**Camping.** You set out with a tent, and any tree will give you sticks. Three sticks lay a fire in a ring of stones: light it and it burns through the night, with sparks and smoke, and lights the ground around it. Rest by a fire or in the tent and the clock runs fast until dark, or until morning, with the stars wheeling overhead; nothing is skipped, and any step gets you up. A fire that has burned leaves its ring of stones for good and is marked on the map as a camp. Anything in your pack can be set down where you like, a flower on a stone or a row of mushrooms, and it stays there.
+
 **Places to find.** Every landmass has a network of trails linking shrines, lookout towers, camps, ruins, standing stones, huts and boat landings. They're built from whatever is local, so a desert shrine is sandstone and a shrine among the redwoods is mossy rock and red timber. The paths are worn into the ground, climb steep slopes in rough steps, and are marked by cairns, waymarks and milestones. They cross brooks on stepping stones and rivers on arched stone bridges, and the lanterns come on at dusk.
 
 **Getting around.** Open the glider in mid-air and ride it off anything tall. Every landing has a boat tied up, which you can take down a river or across the strait to the next island. Press V to see yourself from behind: a small figure that walks, swims and carries the glider folded on its back.
@@ -72,8 +74,11 @@ The first launch takes a few seconds, because the starting continent has to be s
 | Shift | Sprint |
 | Space | Jump, or swim up |
 | G, or Space in mid-air | Open or fold the glider. Look down to dive, up to slow down |
-| E | Pick what's in front of you, or get in or out of a boat at a landing. W sails, Shift for full sail |
-| I | Open the pack. Drag one thing onto another to move, join or swap them, click one to read about it or let it go |
+| E | Pick what's in front of you (by a tree, sticks), light a fire, rest by a fire or in a tent, or get in or out of a boat at a landing. W sails, Shift for full sail |
+| 1 to 7, or the wheel | Choose which slot of the hotbar is in your hand |
+| Right click | Use what's in your hand where you're looking: pitch the tent, lay a fire with three sticks, or set a thing down |
+| Left click | Pick up what was set down: a flower, the tent, a fire that was never lit |
+| I | Open the pack. Drag one thing onto another to move, join or swap them, or down to the hotbar. Click one to read about it or set it down |
 | M | The large map. Drag to move it, right drag to turn it, the wheel to zoom |
 | N | Show or hide the corner map |
 | V | First or third person |
@@ -83,7 +88,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 
 The settings menu covers field of view, mouse sensitivity, volume, how far terrain loads, the length of a day and of a year, window size, fullscreen, vsync, light shafts and the corner map. If you push the load radius further than your graphics card can hold, the game pulls it back in by itself.
 
-A plain run starts a new, random world each time. The game remembers your settings and where you were standing in each world, boat included, along with the time of year, the map you've drawn and what's in your pack, so `--seed N` takes you back to world N where you left it. Use `--fresh` to go back to the start of a world. `--time H` picks the hour and `--season` the time of year for one run, and the debug panel has sliders for both.
+A plain run starts a new, random world each time. The game remembers your settings and where you were standing in each world, boat included, along with the time of year, the map you've drawn, what's in your pack and what you've set down, so `--seed N` takes you back to world N where you left it. Use `--fresh` to go back to the start of a world. `--time H` picks the hour and `--season` the time of year for one run, and the debug panel has sliders for both.
 
 ### Looking around without playing
 

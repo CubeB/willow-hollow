@@ -64,6 +64,10 @@ Settings and your place in each world are kept outside the repository:
 - Windows: `%APPDATA%\Willow Hollow`
 - Elsewhere: `$XDG_CONFIG_HOME/willow-hollow`, or `~/.config/willow-hollow`
 
+Each world has a few plain text files there: `world-N.txt` (where you are), `pack-N.txt`
+(the pack, the hotbar and what has been picked) and `placed-N.txt` (what has been set
+down: flowers, tents, fires), a line to a thing.
+
 Delete `settings.txt` there to go back to the defaults. A hand-edited or damaged file
 never stops the game from starting: anything unreadable falls back to its default.
 
@@ -119,6 +123,20 @@ checksum as it was.
 ```sh
 cargo run --release -p bench -- --seed 1
 ```
+
+**The pack and camping.** `--pack` shows the pack's window on a screenshot and
+`--hotbar` the hotbar. `--camp lit` (or `laid`, `burnt`) makes camp a few steps ahead
+of the camera: a fire in that state, a tent and a few things set down. Add `--rest` for
+the view out of the tent's door, as high as `--look` says.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot camp.png --over 42186,30679,5 --look 180,-14 --time 22 --camp lit --hotbar
+./target/release/game.exe --seed 1 --screenshot stars.png --over 42186,30679,5 --look 180,25 --time 23 --camp lit --rest
+```
+
+In a window, `--camp lit --rest` starts the run resting in the tent, and logs the hour
+the rest ended at: `--seed 1 --time 21 --camp lit --rest --frames 1500` watches a night
+go by.
 
 Stills cannot show flicker, shimmer or popping. Anything that moves (shadows, wind,
 light shafts, streaming) also needs a look in a live window.

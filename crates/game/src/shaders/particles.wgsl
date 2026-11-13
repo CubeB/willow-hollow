@@ -55,7 +55,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         color = in.color.rgb * in.glow;
     } else {
         let ndl = max(dot(in.normal, G.sun_dir.xyz), 0.0);
-        let light = G.sun_color.rgb * ndl * sun_visibility(in.rel, in.normal) + ambient(in.normal);
+        // A lantern or a fire lights what stands by it, as it does the ground.
+        let light = G.sun_color.rgb * ndl * sun_visibility(in.rel, in.normal) + ambient(in.normal) + local_lights(in.rel, in.normal);
         color = in.color.rgb * light;
     }
     return vec4<f32>(apply_fog(color, in.rel), in.color.a);

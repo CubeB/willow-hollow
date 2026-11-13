@@ -13,8 +13,12 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     return out;
 }
 
-// A sparse field of stars, fixed to the sky.
-fn stars(dir: vec3<f32>) -> f32 {
+// A sparse field of stars, wheeling about the pole the sun and moon go round: once a
+// night, and once more over the year.
+fn stars(view: vec3<f32>) -> f32 {
+    let c = cos(G.sun_pos.w);
+    let s = sin(G.sun_pos.w);
+    let dir = vec3<f32>(view.x * c + view.y * s, view.y * c - view.x * s, view.z);
     let cell = vec3<i32>(floor(dir * 160.0));
     let h = hash3(cell);
     if (h > 0.015) {
