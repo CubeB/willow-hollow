@@ -169,7 +169,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
   --date F              time of year, 0-1 from the spring equinox
-  --weather W           hold the weather: clear, overcast, rain, snow, storm or fog
+  --weather W           hold the weather: clear, fair, broken, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
   --screenshot FILE     render one frame to a PNG without a window, then exit
