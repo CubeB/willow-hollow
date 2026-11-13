@@ -504,7 +504,7 @@ impl Raster {
                         let hi = lo + IVec3::new(w, h, d);
                         let (sway_lo, sway_hi) = sway(voxel);
                         let thin = if skin == 0 { 0 } else { 1 << (skin - 1) };
-                        boxes.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel, sway_lo, sway_hi, thin });
+                        boxes.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel, sway_lo, sway_hi, thin, season: 0 });
                     }
                 }
             }

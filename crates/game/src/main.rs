@@ -175,7 +175,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
-  --date F              time of year, 0-1 from the spring equinox
+  --date F              time of year, 0-1 from the spring equinox, or a month (may, october):
+                        each flower has its own months
   --weather W           hold the weather: clear, fair, broken, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
@@ -247,7 +248,14 @@ fn parse_args() -> Result<Options> {
             }
             "--time" => o.time = Some(value()?.parse()?),
             "--ambient" => o.ambient = value()?.parse::<f32>()?.clamp(0.0, 600.0),
-            "--date" => o.date = Some(value()?.parse::<f32>()?.rem_euclid(1.0)),
+            "--date" => {
+                let v = value()?;
+                let date = match season::month(&v) {
+                    Some(date) => date,
+                    None => v.parse::<f32>().map_err(|_| anyhow::anyhow!("--date takes a number from 0 to 1 or a month, not {v}"))?,
+                };
+                o.date = Some(date.rem_euclid(1.0));
+            }
             "--weather" => {
                 let name = value()?;
                 o.weather = Some(weather::Forced::named(&name).ok_or_else(|| anyhow::anyhow!("unknown weather {name}"))?);
@@ -381,12 +389,14 @@ fn leaf_shape(v: voxel::Voxel) -> Option<particles::LeafShape> {
 }
 
 /// Samples voxels around the camera for leaves (to shed), asks the world which flowers
-/// stand near (for butterflies), and reads the biome. Cheap enough to do every couple of seconds.
+/// stand near and are out on `date` (for butterflies), and reads the biome. Cheap enough
+/// to do every couple of seconds.
 fn scan_surroundings(
     world: &GameWorld,
     voxels: &mut WorldVoxels,
     camera: DVec3,
     salt: u32,
+    date: f32,
 ) -> Scan {
     let (cx, cz) = (camera.x.floor() as i32, camera.z.floor() as i32);
     let biome = world.column(cx, cz).biome;
@@ -437,11 +447,13 @@ fn scan_surroundings(
         }
     }
     // The flowers are plants standing on the ground, not voxels of it: the world names
-    // them. Mushrooms draw no butterflies, and a picked flower is no longer there.
+    // them. Mushrooms draw no butterflies, nor does a flower out of bloom, and a picked
+    // flower is no longer there.
     let reach = m(BUTTERFLY_REACH) as i32;
     for (at, flower) in world.flowers_standing(cx - reach, cz - reach, 2 * reach + 1) {
         use worldgen::features::plants::Flower;
-        if !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) && (at.y as f64 - camera.y).abs() < m64(12.0) {
+        let out = flower.blooming_at(date, at.x, at.z);
+        if out && !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) && (at.y as f64 - camera.y).abs() < m64(12.0) {
             flowers.push((at.as_dvec3(), to_linear(flower.color())));
         }
     }
@@ -466,23 +478,23 @@ type Scan = (worldgen::biome::Biome, Leaves, Spots, f32);
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
 struct Scanner {
-    ask: Sender<(DVec3, u32)>,
+    ask: Sender<(DVec3, u32, f32)>,
     answer: Receiver<Scan>,
     busy: bool,
 }
 
 impl Scanner {
     fn new(world: Arc<GameWorld>) -> Self {
-        let (ask, questions) = channel::<(DVec3, u32)>();
+        let (ask, questions) = channel::<(DVec3, u32, f32)>();
         let (reply, answer) = channel();
         std::thread::Builder::new()
             .name("scanner".into())
             .spawn(move || {
                 let mut voxels = WorldVoxels::new(world.clone());
                 // Ends when the game drops `ask`.
-                while let Ok((camera, salt)) = questions.recv() {
+                while let Ok((camera, salt, date)) = questions.recv() {
                     voxels.trim(camera);
-                    let found = scan_surroundings(&world, &mut voxels, camera, salt);
+                    let found = scan_surroundings(&world, &mut voxels, camera, salt, date);
                     if reply.send(found).is_err() {
                         break;
                     }
@@ -492,9 +504,9 @@ impl Scanner {
         Self { ask, answer, busy: false }
     }
 
-    fn request(&mut self, camera: DVec3, salt: u32) {
+    fn request(&mut self, camera: DVec3, salt: u32, date: f32) {
         if !self.busy {
-            self.busy = self.ask.send((camera, salt)).is_ok();
+            self.busy = self.ask.send((camera, salt, date)).is_ok();
         }
     }
 
@@ -876,10 +888,11 @@ impl Running {
         let mats = self.world.materials();
         let mut best: Option<(f64, (i32, i32), inventory::Item)> = None;
         // The flowers and mushrooms, which stand on the ground; those on ground far above
-        // or below the feet are out of reach.
+        // or below the feet are out of reach. Only one that is out today can be picked:
+        // a bud or a seed head is left where it is.
         for ((x, z), flower) in self.world.flowers_in(cx - span, cz - span, 2 * span + 1) {
             let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
-            if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+            if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) || !flower.blooming_at(self.env.date, x, z) {
                 continue;
             }
             let ground = (feet - 4..=feet + 3).rev().find(|&y| mats.get(self.voxels.voxel(x, y, z)).kind == voxel::Kind::Solid);
@@ -1246,7 +1259,7 @@ impl Running {
         self.scan_timer -= dt;
         if self.scan_timer <= 0.0 {
             self.scan_timer = 2.0;
-            self.scanner.request(self.camera.pos, self.frame as u32);
+            self.scanner.request(self.camera.pos, self.frame as u32, self.env.date);
         }
         if let Some(found) = self.scanner.poll() {
             let low;
@@ -1456,7 +1469,8 @@ impl Running {
                         }
                         ui.label(&cpu_line);
                         ui.add(egui::Slider::new(&mut time, 0.0..=24.0).text("time of day"));
-                        ui.add(egui::Slider::new(&mut date, 0.0..=1.0).text("time of year"));
+                        let month = season::month_name(date);
+                        ui.add(egui::Slider::new(&mut date, 0.0..=1.0).text(format!("time of year ({month})")));
                         ui.label(format!("mode: {mode}   particles {particle_count}   biome {biome:?}   seed {seed}"));
                         ui.label("Esc = settings. Click or Tab to look. WASD, Space = jump/swim up, Shift = sprint");
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
@@ -1780,7 +1794,7 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers, low) = scan_surroundings(&world, &mut voxels, camera.pos, 1);
+        let (biome, leaves, flowers, low) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
@@ -1824,7 +1838,7 @@ fn main() -> Result<()> {
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
-        log::info!("season {:.2}, biome {biome:?}, ground {:?}", env.date, weather.ground(env.date, warmth));
+        log::info!("season {:.2} ({}), biome {biome:?}, ground {:?}", env.date, season::month_name(env.date), weather.ground(env.date, warmth));
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);

@@ -22,6 +22,10 @@ struct VIn {
     // forest keeps its leaves in winter, in 31sts. zw: its skylines toward sunrise and
     // sunset.
     @location(5) place: vec4<u32>,
+    // Land: the wash of the flowers or heather lying over it (its row of G.wash_body and
+    // G.wash_bloom, 0 for none); how much of the ground's colour it takes, in 255ths; and
+    // how much of that still shows under the land's forest.
+    @location(6) wash: vec4<u32>,
 };
 
 struct VOut {
@@ -39,7 +43,46 @@ struct VOut {
     @location(7) @interpolate(flat) plant: u32,
     // The skylines toward sunrise and sunset (see skyline_light).
     @location(8) skylines: vec2<f32>,
+    // The colour the flowers lying over the land give it this date, times how much of
+    // the ground's colour they take, which is w.
+    @location(9) wash: vec4<f32>,
+    // How much of that shows under the forest, out beyond the tree models.
+    @location(10) wash_far: f32,
 };
+
+// The colour of the wash numbered `code` this date, seen from too far to tell one plant
+// from the next: its leaves, and as much of its flowers as are out (each plant on its
+// own day: see season_phase), or over and brown. As `wash` in terrain.wgsl colours the
+// ground under each plant nearer to.
+fn far_wash(code: u32, s: f32) -> vec3<f32> {
+    let body = G.wash_body[min(code, 63u)];
+    let bloom = G.wash_bloom[min(code, 63u)];
+    var c = body.rgb;
+    if (u32(body.a) == PLANT_GRASS) {
+        c = season_grass(c, s);
+    }
+    let share = fract(bloom.a) * 2.0;
+    let flowering = (u32(bloom.a) >> 3u) & 63u;
+    var out = 1.0;
+    var over = 0.0;
+    if (flowering != 0u) {
+        let row = G.flowering[flowering];
+        if (row.y < 1.0) {
+            // How far into the kind's season the date is, and so how many of its plants
+            // have come out, and how many of those have gone over since.
+            let d = fract(s - row.x);
+            let opened = clamp(d / SEASON_STAGGER, 0.0, 1.0);
+            let shut = clamp((d - row.y) / SEASON_STAGGER, 0.0, 1.0);
+            let bare = clamp((d - row.y - row.w) / SEASON_STAGGER, 0.0, 1.0);
+            out = opened - shut;
+            over = select(0.0, shut - bare, row.w > 0.0);
+        }
+    }
+    c = mix(c, bloom.rgb, share * 0.7 * out);
+    c = mix(c, vec3<f32>(0.2, 0.105, 0.07), share * 0.5 * over);
+    // Darker than the plant's own colours, as its wash on the nearer ground is.
+    return c * 0.62;
+}
 
 @vertex
 fn vs(in: VIn) -> VOut {
@@ -86,6 +129,13 @@ fn vs(in: VIn) -> VOut {
     out.snow = biome_snow(in.place.x);
     out.plant = in.place.y;
     out.skylines = vec2<f32>(in.place.zw) / 255.0;
+    out.wash = vec4<f32>(0.0);
+    out.wash_far = 0.0;
+    if (in.wash.x != 0u && in.wash.y != 0u) {
+        let amount = f32(in.wash.y) / 255.0;
+        out.wash = vec4<f32>(far_wash(in.wash.x, G.season.x) * amount, amount);
+        out.wash_far = f32(in.wash.z) / 255.0;
+    }
     return out;
 }
 
@@ -131,6 +181,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // the forest they drew is seen as its canopy, over the same reach the surface
         // rises to the canopy's height.
         var base = season_far_ground(in.color, false, 0.0, world, G.season.x);
+        // The flowers and heather that lie over it, in this date's colours.
+        base = base * (1.0 - in.wash.a) + in.wash.rgb;
         let canopy = smoothstep(G.cam_wrapped.w * 0.85, G.cam_wrapped.w, length(in.rel.xz));
         if (canopy > 0.0) {
             // A canopy of palms or needles keeps its leaves, whatever its colour says.
@@ -140,7 +192,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             // The hollies, yews and pines among a broadleaf forest's trees keep it partly
             // green when the rest is bare.
             let keeps = f32(in.plant >> 3u) / 31.0;
-            base = mix(base, select(season_far_ground(in.far, forest, keeps, world, G.season.x), in.far, evergreen), canopy);
+            var wooded = select(season_far_ground(in.far, forest, keeps, world, G.season.x), in.far, evergreen);
+            wooded = wooded * (1.0 - in.wash.a * in.wash_far) + in.wash.rgb * in.wash_far;
+            base = mix(base, wooded, canopy);
         }
         base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0, in.snow);
         color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));

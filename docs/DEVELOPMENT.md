@@ -101,8 +101,12 @@ change and one after, at the same place and hour, and compare them.
 
 `--over X,Z,H` puts the camera H above the ground at X,Z. `--look` is yaw and pitch in
 degrees: yaw 0 looks toward +x (where the sun rises), 180 toward -x (where it sets).
-`--weather` and `--season` hold those for the shot. PNG files are ignored by git
-everywhere except under `docs/`, so shots can be written anywhere.
+`--weather` and `--season` hold those for the shot, and `--date` takes a month
+(`--date may`) or a fraction of the year from the spring equinox. Each flower is out in
+its own months (`Flower::months` in `worldgen/src/features/plants.rs`), so a shot of a
+bluebell wood needs `--date may` and one of heather `--date august`; the default date is
+the middle of July. PNG files are ignored by git everywhere except under `docs/`, so
+shots can be written anywhere.
 
 The windows can be put on a shot too: `--pack` for the pack, and `--journal [PAGE]` for
 the journal open at `finds`, `places`, `walk` or `days`. A screenshot reads no save, so
@@ -151,6 +155,15 @@ light shafts, streaming) also needs a look in a live window.
   world. If that is not the intent, the `bench` checksum will say so.
 - **Comments say why.** Plain sentences about what the code is for, not what the next
   line does.
+- **The year is drawn, not generated.** What grows where never depends on the date, so
+  the season costs no regeneration. A part of a plant that comes and goes carries the
+  number of its season (`PlantBox::season`, a row of `plants::seasons()`: when it starts,
+  how long it lasts, how long it is in bud before and in seed after). The number rides
+  to the shader in the low bits of the vertex colour, where a leaf carries its tree's
+  tag, and `season_phase` in `season.wgsl` decides from the date and the plant's column
+  whether it is there and what colour it is. `Season::phase` in Rust is the same sum,
+  which is how picking and the butterflies know which flowers are out. Change one and
+  change the other.
 
 ## How work gets in
 

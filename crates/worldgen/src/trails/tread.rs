@@ -223,7 +223,7 @@ pub fn step(col: &Column, w: &Worn, patch: f32, seed: u32, wx: i32, wz: i32) -> 
 
 /// A fixed fine part, in cells.
 fn part(lo: [i32; 3], hi: [i32; 3], voxel: Voxel) -> PlantBox {
-    PlantBox { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0 }
+    PlantBox { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0 }
 }
 
 /// Where a step is and how it lies: what edges it, which way is down from it (a unit

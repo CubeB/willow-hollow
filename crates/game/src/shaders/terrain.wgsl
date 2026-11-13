@@ -117,7 +117,9 @@ const FLAG_WASH: u32 = 24u;
 fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale: f32) -> vec3<f32> {
     let body = G.wash_body[min(code, 63u)];
     let bloom = G.wash_bloom[min(code, 63u)];
-    let kinds = vec2<u32>(u32(body.a), u32(bloom.a));
+    let kinds = vec2<u32>(u32(body.a), u32(bloom.a) & 7u);
+    // The row of G.flowering the flowers keep, if they have a season of their own.
+    let flowering = (u32(bloom.a) >> 3u) & 63u;
     let share = fract(bloom.a) * 2.0;
     var amount = fract(body.a) * 2.0;
     if (scale < 1.5) {
@@ -136,8 +138,16 @@ fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale
     var c = season_apply(body.rgb, col, kinds.x, s, 0u) * (0.5 + 0.2 * h);
     // Its flowers show on some columns and not on others, as bright specks in the dark
     // of the leaves: mixed into every one, heather went a flat lilac.
-    if (fract(h * 17.0) < share && !season_gone(s, kinds.y, col, 0u)) {
-        c = mix(c, season_apply(bloom.rgb, col, kinds.y, s, 0u), 0.8);
+    if (fract(h * 17.0) < share) {
+        if (flowering != 0u) {
+            // In flower, or over and brown, on the day the plant itself is.
+            let phase = season_phase(G.flowering[flowering], s, voxel.xz);
+            if (phase.x > 1.5) {
+                c = mix(c, season_bloom(bloom.rgb, phase), 0.8);
+            }
+        } else if (!season_gone(s, kinds.y, col, 0u)) {
+            c = mix(c, season_apply(bloom.rgb, col, kinds.y, s, 0u), 0.8);
+        }
     }
     return mix(ground, c, amount);
 }
@@ -204,7 +214,13 @@ fn vs(in: VIn) -> VOut {
         if (kind >= PLANT_GRASS) {
             vox.y = 0;
         }
-        var gone = season_gone(G.season.x, kind, vox, tag);
+        var gone = false;
+        if (kind == PLANT_FLOWER && tag != 0u) {
+            // A flower with a season of its own (the tag is its row of G.flowering).
+            gone = season_phase(G.flowering[tag], G.season.x, vox.xz).x < 0.5;
+        } else {
+            gone = season_gone(G.season.x, kind, vox, tag);
+        }
         if (kind == PLANT_GRASS && !gone) {
             let snow = grid_snow(in.grid0, in.grid1, (vec2<f32>(cell.xz) + 0.5) / 32.0);
             gone = plant_buried(alt_m, season_hash(vox + vec3<i32>(5, 0, 9)), snow);
@@ -270,7 +286,14 @@ fn shade(in: VOut) -> vec4<f32> {
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
-    base = season_apply(base, voxel, (in.flags >> 5u) & 7u, G.season.x, (in.flags >> 8u) & 63u);
+    let kind = (in.flags >> 5u) & 7u;
+    let tag = (in.flags >> 8u) & 63u;
+    if (kind == PLANT_FLOWER && tag != 0u) {
+        // A flower in bud, out or gone to seed, by its own season.
+        base = season_bloom(base, season_phase(G.flowering[tag], G.season.x, voxel.xz));
+    } else {
+        base = season_apply(base, voxel, kind, G.season.x, tag);
+    }
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
     let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
     let washed = (in.flags >> 16u) & 511u;

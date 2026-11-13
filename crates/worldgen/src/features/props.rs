@@ -133,7 +133,7 @@ impl Kit {
         let (lo, hi) = rotate_box(IVec3::from(lo), IVec3::from(hi), self.turns);
         debug_assert!(lo.cmplt(hi).all(), "empty prop part");
         let at = self.at * CELLS;
-        self.fine.push(PlantBox { lo: (lo + at).to_array(), hi: (hi + at).to_array(), voxel: v, sway_lo: false, sway_hi: sway, thin: 0 });
+        self.fine.push(PlantBox { lo: (lo + at).to_array(), hi: (hi + at).to_array(), voxel: v, sway_lo: false, sway_hi: sway, thin: 0, season: 0 });
     }
 
     /// A box fixed in place.

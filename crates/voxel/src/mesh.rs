@@ -69,6 +69,25 @@ pub struct PlantBox {
     /// 7/8 of a voxel can be drawn (see [`Vertex`]); a skin flush against the voxel's
     /// near or far face always does.
     pub thin: u8,
+    /// 0, or the number (1..=63) of the season this box keeps: a row of a table the
+    /// renderer holds, which says between which dates the box is there and when it is in
+    /// bud, in flower and gone to seed (a flower's bloom, its leaves, a berry). A box with
+    /// one is drawn as a [`plant::FLOWER`](crate::plant::FLOWER) whatever its material,
+    /// and comes and goes a column at a time. See [`season_bits`].
+    pub season: u8,
+}
+
+/// The plant kind a box is drawn as: its material's, or a flower's if it keeps a season.
+fn box_kind(b: &PlantBox, mats: &Materials) -> u8 {
+    if b.season != 0 { plant::FLOWER } else { mats.get(b.voxel).plant }
+}
+
+/// A season's number (see [`PlantBox::season`]) spread over the low two bits of each
+/// colour channel, where a broadleaf leaf carries its tree tag: the shader reads both
+/// the same way (`season_tag` in season.wgsl).
+pub fn season_bits(season: u8) -> u32 {
+    let s = (season & 63) as u32;
+    (s & 3) | (s & 12) << 6 | (s & 48) << 12
 }
 
 /// The quarter and half-step bit that put a vertex `r` eighths of a voxel into its voxel,
@@ -661,7 +680,7 @@ struct Piece {
 /// same voxel. Otherwise the shader could drop some corners of a face and not others,
 /// and the face would be torn into a long sliver toward the middle of the screen.
 fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<Piece>) {
-    let kind = mats.get(b.voxel).plant;
+    let kind = box_kind(b, mats);
     let start = out.len();
     out.push(Piece { b: *b, hidden: 0 });
     // Every small plant goes a whole column at a time where it gives out with distance
@@ -798,6 +817,7 @@ pub fn add_plants<'a>(
             }
             let b = &piece.b;
             let m = mats.get(b.voxel);
+            let kind = box_kind(b, mats);
             let n = if positive { b.hi[n_axis] } else { b.lo[n_axis] };
             let corners = [
                 (b.lo[u_axis], b.lo[v_axis]),
@@ -840,7 +860,7 @@ pub fn add_plants<'a>(
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
                     | flags::SKY
                     | if sways { flags::FOLIAGE } else { 0 }
-                    | m.plant << flags::PLANT_SHIFT;
+                    | kind << flags::PLANT_SHIFT;
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
                 // voxel before it. With a quarter set, the same bit is a half step instead.
                 let mut corner = 0u32;
@@ -849,7 +869,7 @@ pub fn add_plants<'a>(
                 }
                 Vertex {
                     a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27 | corner << 29,
-                    b: leaf_color_bits(m.color, m.plant) as u32 | (fl as u32) << 24,
+                    b: leaf_color_bits(m.color, kind) as u32 | season_bits(b.season) | (fl as u32) << 24,
                 }
             };
             let order = if positive { [0, 1, 2, 3] } else { [0, 3, 2, 1] };
@@ -868,11 +888,12 @@ fn color_bits(c: [u8; 3]) -> u64 {
 const TAG_BITS: u32 = 0x03_0303;
 
 /// A colour as packed into a vertex: a broadleaf leaf's with its tree tag cleared, to be
-/// filled in by [`tag_trees`].
+/// filled in by [`tag_trees`], and a flower's with the same bits cleared for the number
+/// of its season (0, the common year of flowers, unless a [`PlantBox`] names one).
 #[inline]
 fn leaf_color_bits(c: [u8; 3], kind: u8) -> u64 {
     let bits = color_bits(c);
-    if kind == plant::DECIDUOUS || kind == plant::AUTUMN { bits & !(TAG_BITS as u64) } else { bits }
+    if matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::FLOWER) { bits & !(TAG_BITS as u64) } else { bits }
 }
 
 /// Gives every broadleaf leaf face in a mesh the tag of the tree it grows on, 1..=63 (0
@@ -1059,6 +1080,7 @@ mod tests {
             sway_lo: false,
             sway_hi: true,
             thin: 0,
+            season: 0,
         };
         add_plants(&mut mesh, [plant].iter(), &c, chunk, &m);
         assert_eq!(mesh.opaque.len(), (6 + 6) * 4, "all six faces, the bottom too");
@@ -1109,9 +1131,9 @@ mod tests {
         let chunk = [0, 0, 0];
         // Boxes straddling voxel boundaries on every axis, and one reaching out of the chunk.
         let boxes = [
-            PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: flower, sway_lo: false, sway_hi: true, thin: 0 },
-            PlantBox { lo: [7, 2, 2], hi: [10, 9, 5], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
-            PlantBox { lo: [-2, 2, 2], hi: [2, 3, 3], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 },
+            PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: flower, sway_lo: false, sway_hi: true, thin: 0, season: 0 },
+            PlantBox { lo: [7, 2, 2], hi: [10, 9, 5], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 },
+            PlantBox { lo: [-2, 2, 2], hi: [2, 3, 3], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 },
         ];
         let mut mesh = ChunkMesh::default();
         add_plants(&mut mesh, boxes.iter(), &PaddedChunk::new(), chunk, &m);
@@ -1128,7 +1150,7 @@ mod tests {
         // columns along x here and two along z), and the faces between its pieces are not
         // drawn: every corner of a face names one column, for giving out with distance.
         let mut mesh = ChunkMesh::default();
-        let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0 };
+        let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0, season: 0 };
         add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m);
         assert_eq!(mesh.opaque.len(), (2 * 6 + 2 * 2 + 2 * 3) * 4);
         for quad in mesh.opaque.chunks_exact(4) {
@@ -1200,6 +1222,7 @@ mod tests {
                 sway_lo: false,
                 sway_hi: false,
                 thin: 1 << outer,
+                season: 0,
             };
             let mut mesh = ChunkMesh::default();
             add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m);
@@ -1225,7 +1248,7 @@ mod tests {
     #[test]
     fn every_plant_box_is_drawn_from_below() {
         let (m, stone, _) = mats();
-        let skin = |thin| PlantBox { lo: [0, 7, 0], hi: [4, 8, 4], voxel: stone, sway_lo: false, sway_hi: false, thin };
+        let skin = |thin| PlantBox { lo: [0, 7, 0], hi: [4, 8, 4], voxel: stone, sway_lo: false, sway_hi: false, thin, season: 0 };
         for thin in [0, 1 << 2, 1 << 3] {
             let mut mesh = ChunkMesh::default();
             add_plants(&mut mesh, [skin(thin)].iter(), &PaddedChunk::new(), [0, 0, 0], &m);
@@ -1245,7 +1268,7 @@ mod tests {
             (0..6).map(|f| mesh.faces[7 + f] - mesh.faces[6 + f]).collect::<Vec<_>>()
         };
         // A blade standing on the voxel at (2, 0, 2) of the chunk, two and a bit voxels tall.
-        let blade = PlantBox { lo: [11, 4, 9], hi: [12, 13, 10], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 };
+        let blade = PlantBox { lo: [11, 4, 9], hi: [12, 13, 10], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 };
         let mut c = PaddedChunk::new();
         assert_eq!(quads(&c, blade), [3, 3, 1, 1, 3, 3], "in the air: a top, a bottom, and the sides of three pieces");
         c.set(3, 1, 3, stone);
@@ -1260,7 +1283,7 @@ mod tests {
         // A skin's inset face is not against what the box is against.
         let mut c = PaddedChunk::new();
         c.set(3, 3, 3, stone);
-        let skin = PlantBox { lo: [8, 7, 8], hi: [12, 8, 12], voxel: stone, sway_lo: false, sway_hi: false, thin: 1 << 2 };
+        let skin = PlantBox { lo: [8, 7, 8], hi: [12, 8, 12], voxel: stone, sway_lo: false, sway_hi: false, thin: 1 << 2, season: 0 };
         assert_eq!(quads(&c, skin), [1; 6]);
         assert_eq!(quads(&c, PlantBox { thin: 0, ..skin }), [1, 1, 0, 1, 1, 1]);
     }
@@ -1269,7 +1292,7 @@ mod tests {
     fn a_cut_blade_bends_in_one_piece() {
         let (mut m, _, _) = mats();
         let grass = m.add(Material { color: [60, 160, 60], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::GRASS });
-        let blade = PlantBox { lo: [9, 4, 9], hi: [10, 13, 10], voxel: grass, sway_lo: false, sway_hi: true, thin: 0 };
+        let blade = PlantBox { lo: [9, 4, 9], hi: [10, 13, 10], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 };
         let mut mesh = ChunkMesh::default();
         add_plants(&mut mesh, [blade].iter(), &PaddedChunk::new(), [0, 0, 0], &m);
         for v in &mesh.opaque {
