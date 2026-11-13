@@ -36,6 +36,7 @@ const TRIANGLE: u32 = 5u;
 const DIAMOND: u32 = 6u;
 const RING: u32 = 7u;
 const BAR: u32 = 8u;
+const LINE: u32 = 9u;
 
 // Unseen land, like the blank paper of a map.
 const FOG: vec3<f32> = vec3<f32>(0.70, 0.69, 0.655);
@@ -230,6 +231,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         case BAR: {
             let b = abs(p) - vec2(in.size.x * 0.7, in.size.x * 0.22);
             out = icon(length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0), in.color, RIM);
+        }
+        case LINE: {
+            let b = abs(p) - in.size + vec2(1.0);
+            let d = length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0);
+            out = vec4(in.color.rgb, in.color.a * clamp(0.5 - d, 0.0, 1.0));
         }
         default: {
             discard;

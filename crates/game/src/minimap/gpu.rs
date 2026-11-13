@@ -19,6 +19,8 @@ pub const TRIANGLE: u32 = 5;
 pub const DIAMOND: u32 = 6;
 pub const RING: u32 = 7;
 pub const BAR: u32 = 8;
+/// A plain bar, as long and as thick as its size.
+pub const LINE: u32 = 9;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
@@ -223,16 +225,21 @@ impl MapGpu {
         Self::write(gpu, &self.reveals, layer, rect, 2, rows);
     }
 
-    pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, uniforms: &Uniforms, instances: &[Instance]) {
-        if instances.is_empty() {
-            return;
-        }
+    /// Sets what the passes of this frame draw.
+    pub fn load(&mut self, gpu: &Gpu, uniforms: &Uniforms, instances: &[Instance]) {
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
             self.instances = instance_buffer(&gpu.device, self.capacity);
         }
         gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
         gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+    }
+
+    /// Draws some of the instances loaded this frame.
+    pub fn pass(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, range: std::ops::Range<u32>) {
+        if range.is_empty() {
+            return;
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("minimap"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -249,6 +256,130 @@ impl MapGpu {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..instances.len() as u32);
+        pass.draw(0..4, range);
+    }
+}
+
+/// The large map's model and the pipeline that draws it (shaders/relief.wgsl).
+pub struct ReliefGpu {
+    pipeline: wgpu::RenderPipeline,
+    uniforms: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    mesh: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+    depth: Option<((u32, u32), wgpu::TextureView)>,
+}
+
+impl ReliefGpu {
+    pub fn new(gpu: &Gpu, format: wgpu::TextureFormat) -> Self {
+        let device = &gpu.device;
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("map relief"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/relief.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("map relief"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("map relief"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("map relief"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("map relief"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("map relief"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<super::relief::Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &attrs,
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::gfx::DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline, uniforms, bind, mesh: None, depth: None }
+    }
+
+    /// Takes a new model in place of the last.
+    pub fn upload(&mut self, gpu: &Gpu, vertices: &[super::relief::Vertex], indices: &[u32]) {
+        use wgpu::util::DeviceExt;
+        if indices.is_empty() {
+            self.mesh = None;
+            return;
+        }
+        let buffer = |label, contents, usage| gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage });
+        self.mesh = Some((
+            buffer("map relief vertices", bytemuck::cast_slice(vertices), wgpu::BufferUsages::VERTEX),
+            buffer("map relief indices", bytemuck::cast_slice(indices), wgpu::BufferUsages::INDEX),
+            indices.len() as u32,
+        ));
+    }
+
+    /// Draws the model over `target`, `size` pixels, through `transform`.
+    pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, size: (u32, u32), transform: glam::Mat4) {
+        let Some((vertices, indices, count)) = &self.mesh else { return };
+        if self.depth.as_ref().is_none_or(|d| d.0 != size) {
+            self.depth = Some((size, crate::gfx::create_depth(&gpu.device, size.0, size.1)));
+        }
+        let depth = &self.depth.as_ref().expect("just made").1;
+        gpu.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&transform.to_cols_array()));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("map relief"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..*count, 0, 0..1);
     }
 }

@@ -106,7 +106,7 @@ fn downsample(world: &GameWorld, species: Species, variant: usize, turns: u32, l
 /// `world::surface_materials` makes, each biome with its own ground, soil and rock,
 /// taking the commonest of its voxel-to-voxel speckle, which would only shimmer at this
 /// distance. Cliffs are banded by height as they are filled (see [`cliff_rock`]).
-fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
+pub(crate) fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
     let cover = mat::ground_cover(col.biome);
     match col.cover {
         Cover::RiverBed => (mat::GRAVEL, mat::GRAVEL),

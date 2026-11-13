@@ -32,6 +32,8 @@ pub struct Reveal {
     pub stale: Option<Rect>,
     /// Changed since it was last saved.
     pub unsaved: bool,
+    /// How many times it has changed.
+    pub changes: u32,
 }
 
 impl Default for Reveal {
@@ -42,7 +44,7 @@ impl Default for Reveal {
 
 impl Reveal {
     pub fn new() -> Self {
-        Self { data: vec![0; TEX * TEX * 2], stale: Some((0, 0, TEX, TEX)), unsaved: false }
+        Self { data: vec![0; TEX * TEX * 2], stale: Some((0, 0, TEX, TEX)), unsaved: false, changes: 0 }
     }
 
     /// Reads a saved mask, or None if there is none or it is not one.
@@ -52,7 +54,7 @@ impl Reveal {
             log::warn!("ignoring the map in {}: it is not {TEX} square", path.display());
             return None;
         }
-        Some(Self { data: img.into_raw(), stale: Some((0, 0, TEX, TEX)), unsaved: false })
+        Some(Self { data: img.into_raw(), stale: Some((0, 0, TEX, TEX)), unsaved: false, changes: 0 })
     }
 
     fn touch(&mut self, r: Rect) {
@@ -61,6 +63,7 @@ impl Reveal {
             None => r,
         });
         self.unsaved = true;
+        self.changes += 1;
     }
 
     /// Texels within `radius` texels of `centre` (in texels), clipped to the mask.
@@ -120,6 +123,11 @@ impl Reveal {
             return 0;
         }
         self.data[(t.y as usize * TEX + t.x as usize) * 2 + channel]
+    }
+
+    /// How well seen, and how walked, the land at continent-local `at` is.
+    pub fn at(&self, at: Vec2) -> [u8; 2] {
+        [self.texel(at, 0), self.texel(at, 1)]
     }
 
     /// Whether the land at continent-local `at` has been seen.

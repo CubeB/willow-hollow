@@ -16,11 +16,16 @@
 //! one still out of sight shows as a faint glow at the map's rim in its direction, for
 //! the nearest few. A visited place turns into its icon, and on the large map its name.
 //!
+//! The large map is a model of the land seen so far ([`relief`]): a slab of blocks with
+//! its water, paths and woods, looked down on at a slant, which the mouse moves, turns
+//! and zooms. The corner map stays a flat picture.
+//!
 //! [`build`] is the older still image of a whole continent, for `--map FILE`.
 
 pub mod gpu;
 pub mod marks;
 pub mod picture;
+pub mod relief;
 pub mod reveal;
 
 use std::{
@@ -32,7 +37,7 @@ use std::{
     },
 };
 
-use glam::{DVec2, DVec3, Vec2, Vec3};
+use glam::{DVec2, DVec3, Mat4, Vec2, Vec3, Vec4};
 use worldgen::{
     continent::Continent,
     macro_layout::MACRO_SIZE,
@@ -41,8 +46,9 @@ use worldgen::{
 };
 
 use crate::gfx::Gpu;
-use gpu::{Instance, MapGpu, SLOTS, Uniforms};
+use gpu::{Instance, MapGpu, ReliefGpu, SLOTS, Uniforms};
 use marks::{Kind, Mark};
+use relief::{Relief, Request};
 use reveal::Reveal;
 
 /// A continent, by macro-cell.
@@ -51,8 +57,18 @@ pub type Key = (i32, i32);
 /// How much of the world the corner map spans, edge to edge, in voxels.
 const CORNER_SPAN: f64 = m64(1800.0);
 /// How near and how far the large map zooms, edge to edge, in voxels.
-const LARGE_SPAN: (f64, f64) = (m64(1200.0), MACRO_SIZE as f64);
-const LARGE_START: f64 = m64(7000.0);
+const LARGE_SPAN: (f64, f64) = (m64(700.0), MACRO_SIZE as f64);
+const LARGE_START: f64 = m64(2400.0);
+/// How the large map is first looked at: turned a little from north, and from how high.
+const YAW: f32 = -0.3;
+const PITCH: f32 = 0.86;
+const PITCH_RANGE: (f32, f32) = (0.45, 1.45);
+/// The large map's field of view, top to bottom.
+const FOV: f32 = 0.5;
+/// How many pixels wide a column of the large map's model is, about, on a window 720 high.
+const COLUMN_PX: f64 = 6.0;
+/// How far, in columns, the map's middle may stray from the model's before a new one is made.
+const STRAY: i64 = 40;
 /// How far off a place may be for its glow to show at the rim.
 const HINT: f64 = m64(2500.0);
 /// Most places hinted at the rim at once.
@@ -64,14 +80,14 @@ const RETRY: f32 = 3.0;
 
 /// What the worker makes of one continent.
 pub struct Sheet {
-    pub picture: Vec<u8>,
+    pub picture: Arc<Vec<u8>>,
     pub marks: Vec<Mark>,
     pub continent: Arc<Continent>,
 }
 
 /// Builds the sheet for continent `key`.
 pub fn sheet(world: &GameWorld, c: Arc<Continent>) -> Sheet {
-    Sheet { picture: picture::picture(world, &c), marks: marks::find(&c, world.seed()), continent: c }
+    Sheet { picture: Arc::new(picture::picture(world, &c)), marks: marks::find(&c, world.seed()), continent: c }
 }
 
 struct Known {
@@ -84,6 +100,7 @@ struct Known {
 enum Answer {
     Sheet(Key, Option<Sheet>),
     Reveal(Key, Option<Reveal>),
+    Relief(Box<Relief>),
 }
 
 enum Disk {
@@ -101,6 +118,35 @@ pub struct Label {
     pub color: [u8; 4],
     /// Placed by its left end rather than its middle.
     pub left: bool,
+    /// Placed by its right end.
+    pub right: bool,
+}
+
+/// How the large map is looked at this frame.
+#[derive(Clone, Copy)]
+struct View {
+    /// From voxels east, up and south of the map's middle to the screen.
+    transform: Mat4,
+    look: DVec2,
+    screen: Vec2,
+    /// Which way east and north run across the screen, a unit each on level ground.
+    east: Vec2,
+    north: Vec2,
+}
+
+impl View {
+    /// Where the point `height` voxels up at world `at` falls on the screen, if in front.
+    fn px(&self, at: DVec2, height: f32) -> Option<Vec2> {
+        let o = at - self.look;
+        let p = self.transform * Vec4::new(o.x as f32, height, o.y as f32, 1.0);
+        (p.w > 1e-3).then(|| Vec2::new((p.x / p.w * 0.5 + 0.5) * self.screen.x, (0.5 - p.y / p.w * 0.5) * self.screen.y))
+    }
+}
+
+/// The width of the model's columns, in voxels, for a map drawn at `voxels_per_px`.
+fn step_for(voxels_per_px: f64, s: f32) -> i32 {
+    let want = (voxels_per_px * COLUMN_PX * s as f64).max(1.0);
+    (1 << want.log2().round() as i32).clamp(relief::MIN_STEP, relief::MAX_STEP)
 }
 
 /// Where on the screen the map is drawn this frame, and what it shows.
@@ -191,8 +237,23 @@ pub struct Minimap {
     /// The large map's middle, in world voxels, and its width.
     look: DVec2,
     span: f64,
-    /// Its width on the screen last frame, in pixels.
+    /// Its width on the screen last frame, in pixels, and the scale of its sizes.
     side: f32,
+    scale: f32,
+    /// How the large map is turned and tilted, in radians.
+    yaw: f32,
+    pitch: f32,
+    /// The height of the ground the large map looks at, in voxels, once it is known.
+    aim: Option<f32>,
+    /// The time of day to show on the large map, in hours.
+    pub hour: f32,
+    /// The large map's model, the one being made, and a count of what has changed the
+    /// land shown since the game began.
+    relief: Option<Relief>,
+    relief_ask: Sender<Request>,
+    relief_pending: bool,
+    version: u64,
+    relief_gpu: ReliefGpu,
     gpu: MapGpu,
     slots: [Option<Key>; SLOTS],
     /// Whether each slot's picture, and its mask, are on the GPU.
@@ -228,6 +289,25 @@ impl Minimap {
                 }
             })
             .expect("map thread");
+        let (relief_ask, reliefs) = channel::<Request>();
+        let (w, to_main) = (world.clone(), reply.clone());
+        std::thread::Builder::new()
+            .name("map relief".into())
+            .spawn(move || {
+                while let Ok(mut req) = reliefs.recv() {
+                    // Only the newest is worth making.
+                    while let Ok(newer) = reliefs.try_recv() {
+                        req = newer;
+                    }
+                    let t = std::time::Instant::now();
+                    let made = relief::build(&w, &req);
+                    log::debug!("map model at step {}: {} corners, made in {:.2} s", made.step, made.vertices.len(), t.elapsed().as_secs_f32());
+                    if to_main.send(Answer::Relief(Box::new(made))).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("map relief thread");
         let (disk, jobs) = channel::<Disk>();
         std::thread::Builder::new()
             .name("map disk".into())
@@ -266,6 +346,16 @@ impl Minimap {
             look: DVec2::ZERO,
             span: LARGE_START,
             side: 600.0,
+            scale: 1.0,
+            yaw: YAW,
+            pitch: PITCH,
+            aim: None,
+            hour: 12.0,
+            relief: None,
+            relief_ask,
+            relief_pending: false,
+            version: 0,
+            relief_gpu: ReliefGpu::new(gpu, format),
             gpu: MapGpu::new(gpu, format),
             slots: [None; SLOTS],
             pictured: [false; SLOTS],
@@ -283,6 +373,7 @@ impl Minimap {
     pub fn set_open(&mut self, open: bool) {
         if open && !self.open {
             self.look = xz(self.player);
+            self.aim = None;
         }
         self.open = open;
     }
@@ -297,10 +388,99 @@ impl Minimap {
         self.span = span.clamp(LARGE_SPAN.0, LARGE_SPAN.1);
     }
 
-    /// Moves the large map with the mouse, by pixels.
+    /// Moves the large map with the mouse, by pixels: the ground follows the cursor.
     pub fn drag(&mut self, dx: f32, dy: f32) {
         let per_px = self.span / self.side.max(1.0) as f64;
-        self.look -= DVec2::new(dx as f64, dy as f64) * per_px;
+        let (sin, cos) = (self.yaw.sin() as f64, self.yaw.cos() as f64);
+        let (right, ahead) = (DVec2::new(cos, -sin), DVec2::new(-sin, -cos));
+        // The ground is seen at a slant, so a pixel up the screen is further over it.
+        self.look += (ahead * dy as f64 / (self.pitch.sin() as f64) - right * dx as f64) * per_px;
+    }
+
+    /// Turns and tilts the large map with the mouse, by pixels.
+    pub fn turn(&mut self, dx: f32, dy: f32) {
+        self.yaw = (self.yaw - dx * 0.006).rem_euclid(std::f32::consts::TAU);
+        self.pitch = (self.pitch + dy * 0.005).clamp(PITCH_RANGE.0, PITCH_RANGE.1);
+    }
+
+    /// How the large map is looked at on a screen `w` by `h`.
+    fn view(&self, w: f32, h: f32) -> View {
+        let side = (w.min(h) * 0.86).floor();
+        let per_px = (self.span / side as f64) as f32;
+        let dist = h * 0.5 * per_px / (FOV * 0.5).tan();
+        let (sin, cos) = self.yaw.sin_cos();
+        let target = Vec3::new(0.0, self.aim.unwrap_or(0.0), 0.0);
+        let eye = target + dist * Vec3::new(sin * self.pitch.cos(), self.pitch.sin(), cos * self.pitch.cos());
+        // Written out by hand, as the camera's is: right-handed, looking down -Z, depth 0..1.
+        let ahead = (target - eye).normalize();
+        let right = ahead.cross(Vec3::Y).normalize();
+        let up = right.cross(ahead);
+        let looking = Mat4::from_cols(
+            Vec4::new(right.x, up.x, -ahead.x, 0.0),
+            Vec4::new(right.y, up.y, -ahead.y, 0.0),
+            Vec4::new(right.z, up.z, -ahead.z, 0.0),
+            Vec4::new(-right.dot(eye), -up.dot(eye), ahead.dot(eye), 1.0),
+        );
+        let (near, far) = (dist * 0.05, dist * 40.0);
+        let t = 1.0 / (FOV * 0.5).tan();
+        let lens = Mat4::from_cols(
+            Vec4::new(t * h / w, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, t, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, far / (near - far), -1.0),
+            Vec4::new(0.0, 0.0, near * far / (near - far), 0.0),
+        );
+        let transform = lens * looking;
+        View {
+            transform,
+            look: self.look,
+            screen: Vec2::new(w, h),
+            east: Vec2::new(cos, sin * self.pitch.sin()),
+            north: Vec2::new(sin, -cos * self.pitch.sin()),
+        }
+    }
+
+    /// Asks for a new model for the large map if the one it has no longer fits: the map
+    /// has moved or zoomed too far from it, or more of the land has been seen.
+    fn want_relief(&mut self) {
+        if !self.open || self.relief_pending {
+            return;
+        }
+        let step = step_for(self.span / self.side.max(1.0) as f64, self.scale);
+        let centre = ((self.look.x / step as f64).round() as i64, (self.look.y / step as f64).round() as i64);
+        let n = relief::N as i64;
+        if let Some(r) = &self.relief {
+            let mid = (r.origin.0 as i64 + n / 2, r.origin.1 as i64 + n / 2);
+            if r.step == step && r.version == self.version && (centre.0 - mid.0).abs() <= STRAY && (centre.1 - mid.1).abs() <= STRAY {
+                return;
+            }
+        }
+        let origin = ((centre.0 - n / 2) as i32, (centre.1 - n / 2) as i32);
+        let corner = |c: usize, o: i32| (o as f64 + c as f64 + 0.5) * step as f64;
+        let (lo, hi) = (key_of(DVec2::new(corner(0, origin.0), corner(0, origin.1))), key_of(DVec2::new(corner(relief::N - 1, origin.0), corner(relief::N - 1, origin.1))));
+        let mut sheets = Vec::new();
+        for kz in lo.1..=hi.1 {
+            for kx in lo.0..=hi.0 {
+                if let Some(k) = self.known.get(&(kx, kz)) {
+                    sheets.push(((kx, kz), k.sheet.continent.clone(), k.sheet.picture.clone()));
+                }
+            }
+        }
+        if sheets.is_empty() {
+            return;
+        }
+        let mut mask = vec![[0u8; 2]; relief::N * relief::N];
+        for z in 0..relief::N {
+            for x in 0..relief::N {
+                let at = DVec2::new(corner(x, origin.0), corner(z, origin.1));
+                let key = key_of(at);
+                if let Some(r) = self.reveals.get(&key) {
+                    mask[z * relief::N + x] = r.at((at - self::origin(key)).as_vec2());
+                }
+            }
+        }
+        if self.relief_ask.send(Request { step, origin, mask, sheets, version: self.version }).is_ok() {
+            self.relief_pending = true;
+        }
     }
 
     fn path(&self, key: Key) -> Option<PathBuf> {
@@ -339,7 +519,7 @@ impl Minimap {
         self.reveals.get_mut(&key)
     }
 
-    fn take(&mut self, answer: Answer) {
+    fn take(&mut self, gpu: &Gpu, answer: Answer) {
         match answer {
             Answer::Sheet(key, sheet) => {
                 self.pending.remove(&key);
@@ -348,7 +528,15 @@ impl Minimap {
                     self.known.insert(key, Known { sheet, visited: vec![false; n], checked: false });
                     self.reveal_mut(key);
                     self.check_visits(key);
+                    self.version += 1;
                 }
+            }
+            Answer::Relief(mut r) => {
+                self.relief_pending = false;
+                self.relief_gpu.upload(gpu, &r.vertices, &r.indices);
+                r.vertices = Vec::new();
+                r.indices = Vec::new();
+                self.relief = Some(*r);
             }
             Answer::Reveal(key, loaded) => {
                 let mut r = loaded.unwrap_or_default();
@@ -357,6 +545,7 @@ impl Minimap {
                 }
                 self.reveals.insert(key, r);
                 self.check_visits(key);
+                self.version += 1;
             }
         }
     }
@@ -384,7 +573,7 @@ impl Minimap {
             self.heading = h.normalize();
         }
         while let Ok(a) = self.answers.try_recv() {
-            self.take(a);
+            self.take(gpu, a);
         }
         let here = key_of(xz(eye));
         self.want(here, true);
@@ -399,6 +588,16 @@ impl Minimap {
             self.see(&c, eye, walked);
         }
         self.fill_slots(gpu, block);
+        self.want_relief();
+        // The large map looks at the ground under its middle, coming to it gently as it
+        // is moved over hills.
+        if let Some(r) = self.relief.as_ref().filter(|_| self.open) {
+            let ground = r.top_at(self.look.x, self.look.y).unwrap_or(r.level * r.step as f32);
+            self.aim = Some(match self.aim {
+                Some(aim) if dt > 0.0 => aim + (ground - aim) * (1.0 - (-dt * 6.0).exp()),
+                _ => ground,
+            });
+        }
         self.region_timer -= dt;
         if self.region_timer <= 0.0
             && let Some(k) = self.known.get(&here)
@@ -417,12 +616,17 @@ impl Minimap {
         let radius = reveal::sight(c, (at - origin(here)).as_vec2(), eye.y as f32);
         self.last_seen = Some(eye);
         let (lo, hi) = (key_of(at - radius as f64), key_of(at + radius as f64));
+        let mut changed = false;
         for kz in lo.1..=hi.1 {
             for kx in lo.0..=hi.0 {
                 let key = (kx, kz);
                 let local = (at - origin(key)).as_vec2();
                 match self.reveal_mut(key) {
-                    Some(r) => r.see(local, radius, walked),
+                    Some(r) => {
+                        let before = r.changes;
+                        r.see(local, radius, walked);
+                        changed |= r.changes != before;
+                    }
                     None => {
                         if let Some(q) = self.loading.get_mut(&key) {
                             q.push((local, radius, walked));
@@ -430,6 +634,9 @@ impl Minimap {
                     }
                 }
             }
+        }
+        if changed {
+            self.version += 1;
         }
         if walked {
             for k in self.known.values_mut() {
@@ -498,11 +705,11 @@ impl Minimap {
     pub fn settle(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3) {
         loop {
             self.update(gpu, eye, forward, false, 0.0);
-            if self.pending.is_empty() && self.loading.is_empty() {
+            if self.pending.is_empty() && self.loading.is_empty() && !self.relief_pending {
                 break;
             }
             match self.answers.recv_timeout(std::time::Duration::from_secs(120)) {
-                Ok(a) => self.take(a),
+                Ok(a) => self.take(gpu, a),
                 Err(_) => break,
             }
         }
@@ -568,10 +775,11 @@ impl Minimap {
             return;
         }
         let (w, h) = (size.0 as f32, size.1 as f32);
-        let f = self.frame(w, h);
         if self.open {
-            self.side = f.half.x * 2.0;
+            self.draw_large(gpu, encoder, target, size);
+            return;
         }
+        let f = self.frame(w, h);
         let mut u = Uniforms {
             screen: [w, h],
             centre: f.centre.into(),
@@ -591,72 +799,179 @@ impl Minimap {
             }
         }
         let mut out = Vec::with_capacity(64);
-        if self.open {
-            let mut veil = Instance::new(gpu::VEIL, [w * 0.5, h * 0.5], 0.0, [0.03, 0.035, 0.04, 0.45]);
-            veil.size = [w * 0.5 + 1.0, h * 0.5 + 1.0];
-            out.push(veil);
-        }
         let mut map = Instance::new(gpu::MAP, f.centre.into(), 0.0, [1.0; 4]);
         map.size = (f.half + Vec2::splat(12.0)).into();
         out.push(map);
-        self.marks(&f, &mut out);
+        let mut labels = Vec::new();
+        let place = |at: DVec2| Some((f.to_px(at), true));
+        self.marks(&f, &place, &mut out, &mut labels);
 
         // The player, and north.
         let me = f.to_px(xz(self.player));
         if f.edge(me) < -2.0 {
-            let mut arrow = Instance::new(gpu::ARROW, me.into(), (if self.open { 9.0 } else { 7.5 }) * f.s, [0.99, 0.98, 0.95, 1.0]);
+            let mut arrow = Instance::new(gpu::ARROW, me.into(), 7.5 * f.s, [0.99, 0.98, 0.95, 1.0]);
             arrow.dir = self.heading.into();
             out.push(arrow);
         }
-        if f.round {
-            let top = f.centre - Vec2::new(0.0, f.half.y - 9.0 * f.s);
-            self.labels.push(Label { pos: top.into(), text: "N".into(), size: 11.0 * f.s, color: [60, 56, 50, 220], left: false });
-        } else {
-            let corner = f.centre - f.half + Vec2::splat(14.0 * f.s);
-            if let Some(region) = &self.region {
-                self.labels.push(Label { pos: [corner.x, corner.y + 4.0 * f.s], text: region.clone(), size: 17.0 * f.s, color: [44, 40, 36, 235], left: true });
-            }
-            let foot = f.centre + Vec2::new(0.0, f.half.y + 16.0 * f.s);
-            self.labels.push(Label {
-                pos: foot.into(),
-                text: "M or Esc to close    wheel to zoom    drag to move".into(),
-                size: 12.0 * f.s,
-                color: [225, 222, 214, 200],
-                left: false,
-            });
+        let top = f.centre - Vec2::new(0.0, f.half.y - 9.0 * f.s);
+        labels.push(Label { pos: top.into(), text: "N".into(), size: 11.0 * f.s, color: [60, 56, 50, 220], left: false, right: false });
+        self.labels = labels;
+        self.gpu.load(gpu, &u, &out);
+        self.gpu.pass(encoder, target, 0..out.len() as u32);
+    }
+
+    /// Draws the large map: the land seen so far as a model looked down on at a slant,
+    /// with the places on it, the player, a compass and where and when this is.
+    fn draw_large(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, size: (u32, u32)) {
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let s = (h / 720.0).max(0.75);
+        self.side = (w.min(h) * 0.86).floor();
+        self.scale = s;
+        let view = self.view(w, h);
+        let screen = Vec2::new(w, h);
+        // The whole screen is the map: marks keep a little in from its edge.
+        let f = Frame {
+            centre: screen * 0.5,
+            half: screen * 0.5 - Vec2::splat(8.0 * s),
+            round: false,
+            corner: 0.0,
+            look: self.look,
+            voxels_per_px: self.span / self.side as f64,
+            s,
+        };
+        let u = Uniforms {
+            screen: [w, h],
+            centre: f.centre.into(),
+            half: (screen * 0.5 + Vec2::splat(4.0)).into(),
+            voxels_per_px: f.voxels_per_px as f32,
+            time: self.clock,
+            ..Default::default()
+        };
+        let mut out = Vec::with_capacity(64);
+        let mut veil = Instance::new(gpu::VEIL, f.centre.into(), 0.0, [0.075, 0.095, 0.125, 0.9]);
+        veil.size = [w * 0.5 + 1.0, h * 0.5 + 1.0];
+        out.push(veil);
+
+        let relief = self.relief.as_ref();
+        let level = relief.map_or(0.0, |r| r.level * r.step as f32);
+        // A place stands on its column of the model, a block clear of the ground; one the
+        // model does not show is taken to lie at the model's middle height.
+        let place = |at: DVec2| match relief.and_then(|r| Some((r.top_at(at.x, at.y)?, r.step))) {
+            Some((top, step)) => view.px(at, top + step as f32).map(|p| (p, true)),
+            None => view.px(at, level).map(|p| (p, false)),
+        };
+        let mut labels = Vec::new();
+        self.marks(&f, &place, &mut out, &mut labels);
+
+        let white = [250, 248, 240, 255];
+        let me = xz(self.player);
+        if let Some((p, _)) = place(me)
+            && f.edge(p) < -2.0
+        {
+            let ahead = place(me + self.heading.as_dvec2() * relief.map_or(64.0, |r| r.step as f64 * 3.0));
+            let dir = ahead.map_or(Vec2::ZERO, |(q, _)| (q - p).normalize_or_zero());
+            let mut arrow = Instance::new(gpu::ARROW, p.into(), 10.0 * s, [0.99, 0.98, 0.95, 1.0]);
+            arrow.dir = (if dir == Vec2::ZERO { self.heading } else { dir }).into();
+            out.push(arrow);
         }
-        self.gpu.draw(gpu, encoder, target, &u, &out);
+
+        // The compass, lying on the ground as the map does.
+        let rose = Vec2::new(w - 56.0 * s, 58.0 * s);
+        let reach = 26.0 * s;
+        for (axis, letters) in [(view.north, ["N", "S"]), (view.east, ["E", "W"])] {
+            let mut bar = Instance::new(gpu::LINE, rose.into(), 0.0, [0.98, 0.97, 0.94, 0.95]);
+            bar.size = [axis.length() * reach, 1.6 * s];
+            bar.dir = axis.normalize_or_zero().into();
+            out.push(bar);
+            for (letter, side) in letters.into_iter().zip([1.0, -1.0]) {
+                let tip = rose + axis * side * (reach + 10.0 * s);
+                let size = if letter == "N" { 15.0 } else { 11.0 } * s;
+                labels.push(Label { pos: tip.into(), text: letter.into(), size, color: white, left: false, right: false });
+            }
+        }
+
+        if let Some(region) = &self.region {
+            labels.push(Label { pos: [w - 112.0 * s, 44.0 * s], text: region.clone(), size: 30.0 * s, color: white, left: false, right: true });
+        }
+        let metres = |v: f64| v / worldgen::scale::VOXELS_PER_METRE as f64;
+        let hour = self.hour.rem_euclid(24.0);
+        let zoom = relief.map_or(1, |r| r.step / relief::MIN_STEP);
+        labels.push(Label {
+            pos: [16.0 * s, 20.0 * s],
+            text: format!(
+                "X {:.0}   Z {:.0}      {}:{:02}      1:{zoom}",
+                metres(self.player.x),
+                metres(self.player.z),
+                hour as u32,
+                (hour.fract() * 60.0) as u32
+            ),
+            size: 14.0 * s,
+            color: white,
+            left: true,
+            right: false,
+        });
+        labels.push(Label {
+            pos: [w * 0.5, h - 20.0 * s],
+            text: "M or Esc to close      wheel to zoom      drag to move      right drag to turn".into(),
+            size: 12.0 * s,
+            color: [225, 222, 214, 200],
+            left: false,
+            right: false,
+        });
+
+        let transform = relief.map(|r| {
+            let step = r.step as f64;
+            let corner = (DVec2::new(r.origin.0 as f64, r.origin.1 as f64) * step - self.look).as_vec2();
+            view.transform * Mat4::from_translation(Vec3::new(corner.x, 0.0, corner.y)) * Mat4::from_scale(Vec3::splat(r.step as f32))
+        });
+        self.labels = labels;
+        self.gpu.load(gpu, &u, &out);
+        self.gpu.pass(encoder, target, 0..1);
+        if let Some(transform) = transform {
+            self.relief_gpu.draw(gpu, encoder, target, size, transform);
+        }
+        self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
 
     /// The places on the map: icons for those visited, soft glows for those seen but
-    /// not visited, and at the rim, the nearest few still out of sight.
-    fn marks(&mut self, f: &Frame, out: &mut Vec<Instance>) {
+    /// not visited, and at the rim, the nearest few still out of sight. `place` gives
+    /// where a point of the world falls on the screen, and whether the map shows it.
+    fn marks(&self, f: &Frame, place: &dyn Fn(DVec2) -> Option<(Vec2, bool)>, out: &mut Vec<Instance>, labels: &mut Vec<Label>) {
         let me = xz(self.player);
-        let me_px = f.to_px(me);
-        let (icon, glow) = if self.open { (6.0 * f.s, 10.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
+        let me_px = place(me).map(|p| p.0);
+        let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
         let mut hints: Vec<(f64, DVec2)> = Vec::new();
         let mut icons = Vec::new();
-        for key in self.slots.iter().flatten() {
+        let keys: Vec<Key> = if self.open { self.known.keys().copied().collect() } else { self.slots.iter().flatten().copied().collect() };
+        for key in &keys {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
             for (mark, &visited) in k.sheet.marks.iter().zip(&k.visited) {
-                let p = f.to_px(mark.at);
-                let on_map = f.edge(p) < -3.0;
+                let at = place(mark.at);
+                let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
-                if visited && on_map {
+                if let Some((p, _)) = at
+                    && on_map
+                    && visited
+                {
                     icons.push(icon_of(mark, p, icon));
                     if self.open
                         && let Some(name) = &mark.name
                     {
-                        self.labels.push(Label {
-                            pos: [p.x + icon + 4.0 * f.s, p.y],
+                        // Over its place, as a pin's flag is.
+                        labels.push(Label {
+                            pos: [p.x, p.y - icon - 9.0 * f.s],
                             text: name.clone(),
-                            size: 12.5 * f.s,
-                            color: [40, 36, 32, 235],
-                            left: true,
+                            size: 13.5 * f.s,
+                            color: [250, 248, 240, 255],
+                            left: false,
+                            right: false,
                         });
                     }
-                } else if !visited && seen && on_map {
+                } else if let Some((p, _)) = at
+                    && on_map
+                    && seen
+                {
                     let tint = if mark.kind.watery() { [0.88, 0.96, 1.0] } else { [1.0, 0.97, 0.86] };
                     let phase = (mark.at.x * 0.013 + mark.at.y * 0.007) as f32;
                     let breathe = 0.85 + 0.15 * (self.clock * 1.1 + phase).sin();
@@ -670,10 +985,13 @@ impl Minimap {
             }
         }
         // Only from where the player is on the map: a hint points away from them.
-        if f.edge(me_px) < -2.0 {
+        if let Some(me_px) = me_px
+            && f.edge(me_px) < -2.0
+        {
             hints.sort_by(|a, b| a.0.total_cmp(&b.0));
             for (d, at) in hints.into_iter().take(HINTS) {
-                let dir = (at - me).normalize_or_zero().as_vec2();
+                let Some((p, _)) = place(at) else { continue };
+                let dir = (p - me_px).normalize_or_zero();
                 if dir == Vec2::ZERO {
                     continue;
                 }
@@ -728,6 +1046,20 @@ mod tests {
             look: DVec2::new(1000.0, 2000.0),
             voxels_per_px: 10.0,
             s: 1.0,
+        }
+    }
+
+    #[test]
+    fn the_model_has_coarser_columns_the_further_out_the_map_is() {
+        assert_eq!(step_for(0.5, 1.0), relief::MIN_STEP);
+        assert_eq!(step_for(1.0e6, 1.0), relief::MAX_STEP);
+        let steps: Vec<i32> = (0..40).map(|k| step_for(1.5 * 1.15f64.powi(k), 1.0)).collect();
+        assert!(steps.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] * 2), "{steps:?}");
+        // Whatever the zoom, what a wide window shows fits within the model.
+        for k in 0..44 {
+            let per_px = 1.5 * 1.1f64.powi(k);
+            let columns = 1280.0 * per_px / step_for(per_px, 1.0) as f64;
+            assert!(columns < relief::N as f64, "{per_px} voxels a pixel shows {columns} columns");
         }
     }
 

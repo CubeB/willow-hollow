@@ -213,7 +213,13 @@ pub fn map_labels(ctx: &egui::Context, labels: &[crate::minimap::Label]) {
         };
         let font = egui::FontId::proportional(l.size / ppp);
         let at = egui::pos2(l.pos[0] / ppp, l.pos[1] / ppp);
-        let align = if l.left { egui::Align2::LEFT_CENTER } else { egui::Align2::CENTER_CENTER };
+        let align = if l.left {
+            egui::Align2::LEFT_CENTER
+        } else if l.right {
+            egui::Align2::RIGHT_CENTER
+        } else {
+            egui::Align2::CENTER_CENTER
+        };
         let step = 1.0 / ppp;
         for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
             painter.text(at + egui::vec2(dx * step, dy * step), align, &l.text, font.clone(), halo);

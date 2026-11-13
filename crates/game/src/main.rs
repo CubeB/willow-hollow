@@ -512,6 +512,8 @@ struct Running {
     map: Minimap,
     /// The large map is being dragged with the mouse, from this cursor position.
     drag: Option<(f64, f64)>,
+    /// Where the cursor was when the map was last turned by it, while it is.
+    turning: Option<(f64, f64)>,
 }
 
 /// Distance between footsteps.
@@ -591,6 +593,7 @@ impl Running {
         Ok(Self {
             map,
             drag: None,
+            turning: None,
             window,
             overlay,
             renderer,
@@ -692,6 +695,7 @@ impl Running {
     fn set_map(&mut self, open: bool) {
         self.map.set_open(open);
         self.drag = None;
+        self.turning = None;
         self.want_grab = !open;
         self.set_grab(!open);
     }
@@ -967,6 +971,7 @@ impl Running {
         }
 
         self.map.corner = self.settings.minimap;
+        self.map.hour = self.env.time;
         self.map.update(&self.gpu, self.camera.pos, self.camera.forward(), self.walking, dt);
 
         self.cpu.lap(2);
@@ -1179,11 +1184,18 @@ impl ApplicationHandler for App {
                     r.map.drag((position.x - x) as f32, (position.y - y) as f32);
                     r.drag = Some((position.x, position.y));
                 }
+                if let Some((x, y)) = r.turning {
+                    r.map.turn((position.x - x) as f32, (position.y - y) as f32);
+                    r.turning = Some((position.x, position.y));
+                }
                 r.last_cursor_seen = Some((position.x, position.y));
                 r.cursor_moved(position.x, position.y);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if r.map.open && !r.show_settings => {
                 r.drag = (state == ElementState::Pressed).then_some(r.last_cursor_seen).flatten();
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } if r.map.open && !r.show_settings => {
+                r.turning = (state == ElementState::Pressed).then_some(r.last_cursor_seen).flatten();
             }
             WindowEvent::MouseWheel { delta, .. } if r.map.open => {
                 let lines = match delta {
@@ -1415,11 +1427,13 @@ fn main() -> Result<()> {
             if let Some(span) = large {
                 map.set_open(true);
                 map.set_span(span);
+                map.settle(&gpu, camera.pos, camera.forward());
             }
             map
         });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
             let Some(map) = &mut map else { return };
+            map.hour = env.time;
             map.update(&gpu, camera.pos, camera.forward(), true, 0.0);
             map.draw(&gpu, encoder, view, opts.size);
             if text {
