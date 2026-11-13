@@ -27,6 +27,8 @@ use crate::{
     surface::{Column, Cover, Sampler},
 };
 
+/// Where a signpost stands from the point two trails meet at.
+const SIGNPOST: Vec2 = Vec2::splat(m(2.4));
 /// Half-width of the worn strip by the traffic a trail carries: (traffic, metres). A
 /// remote trace is a single broken line, a footpath a narrow one, a track a broad firm
 /// strip, and a road between busy places wider still. Widths blend between these.
@@ -1190,6 +1192,8 @@ impl Layer<'_> {
         let mut rng = Rng::new(hash2(self.c.desc.seed ^ 0xb71d, salt as i32, pts.len() as i32));
         // (start, end) of sample ranges carried by a bridge.
         let mut carried: Vec<(usize, usize)> = Vec::new();
+        // Runs waded on stepping stones.
+        let mut fords: Vec<(usize, usize)> = Vec::new();
         let mut pins: Vec<(usize, f32)> = Vec::new();
         for &(s, e) in &runs {
             let span = e - s + 1;
@@ -1215,6 +1219,7 @@ impl Layer<'_> {
                 span: span as i32,
             });
             if kind == CrossingKind::Stones {
+                fords.push((s, e));
                 net.add_stamp(stepping_stones(&palette, &mut rng, &pts, &cols, (s, e)));
             } else {
                 let (voxels, range) = bridge(kind, &palette, &mut rng, &pts, &cols, (s, e));
@@ -1270,9 +1275,20 @@ impl Layer<'_> {
             .chain(net.junctions.iter().copied())
             .chain(net.held_props.iter().filter_map(|(_, _, foot)| foot.first().map(|c| c.as_vec2() + 0.5)))
             .chain(net.held_markers.iter().map(|m| m.at))
+            .chain(net.held_delights.iter().map(|d| d.at))
             .collect();
         let chosen = super::roadside::choose(self.c, self.seed, &trail, &taken);
+        // The small delights, rarer by far, clear of all those and of the signposts
+        // that will stand where trails meet.
+        let taken: Vec<Vec2> = taken
+            .into_iter()
+            .filter(|p| !net.junctions.contains(p))
+            .chain(chosen.iter().map(|m| m.at))
+            .chain(net.junctions.iter().map(|j| *j + SIGNPOST))
+            .collect();
         net.held_markers.extend(chosen);
+        let delights = super::delights::choose(self.c, self.seed, &trail, &fords, &net.junctions, &taken);
+        net.held_delights.extend(delights);
     }
 
     /// How wide the trail is actually worn at point `i`: the width its traffic calls
@@ -1636,6 +1652,27 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         }
     }
 
+    // The small delights, likewise; and none by a site, which has its own things, nor
+    // two near each other, so that each stays a surprise.
+    for d in std::mem::take(&mut net.held_delights) {
+        use super::delights::{APART, APART_SAME, Standing};
+        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(d.at) < m(16.0).powi(2)).collect();
+        let on_way = d.footprint.iter().any(|c| {
+            let c = c.as_vec2() + 0.5;
+            near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
+        });
+        let at = vec2(d.origin.x as f32, d.origin.z as f32);
+        let by_site = net.pads.iter().any(|p| vec2(p.x, p.z).distance(at) < p.radius + m(12.0));
+        let crowded = net.delights.iter().any(|o| {
+            let gap = vec2(o.at.x as f32, o.at.z as f32).distance(at);
+            gap < APART || (o.kind == d.kind && gap < APART_SAME)
+        });
+        if !on_way && !by_site && !crowded {
+            net.delights.push(Standing { kind: d.kind, at: d.origin, footprint: d.footprint });
+            net.add_stamp_with(d.voxels, d.fine);
+        }
+    }
+
     // Signposts where trails meet.
     let mut junction_cells = std::collections::HashSet::new();
     for j in net.junctions.clone() {
@@ -1650,8 +1687,8 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
                 Some(d.y.atan2(d.x))
             })
             .collect();
-        let x = (j.x + m(2.4)) as i32;
-        let z = (j.y + m(2.4)) as i32;
+        let x = (j.x + SIGNPOST.x) as i32;
+        let z = (j.y + SIGNPOST.y) as i32;
         let col = Sampler::new(c, world_seed, x, z, 1).column(x, z);
         if is_wet(&col) || col.river < m(2.4) {
             continue;

@@ -112,6 +112,27 @@ coordinates of landmarks, which is how to find a place worth a screenshot.
 cargo run --release -p mapgen -- --seed 1 --poi
 ```
 
+Each `poi` line names a kind of place and its world coordinates. `poi site` lines are
+the landmarks; `poi marker` the milestones, benches, waymarks and cairns; `poi delight`
+the rare small things left beside a trail (wind chimes, a wayside shelf, a seat at a
+view, prayer flags, balanced stones, a carved face), each with why it stands there.
+Marker and delight lines end with a place on the trail to look from and the yaw to
+face, ready for `--over` and `--look`.
+
+**What things are built of.** Stonework is never a colour picked by biome: a place is
+built of the rock in the ground where it stands. `surface::local_rock` gives the bed a
+cliff there would show, `materials::masonry` the stone that goes with it, and
+`Palette::at` (or `trails::build::palette_at` from continent-local coordinates) the
+palette to build from. Use those for anything new that people have built, and
+`Palette::of(biome)` only in tests.
+
+**Small delights** live in `crates/worldgen/src/trails/delights.rs`. Each kind has a
+reason to stand where it does and a chance of being taken up when the reason holds;
+`APART` and `APART_SAME` keep any two from standing near each other. They are meant to
+be a surprise, so add to the chances with care. Nothing makes a sound yet:
+`GameWorld::delights_near(x, z, reach)` lists the ones about a place, which is where
+the wind chimes' sound should start from when there are recordings.
+
 **Generation speed.** Times chunk generation and prints a checksum of everything
 generated. A change that is only meant to make generation faster must leave the
 checksum as it was.

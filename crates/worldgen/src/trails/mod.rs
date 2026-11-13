@@ -8,6 +8,7 @@
 //! stamps the structures (landmarks, bridges, lanterns) that overlap each column.
 
 pub mod build;
+pub mod delights;
 pub mod roadside;
 pub mod route;
 pub mod sites;
@@ -279,6 +280,11 @@ pub struct Network {
     pub markers: Vec<(roadside::Marker, IVec3)>,
     /// Markers chosen but not yet built, held like the props for the same reason.
     held_markers: Vec<roadside::Placed>,
+    /// Every small delight left beside a trail (wind chimes, prayer flags, a seat at a
+    /// view and the like), and where. Sound for the chimes starts from here.
+    pub delights: Vec<delights::Standing>,
+    /// Delights chosen but not yet built, held like the markers.
+    held_delights: Vec<delights::Placed>,
 }
 
 impl Network {
