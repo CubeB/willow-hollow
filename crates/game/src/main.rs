@@ -550,7 +550,7 @@ struct Running {
 }
 
 /// How much of bringing the glider out is swinging it up from the back.
-const GLIDER_UP: f32 = 0.4;
+const GLIDER_UP: f32 = 0.5;
 /// Distance between footsteps.
 const STRIDE: f32 = m(1.7);
 /// How long each frame may spend handing finished terrain to the GPU.
@@ -957,7 +957,11 @@ impl Running {
             let doing = character::Doing::of(self.player.mode, self.player.on_ground, self.player.swimming, speed);
             // Two steps to a turn of the legs, so only whether the count is odd matters.
             let stride = (self.steps % 2) as f32 + self.stride / STRIDE;
-            self.gait.update(doing, stride, heading, self.player.mode == Mode::Glide, dt);
+            // Taking the glider from the back, or putting it away.
+            let gliding = self.player.mode == Mode::Glide;
+            let stow = ((gliding || self.glider > 0.0) && self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
+            let rise = self.player.vel.y / worldgen::scale::VOXELS_PER_METRE;
+            self.gait.update(doing, stride, heading, gliding, stow, rise, dt);
             if self.third {
                 // Behind and looking past the figure, as far back as the ground and walls allow.
                 use player::Voxels;
@@ -1054,7 +1058,7 @@ impl Running {
             }
             // The glider swings open as it is taken to the air and folds away on landing.
             let flying = self.player.mode == Mode::Glide;
-            self.glider = (self.glider + if flying { dt / 0.5 } else { -dt / 0.45 }).clamp(0.0, 1.0);
+            self.glider = (self.glider + if flying { dt / 0.7 } else { -dt / 0.8 }).clamp(0.0, 1.0);
             if self.glider > GLIDER_UP {
                 let open = (self.glider - GLIDER_UP) / (1.0 - GLIDER_UP);
                 vehicles::draw_glider(self.player.pos, self.camera.yaw, open, self.camera.pos, &mut self.props);
@@ -1489,7 +1493,13 @@ fn main() -> Result<()> {
             let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
             camera.pos += -camera.forward().as_dvec3() * m64(3.6) + DVec3::new(0.0, m64(0.25), 0.0);
             let facing = camera.yaw + turned.to_radians();
-            let gait = if opts.figure_glide.is_some() { character::Gait::gliding(facing) } else { character::Gait::striding(facing, opts.figure_speed) };
+            let gait = if opts.figure_glide.is_some() {
+                character::Gait::gliding(facing)
+            } else if opts.figure_furl > 0.0 {
+                character::Gait::reaching(facing, opts.figure_furl)
+            } else {
+                character::Gait::striding(facing, opts.figure_speed)
+            };
             (feet, gait)
         });
         let mut far = FarView::new(&gpu, world.clone());
