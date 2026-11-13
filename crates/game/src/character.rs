@@ -24,6 +24,10 @@ type Rgb = [u8; 3];
 const LEATHER: Rgb = [0x8d, 0x5c, 0x37];
 const EYE: Rgb = [0x1d, 0x18, 0x15];
 const ROLL: Rgb = [0xe0, 0xd5, 0xb8];
+/// The glider furled: its pole, its cloth, and the tie about it (as vehicles.rs has them).
+const POLE: Rgb = [123, 108, 94];
+const FURL: Rgb = [220, 147, 133];
+const TIE: Rgb = [237, 222, 199];
 
 /// What sets one person apart from another.
 #[derive(Clone, Copy)]
@@ -235,8 +239,10 @@ fn linear(c: Rgb) -> [f32; 4] {
     [l(c[0]), l(c[1]), l(c[2]), 1.0]
 }
 
-/// Draws a figure standing with its feet at `feet`, for a camera at `cam`.
-pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+/// Draws a figure standing with its feet at `feet`, for a camera at `cam`. `furled` is
+/// the glider carried as a rod: 0 strapped upright to the back beside the pack, up to 1
+/// swung overhead to where the wing opens from; None once the wing is out.
+pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f32>, cam: DVec3, out: &mut Vec<ParticleInstance>) {
     // The figure looks along its own z; a camera at yaw 0 looks along x.
     let yaw = facing - std::f32::consts::FRAC_PI_2;
     let base = (feet - cam).as_vec3() + Vec3::Y * pose.lift;
@@ -312,14 +318,36 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, out:
         // clear below the scarf, its flap overhangs it, the bedroll rides behind the
         // scarf's knot, and the straps stop short of the scarf and clear of its end.
         body.extend([
-            ([-1.4, 1.2, -2.5], [2.8, 2.7, 1.45], LEATHER),
-            ([-1.6, 3.9, -2.7], [3.2, 0.6, 1.65], shade(LEATHER, 1.18)),
-            ([-1.9, 4.5, -2.95], [3.8, 0.8, 0.85], ROLL),
+            // Set to one side, leaving room beside it for the furled glider.
+            ([-1.75, 1.2, -2.5], [2.75, 2.7, 1.45], LEATHER),
+            ([-1.9, 3.9, -2.7], [3.0, 0.6, 1.65], shade(LEATHER, 1.18)),
+            ([-1.98, 4.5, -2.95], [3.1, 0.8, 0.85], ROLL),
             ([-0.95, 1.05, 1.0], [0.45, 3.9, 0.08], strap),
             ([1.2, 1.05, 1.0], [0.45, 3.9, 0.08], strap),
         ]);
     }
     part(hips, pose.lean, 0.0, &body);
+
+    if let Some(swing) = furled {
+        // From the back, by the shoulder, up and over to lie along the wing's middle.
+        let t = swing.clamp(0.0, 1.0);
+        let e = t * t * (3.0 - 2.0 * t);
+        // Behind the scarf, against the side of the pack.
+        let on_back = leant(Vec3::new(1.58, 14.0, -2.45));
+        let (ahead, up) = grip();
+        let overhead = Vec3::new(0.0, up / CELL + 5.6, ahead / CELL + 2.0);
+        let pitch = pose.lean + (std::f32::consts::FRAC_PI_2 - pose.lean) * e;
+        part(
+            on_back.lerp(overhead, e),
+            pitch,
+            0.0,
+            &[
+                ([-0.22, -5.5, -0.22], [0.44, 8.5, 0.44], POLE),
+                ([-0.4, -5.0, -0.4], [0.8, 6.5, 0.8], FURL),
+                ([-0.42, -2.3, -0.42], [0.84, 0.6, 0.84], TIE),
+            ],
+        );
+    }
 
     let eye = blend(look.skin, EYE, 0.7);
     part(
@@ -344,7 +372,7 @@ mod tests {
 
     fn boxes(pose: &Pose, facing: f32) -> Vec<ParticleInstance> {
         let mut out = Vec::new();
-        draw(&WANDERER, DVec3::ZERO, facing, pose, DVec3::ZERO, &mut out);
+        draw(&WANDERER, DVec3::ZERO, facing, pose, None, DVec3::ZERO, &mut out);
         out
     }
 
@@ -357,6 +385,26 @@ mod tests {
         assert!((high - crate::player::HEIGHT as f32).abs() < 1e-3, "crown at {high}");
         // Narrow enough to pass wherever the player's body does, pack aside.
         assert!(out.iter().all(|b| b.pos[0].hypot(b.pos[2]) < m(0.45)));
+    }
+
+    #[test]
+    fn the_furled_glider_rides_on_the_back_clear_of_the_pack_and_the_arms() {
+        let mut out = Vec::new();
+        draw(&WANDERER, DVec3::ZERO, std::f32::consts::FRAC_PI_2, &Pose::default(), Some(0.0), DVec3::ZERO, &mut out);
+        // Facing along z, the figure's own frame is the world's: x aside, z ahead.
+        let furl = linear(FURL);
+        let rod: Vec<_> = out.iter().filter(|b| b.color == furl).collect();
+        assert_eq!(rod.len(), 1);
+        let (lo, hi) = (|k: usize| rod[0].pos[k] - rod[0].size[k] * 0.5, |k: usize| rod[0].pos[k] + rod[0].size[k] * 0.5);
+        assert!(hi(2) < -CELL, "behind the back: {}", hi(2) / CELL);
+        assert!(hi(0).abs().max(lo(0).abs()) <= 2.0 * CELL + 1e-4, "inside the arms");
+        assert!(rod[0].size[1] > 6.0 * CELL, "upright");
+        // No box of the pack reaches into it.
+        let leather = [linear(LEATHER), linear(shade(LEATHER, 1.18)), linear(ROLL)];
+        for b in out.iter().filter(|b| leather.contains(&b.color) && b.pos[2] < -CELL) {
+            let apart = (0..3).any(|k| (b.pos[k] - rod[0].pos[k]).abs() >= (b.size[k] + rod[0].size[k]) * 0.5 + 1e-4);
+            assert!(apart, "pack box at {:?} meets the rod", b.pos);
+        }
     }
 
     #[test]

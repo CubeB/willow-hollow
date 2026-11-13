@@ -194,23 +194,22 @@ pub fn draw_boat(pos: DVec3, heading: f32, time: f32, cam: DVec3, out: &mut Vec<
 }
 
 /// Draws the wing above someone gliding, with feet at `pos`: `open` of the way unfolded,
-/// from a bundle over the shoulders to its full span, with the bar it is held by and the
-/// hangers the bar is slung from.
+/// from a rod lying along its middle (where the figure swings it up to from its back,
+/// see character::draw) to its full span, with the bar it is held by and the hangers
+/// the bar is slung from.
 pub fn draw_glider(pos: DVec3, heading: f32, open: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) {
     let t = open.clamp(0.0, 1.0);
     let spread = t * t * (3.0 - 2.0 * t);
-    // Folded, it sits lower and further back, over the pack.
-    let stowed = 1.0 - spread;
     let wing = WING.map(|(c, s, color)| {
         let across = if s[2] > 1.0 { s[2] * spread.max(0.04) } else { s[2] };
-        ([c[0] - 0.55 * stowed, c[1] - 0.45 * stowed, c[2] * spread], [s[0], s[1], across], color)
+        ([c[0], c[1], c[2] * spread], [s[0], s[1], across], color)
     });
     let eye = pos + DVec3::new(0.0, crate::player::EYE_HEIGHT, 0.0);
     push_parts(&wing, eye, heading, cam, out);
     // The bar, where the hands are (character::grip), and its hangers up to the wing.
     let (ahead, up) = crate::character::grip();
     let (x, y) = (ahead / OLD_VOXEL, (up - crate::player::EYE_HEIGHT as f32) / OLD_VOXEL);
-    let top = 1.0 - 0.45 * stowed;
+    let top = 1.0;
     let rig: [Part; 3] = [
         ([x, y, 0.0], [0.06, 0.06, 0.95], FRAME),
         ([x, (y + top) * 0.5, 0.42], [0.04, top - y, 0.04], FRAME),

@@ -76,6 +76,8 @@ struct Options {
     /// the wing this far open.
     figure_speed: f32,
     figure_glide: Option<f32>,
+    /// How far the figure on a screenshot has swung its furled glider up from its back.
+    figure_furl: f32,
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
@@ -116,6 +118,7 @@ impl Default for Options {
             third: None,
             figure_speed: 4.16,
             figure_glide: None,
+            figure_furl: 0.0,
             look: (35.0, -18.0),
             time: None,
             date: None,
@@ -148,6 +151,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure DEG          as --third, with the figure turned DEG degrees from the view
   --figure-speed V      the figure runs at V metres a second (default 4.16)
   --figure-glide T      the figure glides, its wing T of the way open (0-1)
+  --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
@@ -201,6 +205,7 @@ fn parse_args() -> Result<Options> {
             "--figure" => o.third = Some(value()?.parse()?),
             "--figure-speed" => o.figure_speed = value()?.parse()?,
             "--figure-glide" => o.figure_glide = Some(value()?.parse()?),
+            "--figure-furl" => o.figure_furl = value()?.parse()?,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
@@ -487,7 +492,8 @@ struct Running {
     /// Distance walked since the last footstep, and how many there have been.
     stride: f32,
     steps: u32,
-    /// How far open the glider is, 0 folded away to 1 flying.
+    /// How far out the glider is: 0 a rod on the back, to [`GLIDER_UP`] swung overhead,
+    /// to 1 spread and flying.
     glider: f32,
     last_fall_speed: f32,
     was_grounded: bool,
@@ -543,6 +549,8 @@ struct Running {
     turning: Option<(f64, f64)>,
 }
 
+/// How much of bringing the glider out is swinging it up from the back.
+const GLIDER_UP: f32 = 0.4;
 /// Distance between footsteps.
 const STRIDE: f32 = m(1.7);
 /// How long each frame may spend handing finished terrain to the GPU.
@@ -1046,9 +1054,10 @@ impl Running {
             }
             // The glider swings open as it is taken to the air and folds away on landing.
             let flying = self.player.mode == Mode::Glide;
-            self.glider = (self.glider + if flying { dt / 0.35 } else { -dt / 0.3 }).clamp(0.0, 1.0);
-            if self.glider > 0.0 {
-                vehicles::draw_glider(self.player.pos, self.camera.yaw, self.glider, self.camera.pos, &mut self.props);
+            self.glider = (self.glider + if flying { dt / 0.5 } else { -dt / 0.45 }).clamp(0.0, 1.0);
+            if self.glider > GLIDER_UP {
+                let open = (self.glider - GLIDER_UP) / (1.0 - GLIDER_UP);
+                vehicles::draw_glider(self.player.pos, self.camera.yaw, open, self.camera.pos, &mut self.props);
             }
             {
                 // Sitting, the hips are where the thwart is.
@@ -1059,7 +1068,9 @@ impl Running {
                 };
                 // Seen from behind, or through its own eyes only by its shadow.
                 let into = if self.third { &mut self.props } else { &mut self.shades };
-                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), self.camera.pos, into);
+                // The glider is a rod on the back until the wing itself is out.
+                let furled = (self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
+                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
             }
         }
 
@@ -1509,7 +1520,8 @@ fn main() -> Result<()> {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
         }
         if let Some((feet, gait)) = &figure {
-            character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), camera.pos, &mut props);
+            let furled = opts.figure_glide.is_none().then_some(opts.figure_furl);
+            character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
             if let Some(open) = opts.figure_glide {
                 vehicles::draw_glider(*feet, gait.facing, open, camera.pos, &mut props);
             }
