@@ -7,6 +7,7 @@ mod farview;
 mod gfx;
 mod impostors;
 mod inventory;
+mod journal;
 mod lod;
 mod minimap;
 mod overlay;
@@ -113,6 +114,10 @@ struct Options {
     shot_pack: bool,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
+    /// Show the journal's window on a screenshot, open at this page, written up as if
+    /// after a walk to this many of the places nearest the camera.
+    shot_journal: Option<journal::Page>,
+    journal_fill: usize,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
 }
@@ -146,6 +151,8 @@ impl Default for Options {
             shot_pan: None,
             shot_pack: false,
             picked: None,
+            shot_journal: None,
+            journal_fill: 16,
             walked: Vec::new(),
         }
     }
@@ -177,6 +184,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --minimap             draw the corner map on a screenshot
   --pack                show the pack's window on a screenshot, with a few things in it
   --picked M            pick every flower within M metres before a screenshot
+  --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
+                        written up as if after a walk round the places near the camera
+  --journal-fill N      with --journal, a walk to the N nearest places (default 16; 0 for
+                        a journal with nothing in it yet)
   --bigmap KM           draw the large map, KM across, on a screenshot
   --bigmap-turn YAW,PITCH  with --bigmap, the large map turned YAW and tilted PITCH degrees
                         (as a right drag would; the map opens at about -17,49)
@@ -205,7 +216,7 @@ fn list<T: std::str::FromStr>(s: &str, sep: char, n: usize) -> Result<Vec<T>> {
 
 fn parse_args() -> Result<Options> {
     let mut o = Options::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -252,6 +263,15 @@ fn parse_args() -> Result<Options> {
             "--minimap" => o.shot_map = Some(None),
             "--pack" => o.shot_pack = true,
             "--picked" => o.picked = Some(value()?.parse()?),
+            "--journal" => {
+                // The page is optional: without one the journal opens at its first.
+                let page = args.next_if(|v| !v.starts_with("--"));
+                o.shot_journal = Some(match page {
+                    Some(word) => journal::Page::named(&word).ok_or_else(|| anyhow::anyhow!("unknown journal page {word}"))?,
+                    None => journal::Page::default(),
+                });
+            }
+            "--journal-fill" => o.journal_fill = value()?.parse()?,
             "--bigmap" => o.shot_map = Some(Some(m64(value()?.parse::<f64>()? * 1000.0))),
             "--bigmap-turn" => {
                 let v = list::<f32>(&value()?, ',', 2)?;
@@ -530,6 +550,12 @@ struct Running {
     /// looked for every so often.
     within_reach: Option<((i32, i32), inventory::Item)>,
     reach_timer: f32,
+    /// The record of the walk, its window, whether that is open, and how long until the
+    /// places round about are next looked over.
+    journal: journal::Journal,
+    journal_view: journal::View,
+    journal_open: bool,
+    journal_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
     /// Game years gone by since what was gathered was last looked over for regrowth,
@@ -626,6 +652,8 @@ impl Running {
         // The pack goes with the world, wherever in it this run begins.
         let pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
 
+        let journal = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(journal::Journal::new, |s| journal::Journal::from_text(&s.journal(settings.seed)));
+
         // Simulating the continent takes seconds, so it starts now, alongside the window
         // and the GPU, instead of waiting its turn after them.
         log::info!("world seed {0} (run with --seed {0} to come back to it)", settings.seed);
@@ -719,6 +747,10 @@ impl Running {
             pack,
             pack_view: inventory::View::default(),
             pack_open: false,
+            journal,
+            journal_view: journal::View::new(world.materials()),
+            journal_open: false,
+            journal_timer: 0.0,
             within_reach: None,
             reach_timer: 0.0,
             notice: None,
@@ -801,6 +833,34 @@ impl Running {
         self.set_grab(!open);
     }
 
+    /// Opens or closes the journal, which needs the mouse.
+    fn set_journal(&mut self, open: bool) {
+        self.journal_open = open;
+        self.want_grab = !open;
+        self.set_grab(!open);
+    }
+
+    /// Writes up the journal: the time gone by (`days`, of the game's), the way gone,
+    /// and, every second or so, the named places come to.
+    fn keep_journal(&mut self, dt: f32, days: f32) {
+        self.journal.tick(days, self.env.date, self.env.time, self.weather.now.snow > 0.3);
+        let way = match (self.walking, self.player.mode, self.player.swimming) {
+            (false, ..) => None,
+            (true, Mode::Boat, _) => Some(journal::Way::Sail),
+            (true, Mode::Glide, _) => Some(journal::Way::Glide),
+            (true, Mode::Walk, true) => Some(journal::Way::Swim),
+            (true, Mode::Walk, false) => Some(journal::Way::Foot),
+        };
+        self.journal.moved(self.player.pos, way, self.player.on_ground);
+        self.journal_timer -= dt;
+        if self.journal_timer <= 0.0 && self.walking {
+            self.journal_timer = 1.0;
+            if let Some((c, at)) = journal::continent_at(&self.world, self.player.pos, false) {
+                self.journal.survey(&c, at, self.player.mode != Mode::Glide);
+            }
+        }
+    }
+
     /// What grows within arm's reach ahead of the player that can be gathered and has
     /// not been already: the nearest, with the column it stands in.
     fn find_within_reach(&mut self) -> Option<((i32, i32), inventory::Item)> {
@@ -861,7 +921,9 @@ impl Running {
             }
             self.world.pick(x, z);
             self.streamer.replant(x, z);
-            format!("{}  \u{d7} {}", item.name, self.pack.count(&item.id))
+            // The first of its kind goes in the journal.
+            let new = if self.journal.found(&item) { "   \u{b7}   written in the journal" } else { "" };
+            format!("{}  \u{d7} {}{new}", item.name, self.pack.count(&item.id))
         } else {
             "Your pack is full".to_string()
         };
@@ -935,6 +997,9 @@ impl Running {
             store.write_progress(self.settings.seed, self.progress());
             if self.pack.unsaved && store.write_pack(self.settings.seed, &self.pack.to_text()) {
                 self.pack.unsaved = false;
+            }
+            if self.journal.unsaved && store.write_journal(self.settings.seed, &self.journal.to_text()) {
+                self.journal.unsaved = false;
             }
         }
         self.map.save(false);
@@ -1152,6 +1217,7 @@ impl Running {
             let date = season::advance(self.env.date, days, self.settings.year_days);
             self.env = Environment::at(self.env.time + days * 24.0, date);
         }
+        self.keep_journal(dt, days);
         // What was gathered a year or two ago has grown back: looked over now and then.
         self.grown += (days / self.settings.year_days.max(1.0)) as f64;
         self.grow_timer -= dt;
@@ -1322,6 +1388,7 @@ impl Running {
             _ => self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)),
         };
         let (pack, pack_view, pack_open) = (&mut self.pack, &mut self.pack_view, self.pack_open);
+        let (journal, journal_view, journal_open) = (&self.journal, &mut self.journal_view, self.journal_open);
         let mut time = self.env.time;
         let mut date = self.env.date;
         let mut settings = self.settings;
@@ -1336,6 +1403,8 @@ impl Running {
                     choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
                 } else if pack_open {
                     inventory::show(ctx, pack, pack_view);
+                } else if journal_open {
+                    journal::show(ctx, journal, journal_view);
                 } else if !grabbed && !map_open {
                     egui::Area::new(egui::Id::unique("hint"))
                         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -40.0])
@@ -1393,6 +1462,7 @@ impl Running {
                         ui.label("F = toggle flying (Space/Ctrl up/down, wheel = speed). F3 = hide this panel, F11 = fullscreen");
                         ui.label("G in the air, or Space when high up = glider. E = board or leave a boat at a landing");
                         ui.label("M = the map (wheel zooms, drag moves it). N = show or hide the corner map");
+                        ui.label("I = the pack. J = the journal");
                     });
             });
         if time != self.env.time || date != self.env.date {
@@ -1444,6 +1514,8 @@ impl ApplicationHandler for App {
                 r.set_map(false);
             } else if r.pack_open {
                 r.set_pack(false);
+            } else if r.journal_open {
+                r.set_journal(false);
             } else {
                 r.set_menu(!r.show_settings);
             }
@@ -1510,7 +1582,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !r.grabbed && !r.show_settings && !r.pack_open => {
+            } if !r.grabbed && !r.show_settings && !r.pack_open && !r.journal_open => {
                 r.want_grab = true;
                 r.set_grab(true);
             }
@@ -1531,16 +1603,20 @@ impl ApplicationHandler for App {
                             r.window.set_fullscreen(fullscreen(r.settings.fullscreen));
                         } else if r.show_settings {
                             // The rest of the keyboard is for playing.
-                        } else if code == KeyCode::KeyM && !event.repeat && !r.pack_open {
+                        } else if code == KeyCode::KeyM && !event.repeat && !r.pack_open && !r.journal_open {
                             r.set_map(!r.map.open);
                         } else if code == KeyCode::KeyN && !event.repeat {
                             r.settings.minimap = !r.settings.minimap;
                         } else if r.map.open {
                             // The rest waits until the map is put away.
-                        } else if code == KeyCode::KeyI && !event.repeat {
+                        } else if code == KeyCode::KeyI && !event.repeat && !r.journal_open {
                             r.set_pack(!r.pack_open);
                         } else if r.pack_open {
                             // And until the pack is shut.
+                        } else if code == KeyCode::KeyJ && !event.repeat {
+                            r.set_journal(!r.journal_open);
+                        } else if r.journal_open {
+                            // Or the journal.
                         } else if code == KeyCode::Tab && !event.repeat {
                             r.want_grab = !r.grabbed;
                             r.set_grab(r.want_grab);
@@ -1793,7 +1869,17 @@ fn main() -> Result<()> {
             view.select(1);
             (pack, view)
         });
+        // A journal as it might stand after a walk round the places near here.
+        let mut written = opts.shot_journal.map(|page| {
+            let mut view = journal::View::new(world.materials());
+            view.page = page;
+            let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
+            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue()), view)
+        });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
+            if text && let Some((journal, journal_view)) = &mut written {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| journal::show(ctx, journal, journal_view));
+            }
             if text && let Some((pack, pack_view)) = &mut sample {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::show(ctx, pack, pack_view));
             }
