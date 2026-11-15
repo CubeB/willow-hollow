@@ -56,7 +56,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     } else {
         // The moon, and stars that fade near the horizon.
         c += G.sun_color.rgb * (smoothstep(0.99975, 0.9999, s) * 60.0 + pow(max(s, 0.0), 300.0) * 3.0);
-        c += vec3<f32>(0.9, 0.95, 1.0) * stars(dir) * smoothstep(0.0, 0.25, dir.y) * 0.08;
+        // They come out as the dusk fades, and shine bright on a dark night.
+        c += vec3<f32>(0.9, 0.95, 1.0) * stars(dir) * smoothstep(0.0, 0.25, dir.y) * 0.14 * darkness();
     }
     return vec4<f32>(c, 1.0);
 }

@@ -392,7 +392,7 @@ fn cloud_seen(dir: vec3<f32>, far: f32) -> vec4<f32> {
     // The outermost blocks of a cloud are thin stuff, and the sky shows through them.
     cloud_alpha = 0.72 + 0.28 * smoothstep(0.0, 0.035, d);
     // Moonlit cloud is only a little lighter than the night sky.
-    return vec4<f32>(color * (0.7 + 0.3 * G.sun_color.w), hit.w);
+    return vec4<f32>(color * (0.55 + 0.45 * G.sun_color.w), hit.w);
 }
 
 // Where voxel terrain hands over to the far view. Both sides call this, so every
@@ -471,8 +471,28 @@ fn haze_depth(rel: vec3<f32>, dist: f32) -> f32 {
     return (haze + mist) * dist;
 }
 
+// How far into the night it is, 0 by day to 1 once the sun is well down: smooth through
+// dusk, where the switch from sun to moon is not.
+fn darkness() -> f32 {
+    return smoothstep(0.08, -0.14, G.sun_pos.y);
+}
+
+// The eye after dark sees little colour: what only the moon and the night sky light goes
+// a cool grey, while whatever a fire or a lantern lights, being brighter and warmer than
+// the moon could make it, keeps its own. So the warm light stands out in a cold, dim world.
+fn night_eye(c: vec3<f32>) -> vec3<f32> {
+    let dark = darkness();
+    if (dark <= 0.0) {
+        return c;
+    }
+    let lum = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+    let warm = smoothstep(0.0, 0.6, (c.r - c.b) / max(lum, 1e-5));
+    let dim = (1.0 - smoothstep(0.03, 0.2, lum)) * (1.0 - warm);
+    return mix(c, vec3<f32>(0.78, 0.9, 1.18) * lum, dark * dim * 0.7);
+}
+
 fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
-    var color = surface;
+    var color = night_eye(surface);
     var rel = at;
     var dist = length(rel);
     // Cloud between the camera and the point (from above the clouds, or a summit up in
@@ -510,7 +530,8 @@ fn local_lights(rel: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         sum += vec3<f32>(0.85, 1.0, 0.35) * (l.w * 0.045) * wrap * reach * reach / (1.0 + dist * dist * 0.6);
     }
     // Lanterns: a warm light that carries a long way after dark, and hardly shows by day.
-    let night = 1.0 - 0.9 * G.sun_color.w;
+    // It comes up through dusk rather than all at once when the moon takes over.
+    let night = 1.0 - 0.9 * (1.0 - darkness());
     for (var i = 0; i < 4; i++) {
         let l = G.lamps[i];
         if (l.w > 0.01) {
