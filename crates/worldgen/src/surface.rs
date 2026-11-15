@@ -159,6 +159,11 @@ pub struct Piece {
     /// Water level just upstream of the start: higher than `l0` where the piece starts
     /// at the foot of a waterfall.
     lip: f32,
+    /// Level at the start and the end as though the river had no waterfall there: half
+    /// way between the pools above and below one, as at any other node. Only the land
+    /// back from the banks follows this, so it falls evenly down the valley past a fall.
+    even0: f32,
+    even2: f32,
     /// Network nodes the piece starts beside, passes and ends beside.
     nodes: [usize; 3],
     /// Length of the curve in voxels.
@@ -189,6 +194,8 @@ impl Piece {
             l1: levels.1,
             l2: levels.2,
             lip: lip.max(levels.0),
+            even0: (levels.0 + lip.max(levels.0)) * 0.5,
+            even2: levels.2,
             nodes,
             lo: lo - reach,
             hi: hi + reach,
@@ -236,6 +243,19 @@ impl Piece {
     fn level_above(&self, t: f32, back: f32) -> f32 {
         let u = t - back / self.length;
         if u < 0.0 { self.lip } else { self.level(u) }
+    }
+
+    /// [`Self::level_above`] as though the river had no waterfall at either end of the
+    /// piece (see `even0`): the same everywhere else.
+    fn even_level_above(&self, t: f32, back: f32) -> f32 {
+        let u = t - back / self.length;
+        if u < 0.0 {
+            self.even0
+        } else if u < 0.5 {
+            self.even0 + (self.l1 - self.even0) * (u * 2.0)
+        } else {
+            self.l1 + (self.even2 - self.l1) * (u * 2.0 - 1.0)
+        }
     }
 
     /// Height of the waterfall at the start of the piece, in simulation units.
@@ -577,7 +597,7 @@ impl<'a> Sampler<'a> {
                     // The face is cut down into the ground below the lip; the ground
                     // above it is never heaped up into a platform round the lip.
                     let before = ground;
-                    let fall = f.cut(d, slope, wx, wz, &mut ground);
+                    let fall = f.cut(d, beside().map_or(f32::MAX, |b| b.0), slope, wx, wz, &mut ground);
                     ground = ground.min(before);
                     if part == cliff::Part::None {
                         part = fall;
@@ -631,10 +651,11 @@ impl<'a> Sampler<'a> {
 
         // The river whose channel edge is nearest.
         // (signed distance to the channel edge, half-width, water level there, water
-        // level a couple of voxels upstream, extra depth of a plunge pool,
+        // level a couple of voxels upstream, and the same as though no waterfall were
+        // there, extra depth of a plunge pool,
         // how far a mouth has shoaled towards the sea floor, nearest point on the
         // centreline)
-        let mut nearest: Option<(f32, f32, f32, f32, f32, f32)> = None;
+        let mut nearest: Option<(f32, f32, f32, f32, f32, f32, f32)> = None;
         for piece in &self.pieces {
             if !piece.near(p, 0.0) {
                 continue;
@@ -653,10 +674,10 @@ impl<'a> Sampler<'a> {
                 // Out at sea a river mouth shoals to the sea floor rather than ending in a
                 // deep rounded hole.
                 let seaward = if piece.nodes[1] == piece.nodes[2] { smoothstep(0.2, 0.95, t) } else { 0.0 };
-                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(0.8)), pool, seaward));
+                nearest = Some((sd, hw, piece.level(t), piece.level_above(t, m(0.8)), piece.even_level_above(t, m(0.8)), pool, seaward));
             }
         }
-        if let Some((sd, hw, level, upstream_level, pool, seaward)) = nearest {
+        if let Some((sd, hw, level, upstream_level, even_level, pool, seaward)) = nearest {
             river = sd;
             let mut k = pool_level(c.desc.seed, level);
             // Where the channel runs on out into a lake, its water is the lake's: a river
@@ -706,10 +727,19 @@ impl<'a> Sampler<'a> {
                 // simulated level, which is never below the pool's, so the valley floor
                 // (and a levee, where the stream runs along a hillside) slopes evenly
                 // down the valley.
+                //
+                // At a waterfall the simulated level itself steps: the pool above holds
+                // its level right to the lip. Beyond the few metres that hold the pool
+                // in, the land follows the level the river would have had without the
+                // fall. Followed out to the bank's full reach, the step stood as a
+                // straight wall of earth running out across the valley floor from either
+                // side of the lip, square to the stream (#170).
                 let lip = pool_level(c.desc.seed, upstream_level) as f32 - 0.5;
                 let smooth = (upstream_level * OLD_VOXEL - 0.5).max(lip);
+                let even = even_level * OLD_VOXEL - 0.5;
                 let bank = lip + (smooth - lip) * smoothstep(m(0.4), m(3.2), sd);
-                let width = bank_reach(hw, ground - smooth);
+                let bank = bank + (even - smooth) * smoothstep(m(3.2), m(6.4), sd);
+                let width = bank_reach(hw, ground - even);
                 if sd < width {
                     ground = bank + (ground - bank) * smoothstep(0.0, width, sd);
                     if sd < m(1.28) && seaward < 0.3 {
@@ -1032,7 +1062,8 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     // Sea level is 0; the last piece of a river runs down to it.
     let lr = river_level(c, r);
     // Above a waterfall the pool holds its level right to the lip.
-    let exit_level = if fall_drop(c, i) > 0.0 { li } else { (li + lr) * 0.5 };
+    let even_exit = (li + lr) * 0.5;
+    let exit_level = if fall_drop(c, i) > 0.0 { li } else { even_exit };
 
     let size = c.size as isize;
     let mut fed = false;
@@ -1045,13 +1076,15 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
                 // Below a waterfall the pool starts at the foot of the fall.
                 let ld = river_level(c, d);
                 let (start, lip) = if fall_drop(c, d) > 0.0 { (li, ld) } else { ((ld + li) * 0.5, (ld + li) * 0.5) };
-                out.push(Piece::new((pd + pi) * 0.5, pi, exit, (width(d), wi), (start, li, exit_level), lip, [d, i, r]));
+                let mut piece = Piece::new((pd + pi) * 0.5, pi, exit, (width(d), wi), (start, li, exit_level), lip, [d, i, r]);
+                piece.even2 = even_exit;
+                out.push(piece);
             }
         }
     }
     if !fed {
         // A source: the stream starts at the node and widens from nothing.
-        out.push(Piece::new(
+        let mut piece = Piece::new(
             pi,
             (pi + exit) * 0.5,
             exit,
@@ -1059,7 +1092,9 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
             (li, (li + exit_level) * 0.5, exit_level),
             li,
             [i, i, r],
-        ));
+        );
+        piece.even2 = even_exit;
+        out.push(piece);
     }
     if c.ocean[r] {
         // A mouth: carry the channel on into the sea, opening out as it goes.
@@ -1180,6 +1215,10 @@ fn funnel(c: &Continent, j: usize, discharge: f32) -> f32 {
 const FALL_MIN: f32 = 7.0;
 /// Chance that a drop that large is a waterfall rather than a run of cascades.
 const FALL_CHANCE: f32 = 0.4;
+/// Farthest from a river's banks that the rock of its waterfall stands, in voxels, and
+/// the distance over which it dies away to nothing.
+const FALL_GORGE: f32 = m(12.0);
+const FALL_GORGE_FADE: f32 = m(6.0);
 
 /// How far the water drops, in simulation units, if the river leaving node `i` goes
 /// over a waterfall on its way to the next node, or 0.
@@ -1208,7 +1247,8 @@ pub(crate) fn fall_drop(c: &Continent, i: usize) -> f32 {
 }
 
 /// The cliff a waterfall pours over: a face across the valley at the lip, which
-/// follows the valley sides downstream as a short gorge and fades out within `radius`.
+/// follows the valley sides downstream as a short gorge and fades out within `radius`,
+/// and within a few metres of the river's banks.
 struct Fall {
     pos: Vec2,
     radius: f32,
@@ -1245,10 +1285,19 @@ impl Fall {
         })
     }
 
-    /// Cuts the face into a column `dist` voxels from the lip.
-    fn cut(&self, dist: f32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> cliff::Part {
+    /// Cuts the face into a column `dist` voxels from the lip and `beside` voxels from
+    /// the edge of the nearest river channel.
+    fn cut(&self, dist: f32, beside: f32, slope: f32, wx: f64, wz: f64, ground: &mut f32) -> cliff::Part {
         // Only on sloping ground: on the flat the lift would raise a round plateau.
         let strength = (1.0 - smoothstep(self.radius * 0.5, self.radius, dist)) * smoothstep(0.2, 0.45, slope);
+        // The face stands where the ground crosses the height of the lip, and on an open
+        // hillside that line runs straight on across the slope, away from the water.
+        // Left to the radius alone it stood as a long wall of rock out over the meadow
+        // on either side, the two making a V far wider than the stream (#170). The rock
+        // the water has cut into is beside the stream: a taller fall has a deeper gorge,
+        // a little wider, but the face always dies away a few metres from the banks.
+        let near = (m(2.0) + self.height * 0.2).min(FALL_GORGE - FALL_GORGE_FADE);
+        let strength = strength * (1.0 - smoothstep(near, near + FALL_GORGE_FADE, beside));
         let half = self.height * 0.5;
         let face = cliff::Face {
             x: *ground - self.level,
@@ -1905,6 +1954,114 @@ mod tests {
         }
         worst.sort_by(|a, b| b.0.total_cmp(&a.0));
         (worst, deep, total)
+    }
+
+    /// Every waterfall's cliff column that the waterfall alone put there, as
+    /// (distance from the nearest channel's edge, x, z), the farthest first.
+    fn fall_cliffs(seed: u32) -> Vec<(f32, i32, i32)> {
+        let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
+        let mut out = Vec::new();
+        for i in 0..c.size * c.size {
+            let Some(f) = Fall::at(&c, seed, i) else { continue };
+            let r = f.radius as i32;
+            let (x0, z0) = (f.pos.x as i32 - r, f.pos.y as i32 - r);
+            let with = Sampler::new(&c, seed, x0, z0, 2 * r);
+            let mut without = Sampler::new(&c, seed, x0, z0, 2 * r);
+            without.falls.clear();
+            for z in z0..z0 + 2 * r {
+                for x in x0..x0 + 2 * r {
+                    let p = vec2(x as f32 + 0.5, z as f32 + 0.5);
+                    if (p - f.pos).length() > f.radius || with.column(x, z).cover != Cover::Cliff || without.column(x, z).cover == Cover::Cliff {
+                        continue;
+                    }
+                    out.push((with.river_beside(p).map_or(f32::MAX, |b| b.0), x, z));
+                }
+            }
+        }
+        out.sort_by(|a, b| b.0.total_cmp(&a.0));
+        out
+    }
+
+    /// A waterfall's rock stands beside its stream. The face across the valley at the
+    /// lip once ran on along the height of the lip as far as the fall's radius, so on an
+    /// open slope two straight walls of rock stood out across the meadow from the
+    /// stream, in a V far wider than it (#170).
+    #[test]
+    fn waterfall_cliffs_stay_beside_the_stream() {
+        let out = fall_cliffs(7);
+        eprintln!("{} waterfall cliff columns; farthest from the banks {:?}", out.len(), &out[..out.len().min(5)]);
+        assert!(out.len() > 1000, "too few waterfall cliffs to tell: {}", out.len());
+        assert!(out.iter().all(|o| o.0 <= FALL_GORGE), "waterfall cliff out across the land: {:?}", &out[..out.len().min(8)]);
+    }
+
+    /// The land back from the banks falls past a waterfall as the valley does. The banks
+    /// once rose from the river's own level all the way out, and that steps at the lip,
+    /// so a straight wall of earth as high as the fall ran out across the valley floor
+    /// from either side of it, square to the stream (#170). This compares the ground
+    /// just above and just below that line, with the waterfall's own rock left out,
+    /// against how the natural ground falls there.
+    #[test]
+    fn no_wall_runs_out_from_a_waterfall_across_the_valley() {
+        let seed = 7;
+        let c = generate(cell_desc(seed, 0, 0), SimConfig { size: 1024 });
+        let cs = c.cell_size();
+        let natural = |x: i32, z: i32| {
+            let (fx, fz) = ((x as f32 + 0.5) / cs - 0.5, (z as f32 + 0.5) / cs - 0.5);
+            natural_ground(&c, seed, fx, fz, x as f64, z as f64).0
+        };
+        let (mut falls, mut samples, mut steps) = (0, 0, Vec::new());
+        for i in 0..c.size * c.size {
+            let Some(f) = Fall::at(&c, seed, i) else { continue };
+            let r = c.rcv[i] as usize;
+            let Some(dir) = (node(&c, r) - node(&c, i)).try_normalize() else { continue };
+            let side = vec2(-dir.y, dir.x);
+            let hw = Continent::river_width(c.discharge[i]) * OLD_VOXEL * 0.5;
+            let mut s = Sampler::new(&c, seed, f.pos.x as i32 - 96, f.pos.y as i32 - 96, 192);
+            s.falls.clear();
+            falls += 1;
+            for sign in [-1.0f32, 1.0] {
+                for k in 0..7 {
+                    let q = f.pos + side * sign * (hw + m(7.0) + k as f32 * m(2.0));
+                    let (up, down) = (q - dir * 3.0, q + dir * 3.0);
+                    let (up, down) = ((up.x as i32, up.y as i32), (down.x as i32, down.y as i32));
+                    let (a, b) = (s.column(up.0, up.1), s.column(down.0, down.1));
+                    // Only the land beside this river: not another channel's banks, water,
+                    // or a trail cut into the slope.
+                    if [&a, &b].iter().any(|col| col.river < m(6.0) || col.water_surface().is_some() || col.clear < m(6.0)) {
+                        continue;
+                    }
+                    // And only the banks of the river close above and below the lip.
+                    // Inside a tight bend the land is nearest a reach further up or down
+                    // the river, whose own level it rises from, as it always has.
+                    let by_lip = |(x, z): (i32, i32)| {
+                        let p = vec2(x as f32 + 0.5, z as f32 + 0.5);
+                        let sd = |pc: &Piece| {
+                            let (d, t, _) = pc.nearest(p);
+                            (d - pc.half_width(t), t)
+                        };
+                        let nearest = s.pieces.iter().filter(|pc| pc.near(p, 0.0)).min_by(|u, v| sd(u).0.total_cmp(&sd(v).0));
+                        nearest.is_some_and(|pc| {
+                            let t = sd(pc).1;
+                            (pc.nodes[1] == i && pc.nodes[2] == r && t > 0.5) || (pc.nodes[0] == i && pc.nodes[1] == r && t < 0.5)
+                        })
+                    };
+                    if !by_lip(up) || !by_lip(down) {
+                        continue;
+                    }
+                    samples += 1;
+                    let step = (a.ground - b.ground) - (natural(up.0, up.1) - natural(down.0, down.1));
+                    steps.push((step.abs(), up.0, up.1, f.height));
+                }
+            }
+        }
+        steps.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let high = steps.iter().filter(|s| s.0 > m(1.2)).count();
+        eprintln!("{falls} waterfalls, {samples} samples beside them, {high} steps over 1.2 m; highest {:?}", &steps[..steps.len().min(6)]);
+        assert!(samples > 200, "too few samples: {samples}");
+        // With the walls, over a third of the samples stepped, some by 10 m. The few
+        // steps left are under 2 m, from the rest of the shaping of the land there.
+        assert!(high * 50 <= samples, "{high} of {samples} steps: {:?}", &steps[..steps.len().min(8)]);
+        assert!(steps.first().is_none_or(|s| s.0 < m(2.4)), "a wall {:?}", steps.first());
     }
 
     #[test]
