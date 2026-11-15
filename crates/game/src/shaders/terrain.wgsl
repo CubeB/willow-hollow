@@ -221,7 +221,8 @@ fn vs(in: VIn) -> VOut {
         } else {
             gone = season_gone(G.season.x, kind, vox, tag);
         }
-        if (kind == PLANT_GRASS && !gone) {
+        // Snow only buries what is open to the sky: grass under a bridge or a roof stays.
+        if (kind == PLANT_GRASS && !gone && (out.flags & FLAG_SKY) != 0u) {
             let snow = grid_snow(in.grid0, in.grid1, (vec2<f32>(cell.xz) + 0.5) / 32.0);
             gone = plant_buried(alt_m, season_hash(vox + vec3<i32>(5, 0, 9)), snow);
         }
