@@ -33,6 +33,11 @@ pub struct Environment {
     /// The height of the clouds' flat bases above sea level, in voxels: `CLOUD_HEIGHT`
     /// over low country, and higher where the hills round about would stand up into them.
     pub cloud_base: f32,
+    /// How far round the clouds' slow cycle of forming and clearing the sky has come, in
+    /// radians (see `weather::CHURN`), and how tall the heaps stand for their cover, 0..1
+    /// with a half the usual: they tower ahead of rain and sink as it clears.
+    pub cloud_churn: f32,
+    pub cloud_swell: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
     /// Time of year, 0 to 1 from the spring equinox.
@@ -94,15 +99,17 @@ impl Environment {
         let dusk = (1.0 - day - night).max(0.0);
         let dusk_sky = dusk;
 
+        // The night sky is a deep blue-black overhead and a little paler toward the
+        // horizon: dark enough for the stars, and a fire, to stand out against it.
         let zenith = Vec3::new(0.14, 0.30, 0.68) * day
             + Vec3::new(0.10, 0.14, 0.36) * dusk
-            + Vec3::new(0.010, 0.016, 0.040) * night;
+            + Vec3::new(0.0035, 0.0060, 0.016) * night;
         let horizon = Vec3::new(0.52, 0.68, 0.88) * day
             + Vec3::new(0.40, 0.36, 0.52) * dusk
-            + Vec3::new(0.024, 0.032, 0.062) * night;
+            + Vec3::new(0.010, 0.014, 0.028) * night;
         let glow = Vec3::new(0.60, 0.72, 0.88) * day
             + Vec3::new(0.95, 0.46, 0.22) * dusk
-            + Vec3::new(0.024, 0.032, 0.062) * night;
+            + Vec3::new(0.010, 0.014, 0.028) * night;
 
         let daylight = elev > -0.06;
         let (sun_dir, sun_color) = if daylight {
@@ -110,15 +117,16 @@ impl Environment {
             let col = Vec3::new(1.0, 0.95, 0.86).lerp(Vec3::new(1.0, 0.50, 0.22), warm);
             (sun, col * 1.35 * smoothstep(-0.06, 0.12, elev))
         } else {
-            // Moonlight from the opposite side of the sky.
+            // Moonlight from the opposite side of the sky: faint, cold and grey, enough to
+            // make out the lie of the land by and little of its colour.
             let moon = Vec3::new(-sun.x, (-sun.y).max(0.15), -sun.z).normalize();
-            (moon, Vec3::new(0.45, 0.55, 0.80) * 0.21 * smoothstep(-0.06, -0.2, elev))
+            (moon, Vec3::new(0.40, 0.50, 0.78) * 0.095 * smoothstep(-0.06, -0.2, elev))
         };
 
         // Eye adaptation: a high sun puts far more light on the ground than a low one, so
         // expose down toward midday. Every light source is one of these three colours,
         // so scaling them here exposes the whole scene.
-        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0)) * (1.0 + 1.1 * smoothstep(-0.02, -0.22, elev));
+        let exposure = 1.0 / (0.75 + 1.1 * elev.max(0.0)) * (1.0 + 0.5 * smoothstep(-0.02, -0.22, elev));
         // Mist gathers in the valleys around dawn, and a little at dusk.
         let dawn = smoothstep(3.5, 6.0, time) * smoothstep(9.5, 7.0, time);
         let dusk = smoothstep(17.0, 18.5, time) * smoothstep(21.0, 19.5, time);
@@ -141,6 +149,8 @@ impl Environment {
             mist_floor: 0.0,
             clouds: 0.45,
             cloud_base: CLOUD_HEIGHT,
+            cloud_churn: 0.0,
+            cloud_swell: 0.5,
             sun_elevation: elev,
             date,
         }

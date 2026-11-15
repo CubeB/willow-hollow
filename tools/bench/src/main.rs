@@ -137,12 +137,13 @@ fn patch(world: &GameWorld, name: &str, (x, z): (i32, i32), size: i32, overlaps:
             for (cy, chunk) in out.chunks.iter().rev() {
                 let wash = voxel::mesh::wash_map(chunk, mats, *cy, &out.wash);
                 let mut m = mesh_chunk_under_sky(chunk, mats, &out.currents, &roof, &wash, &mut falls);
-                cover_columns(chunk, mats, &mut roof);
                 let corner = [(cx + dx) * CHUNK, *cy * CHUNK, (cz + dz) * CHUNK];
                 let t = Instant::now();
                 let inside = out.plants.iter().filter(|p| p.lo[1].div_euclid(CHUNK * CELLS) == *cy);
-                add_plants(&mut m, inside, chunk, corner.map(|v| v * CELLS), mats);
+                // Plants see the same cover as the voxels: only what lies above this chunk.
+                add_plants(&mut m, inside, chunk, corner.map(|v| v * CELLS), mats, &roof);
                 planting += t.elapsed().as_secs_f64() * 1000.0;
+                cover_columns(chunk, mats, &mut roof);
                 let t = Instant::now();
                 let mut tags = LeafTags::new(lib, mats, &out.trees, IVec3::from_array(corner));
                 tag_trees(&mut m, corner, |q| tags.tag(IVec3::from_array(q)));

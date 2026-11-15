@@ -302,3 +302,37 @@ fn a_bare_column_is_the_planted_one_without_its_plants() {
     }
     assert!(planted > 0, "nothing grows around the spawn point");
 }
+
+#[test]
+fn nothing_small_grows_up_through_a_bridge() {
+    // Plants are grown before the bridges go down, and a reed on the bank under a deck
+    // would stand up through its planks.
+    use crate::features::attach::{ColumnVoxels, Voxels};
+    use glam::IVec3;
+    let w = world();
+    let c = w.continent(0, 0);
+    let cells = IVec3::splat(voxel::mesh::CELLS);
+    let mut columns: Vec<(i32, i32)> = c.trails.crossings.iter().map(|x| (x.x.div_euclid(CHUNK), x.z.div_euclid(CHUNK))).collect();
+    columns.sort_unstable();
+    columns.dedup();
+    let (mut looked, mut under) = (0, 0);
+    for &(cx, cz) in columns.iter().take(40) {
+        let out = w.generate_column(cx, cz);
+        let voxels = ColumnVoxels::new(&out.chunks, cx * CHUNK - 1, cz * CHUNK - 1);
+        for b in &out.plants {
+            let (lo, hi) = (IVec3::from_array(b.lo).div_euclid(cells), (IVec3::from_array(b.hi) - 1).div_euclid(cells));
+            let ground = w.column(lo.x, lo.z).top();
+            // Only what grows on the ground: not the fine parts of the bridge itself.
+            if lo.y != ground + 1 || w.materials().get(b.voxel).kind != voxel::Kind::Foliage || !voxels.has_height(hi.y) {
+                continue;
+            }
+            looked += 1;
+            if let Some(y) = (lo.y..=hi.y).find(|&y| w.materials().get(voxels.voxel(IVec3::new(lo.x, y, lo.z))).kind == voxel::Kind::Solid) {
+                under += 1;
+                println!("{} at {lo} grows up into voxel {} at height {y}", b.voxel, voxels.voxel(IVec3::new(lo.x, y, lo.z)));
+            }
+        }
+    }
+    assert!(looked > 0);
+    assert_eq!(under, 0, "{under} plants grow up into something solid");
+}

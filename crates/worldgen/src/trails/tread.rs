@@ -233,15 +233,18 @@ pub type StepAt = (Step, (i32, i32), [bool; 2]);
 
 /// The fine parts a trail column at world `(x, z)` carries on top: the duckboards of a
 /// path over bog, and the log of a step. Like the plants, they stay inside the column.
+/// `step` is a log whose riser stands beside this column, the way to it given (see
+/// `world::step_foot`): the log lies in the corner at the riser's foot.
 pub fn dress(col: &Column, step: Option<StepAt>, x: i32, z: i32, seed: u32, out: &mut Vec<PlantBox>) {
     let Some(w) = col.worn else { return };
     let y = (col.top() + 1) * CELLS;
     let (x0, z0) = (x * CELLS, z * CELLS);
     if let Some((Step::Log(v), (dx, dz), open)) = step {
-        // A log 0.2 m thick along the lip of the step, across the column, its cut ends
-        // pale where it stops.
-        let down = if dx != 0 { dx } else { dz };
-        let along = if down > 0 { (CELLS - 2, CELLS) } else { (0, 2) };
+        // A log 0.2 m thick in the corner at the foot of the riser, across the column,
+        // tucked between the tread below and the one above, its cut ends pale where it
+        // stops.
+        let riser = if dx != 0 { dx } else { dz };
+        let along = if riser > 0 { (CELLS - 2, CELLS) } else { (0, 2) };
         let lo = if open[0] { 1 } else { 0 };
         let hi = if open[1] { CELLS - 1 } else { CELLS };
         let mut put = |a: (i32, i32), c: (i32, i32), v: Voxel| {
@@ -436,17 +439,22 @@ mod tests {
                 assert_eq!((step.0, step.1), (Step::Log(mat::BARK_OAK), (-1, 0)), "a woodland step is a log, down the slope");
                 assert_eq!(step.2, [false, false], "the log runs on across the way");
                 rows += 1;
-                // Its log lies along the lip, on top of the column.
+                // Its log lies on the column below, in the corner at the riser's foot.
+                let foot = crate::world::step_foot(PAD, px - 1, 5, |x, z| nose(&path, x, z, 0.5)).expect("a log at the foot");
+                assert_eq!((foot.0, foot.1), (Step::Log(mat::BARK_OAK), (1, 0)), "the riser is uphill of the foot");
+                assert!(crate::world::step_foot(PAD, px, 5, |x, z| nose(&path, x, z, 0.5)).is_none_or(|f| f.1 != (-1, 0)), "nothing on the lip");
+                let below = &path[(px - 1) * PAD + 5];
                 let mut parts = Vec::new();
-                dress(&path[px * PAD + 5], Some(step), 7, 9, 1, &mut parts);
+                dress(below, Some(foot), 7, 9, 1, &mut parts);
                 assert_eq!(parts.len(), 1);
                 let b = parts[0];
-                assert_eq!((b.lo[0], b.hi[0]), (7 * CELLS, 7 * CELLS + 2), "at the downhill edge");
+                assert_eq!((b.lo[0], b.hi[0]), (8 * CELLS - 2, 8 * CELLS), "against the riser");
                 assert_eq!((b.lo[2], b.hi[2]), (9 * CELLS, 10 * CELLS), "right across the column");
-                assert_eq!(b.lo[1], (path[px * PAD + 5].top() + 1) * CELLS);
+                assert_eq!(b.lo[1], (below.top() + 1) * CELLS, "on the tread below");
+                assert!(b.hi[1] <= (path[px * PAD + 5].top() + 1) * CELLS, "no higher than the tread above");
                 // Where the way ends, so does the log, showing its cut end.
                 let mut parts = Vec::new();
-                dress(&path[px * PAD + 5], Some((step.0, step.1, [true, false])), 7, 9, 1, &mut parts);
+                dress(below, Some((foot.0, foot.1, [true, false])), 7, 9, 1, &mut parts);
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0].lo[2], 9 * CELLS + 1);
                 assert_eq!((parts[1].lo[2], parts[1].hi[2], parts[1].voxel), (9 * CELLS, 9 * CELLS + 1, mat::PLANK_PALE));

@@ -3,7 +3,9 @@ mod audio;
 mod camera;
 mod camp;
 mod character;
+mod editor;
 mod env;
+mod fallen;
 mod farview;
 mod gfx;
 mod impostors;
@@ -80,6 +82,10 @@ struct Options {
     /// the wing this far open.
     figure_speed: f32,
     figure_glide: Option<f32>,
+    /// With --figure-glide, the wing banked this many degrees (right wing down) and the
+    /// figure rising this many metres a second (negative diving).
+    figure_bank: f32,
+    figure_rise: f32,
     /// How far the figure on a screenshot has swung its furled glider up from its back.
     figure_furl: f32,
     look: (f32, f32),
@@ -116,11 +122,17 @@ struct Options {
     shot_pack: bool,
     /// Show the hotbar on a screenshot, with a few things in it.
     shot_hotbar: bool,
-    /// Make camp ahead of the camera before a screenshot: a tent, and a fire in this state.
+    /// A line of words to show along the foot of a screenshot, as a prompt is shown.
+    shot_prompt: Option<String>,
+    /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
-    /// With a camp made: lying in its tent on a screenshot, or resting in it from the
+    /// How far ahead that camp is made, in metres.
+    camp_ahead: f64,
+    /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
+    /// Hold a lit lantern on a screenshot.
+    shot_lantern: bool,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -129,6 +141,8 @@ struct Options {
     journal_fill: usize,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
+    /// Open the structure editor instead of the game, starting as these say.
+    structures: Option<editor::Options>,
 }
 
 impl Default for Options {
@@ -141,6 +155,8 @@ impl Default for Options {
             third: None,
             figure_speed: 4.16,
             figure_glide: None,
+            figure_bank: 0.0,
+            figure_rise: -1.5,
             figure_furl: 0.0,
             look: (35.0, -18.0),
             time: None,
@@ -160,12 +176,16 @@ impl Default for Options {
             shot_pan: None,
             shot_pack: false,
             shot_hotbar: false,
+            shot_prompt: None,
             shot_camp: None,
+            camp_ahead: 4.2,
             rest: false,
+            shot_lantern: false,
             picked: None,
             shot_journal: None,
             journal_fill: 16,
             walked: Vec::new(),
+            structures: None,
         }
     }
 }
@@ -183,6 +203,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure DEG          as --third, with the figure turned DEG degrees from the view
   --figure-speed V      the figure runs at V metres a second (default 4.16)
   --figure-glide T      the figure glides, its wing T of the way open (0-1)
+  --figure-bank DEG     with --figure-glide, the wing banked DEG degrees, right wing down
+  --figure-rise V       with --figure-glide, rising V metres a second (default -1.5)
   --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
@@ -197,10 +219,15 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --minimap             draw the corner map on a screenshot
   --pack                show the pack's window on a screenshot, with a few things in it
   --hotbar              show the hotbar on a screenshot, with a few things in it
-  --camp STATE          make camp a few steps ahead before a screenshot: a tent, a few
-                        things set down, and a fire that is laid, lit or burnt
-  --rest                with --camp: on a screenshot, the view out of the tent's door,
-                        as high as --look says; in a run, rest in the tent at once
+  --prompt TEXT         show TEXT along the foot of a screenshot, as a prompt is
+  --camp STATE          make camp a few steps ahead before a screenshot: a fire that is
+                        laid, lit, out (put out a moment ago) or burnt, and a few
+                        things set down
+  --camp-ahead M        make that camp M metres ahead instead (default 4.2), to see its
+                        smoke from far off
+  --rest                with --camp: on a screenshot, the view lying by the fire, as
+                        high as --look says; in a run, rest by the fire at once
+  --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -219,7 +246,20 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         the large map is open throughout)
   --drift V             fly straight ahead at V metres a second
   --circle R            with --drift, fly a circle of radius R metres instead
-  --no-vsync            uncapped frame rate";
+  --no-vsync            uncapped frame rate
+
+The structure editor, for looking at the landmarks and drawing your own:
+  --structures          open it instead of the game
+  --structure WHAT      start at a kind (shrine), a saved one (shrine/high-gate), landing,
+                        lantern/N or signpost
+  --variant N           the generator's variant N
+  --place N             seen in place N of its list (0 to 8)
+  --layer L             cut away everything above layer L
+  --copy                start drawing on a copy of the variant
+  --orbit YAW,PITCH[,D] the view, in degrees, D voxels off
+  --hover X,Y           on a screenshot, as if the cursor were at X,Y
+  --structures-dir DIR  read and save structures in DIR, not the repository's
+  With --screenshot FILE and --size, draws the editor once to a PNG.";
 
 fn list<T: std::str::FromStr>(s: &str, sep: char, n: usize) -> Result<Vec<T>> {
     let v: Vec<T> = s
@@ -253,6 +293,8 @@ fn parse_args() -> Result<Options> {
             "--figure" => o.third = Some(value()?.parse()?),
             "--figure-speed" => o.figure_speed = value()?.parse()?,
             "--figure-glide" => o.figure_glide = Some(value()?.parse()?),
+            "--figure-bank" => o.figure_bank = value()?.parse()?,
+            "--figure-rise" => o.figure_rise = value()?.parse()?,
             "--figure-furl" => o.figure_furl = value()?.parse()?,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
@@ -289,13 +331,17 @@ fn parse_args() -> Result<Options> {
             "--minimap" => o.shot_map = Some(None),
             "--pack" => o.shot_pack = true,
             "--hotbar" => o.shot_hotbar = true,
+            "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
+            "--lantern" => o.shot_lantern = true,
+            "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
                     "laid" => placed::LAID,
                     "lit" => placed::BURNING,
+                    "out" => placed::OUT,
                     "burnt" => placed::BURNT,
-                    other => bail!("unknown fire '{other}': laid, lit or burnt"),
+                    other => bail!("unknown fire '{other}': laid, lit, out or burnt"),
                 });
             }
             "--picked" => o.picked = Some(value()?.parse()?),
@@ -332,6 +378,22 @@ fn parse_args() -> Result<Options> {
             "--drift" => o.drift = Some(value()?.parse()?),
             "--circle" => o.circle = Some(value()?.parse::<f32>()?.max(1.0)),
             "--no-vsync" => o.overrides.vsync = Some(false),
+            "--structures" => drop(o.structures.get_or_insert_default()),
+            "--structure" => o.structures.get_or_insert_default().show = Some(value()?),
+            "--variant" => o.structures.get_or_insert_default().variant = Some(value()?.parse()?),
+            "--place" => o.structures.get_or_insert_default().place = Some(value()?.parse()?),
+            "--layer" => o.structures.get_or_insert_default().layer = Some(value()?.parse()?),
+            "--copy" => o.structures.get_or_insert_default().copy = true,
+            "--structures-dir" => o.structures.get_or_insert_default().dir = Some(value()?.into()),
+            "--orbit" => {
+                let v: Vec<f32> = value()?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>()?;
+                anyhow::ensure!(v.len() == 2 || v.len() == 3, "--orbit takes YAW,PITCH or YAW,PITCH,DISTANCE");
+                o.structures.get_or_insert_default().orbit = Some((v[0], v[1], v.get(2).copied()));
+            }
+            "--hover" => {
+                let v = list::<f32>(&value()?, ',', 2)?;
+                o.structures.get_or_insert_default().hover = Some((v[0], v[1]));
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -401,29 +463,10 @@ const BOARD_REACH: f64 = m64(4.8);
 const PLACE_REACH: f64 = m64(3.0);
 /// How long a fire burns once lit, in days: from dusk until well into the morning.
 const FIRE_BURNS: f32 = 14.0 / 24.0;
+/// How long a fire smoulders once it has gone out, in days.
+const SMOULDERS: f32 = 1.5 / 24.0;
 /// How long the name of what has come to hand stays up, in seconds.
 const HAND_WORD: f32 = 2.6;
-
-/// Whether `v` is the wood of a standing tree, under which sticks are to be found.
-fn is_trunk(v: voxel::Voxel) -> bool {
-    use worldgen::materials as mat;
-    matches!(
-        v,
-        mat::BARK_OAK
-            | mat::BARK_BIRCH
-            | mat::BARK_PINE
-            | mat::BARK_REDWOOD
-            | mat::BARK_JUNGLE
-            | mat::BARK_PALM
-            | mat::BARK_WILLOW
-            | mat::BARK_ACACIA
-            | mat::BARK_BAOBAB
-            | mat::BARK_HOLLY
-            | mat::BARK_YEW
-            | mat::BARK_SCOTS
-            | mat::WOOD_DEAD
-    )
-}
 
 /// The ground under `(x, z)` nearest to height `y`: the top of the highest solid voxel
 /// with open air over it, looked for a little way up and down. None in water, or where
@@ -460,27 +503,48 @@ fn firelight(heart: DVec3, clock: f32) -> (DVec3, f32) {
     (heart + DVec3::new(0.0, m64(0.25), 0.0), 1.25 + flicker)
 }
 
-/// Makes camp a few steps ahead of someone whose eye is at `eye`, looking along `yaw`:
-/// a fire in `state`, a tent beyond it with its door toward the fire, and a few things
-/// set down about it. Behind them or to one side instead, if there is water or a cliff
-/// ahead. For showing a camp without having made one.
-fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8) {
+/// How brightly a lantern's candle burns at `clock` seconds: steady, with a small
+/// unsettled flicker, less than a fire's.
+fn candle(clock: f32) -> f32 {
+    1.15 + 0.05 * (clock * 7.3).sin() + 0.035 * (clock * 17.9 + 1.3).sin() + 0.03 * (clock * 2.3).sin()
+}
+
+/// Where someone resting by `fire` lies, coming to it from `from`: on the ground a step
+/// short of its ring, feet to the warmth.
+fn by_the_fire(voxels: &mut WorldVoxels, fire: &placed::Thing, from: DVec3) -> DVec3 {
+    let toward = DVec3::new(from.x - fire.pos.x, 0.0, from.z - fire.pos.z).normalize_or(DVec3::X);
+    let p = fire.pos + toward * m64(1.3);
+    DVec3::new(p.x, ground_near(voxels, p.x, fire.pos.y + 1.0, p.z).unwrap_or(fire.pos.y), p.z)
+}
+
+/// Makes camp `far` metres ahead of someone whose eye is at `eye`, looking along `yaw`:
+/// a fire in `state` and a few things set down about it. Behind them or to one side
+/// instead, if there is water or a cliff ahead. For showing a camp without having made
+/// one.
+fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8, far: f64) {
     use worldgen::features::plants::Flower;
     let foot = eye.y - player::EYE_HEIGHT;
     for turned in [0.0, std::f32::consts::PI, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
         let yaw = yaw + turned;
         let (ahead, across) = (DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64), DVec3::new(-yaw.sin() as f64, 0.0, yaw.cos() as f64));
         let mut spot = |along: f64, aside: f64| {
+            let along = along + far - 4.2;
             let p = eye + ahead * m64(along) + across * m64(aside);
-            let y = ground_near(voxels, p.x, foot + 2.0, p.z).or_else(|| ground_near(voxels, p.x, foot - 4.0, p.z))?;
+            let y = ground_near(voxels, p.x, foot + 2.0, p.z).or_else(|| ground_near(voxels, p.x, foot - 4.0, p.z));
+            // Far off, the ground may be well above or below the feet.
+            let y = y.or_else(|| (along > 10.0).then(|| (-30..30).rev().find_map(|k| ground_near(voxels, p.x, foot + 8.0 * k as f64, p.z))).flatten())?;
             Some(DVec3::new(p.x, y, p.z))
         };
-        let (Some(fire), Some(tent)) = (spot(4.2, 0.0), spot(6.6, 2.3)) else { continue };
+        let Some(fire) = spot(4.2, 0.0) else { continue };
+        log::info!("camp made at {:.0} {:.0} {:.0}, {:.0} m from the eye", fire.x, fire.y, fire.z, fire.distance(eye) / m64(1.0));
         camp.put(placed::Thing::new(inventory::campfire(), 1, fire, yaw));
         if let Some(at) = camp.within_reach(fire).filter(|_| state != placed::LAID) {
             camp.set_state(at, state);
         }
-        camp.put(placed::Thing::new(inventory::tent(), 1, tent, yaw + 2.1));
+        // A fire burnt down has long since stopped smoking; one put out has only just.
+        if state == placed::BURNT {
+            camp.pass(1.0, f64::MAX);
+        }
         for (item, count, along, aside, turn) in [
             (inventory::sticks(), 3, 3.6, -1.3, 0.4),
             (inventory::of_flower(Flower::Poppy), 3, 3.0, 0.9, 2.0),
@@ -584,7 +648,9 @@ fn scan_surroundings(
             flowers.push((at.as_dvec3(), to_linear(flower.color())));
         }
     }
-    (biome, leaves, flowers, low_ground(world, cx, cz))
+    // And the sticks fallen under the trees about.
+    let sticks = fallen::near(world, voxels, camera);
+    (biome, leaves, flowers, low_ground(world, cx, cz), sticks)
 }
 
 /// The lowest ground or water within a short walk: where mist gathers. Standing in a
@@ -599,8 +665,9 @@ fn low_ground(world: &GameWorld, cx: i32, cz: i32) -> f32 {
     low as f32
 }
 
-/// The biome, leaves and flowers round the camera, and the low ground near it.
-type Scan = (worldgen::biome::Biome, Leaves, Spots, f32);
+/// The biome, leaves and flowers round the camera, the low ground near it, and the
+/// sticks lying under the trees.
+type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -658,6 +725,8 @@ struct Running {
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
+    /// Sticks lying on the ground near the player, refreshed with them.
+    fallen: Vec<fallen::Stick>,
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
@@ -697,7 +766,7 @@ struct Running {
     journal_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
-    /// What has been set down in this world: flowers, tents, fires.
+    /// What has been set down in this world: flowers, sticks, fires.
     placed: placed::Placed,
     /// The thing set down that is within reach, if one is; looked for with `within_reach`.
     thing_near: Option<placed::Handle>,
@@ -722,6 +791,9 @@ struct Running {
     last_fall_speed: f32,
     was_grounded: bool,
     was_swimming: bool,
+    /// Seconds since the player was last swimming: only going in after a while out
+    /// splashes, not the chest bobbing in and out at the top of a swim.
+    dry_for: f32,
     fleet: Fleet,
     /// Solid models to draw this frame.
     props: Vec<particles::ParticleInstance>,
@@ -734,6 +806,8 @@ struct Running {
     last_yaw: f32,
     /// The view is from behind the player's figure, not through its eyes.
     third: bool,
+    /// The lantern's shutter is closed: held, it gives no light.
+    shuttered: bool,
     gait: character::Gait,
     world: Arc<GameWorld>,
     camera: Camera,
@@ -801,7 +875,7 @@ impl Running {
             .and_then(|s| s.progress(settings.seed));
         // The pack goes with the world, wherever in it this run begins.
         let mut pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
-        // Every wanderer has a tent, those who set out before there were tents too.
+        // Every wanderer has a lantern, those who set out before there were lanterns too.
         pack.give_kit();
         // As does what has been set down in it.
         let placed = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(placed::Placed::new, |s| placed::Placed::from_text(&s.placed(settings.seed)));
@@ -863,14 +937,14 @@ impl Running {
         let mut voxels = WorldVoxels::new(world.clone());
         let mut rest = None;
         if let Some(state) = opts.shot_camp {
-            sample_camp(&mut placed, &mut voxels, camera.pos, camera.yaw, state);
+            sample_camp(&mut placed, &mut voxels, camera.pos, camera.yaw, state, opts.camp_ahead);
             if opts.rest
                 && !flying
-                && let Some((_, tent)) = placed.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_tent())
+                && let Some((_, fire)) = placed.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_fire())
             {
-                player.pos = tent.bed().0;
-                rest = Some(camp::Rest::begin(&Environment::at(time, date), true));
-                log::info!("resting in the tent from {time:.2} h");
+                player.pos = by_the_fire(&mut voxels, fire, camera.pos);
+                rest = Some(camp::Rest::begin(&Environment::at(time, date)));
+                log::info!("resting by the fire from {time:.2} h");
             }
         }
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
@@ -885,6 +959,7 @@ impl Running {
             renderer,
             last_yaw: camera.yaw,
             third: false,
+            shuttered: false,
             gait: character::Gait::new(camera.yaw),
             camera,
             walking: !flying,
@@ -898,6 +973,7 @@ impl Running {
             particles: Particles::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
+            fallen: Vec::new(),
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
@@ -938,6 +1014,7 @@ impl Running {
             last_fall_speed: 0.0,
             was_grounded: false,
             was_swimming: false,
+            dry_for: 0.0,
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
             shades: Vec::new(),
@@ -1085,19 +1162,14 @@ impl Running {
                 best = Some((d, (p.x, p.z), item));
             }
         }
-        // And sticks, from under any tree: by its trunk, once until more have fallen.
-        if best.is_none() {
-            for z in cz - span..=cz + span {
-                for x in cx - span..=cx + span {
-                    let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
-                    if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
-                        continue;
-                    }
-                    if (feet..=feet + 2).any(|y| is_trunk(self.voxels.voxel(x, y, z))) {
-                        best = Some((d, (x, z), inventory::sticks()));
-                    }
-                }
+        // And the sticks lying on the ground, until they are picked up.
+        for stick in &self.fallen {
+            let (x, z) = stick.spot();
+            let d = DVec3::new(stick.pos.x - centre.x, 0.0, stick.pos.z - centre.z).length();
+            if d > reach || (stick.pos.y - feet as f64).abs() > 3.0 || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+                continue;
             }
+            best = Some((d, (x, z), inventory::sticks()));
         }
         best.map(|b| (b.1, b.2))
     }
@@ -1111,8 +1183,11 @@ impl Running {
                 self.world.regrow(ox, oz);
                 self.streamer.replant(ox, oz);
             }
-            // (Sticks leave the tree as it was: there is nothing to build again.)
-            if item.id != "sticks" {
+            if item.id == "sticks" {
+                // All that lay there, which is not part of the world: nothing to build again.
+                let more = self.fallen.iter().find(|s| s.spot() == (x, z)).map_or(0, |s| s.count.saturating_sub(1));
+                self.pack.add_many(&item, more);
+            } else {
                 self.world.pick(x, z);
                 self.streamer.replant(x, z);
             }
@@ -1151,33 +1226,25 @@ impl Running {
         ground_near(&mut self.voxels, p.x, self.player.pos.y + 1.0, p.z).map(|y| DVec3::new(p.x, y, p.z))
     }
 
-    /// Uses what is held: pitches the tent, lays a fire of sticks, or sets the thing
-    /// down, where the player is looking.
+    /// Uses what is held: lays a fire of sticks, or sets the thing down, where the
+    /// player is looking.
     fn use_held(&mut self) {
         if !self.walking || self.player.mode != Mode::Walk || self.rest.is_some() {
             return;
         }
         let Some(stack) = self.pack.in_hand().cloned() else { return };
+        // The lantern is not set down: it is carried, lit or shuttered.
+        if stack.item.id == "lantern" {
+            self.shuttered = !self.shuttered;
+            self.say(if self.shuttered { "The lantern is shuttered" } else { "The lantern is lit" });
+            return;
+        }
         let Some(at) = self.spot_ahead() else {
             self.say("There is nowhere here to put it");
             return;
         };
         let yaw = self.camera.yaw;
         match stack.item.id.as_str() {
-            "tent" => {
-                // A tent wants level ground the size of itself.
-                let level = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
-                    .iter()
-                    .all(|(dx, dz)| ground_near(&mut self.voxels, at.x + dx * m64(0.9), at.y, at.z + dz * m64(0.9)).is_some_and(|y| (y - at.y).abs() <= 1.0));
-                if !level {
-                    self.say("The ground here is too steep for a tent");
-                    return;
-                }
-                self.pack.spend("tent", 1);
-                // Its door toward whoever pitched it.
-                self.placed.put(placed::Thing::new(stack.item, 1, at, yaw + std::f32::consts::FRAC_PI_2));
-                self.say("The tent is pitched");
-            }
             "sticks" => {
                 if !self.pack.spend("sticks", inventory::FIRE_STICKS) {
                     self.say(format!("A fire wants {} sticks", inventory::FIRE_STICKS));
@@ -1205,27 +1272,31 @@ impl Running {
         self.placed.put(placed::Thing::new(stack.item, stack.count, DVec3::new(p.x, y, p.z), self.camera.yaw + std::f32::consts::FRAC_PI_2));
     }
 
-    /// Takes up the thing set down that is within reach, back into the pack.
+    /// Takes up the thing set down that is within reach, back into the pack. A fire
+    /// burning is put out instead, and one that is not is taken apart.
     fn take_up(&mut self) {
         if !self.walking || self.player.mode != Mode::Walk || self.rest.is_some() {
             return;
         }
         let Some(at) = self.placed.within_reach(self.hands()) else { return };
         let Some(thing) = self.placed.get(at).cloned() else { return };
-        if thing.is_fire() {
-            if thing.state != placed::LAID {
-                self.say("The ring of stones stays");
-                return;
-            }
-            // A fire never lit comes apart into its sticks.
-            let left = self.pack.add_many(&inventory::sticks(), inventory::FIRE_STICKS);
+        if thing.burns() {
+            // Smothered and stamped out, it smoulders for a while.
+            self.placed.set_state(at, placed::OUT);
+            self.say("The fire is put out");
+        } else if thing.is_fire() {
+            // It comes apart into what of its sticks is not burnt through, and its stones
+            // are scattered.
+            let back = thing.salvage();
+            let left = self.pack.add_many(&inventory::sticks(), back);
             if left > 0 {
-                self.pack.spend("sticks", inventory::FIRE_STICKS - left);
+                self.pack.spend("sticks", back - left);
                 self.say("Your pack is full");
                 return;
             }
             self.placed.take(at);
-            self.say(format!("Sticks  \u{d7} {}", self.pack.count("sticks")));
+            self.map.camps = self.placed.camps();
+            self.say(if back > 0 { format!("Sticks  \u{d7} {}", self.pack.count("sticks")) } else { "The fire is cleared away".into() });
         } else {
             let left = self.pack.add_many(&thing.item, thing.count);
             if left == thing.count {
@@ -1259,14 +1330,14 @@ impl Running {
         let Some(thing) = self.thing_near.and_then(|at| self.placed.get(at)) else {
             return self.ember_near().map(|_| format!("E to rest by the fire until {until}"));
         };
-        Some(if thing.is_tent() {
-            format!("E to rest in the tent until {until}   \u{b7}   left click to strike it")
-        } else if thing.burns() {
-            format!("E to rest by the fire until {until}")
+        Some(if thing.burns() {
+            format!("E to rest by the fire until {until}   \u{b7}   left click to put it out")
         } else if thing.is_fire() && thing.state == placed::LAID {
             "E to light the fire   \u{b7}   left click to take the sticks back".into()
+        } else if thing.is_fire() && thing.salvage() > 0 {
+            "E to light the fire again   \u{b7}   left click to take it apart for its sticks".into()
         } else if thing.is_fire() {
-            "E to light the fire again".into()
+            "E to light the fire again   \u{b7}   left click to clear it away".into()
         } else if thing.count > 1 {
             format!("Left click to pick up  {}  \u{d7} {}", thing.item.name, thing.count)
         } else {
@@ -1274,8 +1345,8 @@ impl Running {
         })
     }
 
-    /// Lights the fire within reach, or lies down to rest in the tent or by the fire
-    /// that is. Whether there was anything of the kind to do.
+    /// Lights the fire within reach, or settles down to rest by the one burning there.
+    /// Whether there was anything of the kind to do.
     fn make_camp(&mut self) -> bool {
         let thing = self.thing_near.and_then(|at| Some((at, self.placed.get(at)?.clone())));
         match thing {
@@ -1285,20 +1356,15 @@ impl Running {
                 self.say("The fire catches");
                 true
             }
-            Some((_, thing)) if thing.is_tent() => {
-                // In at the door, to lie on the bedroll with the head by it.
-                self.player.pos = thing.bed().0;
-                self.player.vel = glam::Vec3::ZERO;
-                self.rest = Some(camp::Rest::begin(&self.env, true));
-                true
-            }
             Some((_, thing)) if thing.is_fire() => {
-                self.rest = Some(camp::Rest::begin(&self.env, false));
+                self.player.vel = glam::Vec3::ZERO;
+                self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
             Some(_) => false,
             None if self.ember_near().is_some() => {
-                self.rest = Some(camp::Rest::begin(&self.env, false));
+                self.player.vel = glam::Vec3::ZERO;
+                self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
             None => false,
@@ -1671,19 +1737,21 @@ impl Running {
         }
         if let Some(found) = self.scanner.poll() {
             let low;
-            (self.biome, self.leaves, self.flowers, low) = found;
+            (self.biome, self.leaves, self.flowers, low, self.fallen) = found;
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
-        let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
+        let entered_water = (self.player.swimming && !self.was_swimming && self.walking && self.dry_for > 0.75)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
+        self.dry_for = if self.player.swimming { 0.0 } else { self.dry_for + dt };
         let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, m(120.0)).copied().collect();
         let springs: Vec<_> = self.streamer.springs_near(self.camera.pos, m(40.0)).copied().collect();
         let surf: Vec<_> = self.streamer.surf_near(self.camera.pos, m(60.0)).copied().collect();
         // Every fire burning near: the player's own, and the embers of older camps.
         let burning: Vec<DVec3> = self.placed.near(self.camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
-        let fires: Vec<DVec3> = burning.iter().chain(&self.embers).copied().collect();
+        let mut fires = self.placed.smoking(self.camera.pos, m64(particles::SMOKE_SIGHT), (SMOULDERS / self.settings.year_days.max(1.0)) as f64);
+        fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -1701,6 +1769,7 @@ impl Running {
             snow: self.weather.now.snow,
             storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
+            land: &|x, z| particles::land_under(&self.world, x, z),
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
         self.voxels.trim(self.camera.pos);
@@ -1714,6 +1783,8 @@ impl Running {
             vehicles::draw_boat(boat.pos, boat.heading, clock, self.camera.pos, &mut self.props);
         }
         self.placed.draw(self.camera.pos, clock, &mut self.props);
+        let mut held_light = None;
+        fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -1724,7 +1795,9 @@ impl Running {
             self.glider = (self.glider + if flying { dt / 0.7 } else { -dt / 0.8 }).clamp(0.0, 1.0);
             if self.glider > GLIDER_UP {
                 let open = (self.glider - GLIDER_UP) / (1.0 - GLIDER_UP);
-                vehicles::draw_glider(self.player.pos, self.camera.yaw, open, self.camera.pos, &mut self.props);
+                let rise = self.player.vel.y / worldgen::scale::VOXELS_PER_METRE;
+                let flight = vehicles::Flight::of(self.player.bank, rise, clock);
+                vehicles::draw_glider(self.player.pos, self.camera.yaw, open, flight, self.camera.pos, &mut self.props);
             }
             {
                 // Sitting, the hips are where the thwart is.
@@ -1738,6 +1811,13 @@ impl Running {
                 // The glider is a rod on the back until the wing itself is out.
                 let furled = (self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
                 character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
+                // A lantern in hand lights the way, unless it is shuttered; not with both
+                // hands on the glider's bar.
+                if self.pack.in_hand().is_some_and(|s| s.item.id == "lantern") && self.player.mode != Mode::Glide {
+                    let lit = if self.shuttered { 0.0 } else { candle(clock) };
+                    let flame = character::draw_lantern(feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
+                    held_light = (lit > 0.0).then_some((flame, lit));
+                }
             }
         }
 
@@ -1750,6 +1830,7 @@ impl Running {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let mut lamps: Vec<(DVec3, f32)> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(burning.iter().map(|&heart| firelight(heart, clock)));
+        lamps.extend(held_light);
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
@@ -1837,11 +1918,7 @@ impl Running {
                 } else if journal_open {
                     journal::show(ctx, journal, journal_view);
                 } else if !grabbed && !map_open {
-                    egui::Area::new(egui::Id::unique("hint"))
-                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -150.0])
-                        .show(ctx, |ui| {
-                            ui.label(egui::RichText::new("Click the view (or press Tab) to look around").size(18.0));
-                        });
+                    overlay::bottom_line(ctx, "hint", "Click the view (or press Tab) to look around", 150.0, egui::Color32::from_gray(220));
                 }
                 // The hotbar is always there, but for the menu, the map and the pack
                 // (which shows it among its own slots).
@@ -1849,11 +1926,7 @@ impl Running {
                     inventory::hotbar(ctx, pack, hand_word.as_ref().map(|(text, shown)| (text.as_str(), *shown)));
                 }
                 if let Some(text) = prompt {
-                    egui::Area::new(egui::Id::unique("prompt"))
-                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -112.0])
-                        .show(ctx, |ui| {
-                            ui.label(egui::RichText::new(text).size(18.0).color(egui::Color32::from_gray(235)));
-                        });
+                    overlay::bottom_line(ctx, "prompt", &text, 112.0, egui::Color32::from_gray(235));
                 }
                 if !show_debug {
                     return;
@@ -2215,6 +2288,12 @@ fn main() -> Result<()> {
         .init();
     let opts = parse_args()?;
 
+    if let Some(mut structures) = opts.structures.clone() {
+        structures.screenshot = opts.screenshot.clone();
+        structures.size = opts.size;
+        return editor::run(structures);
+    }
+
     if let Some(path) = &opts.map {
         let settings = opts.overrides.applied_to(Settings::default());
         let world = GameWorld::new(settings.seed);
@@ -2264,7 +2343,7 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers, low) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
+        let (biome, leaves, flowers, low, sticks) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
@@ -2284,26 +2363,30 @@ fn main() -> Result<()> {
             let furled = opts.figure_glide.is_none().then_some(opts.figure_furl);
             character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
             if let Some(open) = opts.figure_glide {
-                vehicles::draw_glider(*feet, gait.facing, open, camera.pos, &mut props);
+                let flight = vehicles::Flight::of(opts.figure_bank.to_radians(), opts.figure_rise, 0.0);
+                vehicles::draw_glider(*feet, gait.facing, open, flight, camera.pos, &mut props);
             }
         }
-        // A camp a few steps ahead: a fire, a tent facing it, and a few things set down.
+        // A camp a few steps ahead: a fire, and a few things set down.
         let mut camp = placed::Placed::new();
         if let Some(state) = opts.shot_camp {
-            sample_camp(&mut camp, &mut voxels, camera.pos, camera.yaw, state);
+            sample_camp(&mut camp, &mut voxels, camera.pos, camera.yaw, state, opts.camp_ahead);
         }
-        // Lying in its tent, head by the door, looking out of it as high as --look says.
+        // Lying by its fire, facing it, looking up as high as --look says.
         if opts.rest
-            && let Some((_, tent)) = camp.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_tent())
+            && let Some((_, fire)) = camp.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_fire())
         {
-            let (bed, door) = tent.bed();
-            camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::begin(&env, true).lowered() as f64), 0.0);
-            camera.yaw = (door.y.atan2(door.x) as f32).rem_euclid(std::f32::consts::TAU);
+            let bed = by_the_fire(&mut voxels, fire, camera.pos);
+            let to = fire.pos - bed;
+            camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::begin(&env).lowered() as f64), 0.0);
+            camera.yaw = (to.z.atan2(to.x) as f32).rem_euclid(std::f32::consts::TAU);
         }
         camp.draw(camera.pos, 0.6, &mut props);
+        fallen::draw(&sticks, &inventory::Pack::new(), camera.pos, &mut props);
         let fires: Vec<DVec3> = camp.near(camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
         // Smoke rises from them, and from the embers of the camps that were here already.
-        let smoking: Vec<DVec3> = fires.iter().copied().chain(embers_near(&streamer, &mut voxels, camera.pos)).collect();
+        let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);
+        smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         let mut particles = Particles::new();
         for step in 0..(opts.ambient * 60.0) as u32 {
@@ -2324,6 +2407,7 @@ fn main() -> Result<()> {
                 snow: weather.now.snow,
                 storm: weather.now.storm,
                 time: step as f64 / 60.0,
+                land: &|x, z| particles::land_under(&world, x, z),
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
@@ -2334,6 +2418,16 @@ fn main() -> Result<()> {
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
+        // A lit lantern in the hand: of the figure if there is one, else of whoever's eyes
+        // the camera is, standing (seen only by its light).
+        if opts.shot_lantern {
+            let (mut unseen, standing) = (Vec::new(), character::Gait::new(camera.yaw));
+            let (feet, gait, into) = match &figure {
+                Some((feet, gait)) => (*feet, gait, &mut props),
+                None => (camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), &standing, &mut unseen),
+            };
+            lamps.push((character::draw_lantern(feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
+        }
         // The map, as the player would have it after walking here.
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut map = opts.shot_map.map(|large| {
@@ -2375,7 +2469,6 @@ fn main() -> Result<()> {
             for k in 3..inventory::HOTBAR {
                 pack.shift(inventory::SLOTS + k, 20 + k - 3);
             }
-            pack.give_kit();
             for _ in 0..5 {
                 pack.add(&inventory::sticks());
             }
@@ -2391,7 +2484,7 @@ fn main() -> Result<()> {
             let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
             (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue()), view)
         });
-        // A hotbar as it might be an hour into a walk: the tent, sticks, things picked.
+        // A hotbar as it might be an hour into a walk: sticks, things picked.
         let hotbar = opts.shot_hotbar.then(|| {
             use worldgen::features::plants::Flower;
             let mut pack = inventory::Pack::new();
@@ -2399,8 +2492,8 @@ fn main() -> Result<()> {
             for (item, n) in [(inventory::sticks(), 5), (inventory::of_flower(Flower::Poppy), 12), (inventory::of_flower(Flower::PennyBun), 2), (inventory::of_flower(Flower::Bluebell), 7)] {
                 pack.add_many(&item, n);
             }
-            pack.shift(inventory::SLOTS + 4, inventory::SLOTS + 6);
-            pack.hold(1);
+            pack.shift(inventory::SLOTS + 3, inventory::SLOTS + 5);
+            pack.hold(0);
             pack
         });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
@@ -2412,6 +2505,9 @@ fn main() -> Result<()> {
             } else if text && let Some(pack) = &hotbar {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
+            }
+            if text && let Some(line) = &opts.shot_prompt {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
             let Some(map) = &mut map else { return };
             map.hour = env.time;

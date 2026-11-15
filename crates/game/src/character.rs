@@ -444,6 +444,49 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f
     );
 }
 
+/// Brass, and the glass of a lantern by day, when it is not lit.
+const BRASS: Rgb = [150, 112, 58];
+const GLASS: Rgb = [214, 200, 160];
+
+/// Draws a lantern hung from the right hand of a figure drawn by `draw` with the same
+/// `feet`, `facing` and `pose`, burning `lit` brightly (0 shuttered). Where its flame is,
+/// in the world, for the light it throws.
+pub fn draw_lantern(feet: DVec3, facing: f32, pose: &Pose, lit: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) -> DVec3 {
+    let yaw = facing - std::f32::consts::FRAC_PI_2;
+    let (sy, cy) = yaw.sin_cos();
+    // The hand, as `draw` puts it: down the arm from the shoulder, and on down the
+    // forearm from the elbow, with the body leaning from the hips.
+    let hips = Vec3::new(0.0, 9.0, 0.0);
+    let (sl, cl) = pose.lean.sin_cos();
+    let shoulder = Vec3::new(-2.5, 13.5, 0.0) - hips;
+    let shoulder = hips + Vec3::new(shoulder.x, shoulder.y * cl - shoulder.z * sl, shoulder.y * sl + shoulder.z * cl);
+    let along = |joint: Vec3, pitch: f32, down: f32| joint + Vec3::new(0.0, -down * pitch.cos(), -down * pitch.sin());
+    let elbow = along(shoulder, pose.arm[0], 2.5);
+    // Held a little out from the side, so it swings clear of the leg.
+    let hand = along(elbow, pose.arm[0] + pose.fore[0], 3.0) + Vec3::new(-0.7, 0.0, 0.0);
+    let base = (feet - cam).as_vec3() + Vec3::Y * pose.lift;
+    let world = |p: Vec3| base + Vec3::new(p.x * cy - p.z * sy, p.y, p.x * sy + p.z * cy) * CELL;
+    // It hangs from its handle straight down, whatever the arm is doing.
+    let pieces: [([f32; 3], [f32; 3], Rgb, f32); 5] = [
+        ([0.0, -0.4, 0.0], [0.25, 0.8, 0.25], BRASS, 0.0),
+        ([0.0, -1.0, 0.0], [1.5, 0.35, 1.5], BRASS, 0.0),
+        ([0.0, -2.0, 0.0], [1.1, 1.7, 1.1], if lit > 0.0 { [255, 196, 110] } else { GLASS }, 4.0 * lit),
+        ([0.0, -2.0, 0.0], [1.3, 1.6, 0.18], BRASS, 0.0),
+        ([0.0, -3.0, 0.0], [1.6, 0.35, 1.6], BRASS, 0.0),
+    ];
+    for (at, size, color, glow) in pieces {
+        out.push(ParticleInstance {
+            pos: world(hand + Vec3::from(at)).into(),
+            yaw,
+            size: (Vec3::from(size) * CELL).into(),
+            glow,
+            color: linear(color),
+            tilt: [0.0; 2],
+        });
+    }
+    cam + world(hand + Vec3::new(0.0, -2.0, 0.0)).as_dvec3()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

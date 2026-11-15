@@ -69,21 +69,6 @@ fn turns_toward(d: Vec2) -> u32 {
     (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
 }
 
-/// Whether a gate turned `turns` at trail point `i` has its posts off the way, either
-/// side of it.
-fn gate_fits(pts: &[Vec2], widths: &[f32], i: usize, turns: u32, half: i32) -> bool {
-    let r = rotate(IVec3::new(half, 0, 0), turns);
-    let axis = vec2(r.x as f32, r.z as f32);
-    let (x, z) = (pts[i].x.floor(), pts[i].y.floor());
-    let lo = i.saturating_sub(40);
-    let hi = (i + 40).min(pts.len());
-    [axis, -axis].iter().all(|&a| {
-        let post = vec2(x, z) + a + 0.5;
-        // Each post's footprint is one column, a voxel across.
-        pts[lo..hi].iter().zip(&widths[lo..hi]).all(|(p, &w)| p.distance(post) >= w + 0.5)
-    })
-}
-
 /// Steps to the next lantern along a plain stretch, after one placed at step `i`.
 fn plain_gap(salt: u32, i: usize) -> usize {
     (LANTERN_FAR as f32 * (0.7 + 0.6 * unit(hash2(salt ^ 0x1a77, i as i32, 17)))) as usize
@@ -851,6 +836,13 @@ fn layout(kind: Landmark) -> Layout {
     }
 }
 
+/// The side of a landmark that is turned to face the way most people come, in quarter
+/// turns from +X (1 is +Z), or None if it is turned as its seed has it. The structure
+/// editor shows it, so a saved structure keeps its door where the trail arrives.
+pub fn front(kind: Landmark) -> Option<u32> {
+    layout(kind).front
+}
+
 /// A land site placed but not yet built: it is built once the trails to it are known,
 /// so its door can face the way most people come.
 struct PendingSite {
@@ -860,6 +852,9 @@ struct PendingSite {
     seed: u32,
     palette: Palette,
     water: Option<Vec2>,
+    /// A ruin on a hilltop, built as a tumbledown tower and seen from the trails, with a
+    /// faint path out to it.
+    tower: bool,
 }
 
 /// A landing needs a shoreline and open water straight out from it.
@@ -1015,7 +1010,21 @@ fn place_land(
     pad.hub = lay.hub;
     net.pads.push(pad);
     let origin = IVec3::new(x, y as i32 + 1, z);
-    pending.push(PendingSite { index: net.sites.len(), kind, origin, seed: site_seed, palette, water: found.water });
+    // Only a ruin standing well up over the land about it, where a tower would be seen
+    // from far off, is built as one.
+    let tower = kind == Landmark::Ruins && found.reason == super::Reason::View && {
+        let r = TOWER_RISE_AT as i32;
+        let s = Sampler::new(c, seed, x - r, z - r, 2 * r + 1);
+        let around = (0..8)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                s.column(x + (a.cos() * TOWER_RISE_AT) as i32, z + (a.sin() * TOWER_RISE_AT) as i32).ground
+            })
+            .sum::<f32>()
+            / 8.0;
+        found.y - around > TOWER_RISE
+    };
+    pending.push(PendingSite { index: net.sites.len(), kind, origin, seed: site_seed, palette, water: found.water, tower });
     Some(Site {
         kind,
         x,
@@ -1034,7 +1043,11 @@ fn finish_site(net: &mut Network, site: &PendingSite, toward: Option<Vec2>) -> u
         (Some(front), Some(d)) => (turns_toward(d) + 4 - front) % 4,
         _ => site.seed & 3,
     };
-    let (voxels, fine, props) = landmarks::build_site(site.kind, &site.palette, site.seed, 0);
+    let (voxels, fine, props) = if site.tower {
+        landmarks::build_ruined_tower(&site.palette, site.seed)
+    } else {
+        landmarks::build_placed(site.kind, &site.palette, site.seed, 0)
+    };
     net.add_stamp_with(absolute(voxels, site.origin, turns), parts::place_fine(&fine, site.origin, turns));
     hold_props(net, props, site.origin, turns);
     turns
@@ -1055,6 +1068,32 @@ fn water_path(c: &Continent, seed: u32, pad: &Pad, water: Vec2) -> Option<Vec<Ve
     let stop = cols.iter().position(|col| is_wet(col) || col.river < m(1.2)).unwrap_or(pts.len());
     let keep = stop.saturating_sub(2);
     (keep >= 10).then(|| pts[..keep].to_vec())
+}
+
+/// A ruin on ground standing this far over the land `TOWER_RISE_AT` about it is built
+/// as a tower.
+const TOWER_RISE: f32 = m(4.4);
+const TOWER_RISE_AT: f32 = m(50.0);
+/// How far about a ruin the trails keep away, going round it.
+const RUIN_CLEAR: f32 = m(160.0);
+/// The furthest a trail may be from a tower on a hill for a path to go out to it.
+const RUIN_PATH_REACH: f32 = m(1600.0);
+
+/// The faint way from a trail at `from` out to the edge of a ruin's pad, along the map
+/// cells `cells` and fitted to the ground. None when it is too short to be worth a path,
+/// or would need more than a log over a brook: nobody builds a bridge to reach a ruin,
+/// though a stream may be stepped across.
+fn ruin_path(c: &Continent, seed: u32, pad: &Pad, from: Vec2, cells: &[u32], salt: u32) -> Option<Vec<Vec2>> {
+    let centre = vec2(pad.x, pad.z);
+    let mut pts = route::smooth(c, cells, from, centre, salt);
+    let stop = pts.iter().position(|p| p.distance(centre) < pad.radius)?;
+    pts.truncate(stop);
+    if pts.len() < 10 {
+        return None;
+    }
+    let pts = fit(c, seed, &pts);
+    let cols = sample(c, seed, &pts);
+    wet_runs(&cols).iter().all(|&(s, e)| e - s < 10).then_some(pts)
 }
 
 fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mut Network) -> Option<Site> {
@@ -1349,29 +1388,17 @@ impl Layer<'_> {
             if is_wet(&col) || col.river < m(2.4) {
                 continue;
             }
-            // Each style faces the trail: a crook's lamp hangs out over its edge, a pair
-            // runs along it, and a gate spans it where it is narrow enough to pass through.
-            let pick = hash2(salt ^ 0x5e1f, i as i32, 3);
-            // Gates mark arrivals, at landmarks and where trails meet, their posts
-            // either side of the trail.
-            let mut style = parts::LampStyle::pick_trail(pick >> 3);
-            let arrival = matches!(cause, LanternCause::Approach | LanternCause::Junction);
-            if arrival && pick % 6 == 0 {
-                style = parts::LampStyle::Gate;
-            }
-            let gate_turns = turns_toward(normal);
-            let gate_half = ((widths[i] + 1.0).ceil() as i32).max(parts::GATE_HALF);
-            if style == parts::LampStyle::Gate
-                && !(arrival && gate_half <= parts::GATE_HALF_MAX && gate_fits(pts, widths, i, gate_turns, gate_half))
-            {
-                style = if pick & 1 == 0 { parts::LampStyle::Post } else { parts::LampStyle::Stone };
-            }
-            let (q, turns) = match style {
-                parts::LampStyle::Gate => (pts[i], gate_turns),
-                parts::LampStyle::Crook => (pts[i] + normal * side * (widths[i] + m(0.8)), turns_toward(-normal * side)),
-                parts::LampStyle::Pair => (pts[i] + normal * side * (widths[i] + m(1.2)), turns_toward(tangent)),
-                _ => (pts[i] + normal * side * (widths[i] + m(1.2)), pick >> 7 & 3),
-            };
+            // A pole of sticks beside the way, its lamp hung out toward it. Most are not
+            // lit: only now and then one by a bridge or where trails meet, and more often
+            // on the way in to a place, where someone is about to light them.
+            let style = parts::LampStyle::Stick;
+            let lit = unit(hash2(salt ^ 0x11e7, i as i32, 5))
+                < match cause {
+                    LanternCause::Approach => 0.4,
+                    LanternCause::Bridge | LanternCause::Junction => 0.25,
+                    LanternCause::Plain => 0.15,
+                };
+            let (q, turns) = (pts[i] + normal * side * (widths[i] + m(1.0)), turns_toward(-normal * side));
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
             let crowded = net.lanterns.iter().any(|l| {
                 (l.trail != salt || cause == LanternCause::Junction) && l.at.distance_squared(q) < clear * clear
@@ -1383,12 +1410,14 @@ impl Layer<'_> {
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
             let at = IVec3::new(x, y, z);
-            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col, q), height, hash2(salt, x, z), style, turns, gate_half);
-            let footprint: Vec<IVec2> = voxels
+            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col, q), height, hash2(salt, x, z), style, turns, parts::GATE_HALF, lit);
+            // Its pole, and whatever of it is low enough to walk into.
+            let mut footprint: Vec<IVec2> = voxels
                 .iter()
                 .filter(|(p, _)| (0..=2).contains(&p.y))
                 .map(|(p, _)| IVec2::new(x + p.x, z + p.z))
                 .collect();
+            footprint.insert(0, IVec2::new(x, z));
             // Nothing stands on the walkable way, of this trail or any laid before it.
             let on_way = footprint.iter().any(|c| {
                 let c = c.as_vec2() + 0.5;
@@ -1401,7 +1430,7 @@ impl Layer<'_> {
                 continue;
             }
             net.held_lanterns.push((net.lanterns.len(), absolute(voxels, at, 0), parts::place_fine(&fine, at, 0)));
-            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause, style, footprint });
+            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause, style, lit, footprint });
             since = 0;
             gap = plain_gap(salt, i);
             side = -side;
@@ -1443,10 +1472,12 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         .map(|(s, &cell)| (s.x as f32 + 0.5, s.z as f32 + 0.5, comp[cell]))
         .collect();
 
+    let ruin = |k: usize| net.sites[k].kind == Landmark::Ruins;
     let layer = Layer {
         c,
         seed: world_seed,
-        site_points: at.iter().map(|&(x, z, _)| vec2(x, z)).collect(),
+        // Nobody lights the way to a ruin.
+        site_points: at.iter().enumerate().filter(|&(k, _)| !ruin(k)).map(|(_, &(x, z, _))| vec2(x, z)).collect(),
         trims: land_sites
             .iter()
             .filter(|s| layout(s.kind).trim)
@@ -1469,7 +1500,15 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
 
     // The links between the most important places first, so that lesser trails come
     // to join them rather than the other way about.
+    // Ruins stand out in the wild, off the trails: no trail is made to one, and those
+    // between other places go round them rather than through.
     let mut order = links(&at);
+    order.retain(|&(a, b, _)| !ruin(a) && !ruin(b));
+    for (k, &(x, z, _)) in at.iter().enumerate() {
+        if ruin(k) {
+            router.avoid(cell_of(x, z), RUIN_CLEAR, 8.0);
+        }
+    }
     order.sort_by(|p, q| {
         let key = |&(a, b, d): &(usize, usize, f32)| d / (importance[a] * importance[b]).sqrt();
         key(p).total_cmp(&key(q))
@@ -1561,6 +1600,29 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         stretches.push((pts, widths, start_y, end_y, id));
     }
 
+    // A tumbledown tower on a hilltop is seen from the trails and draws the odd walker
+    // off them: a faint path, broken and overgrown, from the nearest trail out to it,
+    // which its door faces. The other ruins are left to whoever stumbles on them.
+    let mut ruin_paths = Vec::new();
+    for site in land_sites.iter().filter(|s| s.tower) {
+        let pad = net.pads[site.index];
+        let centre = vec2(pad.x, pad.z);
+        let nearest = stretches
+            .iter()
+            .flat_map(|s| s.0.iter())
+            // From somewhere along the way, not from the middle of a place it starts at.
+            .filter(|p| !net.pads.iter().any(|q| vec2(q.x, q.z).distance(**p) < q.radius + m(8.0)))
+            .min_by(|p, q| p.distance_squared(centre).total_cmp(&q.distance_squared(centre)))
+            .copied();
+        if let Some(from) = nearest.filter(|p| p.distance(centre) < RUIN_PATH_REACH)
+            && let Some(cells) = router.search(cell_of(from.x, from.y), cell_of(centre.x, centre.y))
+            && let Some(pts) = ruin_path(c, world_seed, &pad, from, &cells, site.seed)
+        {
+            arrivals[site.index].push((pts[pts.len() - 1] - centre, 0.0));
+            ruin_paths.push((pts, pad.y));
+        }
+    }
+
     // The land sites, each turned so its door faces the busiest way in, with the worn
     // ways from every path round to that door, and a path down to water for those in use.
     let mut spurs = Vec::new();
@@ -1598,9 +1660,15 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         layer.lay(pts, &widths, start_y, end_y, id, &mut net);
     }
     // The paths to water: narrow, from the edge of the pad to a pace short of the bank.
+    let after = next_id + spurs.len() as u32;
     for (k, (pts, y)) in spurs.into_iter().enumerate() {
         let widths = vec![m(0.45); pts.len()];
         layer.lay(pts, &widths, Some(y), None, next_id + k as u32, &mut net);
+    }
+    // The ways out to the towers: as narrow as a trail is worn, so they come and go.
+    for (k, (pts, y)) in ruin_paths.into_iter().enumerate() {
+        let widths = vec![widths_min(); pts.len()];
+        layer.lay(pts, &widths, None, Some(y), after + k as u32, &mut net);
     }
 
     // Lanterns, now every trail is down, except any a later trail runs over.

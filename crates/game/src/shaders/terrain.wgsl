@@ -221,7 +221,8 @@ fn vs(in: VIn) -> VOut {
         } else {
             gone = season_gone(G.season.x, kind, vox, tag);
         }
-        if (kind == PLANT_GRASS && !gone) {
+        // Snow only buries what is open to the sky: grass under a bridge or a roof stays.
+        if (kind == PLANT_GRASS && !gone && (out.flags & FLAG_SKY) != 0u) {
             let snow = grid_snow(in.grid0, in.grid1, (vec2<f32>(cell.xz) + 0.5) / 32.0);
             gone = plant_buried(alt_m, season_hash(vox + vec3<i32>(5, 0, 9)), snow);
         }
@@ -351,7 +352,7 @@ fn shade(in: VOut) -> vec4<f32> {
     }
     if ((in.flags & FLAG_EMISSIVE) != 0u) {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
-        light += vec3<f32>(mix(14.0, 1.2, G.sun_color.w));
+        light += vec3<f32>(mix(1.2, 14.0, darkness()));
     }
     let color = apply_fog(base * light, in.rel);
     return vec4<f32>(color, 1.0);

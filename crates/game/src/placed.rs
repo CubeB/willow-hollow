@@ -1,5 +1,4 @@
-//! Things set down in the world: a flower laid on a stone, a tent pitched, a fire laid
-//! in its ring. Each is plain data (what it is, how many, where, which way it faces and
+//! Things set down in the world: a flower laid on a stone, a fire laid in its ring. Each is plain data (what it is, how many, where, which way it faces and
 //! what state it is in), kept by the chunk column it stands in, so that only what is
 //! near is looked at or drawn, and so that a column's things could be sent to another
 //! player along with the column. They are saved with their world.
@@ -22,6 +21,8 @@ use crate::{
 pub const LAID: u8 = 0;
 pub const BURNING: u8 = 1;
 pub const BURNT: u8 = 2;
+/// Put out before it had burned down, its sticks only half burnt.
+pub const OUT: u8 = 3;
 
 /// How far off the small things and the camps are still drawn, in metres.
 const SMALL_SIGHT: f64 = 45.0;
@@ -53,24 +54,25 @@ impl Thing {
         self.item.id == "campfire"
     }
 
-    pub fn is_tent(&self) -> bool {
-        self.item.id == "tent"
-    }
-
     /// Whether it is a fire, burning.
     pub fn burns(&self) -> bool {
         self.is_fire() && self.state == BURNING
     }
 
+    /// How many sticks a fire not burning gives back when it is taken apart: all of
+    /// them from one never lit, those not burnt through from one put out, and none from
+    /// ashes.
+    pub fn salvage(&self) -> u32 {
+        match self.state {
+            LAID => inventory::FIRE_STICKS,
+            OUT => inventory::FIRE_STICKS - 1,
+            _ => 0,
+        }
+    }
+
     /// How near, in voxels, the player must be to reach it.
     pub fn reach(&self) -> f64 {
-        m64(if self.is_tent() {
-            2.6
-        } else if self.is_fire() {
-            2.0
-        } else {
-            1.3
-        })
+        m64(if self.is_fire() { 2.0 } else { 1.3 })
     }
 
     /// The heart of a fire, where its flames are.
@@ -78,12 +80,6 @@ impl Thing {
         self.pos + DVec3::new(0.0, m64(0.3), 0.0)
     }
 
-    /// Where someone lying in a tent has their feet, and the way its door faces.
-    pub fn bed(&self) -> (DVec3, DVec2) {
-        let (s, c) = (self.yaw as f64).sin_cos();
-        let door = DVec2::new(-s, c);
-        (self.pos + DVec3::new(door.x, 0.0, door.y) * m64(0.25) + DVec3::new(0.0, m64(0.1), 0.0), door)
-    }
 }
 
 /// Which thing, of all those set down: its column, and its place among that column's.
@@ -108,7 +104,7 @@ impl Placed {
         Self::default()
     }
 
-    /// Sets `thing` down. A fire's or a tent's state dates from now.
+    /// Sets `thing` down. A fire's state dates from now.
     pub fn put(&mut self, mut thing: Thing) {
         thing.since = self.years;
         self.columns.entry(column_of(thing.pos)).or_default().push(thing);
@@ -167,7 +163,7 @@ impl Placed {
     }
 
     /// The thing within reach of someone whose hands are at `hands`: the one they are
-    /// furthest inside the reach of, for its size, so that a flower laid by a tent can
+    /// furthest inside the reach of, for its size, so that a flower laid by a fire can
     /// still be picked out.
     pub fn within_reach(&self, hands: DVec3) -> Option<Handle> {
         self.near(hands, m64(3.0))
@@ -198,6 +194,21 @@ impl Placed {
         out
     }
 
+    /// The fires within `radius` voxels of `pos` that smoke, each with how much: 1 for
+    /// one burning, and a little, less and less, for one that has gone out in the last
+    /// `smoulder` years.
+    pub fn smoking(&self, pos: DVec3, radius: f64, smoulder: f64) -> Vec<(DVec3, f32)> {
+        self.near(pos, radius)
+            .filter_map(|(_, t)| {
+                if t.burns() {
+                    return Some((t.heart(), 1.0));
+                }
+                let cold = (self.years - t.since) / smoulder.max(1e-9);
+                (t.is_fire() && matches!(t.state, OUT | BURNT) && cold < 1.0).then(|| (t.heart(), 0.4 * (1.0 - cold as f32)))
+            })
+            .collect()
+    }
+
     /// Where the player has camped: every fire of theirs that has ever burned.
     pub fn camps(&self) -> Vec<DVec2> {
         self.columns.values().flatten().filter(|t| t.is_fire() && t.state != LAID).map(|t| DVec2::new(t.pos.x, t.pos.z)).collect()
@@ -219,7 +230,8 @@ impl Placed {
         out
     }
 
-    /// Reads them back, leaving out any line that does not make sense.
+    /// Reads them back, leaving out any line that does not make sense, and any tent
+    /// pitched when there were tents (its shape no longer reads).
     pub fn from_text(text: &str) -> Self {
         let mut placed = Self::new();
         for line in text.lines() {
@@ -239,7 +251,7 @@ impl Placed {
                         count: stack.count,
                         pos: DVec3::new(x, y, z),
                         yaw: yaw.trim().parse::<f32>().ok().filter(|v| v.is_finite())?,
-                        state: state.trim().parse::<u8>().ok()?.min(BURNT),
+                        state: state.trim().parse::<u8>().ok()?.min(OUT),
                         since: since.trim().parse::<f64>().ok().filter(|v| v.is_finite())?,
                     })
                 })();
@@ -262,9 +274,8 @@ impl Placed {
             if out.len() >= limit {
                 break;
             }
-            let camp = thing.is_fire() || thing.is_tent();
-            if camp || d <= m64(SMALL_SIGHT) {
-                draw(thing, cam, clock, out);
+            if thing.is_fire() || d <= m64(SMALL_SIGHT) {
+                draw_one(thing, cam, clock, out);
             }
         }
     }
@@ -326,13 +337,11 @@ impl Brush<'_> {
     }
 }
 
-/// Draws one thing.
-fn draw(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) {
+/// Draws one thing, wherever it is.
+pub fn draw_one(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) {
     let mut brush = Brush { out, base: (thing.pos - cam).as_vec3(), yaw: thing.yaw };
     if thing.is_fire() {
         fire(&mut brush, thing, clock);
-    } else if thing.is_tent() {
-        tent(&mut brush, linear(thing.item.color));
     } else {
         // Up to three of a kind are shown, fanned out where they lie.
         let n = thing.count.clamp(1, 3);
@@ -344,43 +353,7 @@ fn draw(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) 
     }
 }
 
-/// A ridge tent: two slopes of canvas over a pole, shut at the back and open at the
-/// front (the model's +z), with a bedroll laid inside.
-fn tent(b: &mut Brush, canvas: [f32; 3]) {
-    let (half, high, long) = (0.9f32, 1.2f32, 2.2f32);
-    let slant = half.hypot(high);
-    let lean = high.atan2(half);
-    b.tilted([-half / 2.0, high / 2.0, 0.0], [slant + 0.08, 0.04, long], canvas, 0.0, [0.0, lean], 0.0);
-    b.tilted([half / 2.0, high / 2.0, 0.0], [slant + 0.08, 0.04, long], shade(canvas, 0.9), 0.0, [0.0, -lean], 0.0);
-    // The ridge pole and the two uprights that carry it.
-    b.piece([0.0, high + 0.02, 0.0], [0.05, 0.05, long + 0.24], WOOD);
-    for end in [-1.0, 1.0] {
-        b.piece([0.0, high / 2.0, end * (long / 2.0 + 0.03)], [0.05, high, 0.05], WOOD);
-    }
-    // The back, and the flaps tied open at the front, in strips that step in to the ridge.
-    let strips = 6;
-    for i in 0..strips {
-        let (y, tall) = ((i as f32 + 0.5) * high / strips as f32, high / strips as f32);
-        let across = half * (1.0 - (i as f32 + 0.5) / strips as f32);
-        b.piece([0.0, y, -long / 2.0 + 0.03], [across * 2.0, tall, 0.04], shade(canvas, 0.8));
-        let flap = 0.22 * (1.0 - i as f32 / strips as f32);
-        for side in [-1.0, 1.0] {
-            b.piece([side * (across - flap / 2.0 - 0.03), y, long / 2.0 - 0.03], [flap, tall, 0.04], shade(canvas, 0.86));
-        }
-    }
-    // A groundsheet, and on it a mat, a blanket turned down, and a pillow by the door.
-    b.piece([0.0, 0.02, 0.0], [half * 2.0 - 0.25, 0.04, long - 0.1], [0.11, 0.12, 0.085]);
-    b.piece([0.0, 0.07, -0.05], [0.7, 0.06, 1.85], [0.42, 0.35, 0.24]);
-    b.piece([0.0, 0.13, -0.33], [0.72, 0.08, 1.25], [0.40, 0.09, 0.07]);
-    b.piece([0.0, 0.14, 0.33], [0.72, 0.09, 0.1], CREAM);
-    b.piece([0.0, 0.15, 0.62], [0.45, 0.1, 0.26], CREAM);
-    // Pegs at the corners.
-    for (x, z) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
-        b.piece([x * (half + 0.07), 0.06, z * (long / 2.0 - 0.15)], [0.05, 0.12, 0.05], WOOD);
-    }
-}
-
-/// A fire in its ring of stones: laid ready, burning, or burnt down to ash.
+/// A fire in its ring of stones: laid ready, burning, put out, or burnt down to ash.
 fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
     let salt = (thing.pos.x.floor() as i32 as u32).wrapping_mul(31) ^ (thing.pos.z.floor() as i32 as u32).wrapping_mul(17);
     // The ring: nine stones, no two alike.
@@ -392,10 +365,11 @@ fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
         b.tilted([0.44 * a.cos(), tall / 2.0, 0.44 * a.sin()], [0.2 + 0.06 * r3, tall, 0.15 + 0.05 * r1], grey, a * 1.7 + r2, [0.0; 2], 0.0);
     }
     let burning = thing.state == BURNING;
-    // The bed: bare earth, embers, or ash.
+    // The bed: bare earth, embers, wet black char, or ash.
     let bed = match thing.state {
         LAID => [0.09, 0.07, 0.05],
         BURNING => [0.05, 0.04, 0.035],
+        OUT => [0.03, 0.028, 0.026],
         _ => [0.20, 0.19, 0.18],
     };
     b.tilted([0.0, 0.02, 0.0], [0.6, 0.04, 0.6], bed, 0.4, [0.0; 2], 0.0);
@@ -407,8 +381,13 @@ fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
         }
         return;
     }
-    // Three sticks stood together over a little kindling.
-    let wood = if burning { shade(WOOD, 0.35) } else { WOOD };
+    // Three sticks stood together over a little kindling; put out, still standing but
+    // blackened, the kindling gone to char.
+    let wood = match thing.state {
+        BURNING => shade(WOOD, 0.35),
+        OUT => shade(WOOD, 0.2),
+        _ => WOOD,
+    };
     let (long, lean) = (0.52f32, 0.72f32);
     for k in 0..3 {
         let a = k as f32 * std::f32::consts::TAU / 3.0 + 0.3;
@@ -474,7 +453,7 @@ fn small(b: &mut Brush, item: &Item) {
             b.piece([0.05, 0.035, 0.12], [0.12, 0.04, 0.04], shade(c, 0.8));
         }
         // Not things that lie about, but a save may say anything: a bundle.
-        Shape::Tent | Shape::Fire => b.piece([0.0, 0.1, 0.0], [0.3, 0.2, 0.5], c),
+        Shape::Fire | Shape::Lantern => b.piece([0.0, 0.1, 0.0], [0.3, 0.2, 0.5], c),
     }
 }
 
@@ -527,16 +506,41 @@ mod tests {
     }
 
     #[test]
+    fn a_fire_put_out_smoulders_a_while_and_gives_back_what_is_left_of_it() {
+        let mut placed = Placed::new();
+        placed.put(fire(1.0, 2.0));
+        let at = placed.within_reach(DVec3::new(1.0, 12.0, 2.0)).unwrap();
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(inventory::FIRE_STICKS));
+        assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty(), "a laid fire does not smoke");
+        placed.set_state(at, BURNING);
+        assert_eq!(placed.smoking(DVec3::ZERO, 100.0, 0.01)[0].1, 1.0);
+        placed.pass(0.001, 1.0);
+        placed.set_state(at, OUT);
+        assert!(!placed.get(at).unwrap().burns() && placed.camps().len() == 1);
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(inventory::FIRE_STICKS - 1));
+        let wisp = placed.smoking(DVec3::ZERO, 100.0, 0.01)[0].1;
+        assert!(wisp > 0.0 && wisp < 1.0);
+        // It is still put out when it is read back, and in time it is cold.
+        assert_eq!(Placed::from_text(&placed.to_text()).get(at).map(|t| t.state), Some(OUT));
+        placed.pass(0.02, 1.0);
+        assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty());
+        placed.set_state(at, BURNT);
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(0));
+    }
+
+    #[test]
     fn what_is_set_down_reads_back_as_it_was_saved_and_shrugs_off_nonsense() {
         let mut placed = Placed::new();
         placed.put(flower(7, 10.25, -4.5));
         placed.put(fire(-300.0, 77.125));
-        placed.put(Thing::new(inventory::tent(), 1, DVec3::new(-296.0, 12.0, 80.0), 2.5));
+        placed.put(Thing::new(inventory::sticks(), 2, DVec3::new(-296.0, 12.0, 80.0), 2.5));
         placed.pass(0.25, 1.0);
         let at = placed.within_reach(DVec3::new(-300.0, 12.0, 77.0)).unwrap();
         placed.set_state(at, BURNING);
         let text = placed.to_text();
-        let back = Placed::from_text(&format!("{text}thing = 1,2|0|0|0|1|flower|1,2,3|x|X|\nthing = 1,2,3|0|9|0|0|flower|1,2,3|x|X|\nrubbish\n"));
+        // A tent pitched when there were tents is quietly left out.
+        let tent = "thing = -296.000,12.000,80.000|2.500|0|0|1|tent|204,182,136|tent|Tent|Canvas, two poles and a bedroll.\n";
+        let back = Placed::from_text(&format!("{text}thing = 1,2|0|0|0|1|flower|1,2,3|x|X|\nthing = 1,2,3|0|9|0|0|flower|1,2,3|x|X|\nrubbish\n{tent}"));
         assert!(!back.unsaved);
         assert_eq!(back.to_text(), text);
         let all: Vec<&Thing> = back.near(DVec3::ZERO, 1e6).map(|(_, t)| t).collect();
@@ -549,7 +553,7 @@ mod tests {
     #[test]
     fn every_kind_of_thing_has_a_model_and_only_a_burning_fire_glows() {
         let cam = DVec3::new(0.0, 14.0, 0.0);
-        let mut shapes = vec![inventory::sticks(), inventory::tent(), inventory::campfire()];
+        let mut shapes = vec![inventory::sticks(), inventory::campfire()];
         for (shape, id) in [(Shape::Flower, "a"), (Shape::Spike, "b"), (Shape::Sprig, "c"), (Shape::Berries, "d"), (Shape::Mushroom, "e"), (Shape::Reed, "f")] {
             shapes.push(Item::new(id, "A thing", "About it.", [200, 100, 50], shape));
         }

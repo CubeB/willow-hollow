@@ -244,6 +244,8 @@ pub struct TrailLantern {
     pub step: usize,
     pub cause: LanternCause,
     pub style: crate::features::parts::LampStyle,
+    /// Whether anyone has lit it: most stand cold.
+    pub lit: bool,
     /// The columns where it stands on the ground: its footprint in its lowest layers.
     pub footprint: Vec<glam::IVec2>,
 }

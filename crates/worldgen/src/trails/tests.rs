@@ -381,6 +381,17 @@ fn lanterns_gather_at_places_and_thin_out_between() {
         .count();
     assert!(near_site > 0, "no lantern near any landmark");
     assert!(near_site * 4 >= lanterns.len(), "only {near_site} of {} lanterns near landmarks", lanterns.len());
+    // Most stand cold; those that are lit are lit more often on the way in to a place.
+    let share = |f: &dyn Fn(&&crate::trails::TrailLantern) -> bool| {
+        let of: Vec<_> = lanterns.iter().filter(f).collect();
+        (of.iter().filter(|l| l.lit).count() as f32 / of.len().max(1) as f32, of.len())
+    };
+    let (lit, _) = share(&|_| true);
+    let (approach, n) = share(&|l| l.cause == LanternCause::Approach);
+    let (plain, _) = share(&|l| l.cause == LanternCause::Plain);
+    println!("lit: {lit:.2} of all, {approach:.2} of {n} on the way in, {plain:.2} on plain stretches");
+    assert!((0.1..=0.35).contains(&lit), "{lit:.2} of lanterns lit");
+    assert!(n == 0 || approach > plain, "lanterns are lit as often on plain stretches");
 }
 
 #[test]
@@ -388,12 +399,8 @@ fn nothing_stands_on_the_walkable_trail() {
     let w = world();
     let c = w.continent(0, 0);
     let net = &c.trails;
-    let mut styles = std::collections::HashMap::new();
-    for l in &net.lanterns {
-        *styles.entry(l.style).or_insert(0) += 1;
-    }
-    println!("lantern styles: {styles:?}");
-    assert!(styles.get(&crate::features::parts::LampStyle::Gate).copied().unwrap_or(0) >= 1, "no gates");
+    // Beside a trail a lantern is a pole of sticks, never a gate across the way.
+    assert!(net.lanterns.iter().all(|l| l.style == crate::features::parts::LampStyle::Stick));
     let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
     for l in &net.lanterns {
         assert!(!l.footprint.is_empty());
@@ -404,4 +411,27 @@ fn nothing_stands_on_the_walkable_trail() {
             }
         }
     }
+}
+
+#[test]
+fn ruins_stand_off_the_trails() {
+    // Nobody walks to a ruin: no trail runs to one or past it. A tower on a hill may
+    // have a path out to it, but only a faint one, ending at the edge of its ground.
+    let w = world();
+    let c = w.continent(0, 0);
+    let net = &c.trails;
+    let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
+    let mut ruins = 0;
+    for (s, pad) in net.sites.iter().zip(&net.pads).filter(|(s, _)| s.kind == Landmark::Ruins) {
+        ruins += 1;
+        let centre = glam::vec2(pad.x, pad.z);
+        let near: Vec<_> = points.iter().filter(|p| glam::vec2(p.x, p.z).distance(centre) < crate::scale::m(60.0)).collect();
+        println!("ruins at {},{} ({:?}): {} trail points within 60 m", s.x, s.z, s.reason, near.len());
+        for p in near {
+            let d = glam::vec2(p.x, p.z).distance(centre);
+            assert!(d > pad.radius * 0.9, "a trail runs into the ruins at {},{}, {d} from the middle", s.x, s.z);
+            assert!(p.half_width < crate::scale::m(0.4), "a worn trail passes {d} from the ruins at {},{}", s.x, s.z);
+        }
+    }
+    assert!(ruins > 0, "no ruins to test");
 }

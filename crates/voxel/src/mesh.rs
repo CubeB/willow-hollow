@@ -781,13 +781,16 @@ fn buried(b: &PlantBox, face: usize, origin: [i32; 3], lasting: &[[u64; PAD]; PA
 /// Appends plants to a chunk's mesh. `origin` is the chunk's corner in world cells, and
 /// every box must start inside the chunk; any box reaching outside what a vertex can
 /// hold is left out. Faces lying against the chunk's own lasting voxels (the ground a
-/// tuft stands on) are left out too.
+/// tuft stands on) are left out too. `covered` is as for [`mesh_chunk_under_sky`]: a
+/// plant with anything over it, in this chunk or one above, carries no [`flags::SKY`],
+/// so no snow lies on the moss inside a hut or the grass under a bridge.
 pub fn add_plants<'a>(
     mesh: &mut ChunkMesh,
     boxes: impl Iterator<Item = &'a PlantBox>,
     chunk: &PaddedChunk,
     origin: [i32; 3],
     mats: &Materials,
+    covered: &[bool],
 ) {
     let reach = 63 * CELLS;
     let mut cut = Vec::new();
@@ -806,12 +809,32 @@ pub fn add_plants<'a>(
             }
         }
     }
+    // Which pieces stand open to the sky: nothing that keeps snow off (see `roofs`) in
+    // the voxels over the top of the piece, here or in the chunks above.
+    let open: Vec<bool> = if cut.is_empty() {
+        Vec::new()
+    } else {
+        let roofing: Vec<bool> = (0..mats.len()).map(|i| roofs(mats, i as crate::Voxel)).collect();
+        let voxels = chunk.voxels();
+        cut.iter()
+            .map(|piece| {
+                let b = &piece.b;
+                let at = |a: usize, c: i32| ((c - origin[a]).div_euclid(CELLS) + 1).clamp(0, PAD as i32 - 1) as usize;
+                let (x, z) = (at(0, b.lo[0]), at(2, b.lo[2]));
+                if !covered.is_empty() && covered[x * PAD + z] {
+                    return false;
+                }
+                let top = at(1, b.hi[1] - 1);
+                !voxels[(x * PAD + z) * PAD..][..PAD][top + 1..].iter().any(|&v| roofing[v as usize])
+            })
+            .collect()
+    };
     for face in 0..6usize {
         mesh.faces[6 + face] = (mesh.opaque.len() / 4) as u32;
         let n_axis = face / 2;
         let positive = face.is_multiple_of(2);
         let (u_axis, v_axis) = ((n_axis + 1) % 3, (n_axis + 2) % 3);
-        for piece in &cut {
+        for (piece, &open) in cut.iter().zip(&open) {
             if piece.hidden >> face & 1 != 0 {
                 continue;
             }
@@ -856,9 +879,8 @@ pub fn add_plants<'a>(
                 // Darker where a rooted stem meets the ground.
                 let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
                 let sways = if at_top { b.sway_hi } else { b.sway_lo };
-                // Plants are taken to stand in the open, where snow settles on them.
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
-                    | flags::SKY
+                    | if open { flags::SKY } else { 0 }
                     | if sways { flags::FOLIAGE } else { 0 }
                     | kind << flags::PLANT_SHIFT;
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
@@ -1082,7 +1104,7 @@ mod tests {
             thin: 0,
             season: 0,
         };
-        add_plants(&mut mesh, [plant].iter(), &c, chunk, &m);
+        add_plants(&mut mesh, [plant].iter(), &c, chunk, &m, &[]);
         assert_eq!(mesh.opaque.len(), (6 + 6) * 4, "all six faces, the bottom too");
         assert_eq!(mesh.faces[6], 6);
         assert_eq!(mesh.faces[12], 12);
@@ -1136,7 +1158,7 @@ mod tests {
             PlantBox { lo: [-2, 2, 2], hi: [2, 3, 3], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 },
         ];
         let mut mesh = ChunkMesh::default();
-        add_plants(&mut mesh, boxes.iter(), &PaddedChunk::new(), chunk, &m);
+        add_plants(&mut mesh, boxes.iter(), &PaddedChunk::new(), chunk, &m, &[]);
         assert!(!mesh.opaque.is_empty());
         for quad in mesh.opaque.chunks_exact(4) {
             let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
@@ -1151,7 +1173,7 @@ mod tests {
         // drawn: every corner of a face names one column, for giving out with distance.
         let mut mesh = ChunkMesh::default();
         let b = PlantBox { lo: [3, 3, 6], hi: [9, 6, 11], voxel: stone, sway_lo: false, sway_hi: false, thin: 0, season: 0 };
-        add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m);
+        add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m, &[]);
         assert_eq!(mesh.opaque.len(), (2 * 6 + 2 * 2 + 2 * 3) * 4);
         for quad in mesh.opaque.chunks_exact(4) {
             let named: Vec<[i32; 3]> = quad.iter().map(named_voxel).collect();
@@ -1225,7 +1247,7 @@ mod tests {
                 season: 0,
             };
             let mut mesh = ChunkMesh::default();
-            add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m);
+            add_plants(&mut mesh, [b].iter(), &PaddedChunk::new(), chunk, &m, &[]);
             assert_eq!(mesh.opaque.len() / 4, 6, "face {face}");
             let host = if positive { v[axis] + CELLS } else { v[axis] };
             let mut depths = std::collections::BTreeSet::new();
@@ -1251,7 +1273,7 @@ mod tests {
         let skin = |thin| PlantBox { lo: [0, 7, 0], hi: [4, 8, 4], voxel: stone, sway_lo: false, sway_hi: false, thin, season: 0 };
         for thin in [0, 1 << 2, 1 << 3] {
             let mut mesh = ChunkMesh::default();
-            add_plants(&mut mesh, [skin(thin)].iter(), &PaddedChunk::new(), [0, 0, 0], &m);
+            add_plants(&mut mesh, [skin(thin)].iter(), &PaddedChunk::new(), [0, 0, 0], &m, &[]);
             assert_eq!(mesh.opaque.len() / 4, 6);
             assert_eq!(mesh.faces[9] + 1, mesh.faces[10], "one downward quad");
         }
@@ -1264,7 +1286,7 @@ mod tests {
         let leaf = m.add(Material { color: [60, 160, 60], kind: Kind::Foliage, jitter: 0, emissive: false, plant: plant::DECIDUOUS });
         let quads = |c: &PaddedChunk, b: PlantBox| {
             let mut mesh = ChunkMesh::default();
-            add_plants(&mut mesh, [b].iter(), c, [0, 0, 0], &m);
+            add_plants(&mut mesh, [b].iter(), c, [0, 0, 0], &m, &[]);
             (0..6).map(|f| mesh.faces[7 + f] - mesh.faces[6 + f]).collect::<Vec<_>>()
         };
         // A blade standing on the voxel at (2, 0, 2) of the chunk, two and a bit voxels tall.
@@ -1294,7 +1316,7 @@ mod tests {
         let grass = m.add(Material { color: [60, 160, 60], kind: Kind::Solid, jitter: 0, emissive: false, plant: plant::GRASS });
         let blade = PlantBox { lo: [9, 4, 9], hi: [10, 13, 10], voxel: grass, sway_lo: false, sway_hi: true, thin: 0, season: 0 };
         let mut mesh = ChunkMesh::default();
-        add_plants(&mut mesh, [blade].iter(), &PaddedChunk::new(), [0, 0, 0], &m);
+        add_plants(&mut mesh, [blade].iter(), &PaddedChunk::new(), [0, 0, 0], &m, &[]);
         for v in &mesh.opaque {
             let y = eighths(v)[1];
             assert_eq!((v.b >> 24) as u8 & flags::FOLIAGE != 0, y > 8, "all but the foot moves, at {y} eighths");

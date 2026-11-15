@@ -15,6 +15,10 @@ macro_rules! palette {
 
         $( pub const $name: Voxel = Id::$name as Voxel; )*
 
+        /// Every material by the name it has in the code, for files that name them (the
+        /// structures made in the editor). A name stays put when ids are renumbered.
+        pub const NAMES: &[(&str, Voxel)] = &[ $( (stringify!($name), $name), )* ];
+
         pub fn build() -> Materials {
             let mut m = Materials::new();
             $(
@@ -149,7 +153,9 @@ palette! {
     IVY_LEAF          = ( 72, 136,  58), Foliage, 3;
     IVY_LEAF_PALE     = (136, 180,  80), Foliage, 3;
     IVY_LEAF_RED      = (176,  74,  52), Foliage, 3;
-    IVY_FLOWER        = (206, 208, 120), Foliage, 2;
+    // Ivy flowers in round heads of small green flowers, pale against the dark leaves
+    // but never yellow: a yellow cluster reads as gorse or lichen from a step away.
+    IVY_FLOWER        = (176, 214, 124), Foliage, 2;
     IVY_BERRY_GREEN   = (110, 134,  74), Foliage, 1;
     IVY_BERRY         = ( 40,  40,  66), Foliage, 1;
     CREEPER_LEAF_DARK = ( 60, 104,  48), Foliage, 3;
@@ -298,6 +304,18 @@ palette! {
     STEM              = ( 84, 136,  64), Foliage, 2;
     LEAF_GLOSS        = ( 48, 112,  56), Foliage, 2;
     LEAF_GREY         = (130, 148, 120), Foliage, 2;
+    // The glass of a lantern nobody has lit: smoky, and dark against the lit ones.
+    LANTERN_COLD      = (128, 118,  94), Solid, 0;
+}
+
+/// The material called `name` in the code (see [`NAMES`]), ignoring case.
+pub fn by_name(name: &str) -> Option<Voxel> {
+    NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|&(_, v)| v)
+}
+
+/// The name of material `v` in the code, or None for air and ids out of range.
+pub fn name_of(v: Voxel) -> Option<&'static str> {
+    NAMES.iter().find(|&&(_, id)| id == v).map(|&(n, _)| n)
 }
 
 /// Thickness of one rock layer, in voxels.

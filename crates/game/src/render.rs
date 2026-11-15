@@ -19,7 +19,7 @@ use crate::{
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
     impostors::{self, BoxInstance, Impostors},
     profile::GpuTimer,
-    terrain::{LEVELS, PLANT_REACH, Streamer},
+    terrain::{GpuChunk, LEVELS, PLANT_REACH, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -62,12 +62,27 @@ const CLOUD_LEVELS: u32 = CLOUD_PERIOD.trailing_zeros() + 1;
 const CLOUD_MARCH: i32 = 64;
 /// How many amounts of cover `cloud_edges` holds the field's level for.
 const CLOUD_COVERS: usize = 33;
+/// How far round the clouds' cycle of forming and clearing (`cloud_mix`) one stretch of
+/// sky may be ahead of another, in radians: enough that no two a few kilometres apart
+/// keep time.
+const CLOUD_TURNS: f32 = 3.0 * std::f32::consts::TAU;
 
-/// The clouds' field, a byte for each cell of their grid, row by row: high where cloud
-/// stands first as the cover grows (see cloud_blocks in common.wgsl). Heaps a few hundred
-/// metres across with ragged edges, wrapping round at the grid's edge. It never changes,
-/// so it is worked out once here and not for every pixel that looks for a cloud.
-fn cloud_field() -> (Vec<Vec<u8>>, [f32; CLOUD_COVERS]) {
+/// The clouds' field, four bytes for each cell of their grid, row by row: two patterns of
+/// heaps (r and g), each high where cloud stands first as the cover grows (see
+/// cloud_column in common.wgsl), and in b where each stretch of sky is in its cycle of
+/// going from the one pattern to the other and back (see `cloud_mix`). So the clouds form
+/// and clear as the cycle goes round, each stretch of sky in its own time: a heap of one
+/// pattern grows out from its core as one of the other breaks up and goes. Each pattern
+/// is of heaps a few hundred metres across with ragged edges, wrapping round at the
+/// grid's edge. The field itself never changes, so it is worked out once here and not
+/// for every pixel that looks for a cloud; only the cycle moves on.
+///
+/// Each coarser level holds, for each square of cells, the highest of each pattern in it
+/// in r and g, the middle of their places in the cycle in b, and in a how far from that
+/// the place of any cell in the square is, so a ray can tell that a square holds no cloud
+/// without looking at its cells (see cloud_bound in common.wgsl).
+fn cloud_field() -> (Vec<Vec<[u8; 4]>>, [f32; CLOUD_COVERS]) {
+    use rayon::prelude::*;
     fn hash(x: i32, y: i32, z: i32) -> f32 {
         let mut h = (x as u32).wrapping_mul(0x8da6b343).wrapping_add((y as u32).wrapping_mul(0xd8163841)).wrapping_add((z as u32).wrapping_mul(0xcb1ab31f));
         h ^= h >> 15;
@@ -91,47 +106,77 @@ fn cloud_field() -> (Vec<Vec<u8>>, [f32; CLOUD_COVERS]) {
     // Smooth noise folded about its middle: round bumps with creases between them, as the
     // top of a heap of cumulus has.
     let billow = |x: i32, y: i32, k: i32, salt: i32| (lattice(x, y, k, salt) * 2.0 - 1.0).abs();
+    // Where the heaps stand (half a kilometre across, gathered in broader stretches with
+    // clearer sky between), then their bulges, then their bumps.
+    let heaps = |x: i32, y: i32, salt: i32| {
+        let mass = lattice(x, y, 256, salt) * 0.2 + lattice(x, y, 64, salt + 2) * 0.36 + lattice(x, y, 32, salt + 4) * 0.18;
+        let bumps = billow(x, y, 16, salt + 6) * 0.15 + billow(x, y, 8, salt + 8) * 0.07;
+        ((mass + bumps) * 255.0).round().clamp(0.0, 255.0) as u8
+    };
     let n = CLOUD_PERIOD as usize;
-    let mut field = Vec::with_capacity(n * n);
-    for y in 0..CLOUD_PERIOD {
-        for x in 0..CLOUD_PERIOD {
-            // Where the heaps stand (half a kilometre across, gathered in broader
-            // stretches with clearer sky between), then their bulges, then their bumps.
-            let mass = lattice(x, y, 256, 39) * 0.2 + lattice(x, y, 64, 41) * 0.36 + lattice(x, y, 32, 43) * 0.18;
-            let bumps = billow(x, y, 16, 45) * 0.15 + billow(x, y, 8, 47) * 0.07;
-            field.push(((mass + bumps) * 255.0).round().clamp(0.0, 255.0) as u8);
+    let field: Vec<[u8; 4]> = (0..CLOUD_PERIOD)
+        .into_par_iter()
+        .flat_map_iter(|y| {
+            (0..CLOUD_PERIOD).map(move |x| {
+                // The place in the cycle changes slowly across the sky, so the cells of a
+                // heap form and clear nearly together and a whole cloud comes and goes.
+                let place = lattice(x, y, 256, 51) * 0.6 + lattice(x, y, 128, 53) * 0.4;
+                [heaps(x, y, 39), heaps(x, y, 61), (place * 255.0).round() as u8, 0]
+            })
+        })
+        .collect();
+    // For each amount of cover, the level that leaves that share of the field above it:
+    // over a sample of cells at points all round the cycle, which the sky as a whole keeps
+    // to near enough at any one time, its stretches being at every point of it.
+    const BINS: usize = 1024;
+    let mut counts = vec![0usize; BINS];
+    let mut total = 0;
+    for k in 0..8 {
+        let churn = k as f32 * std::f32::consts::TAU / 8.0;
+        for t in field.iter().step_by(7) {
+            counts[((cloud_mix(*t, churn) * BINS as f32) as usize).min(BINS - 1)] += 1;
+            total += 1;
         }
-    }
-    // For each amount of cover, the level that leaves that share of the field above it.
-    let mut counts = [0usize; 256];
-    for &v in &field {
-        counts[v as usize] += 1;
     }
     let edges = std::array::from_fn(|i| {
-        let wanted = (i as f32 / (CLOUD_COVERS - 1) as f32 * field.len() as f32) as usize;
+        let wanted = (i as f32 / (CLOUD_COVERS - 1) as f32 * total as f32) as usize;
         let mut above = 0;
-        let mut level = 255;
-        while level > 0 && above + counts[level] <= wanted {
-            above += counts[level];
-            level -= 1;
+        let mut bin = BINS - 1;
+        while bin > 0 && above + counts[bin] <= wanted {
+            above += counts[bin];
+            bin -= 1;
         }
-        // Between two of the field's bytes, so that neither is on the edge itself.
-        if i == CLOUD_COVERS - 1 { -0.01 } else { (level as f32 + 0.5) / 255.0 }
+        if i == CLOUD_COVERS - 1 { -0.01 } else { (bin + 1) as f32 / BINS as f32 }
     });
-    // Coarser levels, each cell the highest of the four under it.
+    // Coarser levels: the highest of each pattern in the four cells under each, the middle
+    // of their places in the cycle, and how far from it the furthest of them is.
     let mut levels = vec![field];
     for l in 1..CLOUD_LEVELS as usize {
         let (side, last) = (n >> l, &levels[l - 1]);
         let mut next = Vec::with_capacity(side * side);
         for y in 0..side {
             for x in 0..side {
-                let at = |dx: usize, dy: usize| last[(2 * y + dy) * side * 2 + 2 * x + dx];
-                next.push(at(0, 0).max(at(1, 0)).max(at(0, 1)).max(at(1, 1)));
+                let four = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dx, dy)| last[(2 * y + dy) * side * 2 + 2 * x + dx]);
+                let top = |c: usize| four.iter().map(|t| t[c]).max().unwrap_or(0);
+                let lo = four.iter().map(|t| t[2] as i32 - t[3] as i32).min().unwrap_or(0);
+                let hi = four.iter().map(|t| t[2] as i32 + t[3] as i32).max().unwrap_or(0);
+                let mid = (lo + hi + 1) / 2;
+                next.push([top(0), top(1), mid.clamp(0, 255) as u8, (hi - mid).max(mid - lo).clamp(0, 255) as u8]);
             }
         }
         levels.push(next);
     }
     (levels, edges)
+}
+
+/// The value of the clouds' field in a cell of it (`texel`, as the texture holds it) when
+/// the clouds' cycle has come round to `churn` radians: part of the way from the one
+/// pattern of heaps to the other, as far as this stretch of sky has got. As cloud_mix in
+/// common.wgsl.
+fn cloud_mix(texel: [u8; 4], churn: f32) -> f32 {
+    let [a, b, place] = [texel[0], texel[1], texel[2]].map(|v| v as f32 / 255.0);
+    let t = 0.5 - 0.5 * (churn + place * CLOUD_TURNS).cos();
+    a + (b - a) * t
 }
 
 /// The level of the clouds' field that this much cover (0..1) leaves its edge at.
@@ -502,6 +547,9 @@ pub struct Renderer {
     shadow_sun: Vec3,
     /// The level the shadow maps are laid over, in voxels above sea level.
     shadow_ground: Option<f32>,
+    /// How much of their loaded reach the rings of voxel terrain are drawn out to, less
+    /// the higher the camera is over the ground (see `band_scale`), eased toward that.
+    band_scale: f32,
     frame: u64,
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
@@ -575,7 +623,7 @@ impl Renderer {
         let device = &gpu.device;
         // Shaders work in voxels but know how big one is.
         let common = format!(
-            "const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\nconst CLOUD_CELL: f32 = {CLOUD_CELL:?};\nconst CLOUD_STEP: f32 = {CLOUD_STEP:?};\nconst CLOUD_STEPS: f32 = {CLOUD_STEPS:?};\nconst CLOUD_PERIOD: i32 = {CLOUD_PERIOD};\nconst CLOUD_MARCH: i32 = {CLOUD_MARCH};\nconst CLOUD_BELLY: f32 = {CLOUD_BELLY:?};\nconst CLOUD_LEVEL: i32 = {CLOUD_LEVEL};\nconst CLOUD_COARSE: i32 = {CLOUD_COARSE};\nconst CLOUD_LEVELS: i32 = {CLOUD_LEVELS};\n{}",
+            "const VOXELS_PER_METRE: f32 = {VOXELS_PER_METRE:?};\nconst CLOUD_CELL: f32 = {CLOUD_CELL:?};\nconst CLOUD_STEP: f32 = {CLOUD_STEP:?};\nconst CLOUD_STEPS: f32 = {CLOUD_STEPS:?};\nconst CLOUD_PERIOD: i32 = {CLOUD_PERIOD};\nconst CLOUD_MARCH: i32 = {CLOUD_MARCH};\nconst CLOUD_BELLY: f32 = {CLOUD_BELLY:?};\nconst CLOUD_LEVEL: i32 = {CLOUD_LEVEL};\nconst CLOUD_COARSE: i32 = {CLOUD_COARSE};\nconst CLOUD_LEVELS: i32 = {CLOUD_LEVELS};\nconst CLOUD_TURNS: f32 = {CLOUD_TURNS:?};\n{}",
             include_str!("shaders/common.wgsl")
         );
 
@@ -640,7 +688,7 @@ impl Renderer {
             mip_level_count: CLOUD_LEVELS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -649,10 +697,10 @@ impl Renderer {
             let side = CLOUD_PERIOD as u32 >> level;
             gpu.queue.write_texture(
                 wgpu::TexelCopyTextureInfo { mip_level: level as u32, ..cloud_tex.as_image_copy() },
-                texels,
+                bytemuck::cast_slice(texels),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(side),
+                    bytes_per_row: Some(side * 4),
                     rows_per_image: Some(side),
                 },
                 wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
@@ -1397,6 +1445,7 @@ impl Renderer {
             cascade_views: [None; CASCADES],
             shadow_sun: Vec3::ZERO,
             shadow_ground: None,
+            band_scale: 1.0,
             frame: 0,
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
@@ -1574,8 +1623,12 @@ impl Renderer {
     pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, scene: &Scene) {
         let Scene { camera, env, far, .. } = *scene;
         let device = &gpu.device;
-        // Horizontal distances out to which each ring of voxel terrain is fully loaded.
-        let bands = scene.terrain.bands();
+        // Horizontal distances out to which each ring of voxel terrain is drawn: as far as
+        // it is fully loaded, or less from high over the land.
+        let target = band_scale(scene.terrain.chunks(), camera.pos);
+        // A screenshot is one frame, so it takes the reach at once.
+        self.band_scale = if self.clock.is_some() { target } else { self.band_scale + (target - self.band_scale) * 0.05 };
+        let bands = scene.terrain.bands().map(|b| b * self.band_scale);
         let voxel_radius = bands[LEVELS - 1];
         let aspect = self.width as f32 / self.height as f32;
         let view_proj = camera.view_proj(aspect);
@@ -1662,8 +1715,8 @@ impl Renderer {
             cam_fwd: v4(fwd, 0.0),
             sun_dir: v4(env.sun_dir, time),
             sun_color: v4(env.sun_color, env.daylight as u8 as f32),
-            sky_zenith: v4(env.sky_zenith, 0.0),
-            sky_horizon: v4(env.sky_horizon, 0.0),
+            sky_zenith: v4(env.sky_zenith, env.cloud_churn.rem_euclid(std::f32::consts::TAU)),
+            sky_horizon: v4(env.sky_horizon, env.cloud_swell),
             fog: [env.fog_density, voxel_radius, env.clouds, time * m(4.8)],
             // w: how far the tree models reach, for the far view's forest height.
             cam_wrapped: [cam_wrapped.x, camera.pos.y as f32, cam_wrapped.z, impostors::REACH],
@@ -2158,6 +2211,30 @@ impl Renderer {
     }
 }
 
+/// How much of their loaded reach to draw the rings of voxel terrain out to, with the
+/// camera at `camera`: all of it on the ground, and from high over the land, where no
+/// hill hides the land beyond, half (and the far view the rest). Up among the clouds
+/// every chunk out to the edge was in sight, its voxels a pixel or two across, and the
+/// land cost near twice what it did on the ground; from up there the far view's slopes
+/// look the same. How high is over the tallest chunk with anything in it around the
+/// camera's column, so a cliff top close by keeps the full reach.
+fn band_scale<'a>(chunks: impl Iterator<Item = &'a GpuChunk>, camera: DVec3) -> f32 {
+    let around = m(24.0) as f64;
+    let mut ground = None::<f64>;
+    for chunk in chunks.filter(|c| c.level == 0 && c.opaque.is_some()) {
+        let origin = (chunk.pos * CHUNK).as_dvec3();
+        let size = CHUNK as f64;
+        if origin.x - around <= camera.x && camera.x <= origin.x + size + around && origin.z - around <= camera.z && camera.z <= origin.z + size + around {
+            ground = Some(ground.map_or(origin.y + size, |g: f64| g.max(origin.y + size)));
+        }
+    }
+    // Not loaded yet under the camera: the reach as loaded.
+    let Some(ground) = ground else { return 1.0 };
+    let lift = (camera.y - ground) as f32;
+    let t = ((lift - m(60.0)) / m(140.0)).clamp(0.0, 1.0);
+    1.0 - 0.5 * t * t * (3.0 - 2.0 * t)
+}
+
 /// Draws one triangle over the whole of `target` with `pipeline`.
 fn fullscreen(encoder: &mut wgpu::CommandEncoder, label: &str, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, target: &wgpu::TextureView) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2235,6 +2312,13 @@ pub fn screenshot(
     let (width, height) = size;
     // VOXEL_NO_SHAFTS leaves the light shafts out, to see what they add.
     let shafts = std::env::var_os("VOXEL_NO_SHAFTS").is_none();
+    // VOXEL_CLOUD_AGE=M shows the clouds as they will be M minutes on in steady weather,
+    // having formed and cleared: a few shots a few minutes apart show them changing.
+    let mut aged = env.clone();
+    if let Some(minutes) = std::env::var("VOXEL_CLOUD_AGE").ok().and_then(|v| v.parse::<f32>().ok()) {
+        aged.cloud_churn += minutes * 60.0 * crate::weather::CHURN;
+    }
+    let env = &aged;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = Renderer::new(gpu, format, width, height);
     streamer.wait_idle(gpu, camera.pos);
@@ -2418,20 +2502,36 @@ mod tests {
         let field = &levels[0];
         assert_eq!(levels.len(), CLOUD_LEVELS as usize);
         assert_eq!(levels.last().map(Vec::len), Some(1));
-        for cover in [0.1f32, 0.3, 0.6, 0.9] {
-            let edge = cloud_edge(&edges, cover);
-            let share = field.iter().filter(|&&v| v as f32 / 255.0 > edge).count() as f32 / field.len() as f32;
-            assert!((share - cover).abs() < 0.03, "cover {cover}: {share} of the sky");
+        // Wherever the clouds' cycle has come to, as they form in one place and clear in
+        // another, the sky as a whole keeps near the cover asked for.
+        for churn in [0.0f32, 1.0, 2.5, 4.4] {
+            for cover in [0.1f32, 0.3, 0.6, 0.9] {
+                let edge = cloud_edge(&edges, cover);
+                let share = field.iter().step_by(5).filter(|&&t| cloud_mix(t, churn) > edge).count() as f32 / (field.len() / 5) as f32;
+                assert!((share - cover).abs() < 0.05, "cover {cover} at {churn}: {share} of the sky");
+            }
         }
         // A sky all cloud leaves no cell out, and more cover never means less cloud.
         assert!(cloud_edge(&edges, 1.0) < 0.0);
         assert!(edges.windows(2).all(|w| w[1] <= w[0]));
-        // Each coarser cell holds the highest of the cells under it, to the one at the top.
+        // Each coarser cell bounds the field in the cells under it, wherever the cycle is
+        // (as cloud_bound in common.wgsl), to the one at the top.
         let side = CLOUD_PERIOD as usize;
-        let coarse = &levels[CLOUD_LEVEL as usize];
-        let highest = (0..CLOUD_COARSE as usize).flat_map(|y| (0..CLOUD_COARSE as usize).map(move |x| (x, y))).map(|(x, y)| field[y * side + x]).max();
-        assert_eq!(Some(coarse[0]), highest);
-        assert_eq!(levels.last().map(|l| l[0]), field.iter().copied().max());
+        let bound = |t: [u8; 4], churn: f32| {
+            let top = t[0].max(t[1]) as f32 / 255.0;
+            (cloud_mix(t, churn) + (t[3] as f32 / 255.0 * CLOUD_TURNS * 0.5).min(1.0) * top).min(top)
+        };
+        for l in [1, CLOUD_LEVEL as usize, 6] {
+            let (coarse, k) = (&levels[l], 1usize << l);
+            for (sx, sy) in [(0, 0), (3, 7), (40, 11), (100, 90)].map(|(x, y)| (x % (side >> l), y % (side >> l))) {
+                for churn in [0.0f32, 1.3, 3.0, 5.1] {
+                    let highest = (0..k).flat_map(|y| (0..k).map(move |x| (x, y))).map(|(x, y)| cloud_mix(field[(sy * k + y) * side + sx * k + x], churn)).fold(0.0, f32::max);
+                    assert!(bound(coarse[sy * (side >> l) + sx], churn) >= highest - 1e-5, "level {l} square {sx},{sy} at {churn}");
+                }
+            }
+        }
+        let top = levels.last().map(|l| l[0][0].max(l[0][1]));
+        assert_eq!(top, field.iter().map(|t| t[0].max(t[1])).max());
     }
 
     #[test]

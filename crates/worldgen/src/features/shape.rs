@@ -231,6 +231,11 @@ impl Shape {
         self.clear.iter().any(|&(lo, hi)| p.cmpge(lo).all() && p.cmple(hi).all())
     }
 
+    /// The ways through marked by [`Shape::keep_clear`], as inclusive boxes.
+    pub fn clear_boxes(&self) -> &[(IVec3, IVec3)] {
+        &self.clear
+    }
+
     /// Removes air voxels used to carve hollows.
     pub fn drop_air(&mut self) {
         self.voxels.retain(|_, v| *v != voxel::AIR);

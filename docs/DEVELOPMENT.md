@@ -14,7 +14,8 @@ This is what a new machine needs before it can build, run and change the game. T
 | GitHub CLI (`gh`), optional | Opening issues from the terminal | Run `gh auth login` once. |
 | Python 3 with Pillow, optional | Only for redrawing the logo (`docs/logo.py`) | `pip install pillow` |
 
-The game has no asset files, so there is nothing else to download. It has only been run
+The game has no asset files to download. The only data it reads is the structures drawn
+in the structure editor, kept as text in `assets/structures` and compiled in. It has only been run
 on Windows so far. Nothing in the code is Windows-only on purpose, but Linux and macOS
 are untested.
 
@@ -66,7 +67,7 @@ Settings and your place in each world are kept outside the repository:
 
 Each world has a few plain text files there: `world-N.txt` (where you are), `pack-N.txt`
 (the pack, the hotbar and what has been picked) and `placed-N.txt` (what has been set
-down: flowers, tents, fires), a line to a thing.
+down: flowers, sticks, fires), a line to a thing.
 
 Delete `settings.txt` there to go back to the defaults. A hand-edited or damaged file
 never stops the game from starting: anything unreadable falls back to its default.
@@ -170,6 +171,91 @@ cliff there would show, `materials::masonry` the stone that goes with it, and
 palette to build from. Use those for anything new that people have built, and
 `Palette::of(biome)` only in tests.
 
+**Structures: seeing and drawing the landmarks.** The structure editor shows one
+landmark at a time on a patch of plain ground, and lets you draw your own, which the
+world then builds in place of the generator's.
+
+```sh
+cargo run --release -p game -- --structures
+cargo run --release -p game -- --structures --structure shrine --variant 7
+```
+
+The list on the left has every kind of landmark. Under each is *the generator's own*,
+which steps through the variants it makes (the arrows, or Left and Right), and any you
+have saved. On the right, *Seen in* builds it of the stone and timber of another kind of
+country. *Copy this variant to edit* starts a structure of your own from the one shown;
+*Start from nothing* starts an empty one. The controls are listed in the editor too:
+
+| | |
+|---|---|
+| Drag | turn the view |
+| Shift+drag, or middle drag | move the view |
+| Wheel | zoom |
+| F | frame the structure again |
+| Left click | use the tool: Build (B), Paint (P), Erase (E), Pick (I) or Box (X) |
+| Right click | erase; with Box, empty a box |
+| Middle click | take the material clicked to build with |
+| 1 to 8, 0 | stone, dark stone, weathered stone, mossy stone, timber, planks, roof, accent; air |
+| L, Page Up, Page Down | cut away everything above a layer, and move the cut |
+| Ctrl+Z, Ctrl+Y (or Ctrl+Shift+Z) | undo, redo |
+| Ctrl+S | save |
+
+Build adds a voxel against the face under the cursor, or on the ground; the white
+outline is the voxel the cursor is on and the coloured one where a voxel would go. Box
+takes two clicks, one at each corner. *Mirror* repeats every change on the other side of
+the middle. With a layer cut, you build on the grid of that layer: layer 0 is the first
+above the ground, and the layers below it are footings, which keep a structure from
+floating where the ground falls away. The yellow arrow shows the side the trail arrives
+from: the world turns a site so its door faces the way most people come. The dashed ring
+is the edge of the ground levelled for it.
+
+Most of what you build with are roles rather than materials: *stone* is the rock in the
+ground where the structure stands, *timber* the trees round about, *roof* whatever the
+place roofs with, so one drawn shrine is granite on the moor and sandstone in the
+desert, as the generator's are. *Other materials* are the same everywhere (a lantern,
+iron, charcoal). *Air* clears the ground or plants where it is. The game still lays its
+props (barrels, woodpiles, offerings) round a saved structure, decayed or not as the
+site's age has it, but does not weather or ruin it: it stands as drawn.
+
+Saving writes `assets/structures/<kind>/<name>.txt`. The world uses it from the next
+build of the game. Each structure has a *weight*, how often it is chosen against the
+others of its kind, and so does the generator, in `<kind>/generator.txt` (the editor
+writes it from *How often in the world*). The generator's weight is 0 once a kind has
+a structure saved, so every site of that kind is one of yours until you give the
+generator a weight again; a kind with nothing saved is the generator's alone, and the
+world is as it was. Which one a site gets comes from its seed, so a world stays the same
+from run to run. Landings, trail lanterns and signposts can be looked at but not saved,
+since they are fitted to the shore and the trail.
+
+A structure file is plain text and fine to edit by hand. Each `layer Y:` is that level
+seen from above, a character to a voxel, x along a row and z down the rows, starting at
+`corner`; `.` is nothing and the `key` says what the other characters are:
+
+```text
+kind: cairn
+name: Little cairn
+weight: 1
+corner: -1 -1
+key:
+  S stone
+  a LANTERN
+layer 0:
+  .S.
+  SaS
+  .S.
+fine:
+  0 4 0  4 8 4  timber
+keep clear:
+  -3 0 -6  3 6 -2
+```
+
+`fine` lists parts finer than a voxel (the frame of a lamp), in quarter voxels, and
+`keep clear` boxes props are kept out of (doors, stairs); both come from the copied
+variant and can be left as they are. A file the game cannot read fails
+`designs::tests::every_saved_structure_reads`, which says which line is wrong.
+`--screenshot FILE` with `--structures` draws the editor once without a window
+(`--help` lists `--layer`, `--copy`, `--orbit` and `--hover` for it).
+
 **Small delights** live in `crates/worldgen/src/trails/delights.rs`. Each kind has a
 reason to stand where it does and a chance of being taken up when the reason holds;
 `APART` and `APART_SAME` keep any two from standing near each other. They are meant to
@@ -186,18 +272,47 @@ cargo run --release -p bench -- --seed 1
 ```
 
 **The pack and camping.** `--pack` shows the pack's window on a screenshot and
-`--hotbar` the hotbar. `--camp lit` (or `laid`, `burnt`) makes camp a few steps ahead
-of the camera: a fire in that state, a tent and a few things set down. Add `--rest` for
-the view out of the tent's door, as high as `--look` says.
+`--hotbar` the hotbar. `--camp lit` (or `laid`, `out`, `burnt`) makes camp a few steps
+ahead of the camera: a fire in that state (`out` is put out a moment ago, and still
+smoulders) and a few things set down. `--camp-ahead M` makes it M metres ahead instead,
+to see its smoke from far off; give it `--ambient 40` or so for the column to rise. Add `--rest` for the
+view of someone lying by the fire, facing it, as high as `--look` says. (There were
+tents once; a save from then still loads, without them.)
 
 ```sh
 ./target/release/game.exe --seed 1 --screenshot camp.png --over 42186,30679,5 --look 180,-14 --time 22 --camp lit --hotbar
 ./target/release/game.exe --seed 1 --screenshot stars.png --over 42186,30679,5 --look 180,25 --time 23 --camp lit --rest
 ```
 
-In a window, `--camp lit --rest` starts the run resting in the tent, and logs the hour
+Sticks lie fallen under the trees (`crates/game/src/fallen.rs`). They are not part of
+the world's generation, so they leave the `bench` checksum alone: where they lie comes
+from the trees the world grows and a hash of each tree's place. They are found again
+every couple of seconds round the player, on the same thread that looks for falling
+leaves; `RUST_LOG=warn,game::fallen=trace` logs where each lies, which is how to aim a
+screenshot at some. One picked up is a gathered spot in the pack, as a flower is.
+
+In a window, `--camp lit --rest` starts the run resting by the fire, and logs the hour
 the rest ended at: `--seed 1 --time 21 --camp lit --rest --frames 1500` watches a night
 go by.
+
+**The lantern.** Every pack is given a lantern, at the far end of the hotbar; it is lit
+while it is held, and a right click shutters it. `--lantern` puts a lit one on a
+screenshot: in the hand of the figure with `--third`, or else in the hand of whoever's
+eyes the camera is, which shows only by its light.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot lantern.png --over 42186,30679,5 --look 180,-14 --time 23 --lantern --third --figure 60 --figure-speed 0 --no-audio
+```
+
+**Clouds forming and clearing.** The clouds' field is two patterns of heaps, and each
+stretch of sky goes slowly from the one to the other and back (`cloud_mix` in
+`common.wgsl` and `render.rs`), faster while the weather is on the change. On a
+screenshot, `VOXEL_CLOUD_AGE=M` shows the sky M minutes on in steady weather; a few
+shots a few minutes apart show clouds forming and breaking up.
+
+```sh
+VOXEL_CLOUD_AGE=4 ./target/release/game.exe --seed 1 --screenshot clouds.png --over 42186,30679,60 --look 180,10 --time 14 --weather broken --no-audio
+```
 
 Stills cannot show flicker, shimmer or popping. Anything that moves (shadows, wind,
 light shafts, streaming) also needs a look in a live window.

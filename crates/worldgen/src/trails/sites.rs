@@ -34,11 +34,13 @@ pub fn importance(kind: Landmark) -> f32 {
     match kind {
         Landmark::Landing => 3.0,
         Landmark::Camp => 2.5,
-        Landmark::Ruins | Landmark::Shrine => 2.0,
+        Landmark::Shrine => 2.0,
         Landmark::Hut => 1.5,
         Landmark::Lookout | Landmark::Stones => 1.0,
         Landmark::Arch => 0.7,
         Landmark::Cairn => 0.5,
+        // Ruins are forgotten: nobody makes the trip, and no trail leads to them.
+        Landmark::Ruins => 0.0,
     }
 }
 
@@ -84,7 +86,7 @@ pub fn candidates(c: &Continent, comp: &[u32]) -> Vec<(Landmark, usize, Vec<usiz
     let at = |x: i32, z: i32| (z.clamp(0, n - 1) * n + x.clamp(0, n - 1)) as usize;
     let h = |x: i32, z: i32| c.height[at(x, z)];
     let radius = |r: f32| ((r * scale).round() as i32).max(1);
-    let (r_hill, r_saddle, r_near, r_far) = (radius(12.0), radius(6.0), radius(3.0), radius(8.0));
+    let (r_hill, r_saddle, r_near) = (radius(12.0), radius(6.0), radius(3.0));
 
     let land = comp.iter().filter(|&&l| l != 0).count();
     let total = (land as f32 * (cs / 1000.0).powi(2) / LAND_PER_SITE).clamp(0.0, 90.0);
@@ -114,7 +116,6 @@ pub fn candidates(c: &Continent, comp: &[u32]) -> Vec<(Landmark, usize, Vec<usiz
             let is_river = q >= MIN_RIVER_Q;
             let river_near = ring(r_near).iter().map(|&j| c.discharge[j]).fold(0.0f32, f32::max);
             let lake_near = ring(r_near).iter().any(|&j| c.lake[j] != NO_LAKE);
-            let lake_far = ring(r_far).iter().any(|&j| c.lake[j] != NO_LAKE);
             let sea_near = ring(radius(2.0)).iter().any(|&j| c.ocean[j]);
             let drop = if c.ocean[c.rcv[i] as usize] {
                 0.0
@@ -161,12 +162,8 @@ pub fn candidates(c: &Continent, comp: &[u32]) -> Vec<(Landmark, usize, Vec<usiz
             {
                 offer(Landmark::Stones, rng(6) * 50.0 + relief.max(0.0) * 0.6);
             }
-            if steep < 0.2
-                && !is_river
-                && matches!(biome, Biome::Deciduous | Biome::OldGrowth | Biome::Taiga | Biome::Woodland | Biome::Rainforest)
-            {
-                offer(Landmark::Hut, rng(7) * 40.0 + if lake_far { 30.0 } else { 0.0 });
-            }
+            // Huts are no longer built: a house among the trees sat badly with a world
+            // where nobody lives. The kind is kept so journals that name one still read.
             if relief > 4.0
                 && steep < 0.6
                 && !is_river

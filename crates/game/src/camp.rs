@@ -1,4 +1,4 @@
-//! Camping: resting by a fire or in a tent while the day or the night goes by.
+//! Camping: resting by a fire while the day or the night goes by.
 //!
 //! Resting is the one way the player moves time. Nothing is skipped: the clock runs
 //! fast, and the sun goes down, the stars wheel over and the weather passes as they
@@ -52,14 +52,16 @@ impl Until {
 /// A rest being taken.
 pub struct Rest {
     pub until: Until,
-    /// Lying down in a tent, not sat by a fire.
+    /// Lying down by the fire to sleep the night through, not sat up by it to wait for
+    /// the dark.
     pub lying: bool,
     age: f32,
 }
 
 impl Rest {
-    pub fn begin(env: &Environment, lying: bool) -> Self {
-        Self { until: Until::from(env), lying, age: 0.0 }
+    pub fn begin(env: &Environment) -> Self {
+        let until = Until::from(env);
+        Self { until, lying: until == Until::Dawn, age: 0.0 }
     }
 
     /// How many hours go by in the next `dt` seconds of this rest: none once it is over.
@@ -86,7 +88,7 @@ mod tests {
     /// Rests from `hour`, and tells when it ended and how many seconds it took.
     fn rest_from(hour: f32, date: f32) -> (Until, f32, f32) {
         let mut env = Environment::at(hour, date);
-        let mut rest = Rest::begin(&env, true);
+        let mut rest = Rest::begin(&env);
         let (mut seconds, mut gone) = (0.0, 0.0);
         while let Some(hours) = rest.hours(&env, 1.0 / 60.0) {
             assert!(hours >= 0.0 && hours < 0.05, "the clock never jumps: {hours}");

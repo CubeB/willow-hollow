@@ -579,6 +579,58 @@ fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     scatter(s, rng, p, rubble, 20);
 }
 
+/// A tumbledown tower, for a ruin on a hilltop: a round shell still standing high on one
+/// side and fallen to its footings across a breach on the other, its floors long gone,
+/// so that it shows against the sky from far off. Its door is on -Z, as the keep's is.
+fn ruined_tower(s: &mut Shape, rng: &mut Rng, p: &Palette) {
+    let r = rng.range(5.0, 6.8);
+    let height = rng.int(26, 40) as f32;
+    let thick = 2.2;
+    let ri = r.ceil() as i32 + 1;
+    // Where it has come down, and how far round the breach runs either way, in radians.
+    let breach = rng.range(0.0, TAU);
+    let width = rng.range(0.7, 1.3);
+    footing(s, (-ri, -ri), (ri, ri), || p.stone_dark);
+    disc(s, r + 1.2, 0, |_| p.stone_dark);
+    for z in -ri..=ri {
+        for x in -ri..=ri {
+            let d = ((x * x + z * z) as f32).sqrt();
+            if d > r || d <= r - thick {
+                continue;
+            }
+            let a = (z as f32).atan2(x as f32);
+            let off = ((a - breach + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI).abs();
+            // Down to a stump in the breach, and leaning lower toward it all the way round,
+            // so the top runs in a ragged slope from the last high shard.
+            let fallen = (1.0 - off / width).clamp(0.0, 1.0);
+            let slope = 0.55 + 0.45 * off / std::f32::consts::PI;
+            let top = (height * slope * (1.0 - 0.95 * fallen.sqrt()) * rng.range(0.88, 1.0)).round() as i32;
+            for y in 1..=top.max(1) {
+                // Slit windows, one a storey, on four sides.
+                let slit = y % 9 >= 4 && y % 9 <= 6 && (a * 4.0 / TAU).rem_euclid(1.0) < 0.06;
+                s.set(v(x, y, z), if slit { AIR } else { p.block(rng) });
+            }
+        }
+    }
+    let inner = (r - thick).floor() as i32;
+    cuboid(s, v(-1, 1, -ri), v(1, 6, -inner), |_| AIR);
+    s.keep_clear(v(-inner, 0, -inner), v(inner, 8, inner));
+    s.keep_clear(v(-2, 0, -ri - 5), v(2, 8, -inner));
+    // What came down lies about the foot, most of it on the side it fell.
+    let (bx, bz) = (breach.cos(), breach.sin());
+    for _ in 0..rng.int(26, 40) {
+        let along = rng.range(r + 1.0, r + 9.0);
+        let spread = rng.range(-4.0, 4.0);
+        let (x, z) = ((bx * along - bz * spread).round() as i32, (bz * along + bx * spread).round() as i32);
+        let at = v(x, 0, z);
+        if s.get(at).is_none() {
+            cuboid(s, at, at + v(rng.int(0, 1), rng.int(0, 1), rng.int(0, 1)), |_| p.block(rng));
+        }
+    }
+    let loose = rng.int(8, 14);
+    scatter(s, rng, p, loose, ri + 6);
+}
+
 fn standing_stone(s: &mut Shape, rng: &mut Rng, p: &Palette, x: i32, z: i32, height: i32) {
     let (w, d) = (rng.int(1, 3), rng.int(1, 2));
     for y in -6..=height {
@@ -910,7 +962,48 @@ pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) ->
 /// A landmark's voxels and fine parts, and apart from them the props laid about it,
 /// each in its intact or decayed form by the site's [`History`].
 pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    build_site_as(kind, palette, seed, length, false)
+}
+
+/// [`build_site`] for ruins on a hilltop: a tumbledown tower rather than a keep.
+pub fn build_ruined_tower(palette: &Palette, seed: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    build_site_as(Landmark::Ruins, palette, seed, 0, true)
+}
+
+fn build_site_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower: bool) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
     let palette = &palette.varied(seed);
+    finish(kind, palette, seed, length, generate_as(kind, palette, seed, length, tower))
+}
+
+/// [`build_site`], or instead one of the structures saved from the structure editor for
+/// this kind, when the seed picks one (see [`super::designs`]). This is what the world
+/// builds; with nothing saved it is [`build_site`].
+pub fn build_placed(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    match super::designs::pick(kind, seed) {
+        Some(design) => {
+            let palette = &palette.varied(seed);
+            finish(kind, palette, seed, length, design.shape(palette, seed))
+        }
+        None => build_site(kind, palette, seed, length),
+    }
+}
+
+/// Lays the props about a built model, and hands back its voxels, fine parts and props.
+pub fn finish(kind: Landmark, palette: &Palette, seed: u32, length: i32, mut s: Shape) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    let props = props::dress(kind, palette, seed, History::of(kind, seed), &s, length * crate::scale::BLOCK);
+    let fine = s.take_fine();
+    (s.into_voxels(), fine, props)
+}
+
+/// The generator's own model of a landmark, weathered and aged, before any props are
+/// laid about it. `palette` is used as it is: [`build_site`] varies it for the place
+/// first. The structure editor copies from this.
+pub fn generate(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Shape {
+    generate_as(kind, palette, seed, length, false)
+}
+
+/// [`generate`], or for ruins with `tower` the tumbledown tower of a hilltop.
+fn generate_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower: bool) -> Shape {
     let history = History::of(kind, seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();
@@ -918,6 +1011,7 @@ pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> 
         Landmark::Shrine => shrine(&mut s, &mut rng, palette),
         Landmark::Lookout => lookout(&mut s, &mut rng, palette),
         Landmark::Camp => camp(&mut s, &mut rng, palette),
+        Landmark::Ruins if tower => ruined_tower(&mut s, &mut rng, palette),
         Landmark::Ruins => ruins(&mut s, &mut rng, palette),
         Landmark::Stones => stones(&mut s, &mut rng, palette),
         Landmark::Cairn => cairn(&mut s, &mut rng, palette),
@@ -937,22 +1031,22 @@ pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> 
         parts::weather_stone(&mut s, &mut rng, palette, chip);
     }
     decay(&mut s, kind, palette, seed, history);
-    let props = props::dress(kind, palette, seed, history, &s, length * crate::scale::BLOCK);
-    let fine = s.take_fine();
-    (s.into_voxels(), fine, props)
+    s
 }
 
-/// A lamp on a post beside a trail, in the style `hash` picks.
+/// A lamp hung from a pole of sticks beside a trail, lit or not as `hash` has it.
 pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, Voxel)> {
     trail_lantern_parts(palette, height, hash).0
 }
 
 /// [`trail_lantern`], with its fine parts in model cells.
 pub fn trail_lantern_parts(palette: &Palette, height: i32, hash: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
-    trail_lantern_styled(palette, height, hash, parts::LampStyle::pick_trail(hash >> 3), hash >> 7 & 3, parts::GATE_HALF)
+    trail_lantern_styled(palette, height, hash, parts::LampStyle::Stick, hash >> 7 & 3, parts::GATE_HALF, hash >> 11 & 3 == 0)
 }
 
-/// [`trail_lantern_parts`] in a given style and turned a given number of quarter turns.
+/// [`trail_lantern_parts`] in a given style, turned a given number of quarter turns, and
+/// lit or put out.
+#[allow(clippy::too_many_arguments)]
 pub fn trail_lantern_styled(
     palette: &Palette,
     height: i32,
@@ -960,9 +1054,14 @@ pub fn trail_lantern_styled(
     style: parts::LampStyle,
     turns: u32,
     gate_half: i32,
+    lit: bool,
 ) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = palette.varied(hash);
-    parts::lantern_parts_spanning(style, &palette, height * crate::scale::BLOCK, turns, gate_half)
+    let (mut voxels, mut fine) = parts::lantern_parts_spanning(style, &palette, height * crate::scale::BLOCK, turns, gate_half);
+    if !lit {
+        parts::put_out(&mut voxels, &mut fine);
+    }
+    (voxels, fine)
 }
 
 /// A signpost: a post with a cap, and one board per direction pointing along it, each
@@ -1032,10 +1131,26 @@ mod tests {
                 }
             }
         }
-        // Trail lanterns differ in style along a trail.
+    }
+
+    #[test]
+    fn trail_lanterns_are_sticks_with_a_lamp_and_most_are_out() {
         let p = Palette::of(Biome::Deciduous);
-        let styles: std::collections::HashSet<_> = (0..64u32).map(|h| trail_lantern(&p, 3, h.wrapping_mul(2654435761))).collect::<Vec<_>>().into_iter().map(|l| l.len()).collect();
-        assert!(styles.len() >= 3, "lanterns all look alike");
+        let mut lit = 0;
+        for h in 0..64u32 {
+            let (voxels, fine) = trail_lantern_parts(&p, 3, h.wrapping_mul(2654435761));
+            // The lamp is the only voxel, a lit one or cold glass, and it hangs from the arm
+            // of a pole that stands on the ground.
+            assert_eq!(voxels.len(), 1, "{voxels:?}");
+            let (lamp, v) = voxels[0];
+            assert!(v == mat::LANTERN || v == mat::LANTERN_COLD);
+            lit += (v == mat::LANTERN) as u32;
+            let flames = fine.iter().filter(|b| b.voxel == mat::LANTERN).count();
+            assert_eq!(flames > 0, v == mat::LANTERN, "a flame in a cold lamp, or none in a lit one");
+            assert!(lamp.y >= 1 && fine.iter().any(|b| b.lo[1] < 0), "the pole does not reach the ground");
+            assert!(fine.iter().any(|b| b.hi[1] > (lamp.y + 3) * voxel::mesh::CELLS), "nothing holds the lamp up");
+        }
+        assert!((8..=24).contains(&lit), "{lit} of 64 lanterns lit");
     }
 
     #[test]

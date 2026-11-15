@@ -209,8 +209,9 @@ pub struct Surroundings<'a> {
     pub leaves: &'a [LeafSite],
     /// Flowers in bloom near the player: the voxel each stands in, and its colour.
     pub flowers: &'a [(DVec3, [f32; 3])],
-    /// Fires burning near the player: the heart of each.
-    pub fires: &'a [DVec3],
+    /// Fires near the player, out to [`SMOKE_SIGHT`]: the heart of each, and how much it
+    /// smokes, 1 for one burning.
+    pub fires: &'a [(DVec3, f32)],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
@@ -221,6 +222,28 @@ pub struct Surroundings<'a> {
     pub snow: f32,
     pub storm: f32,
     pub time: f64,
+    /// The height of the land at a place, roughly (see [`land_under`]), or None where it
+    /// is not known yet: what flocks keep above.
+    pub land: &'a dyn Fn(f64, f64) -> Option<f64>,
+}
+
+/// The height of the land around `(x, z)` from the continent's map, in voxels: the
+/// highest of the map's cells around it, so a flock kept above it clears the hills on it
+/// wherever between the cells they rise. None until the continent there is ready.
+pub fn land_under(world: &worldgen::world::GameWorld, x: f64, z: f64) -> Option<f64> {
+    use worldgen::macro_layout::{MACRO_SIZE, cell_of};
+    let (mx, mz) = cell_of(x.floor() as i32, z.floor() as i32);
+    let c = world.continent_if_ready(mx, mz)?;
+    let cs = c.cell_size() as f64;
+    let (lx, lz) = ((x - (mx * MACRO_SIZE) as f64) / cs, (z - (mz * MACRO_SIZE) as f64) / cs);
+    let max = c.size as i32 - 1;
+    let mut highest = f32::MIN;
+    for gz in (lz.floor() as i32 - 1).clamp(0, max)..=(lz.floor() as i32 + 1).clamp(0, max) {
+        for gx in (lx.floor() as i32 - 1).clamp(0, max)..=(lx.floor() as i32 + 1).clamp(0, max) {
+            highest = highest.max(c.height[gz as usize * c.size + gx as usize]);
+        }
+    }
+    Some((highest * worldgen::scale::OLD_VOXEL) as f64)
 }
 
 pub struct Particles {
@@ -239,11 +262,31 @@ const MAX_PARTICLES: usize = 8000;
 const MAX_FALLING: usize = 1500;
 /// How far off (voxels, across) a falling leaf is let go of, being out of sight.
 const LEAF_REACH: f64 = 110.0 * VOXELS_PER_METRE as f64;
+/// The colours butterflies come in: whites, a sulphur yellow, oranges, a blue and a brown,
+/// as the common ones of meadows are.
+const BUTTERFLY_COLOURS: [[f32; 3]; 7] = [
+    [0.95, 0.95, 0.9],
+    [0.93, 0.9, 0.55],
+    [0.95, 0.55, 0.15],
+    [0.85, 0.35, 0.1],
+    [0.45, 0.6, 0.95],
+    [0.5, 0.33, 0.2],
+    [0.98, 0.98, 0.98],
+];
+
 /// How far off (voxels) a raindrop's splash is still drawn.
 const SPLASH_REACH: f64 = 11.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
 const RAIN_COUNT: f32 = 2200.0;
 const SNOW_COUNT: f32 = 1500.0;
+/// How far off a fire's smoke is still seen, in metres: a column of it is how a camp
+/// is told from across a valley.
+pub const SMOKE_SIGHT: f64 = 600.0;
+/// How far off its sparks are, in metres, and the finer puffs low down.
+const SPARK_SIGHT: f64 = 90.0;
+/// Puffs of smoke in the air at once, at most, so that a row of fires leaves room for
+/// the rain and the leaves.
+const MAX_SMOKE: usize = 1400;
 
 impl Particles {
     pub fn new() -> Self {
@@ -477,12 +520,17 @@ impl Particles {
             }
         }
 
-        // Fires: sparks that fly up and wink out, and smoke that leans with the wind.
-        for &fire in s.fires {
-            if (fire - s.camera).length() > (90.0 * VOXELS_PER_METRE) as f64 {
+        // Fires: sparks that fly up and wink out, and smoke that leans with the wind and
+        // goes up a long way, so that a fire is seen from far off by its column of smoke.
+        // Beyond where the sparks show, fewer and bigger puffs make the same column.
+        let mut smoke = if s.fires.is_empty() { 0 } else { self.count(PKind::Smoke) };
+        for &(fire, strength) in s.fires {
+            let metres = (fire - s.camera).length() / VOXELS_PER_METRE as f64;
+            if metres > SMOKE_SIGHT {
                 continue;
             }
-            if self.unit() < dt * 5.0 {
+            let near = metres <= SPARK_SIGHT;
+            if near && strength >= 1.0 && self.unit() < dt * 5.0 {
                 let particle = Particle {
                     kind: PKind::Spark,
                     pos: fire + (Vec3::new(self.range(-0.12, 0.12), self.range(0.0, 0.2), self.range(-0.12, 0.12)) * U).as_dvec3(),
@@ -498,15 +546,20 @@ impl Particles {
                 };
                 self.spawn(particle);
             }
-            if self.unit() < dt * 7.0 {
+            let rate = if near { 8.0 } else { 4.0 } * strength;
+            if smoke < MAX_SMOKE && self.unit() < dt * rate {
+                smoke += 1;
                 let shade = self.range(0.16, 0.3);
+                // Smoke from a fire gone out is thin, and soon gone.
+                let life = self.range(24.0, 34.0) * (0.3 + 0.65 * strength.min(1.0));
+                let size = if near { self.range(0.12, 0.2) } else { self.range(0.6, 0.9) };
                 let particle = Particle {
                     kind: PKind::Smoke,
                     pos: fire + (Vec3::new(self.range(-0.1, 0.1), self.range(0.3, 0.5), self.range(-0.1, 0.1)) * U).as_dvec3(),
-                    vel: Vec3::new(self.range(-0.1, 0.1), self.range(0.9, 1.4), self.range(-0.1, 0.1)),
+                    vel: Vec3::new(self.range(-0.1, 0.1), self.range(1.4, 2.0), self.range(-0.1, 0.1)),
                     age: 0.0,
-                    life: self.range(4.0, 7.0),
-                    size: Vec3::splat(self.range(0.12, 0.2)),
+                    life,
+                    size: Vec3::splat(size),
                     color: [shade, shade, shade * 1.05],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
@@ -564,10 +617,17 @@ impl Particles {
             }
         }
 
-        // Butterflies over the flowers, while they are out and the day is dry.
+        // Butterflies over the flowers, while they are out and the day is dry: a few, seen
+        // now and then, not a cloud of them. Each is a colour of its own, never near the
+        // flower it rose from, so it shows against the flowers instead of hiding in them.
         let in_flower = s.date > 0.08 && s.date < 0.66;
-        if day && in_flower && dry && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 18 && self.unit() < dt * 0.8 {
-            let (pos, color) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
+        if day && in_flower && dry && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 6 && self.unit() < dt * 0.2 {
+            let (pos, flower) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
+            let first = (self.unit() * BUTTERFLY_COLOURS.len() as f32) as usize;
+            let color = (0..BUTTERFLY_COLOURS.len())
+                .map(|i| BUTTERFLY_COLOURS[(first + i) % BUTTERFLY_COLOURS.len()])
+                .find(|c| (0..3).map(|k| (c[k] - flower[k]).powi(2)).sum::<f32>() > 0.12)
+                .unwrap_or(BUTTERFLY_COLOURS[0]);
             let particle = Particle {
                 kind: PKind::Butterfly,
                 pos: pos + DVec3::new(0.5, (1.2 * U) as f64, 0.5),
@@ -575,7 +635,7 @@ impl Particles {
                 age: 0.0,
                 life: self.range(18.0, 30.0),
                 size: Vec3::new(0.17, 0.02, 0.2),
-                color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
+                color,
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
                 rot: Vec3::ZERO,
@@ -589,11 +649,11 @@ impl Particles {
         if day && self.bird_timer <= 0.0 {
             self.bird_timer = self.range(25.0, 60.0);
             if self.flocks.len() < MAX_FLOCKS {
-                self.spawn_flock(s.camera);
+                self.spawn_flock(s.camera, s.land);
             }
         }
         for flock in &mut self.flocks {
-            flock.update(dt);
+            flock.update(dt, s.land);
         }
         self.flocks.retain(|f| !f.gone(s.camera));
 
@@ -671,11 +731,12 @@ impl Particles {
                     p.pos += (p.vel * U * dt).as_dvec3();
                 }
                 PKind::Smoke => {
-                    // It rises fast off the fire, slows, and goes the way the wind does.
+                    // It rises fast off the fire, slows to a steady climb, and goes the
+                    // way the wind does, spreading as it goes up.
                     let curl = Vec3::new((p.age * 1.3 + p.phase).sin(), 0.0, (p.age * 1.1 + p.phase * 2.0).cos()) * 0.25;
-                    p.vel += (Vec3::new(wind.x * 0.55, 0.55, wind.z * 0.55) + curl - p.vel) * (0.6 * dt);
+                    p.vel += (Vec3::new(wind.x * 0.45, 1.5, wind.z * 0.45) + curl - p.vel) * (0.6 * dt);
                     p.pos += (p.vel * U * dt).as_dvec3();
-                    p.size += Vec3::splat(0.11 * dt);
+                    p.size += Vec3::splat(0.28 * dt);
                 }
                 PKind::Mist => {
                     p.vel += (wind * 0.3 - p.vel * 0.5) * dt;
@@ -900,7 +961,11 @@ impl Particles {
                 PKind::Mist => alpha *= 0.16,
                 // Smoke thins all the way up; a spark burns out.
                 PKind::Smoke => {
-                    alpha = fade_in * 0.3 * (1.0 - p.age / p.life).powf(1.5);
+                    alpha = fade_in * 0.32 * (1.0 - p.age / p.life).powf(0.9);
+                    // Far off, the haze takes the edge off thin smoke and fewer puffs
+                    // make the column: each is thicker, so the column still shows.
+                    let metres = (p.pos - s.camera).length() as f32 / VOXELS_PER_METRE;
+                    alpha = (alpha * (1.0 + ((metres - 40.0) / 70.0).clamp(0.0, 3.0))).min(0.9);
                     // Seen by the day's light, and low down by the fire's own.
                     glow = 0.06 + 0.9 * s.sun_elevation.clamp(0.0, 1.0) + 0.5 * (1.0 - p.age / 1.6).max(0.0);
                 }
@@ -1089,7 +1154,7 @@ const MAX_FLOCKS: usize = 2;
 const FLOCK_REACH: f32 = 380.0;
 
 impl Particles {
-    fn spawn_flock(&mut self, camera: DVec3) {
+    fn spawn_flock(&mut self, camera: DVec3, land: &dyn Fn(f64, f64) -> Option<f64>) {
         let vpm = VOXELS_PER_METRE;
         // Big birds a third of the time, and their flocks are smaller.
         let large = self.unit() < 0.4;
@@ -1103,10 +1168,14 @@ impl Particles {
         let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
         let side = Vec3::new(-dir.z, 0.0, dir.x);
         let height = if large { self.range(35.0, 120.0) } else { self.range(18.0, 70.0) };
-        // From out of sight on one side, passing over or near the player.
-        let start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
+        // From out of sight on one side, passing over or near the player, and never
+        // starting inside a hill out there.
+        let mut start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
             + (side * self.range(-70.0, 70.0) * vpm).as_dvec3()
             + DVec3::new(0.0, (height * vpm) as f64, 0.0);
+        if let Some(ground) = land(start.x, start.z) {
+            start.y = start.y.max(ground + (Flock::clearance(large) + height * 0.5 * vpm) as f64);
+        }
         let speed = if large { self.range(13.0, 17.0) } else { self.range(10.0, 14.0) } * vpm;
         let (body, span) = if large { (self.range(0.6, 0.9), self.range(0.65, 0.85)) } else { (0.22, 0.2) };
         // Geese and cormorants dark, gulls pale; small birds near black against the sky.
@@ -1165,7 +1234,45 @@ impl Particles {
 }
 
 impl Flock {
-    fn update(&mut self, dt: f32) {
+    /// How high over the land, in voxels, a flock keeps at the least.
+    fn clearance(large: bool) -> f32 {
+        if large { 40.0 * VOXELS_PER_METRE } else { 25.0 * VOXELS_PER_METRE }
+    }
+
+    /// Keeps the lead clear of the land ahead: it rises to pass over a hill in its way,
+    /// and where the land ahead climbs more steeply than it can, it turns toward the
+    /// lower side, as birds go round a mountain rather than into it.
+    fn keep_clear(&mut self, dt: f32, land: &dyn Fn(f64, f64) -> Option<f64>) {
+        let vpm = VOXELS_PER_METRE as f64;
+        let clear = Self::clearance(self.large) as f64;
+        let dir = DVec3::new(self.heading.cos() as f64, 0.0, self.heading.sin() as f64);
+        let side = DVec3::new(-dir.z, 0.0, dir.x);
+        let lead = self.lead;
+        let ahead = |d: f64, off: f64| land(lead.x + (dir.x * d + side.x * off) * vpm, lead.z + (dir.z * d + side.z * off) * vpm);
+        let mut need = f64::MIN;
+        let mut steep = false;
+        for d in [0.0, 30.0, 60.0, 100.0] {
+            let Some(ground) = ahead(d, 0.0) else { continue };
+            let rise = ground + clear - lead.y;
+            need = need.max(rise);
+            // More to climb than it could by the time it got there, rising at a third of
+            // its speed.
+            if rise > d.max(10.0) * vpm / 3.0 {
+                steep = true;
+            }
+        }
+        if need > 0.0 {
+            self.lead.y += need.min((self.speed * 0.5 * dt) as f64);
+        }
+        if steep {
+            let (left, right) = (ahead(60.0, -60.0), ahead(60.0, 60.0));
+            let way = if left.unwrap_or(f64::MAX) < right.unwrap_or(f64::MAX) { -1.0 } else { 1.0 };
+            self.heading += way * 0.8 * dt;
+        }
+    }
+
+    fn update(&mut self, dt: f32, land: &dyn Fn(f64, f64) -> Option<f64>) {
+        self.keep_clear(dt, land);
         let vpm = VOXELS_PER_METRE;
         self.age += dt;
         let (a, seed) = (self.age as f64, self.seed as f64);
@@ -1348,6 +1455,7 @@ mod leaf_tests {
             snow: 0.0,
             storm: 0.0,
             time,
+            land: &|_, _| Some(0.0),
         }
     }
 
@@ -1421,8 +1529,36 @@ mod leaf_tests {
             }
             p.count(PKind::Butterfly)
         };
-        assert!(count(0.25, 0.0, 0.6) > 5);
+        assert!((2..=6).contains(&count(0.25, 0.0, 0.6)));
         assert_eq!((count(0.85, 0.0, 0.6), count(0.25, 0.6, 0.6), count(0.25, 0.0, -0.3)), (0, 0, 0));
+        // None the colour of the red flower they rose from.
+        let mut p = Particles::new();
+        for step in 0..60 * 120 {
+            let mut s = still_air(camera, step as f64 / 60.0);
+            (s.flowers, s.date, s.sun_elevation) = (&flowers, 0.25, 0.6);
+            p.update(1.0 / 60.0, &s, &mut Ground);
+            assert!(p.particles.iter().filter(|q| q.kind == PKind::Butterfly).all(|q| (0..3).map(|k| (q.color[k] - flowers[0].1[k]).powi(2)).sum::<f32>() > 0.12));
+        }
+    }
+
+    #[test]
+    fn flocks_go_over_or_round_a_mountain_and_never_into_it() {
+        use super::*;
+        // A wall of mountain 300 m high, 150 m off, across the way the flock is going.
+        let vpm = VOXELS_PER_METRE as f64;
+        let land = |x: f64, _z: f64| Some(if x > 150.0 * vpm { 300.0 * vpm } else { 0.0 });
+        let mut p = Particles::new();
+        for _ in 0..12 {
+            p.flocks.clear();
+            p.spawn_flock(DVec3::ZERO, &land);
+            let mut f = p.flocks.pop().unwrap();
+            (f.heading, f.lead) = (0.0, DVec3::new(0.0, 40.0 * vpm, 0.0));
+            for step in 0..60 * 60 {
+                f.update(1.0 / 60.0, &land);
+                let ground = land(f.lead.x, f.lead.z).unwrap();
+                assert!(f.lead.y > ground, "into the mountain after {:.1} s, {:.0} m up at {:.0} m along", step as f64 / 60.0, f.lead.y / vpm, f.lead.x / vpm);
+            }
+        }
     }
 
     #[test]
@@ -1432,12 +1568,12 @@ mod leaf_tests {
         let mut kinds = (false, false);
         for _ in 0..12 {
             p.flocks.clear();
-            p.spawn_flock(DVec3::ZERO);
+            p.spawn_flock(DVec3::ZERO, &|_, _| Some(0.0));
             let mut f = p.flocks.pop().unwrap();
             kinds = (kinds.0 || f.large, kinds.1 || !f.large);
             let mut wings = (f32::MAX, f32::MIN);
             for _ in 0..60 * 40 {
-                f.update(1.0 / 60.0);
+                f.update(1.0 / 60.0, &|_, _| Some(0.0));
                 for b in &f.birds {
                     assert!(b.pos.is_finite() && b.vel.is_finite());
                     wings = (wings.0.min(b.wing), wings.1.max(b.wing));

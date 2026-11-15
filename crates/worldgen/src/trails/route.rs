@@ -155,6 +155,22 @@ impl<'a> Router<'a> {
         Some(cost)
     }
 
+    /// Makes the ground within `r` voxels of the middle of cell `at` `factor` times as
+    /// hard to cross, so trails go round it: a ruin nobody walks to.
+    pub fn avoid(&mut self, at: usize, r: f32, factor: f32) {
+        let n = self.c.size as i32;
+        let k = (r / self.c.cell_size()).ceil() as i32;
+        let (x, z) = (at as i32 % n, at as i32 / n);
+        for dz in -k..=k {
+            for dx in -k..=k {
+                let (nx, nz) = (x + dx, z + dz);
+                if nx >= 0 && nz >= 0 && nx < n && nz < n && ((dx * dx + dz * dz) as f32).sqrt() <= k as f32 {
+                    self.terrain[(nz * n + nx) as usize] *= factor;
+                }
+            }
+        }
+    }
+
     /// The cheapest path of cells from `a` to `b`, both included.
     pub fn search(&mut self, a: usize, b: usize) -> Option<Vec<u32>> {
         let n = self.c.size as i32;
