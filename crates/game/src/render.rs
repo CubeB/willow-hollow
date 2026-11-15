@@ -19,7 +19,7 @@ use crate::{
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
     impostors::{self, BoxInstance, Impostors},
     profile::GpuTimer,
-    terrain::{LEVELS, PLANT_REACH, Streamer},
+    terrain::{GpuChunk, LEVELS, PLANT_REACH, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -547,6 +547,9 @@ pub struct Renderer {
     shadow_sun: Vec3,
     /// The level the shadow maps are laid over, in voxels above sea level.
     shadow_ground: Option<f32>,
+    /// How much of their loaded reach the rings of voxel terrain are drawn out to, less
+    /// the higher the camera is over the ground (see `band_scale`), eased toward that.
+    band_scale: f32,
     frame: u64,
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
@@ -1442,6 +1445,7 @@ impl Renderer {
             cascade_views: [None; CASCADES],
             shadow_sun: Vec3::ZERO,
             shadow_ground: None,
+            band_scale: 1.0,
             frame: 0,
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
@@ -1619,8 +1623,12 @@ impl Renderer {
     pub fn draw(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, scene: &Scene) {
         let Scene { camera, env, far, .. } = *scene;
         let device = &gpu.device;
-        // Horizontal distances out to which each ring of voxel terrain is fully loaded.
-        let bands = scene.terrain.bands();
+        // Horizontal distances out to which each ring of voxel terrain is drawn: as far as
+        // it is fully loaded, or less from high over the land.
+        let target = band_scale(scene.terrain.chunks(), camera.pos);
+        // A screenshot is one frame, so it takes the reach at once.
+        self.band_scale = if self.clock.is_some() { target } else { self.band_scale + (target - self.band_scale) * 0.05 };
+        let bands = scene.terrain.bands().map(|b| b * self.band_scale);
         let voxel_radius = bands[LEVELS - 1];
         let aspect = self.width as f32 / self.height as f32;
         let view_proj = camera.view_proj(aspect);
@@ -2201,6 +2209,30 @@ impl Renderer {
             t.resolve(encoder);
         }
     }
+}
+
+/// How much of their loaded reach to draw the rings of voxel terrain out to, with the
+/// camera at `camera`: all of it on the ground, and from high over the land, where no
+/// hill hides the land beyond, half (and the far view the rest). Up among the clouds
+/// every chunk out to the edge was in sight, its voxels a pixel or two across, and the
+/// land cost near twice what it did on the ground; from up there the far view's slopes
+/// look the same. How high is over the tallest chunk with anything in it around the
+/// camera's column, so a cliff top close by keeps the full reach.
+fn band_scale<'a>(chunks: impl Iterator<Item = &'a GpuChunk>, camera: DVec3) -> f32 {
+    let around = m(24.0) as f64;
+    let mut ground = None::<f64>;
+    for chunk in chunks.filter(|c| c.level == 0 && c.opaque.is_some()) {
+        let origin = (chunk.pos * CHUNK).as_dvec3();
+        let size = CHUNK as f64;
+        if origin.x - around <= camera.x && camera.x <= origin.x + size + around && origin.z - around <= camera.z && camera.z <= origin.z + size + around {
+            ground = Some(ground.map_or(origin.y + size, |g: f64| g.max(origin.y + size)));
+        }
+    }
+    // Not loaded yet under the camera: the reach as loaded.
+    let Some(ground) = ground else { return 1.0 };
+    let lift = (camera.y - ground) as f32;
+    let t = ((lift - m(60.0)) / m(140.0)).clamp(0.0, 1.0);
+    1.0 - 0.5 * t * t * (3.0 - 2.0 * t)
 }
 
 /// Draws one triangle over the whole of `target` with `pipeline`.
