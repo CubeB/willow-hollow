@@ -182,13 +182,24 @@ fn cloud_column_at(rel_xz: vec2<f32>) -> vec2<f32> {
     return cloud_column(cloud_wrap(vec2<i32>(floor((rel_xz + G.weather.zw) / CLOUD_CELL))));
 }
 
-// The clouds as they fall on the ground: the same cells, so the shadow has the cloud's
-// blocky edge, and a thick cloud casts a deeper one. One cell's worth of work, as this
-// runs for every pixel of terrain.
+// The clouds as they fall on the ground: darker under a thick cloud, with an edge that
+// fades over a few cells, not the cloud's own blocky one. Light through the rim of a
+// cloud is softened by the cloud's thin stuff and by the breadth of the sun, and as a
+// cloud drifts over the sun the light goes, and comes back, over a few seconds rather
+// than at once. The field between the four nearest cells, as this runs for every pixel
+// of terrain.
 fn cloud_shadow(rel_xz: vec2<f32>) -> f32 {
-    let col = cloud_column_at(rel_xz);
-    let thick = col.y - col.x;
-    return select(0.0, min(0.5 + 0.03 * thick, 0.86), thick > 0.0);
+    let p = (rel_xz + G.weather.zw) / CLOUD_CELL - 0.5;
+    let c = vec2<i32>(floor(p));
+    let f = p - floor(p);
+    let t = mix(
+        mix(textureLoad(cloud_field, cloud_wrap(c), 0), textureLoad(cloud_field, cloud_wrap(c + vec2<i32>(1, 0)), 0), f.x),
+        mix(textureLoad(cloud_field, cloud_wrap(c + vec2<i32>(0, 1)), 0), textureLoad(cloud_field, cloud_wrap(c + vec2<i32>(1, 1)), 0), f.x),
+        f.y);
+    let d = cloud_mix(t) - G.mist.w;
+    // How thick the cloud is, as cloud_heap has it but without its steps.
+    let thick = CLOUD_STEPS * sqrt(max(d, 0.0) * 3.2 * (0.4 + 1.2 * G.sky_horizon.w)) + CLOUD_BELLY * smoothstep(0.03, 0.14, d);
+    return smoothstep(-0.035, 0.045, d) * min(0.5 + 0.03 * thick, 0.86);
 }
 
 // The fine part of cloud_trace: a view ray's way across the cells of one coarse square of
