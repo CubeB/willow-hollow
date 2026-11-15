@@ -405,3 +405,26 @@ fn nothing_stands_on_the_walkable_trail() {
         }
     }
 }
+
+#[test]
+fn ruins_stand_off_the_trails() {
+    // Nobody walks to a ruin: no trail runs to one or past it. A tower on a hill may
+    // have a path out to it, but only a faint one, ending at the edge of its ground.
+    let w = world();
+    let c = w.continent(0, 0);
+    let net = &c.trails;
+    let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
+    let mut ruins = 0;
+    for (s, pad) in net.sites.iter().zip(&net.pads).filter(|(s, _)| s.kind == Landmark::Ruins) {
+        ruins += 1;
+        let centre = glam::vec2(pad.x, pad.z);
+        let near: Vec<_> = points.iter().filter(|p| glam::vec2(p.x, p.z).distance(centre) < crate::scale::m(60.0)).collect();
+        println!("ruins at {},{} ({:?}): {} trail points within 60 m", s.x, s.z, s.reason, near.len());
+        for p in near {
+            let d = glam::vec2(p.x, p.z).distance(centre);
+            assert!(d > pad.radius * 0.9, "a trail runs into the ruins at {},{}, {d} from the middle", s.x, s.z);
+            assert!(p.half_width < crate::scale::m(0.4), "a worn trail passes {d} from the ruins at {},{}", s.x, s.z);
+        }
+    }
+    assert!(ruins > 0, "no ruins to test");
+}

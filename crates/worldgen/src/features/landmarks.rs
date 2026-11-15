@@ -579,6 +579,58 @@ fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     scatter(s, rng, p, rubble, 20);
 }
 
+/// A tumbledown tower, for a ruin on a hilltop: a round shell still standing high on one
+/// side and fallen to its footings across a breach on the other, its floors long gone,
+/// so that it shows against the sky from far off. Its door is on -Z, as the keep's is.
+fn ruined_tower(s: &mut Shape, rng: &mut Rng, p: &Palette) {
+    let r = rng.range(5.0, 6.8);
+    let height = rng.int(26, 40) as f32;
+    let thick = 2.2;
+    let ri = r.ceil() as i32 + 1;
+    // Where it has come down, and how far round the breach runs either way, in radians.
+    let breach = rng.range(0.0, TAU);
+    let width = rng.range(0.7, 1.3);
+    footing(s, (-ri, -ri), (ri, ri), || p.stone_dark);
+    disc(s, r + 1.2, 0, |_| p.stone_dark);
+    for z in -ri..=ri {
+        for x in -ri..=ri {
+            let d = ((x * x + z * z) as f32).sqrt();
+            if d > r || d <= r - thick {
+                continue;
+            }
+            let a = (z as f32).atan2(x as f32);
+            let off = ((a - breach + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI).abs();
+            // Down to a stump in the breach, and leaning lower toward it all the way round,
+            // so the top runs in a ragged slope from the last high shard.
+            let fallen = (1.0 - off / width).clamp(0.0, 1.0);
+            let slope = 0.55 + 0.45 * off / std::f32::consts::PI;
+            let top = (height * slope * (1.0 - 0.95 * fallen.sqrt()) * rng.range(0.88, 1.0)).round() as i32;
+            for y in 1..=top.max(1) {
+                // Slit windows, one a storey, on four sides.
+                let slit = y % 9 >= 4 && y % 9 <= 6 && (a * 4.0 / TAU).rem_euclid(1.0) < 0.06;
+                s.set(v(x, y, z), if slit { AIR } else { p.block(rng) });
+            }
+        }
+    }
+    let inner = (r - thick).floor() as i32;
+    cuboid(s, v(-1, 1, -ri), v(1, 6, -inner), |_| AIR);
+    s.keep_clear(v(-inner, 0, -inner), v(inner, 8, inner));
+    s.keep_clear(v(-2, 0, -ri - 5), v(2, 8, -inner));
+    // What came down lies about the foot, most of it on the side it fell.
+    let (bx, bz) = (breach.cos(), breach.sin());
+    for _ in 0..rng.int(26, 40) {
+        let along = rng.range(r + 1.0, r + 9.0);
+        let spread = rng.range(-4.0, 4.0);
+        let (x, z) = ((bx * along - bz * spread).round() as i32, (bz * along + bx * spread).round() as i32);
+        let at = v(x, 0, z);
+        if s.get(at).is_none() {
+            cuboid(s, at, at + v(rng.int(0, 1), rng.int(0, 1), rng.int(0, 1)), |_| p.block(rng));
+        }
+    }
+    let loose = rng.int(8, 14);
+    scatter(s, rng, p, loose, ri + 6);
+}
+
 fn standing_stone(s: &mut Shape, rng: &mut Rng, p: &Palette, x: i32, z: i32, height: i32) {
     let (w, d) = (rng.int(1, 3), rng.int(1, 2));
     for y in -6..=height {
@@ -910,6 +962,15 @@ pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) ->
 /// A landmark's voxels and fine parts, and apart from them the props laid about it,
 /// each in its intact or decayed form by the site's [`History`].
 pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    build_site_as(kind, palette, seed, length, false)
+}
+
+/// [`build_site`] for ruins on a hilltop: a tumbledown tower rather than a keep.
+pub fn build_ruined_tower(palette: &Palette, seed: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    build_site_as(Landmark::Ruins, palette, seed, 0, true)
+}
+
+fn build_site_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower: bool) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
     let palette = &palette.varied(seed);
     finish(kind, palette, seed, length, generate(kind, palette, seed, length))
 }
@@ -945,6 +1006,7 @@ pub fn generate(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Sh
         Landmark::Shrine => shrine(&mut s, &mut rng, palette),
         Landmark::Lookout => lookout(&mut s, &mut rng, palette),
         Landmark::Camp => camp(&mut s, &mut rng, palette),
+        Landmark::Ruins if tower => ruined_tower(&mut s, &mut rng, palette),
         Landmark::Ruins => ruins(&mut s, &mut rng, palette),
         Landmark::Stones => stones(&mut s, &mut rng, palette),
         Landmark::Cairn => cairn(&mut s, &mut rng, palette),

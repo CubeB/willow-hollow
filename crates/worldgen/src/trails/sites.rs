@@ -34,11 +34,13 @@ pub fn importance(kind: Landmark) -> f32 {
     match kind {
         Landmark::Landing => 3.0,
         Landmark::Camp => 2.5,
-        Landmark::Ruins | Landmark::Shrine => 2.0,
+        Landmark::Shrine => 2.0,
         Landmark::Hut => 1.5,
         Landmark::Lookout | Landmark::Stones => 1.0,
         Landmark::Arch => 0.7,
         Landmark::Cairn => 0.5,
+        // Ruins are forgotten: nobody makes the trip, and no trail leads to them.
+        Landmark::Ruins => 0.0,
     }
 }
 
