@@ -255,6 +255,8 @@ pub struct TrailLantern {
 pub struct Network {
     pub sites: Vec<Site>,
     pub crossings: Vec<Crossing>,
+    /// Links between sites that no route was found for, so the network is split there.
+    pub unlinked: usize,
     /// Where one trail meets another.
     pub junctions: Vec<Vec2>,
     /// Each trail as a line, for maps.

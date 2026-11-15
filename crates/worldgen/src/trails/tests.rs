@@ -132,6 +132,30 @@ fn bridges_are_rare() {
 }
 
 #[test]
+fn stone_bridges_are_rarest() {
+    let mut stone = 0;
+    let mut wooden = 0;
+    let mut fords = 0;
+    let mut unlinked = 0;
+    let mut km = 0.0;
+    for seed in 1..=4 {
+        let w = GameWorld::with_config(seed, SimConfig { size: 256 });
+        let c = w.continent(0, 0);
+        let count = |k: &[CrossingKind]| c.trails.crossings.iter().filter(|x| k.contains(&x.kind)).count();
+        let (s, wd, f) = (count(&[CrossingKind::Arch]), count(&[CrossingKind::Log, CrossingKind::Plank]), count(&[CrossingKind::Stones]));
+        let length: f32 = c.trails.lines.iter().flat_map(|l| l.windows(2)).map(|p| (p[1] - p[0]).length()).sum::<f32>() / crate::scale::m(1000.0);
+        let spans: Vec<(CrossingKind, i32)> = c.trails.crossings.iter().map(|x| (x.kind, x.span)).collect();
+        println!("seed {seed}: {s} stone, {wd} wooden, {f} fords, {} links unrouted, {length:.1} km; {spans:?}", c.trails.unlinked);
+        stone += s;
+        wooden += wd;
+        fords += f;
+        unlinked += c.trails.unlinked;
+        km += length;
+    }
+    println!("in all: {stone} stone, {wooden} wooden, {fords} fords, {unlinked} unrouted, {km:.1} km");
+}
+
+#[test]
 fn trails_agree_across_chunk_borders() {
     // A column near a trail reads the same whichever chunk's sampler it is taken from.
     let w = world();

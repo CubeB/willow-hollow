@@ -1516,7 +1516,10 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     for (a, b, _) in order {
         let (sa, sb) = (net.sites[a], net.sites[b]);
         let (ca, cb) = (cell_of(at[a].0, at[a].1), cell_of(at[b].0, at[b].1));
-        let Some(path) = router.search(ca, cb) else { continue };
+        let Some(path) = router.search(ca, cb) else {
+            net.unlinked += 1;
+            continue;
+        };
 
         for (first, last) in fresh_runs(&path, &router.used) {
             // Where this piece begins and ends: at a site, or on the trail it joins.
