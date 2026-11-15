@@ -304,6 +304,8 @@ palette! {
     STEM              = ( 84, 136,  64), Foliage, 2;
     LEAF_GLOSS        = ( 48, 112,  56), Foliage, 2;
     LEAF_GREY         = (130, 148, 120), Foliage, 2;
+    // The glass of a lantern nobody has lit: smoky, and dark against the lit ones.
+    LANTERN_COLD      = (128, 118,  94), Solid, 0;
 }
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.

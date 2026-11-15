@@ -69,21 +69,6 @@ fn turns_toward(d: Vec2) -> u32 {
     (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
 }
 
-/// Whether a gate turned `turns` at trail point `i` has its posts off the way, either
-/// side of it.
-fn gate_fits(pts: &[Vec2], widths: &[f32], i: usize, turns: u32, half: i32) -> bool {
-    let r = rotate(IVec3::new(half, 0, 0), turns);
-    let axis = vec2(r.x as f32, r.z as f32);
-    let (x, z) = (pts[i].x.floor(), pts[i].y.floor());
-    let lo = i.saturating_sub(40);
-    let hi = (i + 40).min(pts.len());
-    [axis, -axis].iter().all(|&a| {
-        let post = vec2(x, z) + a + 0.5;
-        // Each post's footprint is one column, a voxel across.
-        pts[lo..hi].iter().zip(&widths[lo..hi]).all(|(p, &w)| p.distance(post) >= w + 0.5)
-    })
-}
-
 /// Steps to the next lantern along a plain stretch, after one placed at step `i`.
 fn plain_gap(salt: u32, i: usize) -> usize {
     (LANTERN_FAR as f32 * (0.7 + 0.6 * unit(hash2(salt ^ 0x1a77, i as i32, 17)))) as usize
@@ -1403,29 +1388,17 @@ impl Layer<'_> {
             if is_wet(&col) || col.river < m(2.4) {
                 continue;
             }
-            // Each style faces the trail: a crook's lamp hangs out over its edge, a pair
-            // runs along it, and a gate spans it where it is narrow enough to pass through.
-            let pick = hash2(salt ^ 0x5e1f, i as i32, 3);
-            // Gates mark arrivals, at landmarks and where trails meet, their posts
-            // either side of the trail.
-            let mut style = parts::LampStyle::pick_trail(pick >> 3);
-            let arrival = matches!(cause, LanternCause::Approach | LanternCause::Junction);
-            if arrival && pick % 6 == 0 {
-                style = parts::LampStyle::Gate;
-            }
-            let gate_turns = turns_toward(normal);
-            let gate_half = ((widths[i] + 1.0).ceil() as i32).max(parts::GATE_HALF);
-            if style == parts::LampStyle::Gate
-                && !(arrival && gate_half <= parts::GATE_HALF_MAX && gate_fits(pts, widths, i, gate_turns, gate_half))
-            {
-                style = if pick & 1 == 0 { parts::LampStyle::Post } else { parts::LampStyle::Stone };
-            }
-            let (q, turns) = match style {
-                parts::LampStyle::Gate => (pts[i], gate_turns),
-                parts::LampStyle::Crook => (pts[i] + normal * side * (widths[i] + m(0.8)), turns_toward(-normal * side)),
-                parts::LampStyle::Pair => (pts[i] + normal * side * (widths[i] + m(1.2)), turns_toward(tangent)),
-                _ => (pts[i] + normal * side * (widths[i] + m(1.2)), pick >> 7 & 3),
-            };
+            // A pole of sticks beside the way, its lamp hung out toward it. Most are not
+            // lit: only now and then one by a bridge or where trails meet, and more often
+            // on the way in to a place, where someone is about to light them.
+            let style = parts::LampStyle::Stick;
+            let lit = unit(hash2(salt ^ 0x11e7, i as i32, 5))
+                < match cause {
+                    LanternCause::Approach => 0.4,
+                    LanternCause::Bridge | LanternCause::Junction => 0.25,
+                    LanternCause::Plain => 0.1,
+                };
+            let (q, turns) = (pts[i] + normal * side * (widths[i] + m(1.0)), turns_toward(-normal * side));
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
             let crowded = net.lanterns.iter().any(|l| {
                 (l.trail != salt || cause == LanternCause::Junction) && l.at.distance_squared(q) < clear * clear
@@ -1437,12 +1410,14 @@ impl Layer<'_> {
             let y = heights[i].floor() as i32 + 1;
             let height = 3 + (unit(hash2(salt, x, z)) * 2.0) as i32;
             let at = IVec3::new(x, y, z);
-            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col, q), height, hash2(salt, x, z), style, turns, gate_half);
-            let footprint: Vec<IVec2> = voxels
+            let (voxels, fine) = landmarks::trail_lantern_styled(&self.palette_at(&col, q), height, hash2(salt, x, z), style, turns, parts::GATE_HALF, lit);
+            // Its pole, and whatever of it is low enough to walk into.
+            let mut footprint: Vec<IVec2> = voxels
                 .iter()
                 .filter(|(p, _)| (0..=2).contains(&p.y))
                 .map(|(p, _)| IVec2::new(x + p.x, z + p.z))
                 .collect();
+            footprint.insert(0, IVec2::new(x, z));
             // Nothing stands on the walkable way, of this trail or any laid before it.
             let on_way = footprint.iter().any(|c| {
                 let c = c.as_vec2() + 0.5;
@@ -1455,7 +1430,7 @@ impl Layer<'_> {
                 continue;
             }
             net.held_lanterns.push((net.lanterns.len(), absolute(voxels, at, 0), parts::place_fine(&fine, at, 0)));
-            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause, style, footprint });
+            net.lanterns.push(TrailLantern { at: q, trail: salt, step: i, cause, style, lit, footprint });
             since = 0;
             gap = plain_gap(salt, i);
             side = -side;

@@ -1029,17 +1029,19 @@ pub fn generate(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Sh
     s
 }
 
-/// A lamp on a post beside a trail, in the style `hash` picks.
+/// A lamp hung from a pole of sticks beside a trail, lit or not as `hash` has it.
 pub fn trail_lantern(palette: &Palette, height: i32, hash: u32) -> Vec<(IVec3, Voxel)> {
     trail_lantern_parts(palette, height, hash).0
 }
 
 /// [`trail_lantern`], with its fine parts in model cells.
 pub fn trail_lantern_parts(palette: &Palette, height: i32, hash: u32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
-    trail_lantern_styled(palette, height, hash, parts::LampStyle::pick_trail(hash >> 3), hash >> 7 & 3, parts::GATE_HALF)
+    trail_lantern_styled(palette, height, hash, parts::LampStyle::Stick, hash >> 7 & 3, parts::GATE_HALF, hash >> 11 & 3 == 0)
 }
 
-/// [`trail_lantern_parts`] in a given style and turned a given number of quarter turns.
+/// [`trail_lantern_parts`] in a given style, turned a given number of quarter turns, and
+/// lit or put out.
+#[allow(clippy::too_many_arguments)]
 pub fn trail_lantern_styled(
     palette: &Palette,
     height: i32,
@@ -1047,9 +1049,14 @@ pub fn trail_lantern_styled(
     style: parts::LampStyle,
     turns: u32,
     gate_half: i32,
+    lit: bool,
 ) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>) {
     let palette = palette.varied(hash);
-    parts::lantern_parts_spanning(style, &palette, height * crate::scale::BLOCK, turns, gate_half)
+    let (mut voxels, mut fine) = parts::lantern_parts_spanning(style, &palette, height * crate::scale::BLOCK, turns, gate_half);
+    if !lit {
+        parts::put_out(&mut voxels, &mut fine);
+    }
+    (voxels, fine)
 }
 
 /// A signpost: a post with a cap, and one board per direction pointing along it, each
@@ -1119,10 +1126,26 @@ mod tests {
                 }
             }
         }
-        // Trail lanterns differ in style along a trail.
+    }
+
+    #[test]
+    fn trail_lanterns_are_sticks_with_a_lamp_and_most_are_out() {
         let p = Palette::of(Biome::Deciduous);
-        let styles: std::collections::HashSet<_> = (0..64u32).map(|h| trail_lantern(&p, 3, h.wrapping_mul(2654435761))).collect::<Vec<_>>().into_iter().map(|l| l.len()).collect();
-        assert!(styles.len() >= 3, "lanterns all look alike");
+        let mut lit = 0;
+        for h in 0..64u32 {
+            let (voxels, fine) = trail_lantern_parts(&p, 3, h.wrapping_mul(2654435761));
+            // The lamp is the only voxel, a lit one or cold glass, and it hangs from the arm
+            // of a pole that stands on the ground.
+            assert_eq!(voxels.len(), 1, "{voxels:?}");
+            let (lamp, v) = voxels[0];
+            assert!(v == mat::LANTERN || v == mat::LANTERN_COLD);
+            lit += (v == mat::LANTERN) as u32;
+            let flames = fine.iter().filter(|b| b.voxel == mat::LANTERN).count();
+            assert_eq!(flames > 0, v == mat::LANTERN, "a flame in a cold lamp, or none in a lit one");
+            assert!(lamp.y >= 1 && fine.iter().any(|b| b.lo[1] < 0), "the pole does not reach the ground");
+            assert!(fine.iter().any(|b| b.hi[1] > (lamp.y + 3) * voxel::mesh::CELLS), "nothing holds the lamp up");
+        }
+        assert!((8..=24).contains(&lit), "{lit} of 64 lanterns lit");
     }
 
     #[test]

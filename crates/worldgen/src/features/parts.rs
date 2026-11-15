@@ -5,6 +5,9 @@
 //! Every part takes its colours from a [`Palette`], so a lantern in the desert is
 //! sandstone and acacia and one in the redwoods is mossy rock and red timber.
 //!
+//! A lantern beside a trail is the plainest of them: a pole of sticks bound together
+//! with a lamp hung from an arm, and most of those are not lit (see [`put_out`]).
+//!
 //! A lantern is two things. Its voxels are a sturdy silhouette that reads from far off
 //! and holds the lit voxel the renderer lights the ground from. Its fine parts, 0.1 m
 //! boxes drawn like plants (see [`voxel::mesh::PlantBox`]), are what make it look made
@@ -31,6 +34,10 @@ pub enum LampStyle {
     Pair,
     /// Two posts under a lintel, a lamp on a tie beam between them, chained above.
     Gate,
+    /// Two sticks bound into a pole, an arm lashed across the top and a lamp hung from
+    /// it: what is put up beside a trail. Its pole and arm are fine parts only, so from
+    /// far off, where those are not drawn, only its lamp shows.
+    Stick,
 }
 
 impl LampStyle {
@@ -44,17 +51,6 @@ impl LampStyle {
             3..=4 => LampStyle::Crook,
             5 => LampStyle::Stone,
             _ => LampStyle::Pair,
-        }
-    }
-
-    /// A style for a lantern beside a trail, from a hash: any of the five.
-    pub fn pick_trail(hash: u32) -> Self {
-        match hash % 16 {
-            0..=4 => LampStyle::Post,
-            5..=8 => LampStyle::Crook,
-            9..=10 => LampStyle::Stone,
-            11..=12 => LampStyle::Pair,
-            _ => LampStyle::Gate,
         }
     }
 
@@ -238,7 +234,7 @@ pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: 
     // A footing running down into the ground, so nothing floats on uneven land, and a
     // plus-shaped stone base on it; but a gate stands on its two posts' own footings,
     // leaving the way between them clear.
-    if style != LampStyle::Gate {
+    if !matches!(style, LampStyle::Gate | LampStyle::Stick) {
         for y in -3..0 {
             put(0, y, 0, p.stone_dark);
         }
@@ -334,6 +330,10 @@ pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: 
                 put(x, lintel + 1, 0, p.roof);
             }
         }
+        LampStyle::Stick => {
+            // Only the lamp is a voxel, hung three below the arm at the top of the pole.
+            put(1, stick_arm(h) - 3, 0, mat::LANTERN);
+        }
     }
     for (q, voxel) in voxels {
         let r = rotate(q, turns);
@@ -390,6 +390,38 @@ pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: 
             let top = f.lamp(v(0, l, 0), iron, p.roof, 1, 2);
             f.chain(v(0, l, 0), top, (lintel - l) * CELLS, iron);
             f.finial(v(0, lintel + 1, 0), CELLS, iron, p.accent);
+        }
+        LampStyle::Stick => {
+            let a = stick_arm(h);
+            let twine = mat::CLOTH_PALE;
+            // A pole of two sticks driven into the ground, the second thinner and shorter,
+            // bound to the first in two places.
+            f.put(v(0, 0, 0), (1, -2, 1), (3, a * CELLS + 2, 3), p.wood);
+            f.put(v(0, 0, 0), (3, -2, 2), (4, (a - 1) * CELLS, 3), p.wood);
+            for y in [CELLS * 2, (a - 1) * CELLS - 3] {
+                f.put(v(0, 0, 0), (0, y, 0), (4, y + 1, 4), twine);
+            }
+            // The arm, lashed across the top of the pole and out over the trail.
+            f.put(v(0, a, 0), (0, 0, 1), (CELLS + 3, 1, 3), p.wood);
+            f.put(v(0, a, 0), (0, 1, 0), (4, 2, 4), twine);
+            f.hanging(v(1, a - 3, 0), 3, iron, iron);
+        }
+    }
+}
+
+/// The layer of a stick lantern's arm, for a lantern `h` voxels tall: about two metres
+/// up, whatever the height asked for, as a pole of sticks is never tall.
+fn stick_arm(h: i32) -> i32 {
+    h.clamp(5, 6)
+}
+
+/// Puts a lantern out: its lamps are cold glass rather than lit voxels, so they neither
+/// shine nor light the ground about them, and the flame under each cap is gone.
+pub fn put_out(voxels: &mut [(IVec3, Voxel)], fine: &mut Vec<PlantBox>) {
+    fine.retain(|b| b.voxel != mat::LANTERN);
+    for (_, v) in voxels.iter_mut() {
+        if *v == mat::LANTERN {
+            *v = mat::LANTERN_COLD;
         }
     }
 }
