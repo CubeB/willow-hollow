@@ -551,7 +551,28 @@ fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
     // is haze, the sun's glow in it.
     let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
     let glow = sun_haze(dot(rel, G.sun_dir.xyz) / max(dist, 1e-4)) * (1.0 - exp(-haze));
-    return color * through + (sky_base(dir) + glow) * (1.0 - through);
+    return color * through + (air_light(dir, through) + glow) * (1.0 - through);
+}
+
+// The light the air between the eye and a far thing gives off toward the eye. While the
+// sun is up it lights the low air as it lights the sky, and that is the horizon's colour.
+// Once it has set, the bright horizon is high air the sun still reaches, far off over
+// the edge of the world; the air down among the hills has only the dark sky above to
+// light it. A ridge a few kilometres off at dusk, or under the moon, is then a dim shape
+// against the sky, where it had faded into the glow and so looked lit as if by day.
+// Only through so much air that the land is all but gone (`through` near 0) is the
+// colour the sky's again, so that the farthest land still dissolves into the sky behind.
+fn air_light(dir: vec3<f32>, through: vec3<f32>) -> vec3<f32> {
+    let sky = sky_base(dir);
+    let sunk = smoothstep(0.0, -0.1, G.sun_pos.y);
+    if (sunk <= 0.0) {
+        return sky;
+    }
+    // The sky overhead and round about, as lights the ground (see `ambient`).
+    let dome = min(mix(mix(G.sky_horizon.rgb, G.sky_glow.rgb, 0.4), G.sky_zenith.rgb, 0.6), sky);
+    let gone = 1.0 - through;
+    let deep = gone * gone * gone * gone;
+    return mix(sky, mix(dome, sky, deep), sunk);
 }
 
 // Warm light from nearby fireflies, falling off over about eight metres.

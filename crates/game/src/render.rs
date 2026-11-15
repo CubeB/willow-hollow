@@ -221,6 +221,9 @@ const CASCADE_SWING: f32 = 0.985;
 const CASCADE_DRIFT: f64 = 0.06;
 /// Sun heights above which the far cascade can do with only the tops of things.
 const HIGH_SUN: f32 = 0.4;
+/// The faintest light (in the brightest of its channels) that terrain casts shadows in.
+/// A full moon in a clear sky is some thirty times this.
+const MIN_SHADOW_LIGHT: f32 = 0.005;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -1826,7 +1829,14 @@ impl Renderer {
             let center = offset + Vec3::splat(size * 0.5);
             // Each cascade only draws what falls inside its own box of light, and only
             // if its shadow could land somewhere the camera can see.
-            let reaches_view = env.daylight && frustum.intersects_swept_box(offset, far_corner, sweep);
+            // The moon casts shadows as the sun does: it is the only light on the land at
+            // night, and without them a wood was lit right through, trunk, crown and the
+            // ground beneath, as flat and even as open ground, while the plants close by
+            // (drawn into the maps as props) still cast theirs. Only in the moment either
+            // side of the change from sun to moon, when neither gives any light, is there
+            // nothing for a shadow to take away.
+            let lit = env.sun_color.max_element() > MIN_SHADOW_LIGHT;
+            let reaches_view = lit && frustum.intersects_swept_box(offset, far_corner, sweep);
             let casts: [bool; CASCADES] = std::array::from_fn(|i| fresh[i] && reaches_view && light[i].intersects_box(offset, far_corner));
             // Directions whose faces could be seen from the camera. Foliage sways, so
             // leave a little slack.
