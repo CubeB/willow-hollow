@@ -423,6 +423,27 @@ pub(crate) fn step_nose(
     Some((step, down, open))
 }
 
+/// The log step whose riser stands at the side of trail column `(px, pz)`, given the
+/// step at each column (`nose`, as [`step_nose`] finds them). A log is laid in the
+/// corner at the foot of the riser, on the column below, rather than along the lip of
+/// the one above, so it sits between the two treads the way a log set into a path does
+/// instead of perching on the edge of the step. Returns the log, the way from this
+/// column to the riser, and where the log ends across the way (as the step's).
+pub(crate) fn step_foot(n: usize, px: usize, pz: usize, nose: impl Fn(usize, usize) -> Option<trails::tread::StepAt>) -> Option<trails::tread::StepAt> {
+    for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+        let (x, z) = (px as i32 + dx, pz as i32 + dz);
+        if x < 0 || z < 0 || x >= n as i32 || z >= n as i32 {
+            continue;
+        }
+        if let Some((step @ trails::tread::Step::Log(_), down, open)) = nose(x as usize, z as usize)
+            && down == (-dx, -dz)
+        {
+            return Some((step, (dx, dz), open));
+        }
+    }
+    None
+}
+
 /// Sees each whole climbing plant a chunk column grows, before it is cut to the column.
 pub(crate) type Inspect<'a> = dyn FnMut(&features::climber::Root, &features::attach::Raster) + 'a;
 
@@ -634,7 +655,21 @@ impl GameWorld {
                     if plants.len() == grown {
                         features::pebbles::scatter(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
                     }
-                    trails::tread::dress(col, step, wx as i32, wz as i32, self.seed, &mut plants);
+                    // A log step lies at the foot of its riser, on this column if the
+                    // riser stands beside it.
+                    let nose_at = |x: usize, z: usize| {
+                        let c = &wide[x * WIDE + z];
+                        if c.worn.is_none() || x == 0 || z == 0 || x == WIDE - 1 || z == WIDE - 1 {
+                            return None;
+                        }
+                        let gx = (ground(x + 1, z) - ground(x - 1, z)) * 0.5;
+                        let gz = (ground(x, z + 1) - ground(x, z - 1)) * 0.5;
+                        let (nx, nz) = ((wx0 - 1 + x as i32) as f64, (wz0 - 1 + z as i32) as f64);
+                        let patch = crate::surface::ground_patch(self.seed, nx, nz);
+                        step_nose(&wide, WIDE, x, z, gx.hypot(gz), patch, self.seed, wx0 - 1, wz0 - 1)
+                    };
+                    let foot = step_foot(WIDE, px + 1, pz + 1, nose_at);
+                    trails::tread::dress(col, foot, wx as i32, wz as i32, self.seed, &mut plants);
                 }
                 skins.push(skin);
             }
