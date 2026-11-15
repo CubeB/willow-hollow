@@ -271,6 +271,15 @@ any chunk; the bees and wasps in the air (`crates/game/src/insects.rs`) fly from
 an apiary should look there for colonies. With `RUST_LOG=warn,game=debug` a screenshot
 logs the nests within 200 m of the camera, to aim a shot at one.
 
+**Starlings.** On about one evening in five of late autumn, over open country or reeds, a
+murmuration gathers at dusk (`crates/game/src/starlings.rs`). `--murmuration` puts one
+ahead of the camera whatever the date, hour and country; give it `--ambient 20` or more
+to see the cloud a while after it has gathered.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot starlings.png --over 42186,30679,4 --look 180,8 --time 16.6 --date november --murmuration --ambient 20 --no-audio
+```
+
 **Generation speed.** Times chunk generation and prints a checksum of everything
 generated. A change that is only meant to make generation faster must leave the
 checksum as it was.

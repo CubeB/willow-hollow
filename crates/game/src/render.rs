@@ -1271,7 +1271,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let particle_capacity = 8192;
+        // Room for every particle there can be, and a murmuration's birds besides.
+        let particle_capacity = 10240;
         let particle_instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particle instances"),
             size: (particle_capacity * size_of::<ParticleInstance>()) as u64,

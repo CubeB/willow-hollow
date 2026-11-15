@@ -21,6 +21,7 @@ mod player;
 mod profile;
 mod render;
 mod season;
+mod starlings;
 mod settings;
 mod weather;
 mod terrain;
@@ -98,6 +99,8 @@ struct Options {
     weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
     fresh: bool,
+    /// A murmuration of starlings ahead, whatever the date, hour and country.
+    murmuration: bool,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     /// Write the map of the continent around the start to this PNG, then exit.
@@ -164,6 +167,7 @@ impl Default for Options {
             date: None,
             weather: None,
             fresh: false,
+            murmuration: false,
             screenshot: None,
             map: None,
             audio: true,
@@ -241,6 +245,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
                         to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
+  --murmuration         starlings gathering ahead of the camera, whatever the date and hour
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went (with --bigmap,
@@ -282,6 +287,7 @@ fn parse_args() -> Result<Options> {
         match a.as_str() {
             "--seed" => o.overrides.seed = Some(value()?.parse()?),
             "--fresh" => o.fresh = true,
+            "--murmuration" => o.murmuration = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
@@ -941,6 +947,7 @@ impl Running {
         log::info!("startup: world after {:.2} s", began.elapsed().as_secs_f32());
         camera.fov_y = settings.fov.to_radians();
         camera.sensitivity = settings.sensitivity;
+        let looking = camera.forward();
         let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
         let mut player = Player::new(feet);
         if let Some(p) = progress.filter(|p| p.travel == Travel::Sailing) {
@@ -989,7 +996,14 @@ impl Running {
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
             env: Environment::at(time, date),
-            particles: Particles::new(),
+            particles: {
+                let mut p = Particles::new();
+                // Asked for: ahead of where the camera first looks.
+                if opts.murmuration {
+                    p.starlings.forced = Some(looking);
+                }
+                p
+            },
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
@@ -1792,6 +1806,7 @@ impl Running {
             land: &|x, z| particles::land_under(&self.world, x, z),
             nests: &self.nests.0,
             forage: &self.nests.1,
+            hour: self.env.time,
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
         self.voxels.trim(self.camera.pos);
@@ -2411,6 +2426,9 @@ fn main() -> Result<()> {
         smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         let mut particles = Particles::new();
+        if opts.murmuration {
+            particles.starlings.forced = Some(camera.forward());
+        }
         for step in 0..(opts.ambient * 60.0) as u32 {
             let surroundings = Surroundings {
                 camera: camera.pos,
@@ -2432,6 +2450,7 @@ fn main() -> Result<()> {
                 land: &|x, z| particles::land_under(&world, x, z),
                 nests: &nests.0,
                 forage: &nests.1,
+                hour: env.time,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
@@ -2439,6 +2458,10 @@ fn main() -> Result<()> {
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
+        }
+        if let Some((at, n)) = particles.starlings.now() {
+            let off = at - camera.pos;
+            log::info!("murmuration of {n} starlings at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
         }
         // Where the nests further about are, to aim a shot at one (RUST_LOG=game=debug).
         if log::log_enabled!(log::Level::Debug) {
