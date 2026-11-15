@@ -90,6 +90,13 @@ impl Placement {
         self.lie.map_or(0, |l| l.rise)
     }
 
+    /// How far across the ground from `pos` any of it lies: its model, or a big tree's
+    /// buttresses where they spread further.
+    pub fn reach(&self, lib: &Library) -> i32 {
+        let model = lib.get(self.species, self.variant).reach;
+        self.roots.map_or(model, |r| model.max(r.spread()))
+    }
+
     /// The highest voxel the model can reach.
     pub fn top(&self, lib: &Library) -> i32 {
         self.pos.y + lib.get(self.species, self.variant).top + self.rise().max(0)
@@ -744,7 +751,8 @@ impl Cell {
                 let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
                 c.water_surface().is_none().then_some(c.top())
             };
-            roots::find(lib, species, variant, turns, pos, world_seed, ground)
+            // Buttresses keep within the layer's reach: as far as a chunk looks for trees.
+            roots::find(lib, species, variant, turns, pos, world_seed, layer.reach - 2, ground)
         };
         Grown {
             chosen: true,

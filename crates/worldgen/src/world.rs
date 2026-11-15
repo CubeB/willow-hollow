@@ -720,15 +720,15 @@ impl GameWorld {
             PAD as i32,
             (mx * MACRO_SIZE, mz * MACRO_SIZE),
         );
-        // Only the features whose model can touch this column.
+        // Only the features whose model, or buttresses, can touch this column.
         let mut placements: Vec<_> = placements
             .into_iter()
             .filter(|p| {
-                let t = lib.get(p.species, p.variant);
-                p.pos.x + t.reach >= wx0
-                    && p.pos.x - t.reach < wx0 + PAD as i32
-                    && p.pos.z + t.reach >= wz0
-                    && p.pos.z - t.reach < wz0 + PAD as i32
+                let reach = p.reach(lib);
+                p.pos.x + reach >= wx0
+                    && p.pos.x - reach < wx0 + PAD as i32
+                    && p.pos.z + reach >= wz0
+                    && p.pos.z - reach < wz0 + PAD as i32
             })
             .collect();
         if !tors.is_empty() {
