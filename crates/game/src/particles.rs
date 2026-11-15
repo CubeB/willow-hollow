@@ -222,6 +222,28 @@ pub struct Surroundings<'a> {
     pub snow: f32,
     pub storm: f32,
     pub time: f64,
+    /// The height of the land at a place, roughly (see [`land_under`]), or None where it
+    /// is not known yet: what flocks keep above.
+    pub land: &'a dyn Fn(f64, f64) -> Option<f64>,
+}
+
+/// The height of the land around `(x, z)` from the continent's map, in voxels: the
+/// highest of the map's cells around it, so a flock kept above it clears the hills on it
+/// wherever between the cells they rise. None until the continent there is ready.
+pub fn land_under(world: &worldgen::world::GameWorld, x: f64, z: f64) -> Option<f64> {
+    use worldgen::macro_layout::{MACRO_SIZE, cell_of};
+    let (mx, mz) = cell_of(x.floor() as i32, z.floor() as i32);
+    let c = world.continent_if_ready(mx, mz)?;
+    let cs = c.cell_size() as f64;
+    let (lx, lz) = ((x - (mx * MACRO_SIZE) as f64) / cs, (z - (mz * MACRO_SIZE) as f64) / cs);
+    let max = c.size as i32 - 1;
+    let mut highest = f32::MIN;
+    for gz in (lz.floor() as i32 - 1).clamp(0, max)..=(lz.floor() as i32 + 1).clamp(0, max) {
+        for gx in (lx.floor() as i32 - 1).clamp(0, max)..=(lx.floor() as i32 + 1).clamp(0, max) {
+            highest = highest.max(c.height[gz as usize * c.size + gx as usize]);
+        }
+    }
+    Some((highest * worldgen::scale::OLD_VOXEL) as f64)
 }
 
 pub struct Particles {
@@ -627,11 +649,11 @@ impl Particles {
         if day && self.bird_timer <= 0.0 {
             self.bird_timer = self.range(25.0, 60.0);
             if self.flocks.len() < MAX_FLOCKS {
-                self.spawn_flock(s.camera);
+                self.spawn_flock(s.camera, s.land);
             }
         }
         for flock in &mut self.flocks {
-            flock.update(dt);
+            flock.update(dt, s.land);
         }
         self.flocks.retain(|f| !f.gone(s.camera));
 
@@ -1132,7 +1154,7 @@ const MAX_FLOCKS: usize = 2;
 const FLOCK_REACH: f32 = 380.0;
 
 impl Particles {
-    fn spawn_flock(&mut self, camera: DVec3) {
+    fn spawn_flock(&mut self, camera: DVec3, land: &dyn Fn(f64, f64) -> Option<f64>) {
         let vpm = VOXELS_PER_METRE;
         // Big birds a third of the time, and their flocks are smaller.
         let large = self.unit() < 0.4;
@@ -1146,10 +1168,14 @@ impl Particles {
         let dir = Vec3::new(heading.cos(), 0.0, heading.sin());
         let side = Vec3::new(-dir.z, 0.0, dir.x);
         let height = if large { self.range(35.0, 120.0) } else { self.range(18.0, 70.0) };
-        // From out of sight on one side, passing over or near the player.
-        let start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
+        // From out of sight on one side, passing over or near the player, and never
+        // starting inside a hill out there.
+        let mut start = camera - (dir * self.range(230.0, 300.0) * vpm).as_dvec3()
             + (side * self.range(-70.0, 70.0) * vpm).as_dvec3()
             + DVec3::new(0.0, (height * vpm) as f64, 0.0);
+        if let Some(ground) = land(start.x, start.z) {
+            start.y = start.y.max(ground + (Flock::clearance(large) + height * 0.5 * vpm) as f64);
+        }
         let speed = if large { self.range(13.0, 17.0) } else { self.range(10.0, 14.0) } * vpm;
         let (body, span) = if large { (self.range(0.6, 0.9), self.range(0.65, 0.85)) } else { (0.22, 0.2) };
         // Geese and cormorants dark, gulls pale; small birds near black against the sky.
@@ -1208,7 +1234,45 @@ impl Particles {
 }
 
 impl Flock {
-    fn update(&mut self, dt: f32) {
+    /// How high over the land, in voxels, a flock keeps at the least.
+    fn clearance(large: bool) -> f32 {
+        if large { 40.0 * VOXELS_PER_METRE } else { 25.0 * VOXELS_PER_METRE }
+    }
+
+    /// Keeps the lead clear of the land ahead: it rises to pass over a hill in its way,
+    /// and where the land ahead climbs more steeply than it can, it turns toward the
+    /// lower side, as birds go round a mountain rather than into it.
+    fn keep_clear(&mut self, dt: f32, land: &dyn Fn(f64, f64) -> Option<f64>) {
+        let vpm = VOXELS_PER_METRE as f64;
+        let clear = Self::clearance(self.large) as f64;
+        let dir = DVec3::new(self.heading.cos() as f64, 0.0, self.heading.sin() as f64);
+        let side = DVec3::new(-dir.z, 0.0, dir.x);
+        let lead = self.lead;
+        let ahead = |d: f64, off: f64| land(lead.x + (dir.x * d + side.x * off) * vpm, lead.z + (dir.z * d + side.z * off) * vpm);
+        let mut need = f64::MIN;
+        let mut steep = false;
+        for d in [0.0, 30.0, 60.0, 100.0] {
+            let Some(ground) = ahead(d, 0.0) else { continue };
+            let rise = ground + clear - lead.y;
+            need = need.max(rise);
+            // More to climb than it could by the time it got there, rising at a third of
+            // its speed.
+            if rise > d.max(10.0) * vpm / 3.0 {
+                steep = true;
+            }
+        }
+        if need > 0.0 {
+            self.lead.y += need.min((self.speed * 0.5 * dt) as f64);
+        }
+        if steep {
+            let (left, right) = (ahead(60.0, -60.0), ahead(60.0, 60.0));
+            let way = if left.unwrap_or(f64::MAX) < right.unwrap_or(f64::MAX) { -1.0 } else { 1.0 };
+            self.heading += way * 0.8 * dt;
+        }
+    }
+
+    fn update(&mut self, dt: f32, land: &dyn Fn(f64, f64) -> Option<f64>) {
+        self.keep_clear(dt, land);
         let vpm = VOXELS_PER_METRE;
         self.age += dt;
         let (a, seed) = (self.age as f64, self.seed as f64);
@@ -1391,6 +1455,7 @@ mod leaf_tests {
             snow: 0.0,
             storm: 0.0,
             time,
+            land: &|_, _| Some(0.0),
         }
     }
 
@@ -1477,18 +1542,38 @@ mod leaf_tests {
     }
 
     #[test]
+    fn flocks_go_over_or_round_a_mountain_and_never_into_it() {
+        use super::*;
+        // A wall of mountain 300 m high, 150 m off, across the way the flock is going.
+        let vpm = VOXELS_PER_METRE as f64;
+        let land = |x: f64, _z: f64| Some(if x > 150.0 * vpm { 300.0 * vpm } else { 0.0 });
+        let mut p = Particles::new();
+        for _ in 0..12 {
+            p.flocks.clear();
+            p.spawn_flock(DVec3::ZERO, &land);
+            let mut f = p.flocks.pop().unwrap();
+            (f.heading, f.lead) = (0.0, DVec3::new(0.0, 40.0 * vpm, 0.0));
+            for step in 0..60 * 60 {
+                f.update(1.0 / 60.0, &land);
+                let ground = land(f.lead.x, f.lead.z).unwrap();
+                assert!(f.lead.y > ground, "into the mountain after {:.1} s, {:.0} m up at {:.0} m along", step as f64 / 60.0, f.lead.y / vpm, f.lead.x / vpm);
+            }
+        }
+    }
+
+    #[test]
     fn flocks_hold_together_and_beat_their_wings() {
         use super::*;
         let mut p = Particles::new();
         let mut kinds = (false, false);
         for _ in 0..12 {
             p.flocks.clear();
-            p.spawn_flock(DVec3::ZERO);
+            p.spawn_flock(DVec3::ZERO, &|_, _| Some(0.0));
             let mut f = p.flocks.pop().unwrap();
             kinds = (kinds.0 || f.large, kinds.1 || !f.large);
             let mut wings = (f32::MAX, f32::MIN);
             for _ in 0..60 * 40 {
-                f.update(1.0 / 60.0);
+                f.update(1.0 / 60.0, &|_, _| Some(0.0));
                 for b in &f.birds {
                     assert!(b.pos.is_finite() && b.vel.is_finite());
                     wings = (wings.0.min(b.wing), wings.1.max(b.wing));

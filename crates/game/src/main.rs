@@ -1736,6 +1736,7 @@ impl Running {
             snow: self.weather.now.snow,
             storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
+            land: &|x, z| particles::land_under(&self.world, x, z),
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
         self.voxels.trim(self.camera.pos);
@@ -2367,6 +2368,7 @@ fn main() -> Result<()> {
                 snow: weather.now.snow,
                 storm: weather.now.storm,
                 time: step as f64 / 60.0,
+                land: &|x, z| particles::land_under(&world, x, z),
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
