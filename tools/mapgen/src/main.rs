@@ -458,6 +458,11 @@ fn print_trail_poi(c: &Continent, seed: u32) {
         let (x, z) = local(at.x as f32, at.z as f32);
         println!("  poi marker     {x},{z}  {kind:?}  {}", view(at.x, at.z));
     }
+    // The lanterns, and which of them anyone has lit.
+    for l in &c.trails.lanterns {
+        let (x, z) = local(l.at.x, l.at.y);
+        println!("  poi lantern    {x},{z}  {:?}{}  {}", l.cause, if l.lit { ", lit" } else { "" }, view(l.at.x as i32, l.at.y as i32));
+    }
     // The small delights: few enough that each is worth going to see.
     for d in &c.trails.delights {
         let (x, z) = local(d.at.x as f32, d.at.z as f32);
