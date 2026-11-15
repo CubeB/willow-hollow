@@ -679,7 +679,12 @@ impl GameWorld {
                 }
                 // The border columns belong to neighbouring chunk columns.
                 let own = !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32));
-                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }));
+                // Grass over rock is thin: at the foot of a tor and at the edge of a cliff
+                // or scree.
+                let by_rock = skin.0 == mat::TURF
+                    || (0..3).any(|i| (0..3).any(|j| matches!(wide[(px + i) * WIDE + pz + j].cover, Cover::Cliff | Cover::Scree | Cover::Boulders)));
+                let sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
+                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }, sward));
                 if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);

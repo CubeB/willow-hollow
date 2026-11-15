@@ -400,8 +400,10 @@ fn roofs(mats: &Materials, v: crate::Voxel) -> bool {
 /// plant standing on them when seen from afar: in its low six bits the padded y of the
 /// column's voxel that does (0 for none), and above them which colour, 1..=511. Every face
 /// of such a voxel carries [`flags::WASH`] and, where other faces keep fractions and
-/// corner bits (`a` bits 23..=31), the colour's number.
-pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool], wash: &[u16], falls: &mut Falls) -> ChunkMesh {
+/// corner bits (`a` bits 23..=31), the colour's number. Bits 16..22 are the column's
+/// sward code (see [`tag_bits`]), which every face of grassy ground in the column
+/// carries in the low bits of its colour.
+pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[Current], covered: &[bool], wash: &[u32], falls: &mut Falls) -> ChunkMesh {
     assert!(wash.is_empty() || wash.len() == PAD * PAD, "one wash per padded column");
     assert!(currents.is_empty() || currents.len() == PAD * PAD, "one current per padded column");
     assert!(covered.is_empty() || covered.len() == PAD * PAD, "one cover per padded column");
@@ -536,14 +538,18 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         // voxel every corner of a face belongs to.
                         let single = droppable(m.plant);
                         let mut tint = 0u64;
-                        if washed != 0 && (washed & 63) as usize == y && m.kind == Kind::Solid && !m.emissive {
-                            tint = (washed >> 6) as u64;
+                        if (washed >> 6) & 0x1FF != 0 && (washed & 63) as usize == y && m.kind == Kind::Solid && !m.emissive {
+                            tint = ((washed >> 6) & 0x1FF) as u64;
                             fl |= flags::WASH;
+                        }
+                        let mut colour = leaf_color_bits(m.color, m.plant);
+                        if m.plant == plant::GROUND {
+                            colour |= tag_bits((washed >> 16) as u8) as u64;
                         }
                         let key = 1
                             | tint << 48
                             | (uniform && !single) as u64 * 4
-                            | leaf_color_bits(m.color, m.plant) << 8
+                            | colour << 8
                             | (fl as u64) << 32
                             | ao_bits << 40;
                         let (slice, u, v) = (p[n_axis] - 1, p[u_axis] - 1, p[v_axis] - 1);
@@ -641,23 +647,26 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
 }
 
 /// The `wash` [`mesh_chunk_under_sky`] takes for the chunk at height `cy` (in chunks), from
-/// each padded column's ground height (in world voxels) and colour number (0 for none).
-/// Only ground standing open to the air is washed: none under a trunk, a rock or water.
-pub fn wash_map(chunk: &PaddedChunk, mats: &Materials, cy: i32, columns: &[(i32, u8)]) -> Vec<u16> {
-    if columns.iter().all(|c| c.1 == 0) {
+/// each padded column's ground height (in world voxels), colour number (0 for none) and
+/// sward code (0 for grass as its country grows it). Only ground standing open to the air
+/// is washed: none under a trunk, a rock or water. The sward goes with the column
+/// whatever stands on it.
+pub fn wash_map(chunk: &PaddedChunk, mats: &Materials, cy: i32, columns: &[(i32, u8, u8)]) -> Vec<u32> {
+    if columns.iter().all(|c| c.1 == 0 && c.2 == 0) {
         return Vec::new();
     }
     let voxels = chunk.voxels();
     columns
         .iter()
         .enumerate()
-        .map(|(i, &(top, code))| {
+        .map(|(i, &(top, code, sward))| {
+            let sward = ((sward & 63) as u32) << 16;
             let y = top - cy * CHUNK + 1;
             if code == 0 || !(1..=CHUNK).contains(&y) {
-                return 0;
+                return sward;
             }
             let above = mats.get(voxels[i * PAD + y as usize + 1]).kind;
-            if above == Kind::Air { y as u16 | (code as u16) << 6 } else { 0 }
+            sward | if above == Kind::Air { y as u32 | (code as u32) << 6 } else { 0 }
         })
         .collect()
 }
@@ -915,7 +924,47 @@ const TAG_BITS: u32 = 0x03_0303;
 #[inline]
 fn leaf_color_bits(c: [u8; 3], kind: u8) -> u64 {
     let bits = color_bits(c);
-    if matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::FLOWER) { bits & !(TAG_BITS as u64) } else { bits }
+    if matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::FLOWER | plant::GRASS | plant::GROUND) { bits & !(TAG_BITS as u64) } else { bits }
+}
+
+/// Six bits as a vertex carries them in the low two bits of each colour channel: a leaf
+/// its tree's tag (see [`tag_trees`]), and grass its sward code (worldgen's
+/// `surface::sward`: how wet and how worn the grass is where it grows), which `sward` in
+/// terrain.wgsl reads back. Grassy ground has it from [`mesh_chunk_under_sky`], tufts
+/// from [`tag_sward`].
+pub fn tag_bits(code: u8) -> u32 {
+    let t = (code & 63) as u32;
+    (t & 3) | (t >> 2 & 3) << 8 | (t >> 4 & 3) << 16
+}
+
+/// Gives every grass tuft in a mesh the sward code of the column it stands in, as
+/// [`tag_trees`] does a leaf its tree's tag. `code` is asked with the voxel each face
+/// belongs to, in the chunk's own voxels counted from `origin`.
+pub fn tag_sward(mesh: &mut ChunkMesh, origin: [i32; 3], mut code: impl FnMut([i32; 3]) -> u8) {
+    let plants = mesh.faces[6] as usize * 4;
+    for quad in mesh.opaque[plants..].chunks_exact_mut(4) {
+        if (quad[0].b >> 29) & 7 != plant::GRASS as u32 {
+            continue;
+        }
+        let bits = tag_bits(code(face_voxel(quad[0].a, origin)));
+        for v in quad {
+            v.b = (v.b & !TAG_BITS) | bits;
+        }
+    }
+}
+
+/// The voxel a face belongs to, from the first corner of its quad: the one the shader
+/// names (see `vertex_corner` in terrain.wgsl).
+fn face_voxel(a: u32, origin: [i32; 3]) -> [i32; 3] {
+    let mut voxel = [0i32; 3];
+    for (axis, v) in voxel.iter_mut().enumerate() {
+        let p = (a >> (6 * axis)) & 63;
+        let quarter = (a >> (23 + 2 * axis)) & 3;
+        // With no quarter, the corner bit says the corner is on the far side of its voxel.
+        let back = if quarter == 0 { (a >> (29 + axis)) & 1 } else { 0 };
+        *v = origin[axis] + p as i32 - back as i32;
+    }
+    voxel
 }
 
 /// Gives every broadleaf leaf face in a mesh the tag of the tree it grows on, 1..=63 (0
@@ -933,17 +982,7 @@ pub fn tag_trees(mesh: &mut ChunkMesh, origin: [i32; 3], mut tag: impl FnMut([i3
         if kind != plant::DECIDUOUS as u32 && kind != plant::AUTUMN as u32 {
             continue;
         }
-        let a = first.a;
-        let mut voxel = [0i32; 3];
-        for (axis, v) in voxel.iter_mut().enumerate() {
-            let p = (a >> (6 * axis)) & 63;
-            let quarter = (a >> (23 + 2 * axis)) & 3;
-            // With no quarter, the corner bit says the corner is on the far side of its voxel.
-            let back = if quarter == 0 { (a >> (29 + axis)) & 1 } else { 0 };
-            *v = origin[axis] + p as i32 - back as i32;
-        }
-        let t = (tag(voxel) & 63) as u32;
-        let bits = (t & 3) | (t >> 2 & 3) << 8 | (t >> 4 & 3) << 16;
+        let bits = tag_bits(tag(face_voxel(first.a, origin)));
         for v in quad {
             v.b = (v.b & !TAG_BITS) | bits;
         }
@@ -1195,10 +1234,10 @@ mod tests {
         chunk.set(9, 3, 9, stone);
         // The ground's height in each column, with a wash on three of them: one in the
         // open, one under the block, and one a level too low to be the top.
-        let mut columns = vec![(1, 0u8); PAD * PAD];
-        columns[5 * PAD + 5] = (1, 7);
-        columns[9 * PAD + 9] = (1, 9);
-        columns[12 * PAD + 12] = (0, 11);
+        let mut columns = vec![(1, 0u8, 0u8); PAD * PAD];
+        columns[5 * PAD + 5] = (1, 7, 0);
+        columns[9 * PAD + 9] = (1, 9, 0);
+        columns[12 * PAD + 12] = (0, 11, 0);
         let wash = wash_map(&chunk, &m, 0, &columns);
         assert_eq!(wash[5 * PAD + 5], 2 | 7 << 6);
         assert_eq!(wash[9 * PAD + 9], 0, "nothing grows under a block");
@@ -1213,7 +1252,7 @@ mod tests {
         let xs: Vec<u32> = washed[0].iter().map(|v| v.a & 63).collect();
         assert_eq!((xs.iter().min(), xs.iter().max()), (Some(&4), Some(&5)), "one voxel wide: it never merges with bare ground");
         // With no wash at all the map is empty, and the floor merges as it always did.
-        assert!(wash_map(&chunk, &m, 0, &vec![(1, 0u8); PAD * PAD]).is_empty());
+        assert!(wash_map(&chunk, &m, 0, &vec![(1, 0u8, 0u8); PAD * PAD]).is_empty());
     }
 
     #[test]

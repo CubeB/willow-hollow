@@ -180,10 +180,11 @@ fn lowest_ground(sampler: &Sampler, corners: &[Column], lx0: i32, lz0: i32, step
 
 /// The chunks of one coarse column: `(chunk y, voxels)`, in coarse cells, and the tall
 /// features stamped into them, in order (for telling whose leaves are whose). Then, for
-/// each padded cell, the height of its ground and the colour the plants growing there
-/// give it (as `ColumnOutput::wash`): the plant of one of the columns under the cell
-/// stands for them all, so a drift of heather is as thick here as it is close to.
-pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>, Vec<(i32, u8)>) {
+/// each padded cell, the height of its ground, the colour the plants growing there give
+/// it and how the grass grows there (as `ColumnOutput::wash`): the plant of one of the
+/// columns under the cell stands for them all, so a drift of heather is as thick here
+/// as it is close to.
+pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>, Vec<(i32, u8, u8)>) {
     let step = 1 << level;
     let span = CHUNK * step;
     let (wx0, wz0) = (cx * span - step, cz * span - step);
@@ -237,7 +238,11 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
             lo = lo.min(top);
             hi = hi.max(top).max(water.unwrap_or(i32::MIN));
             let grows = water.is_none() && cliff.is_none();
-            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }));
+            // The grass as the full-size ground has it, so it does not change at the
+            // ring's edge: from the column at the cell's corner, its slope across the cell.
+            let by_rock = four.iter().any(|c| matches!(c.cover, Cover::Cliff | Cover::Scree | Cover::Boulders));
+            let sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
+            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }, sward));
             cells.push(Cell { top, water, surface, under, cliff });
         }
     }

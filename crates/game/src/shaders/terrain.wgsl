@@ -151,6 +151,61 @@ fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale
     }
     return mix(ground, c, amount);
 }
+// The grass's own colour where it grows: the ground that is grass, and the tufts on it.
+// Where the world knows better (see worldgen's surface/sward.rs) `code` says how wet and
+// how worn it is there: its low three bits wetness, -4 parched to 3 lush, its next three
+// wear, 0 to 7. Here are added what the shader knows: which way the slope faces and how
+// steep it is (`slope`, the land's normal's x and z), the height, the shade of trees
+// (`open`, the voxel open to the sky), the season, and the grass's own pattern: clumps a
+// metre or so across, long swathes grazed short, and soft drifts of tens of metres. All
+// of it is one colour to a voxel, from where the voxel is, so the cubes still read as
+// cubes and neighbouring ones are alike, where each had a random brightness of its own.
+// `world` is the voxel's middle in metres; `fine` fades the finest pattern out where a
+// voxel is smaller than a pixel.
+fn sward(c: vec3<f32>, code: u32, world: vec2<f32>, slope: vec2<f32>, alt_m: f32, open: bool, fine: f32) -> vec3<f32> {
+    // Signed three bits: shifted to the top of a word and back down.
+    let wet_code = f32(i32(code << 29u) >> 29u) / 3.5;
+    let worn = f32((code >> 3u) & 7u) / 7.0;
+    // Tussocks and the hollows between them.
+    let clump = mix(0.5, vnoise(world / 1.1), fine);
+    let drift = vnoise(world / 24.0 + vec2<f32>(7.9, 31.1)) - 0.5;
+    // Swathes, long and narrow, where beasts have grazed the grass short: lying across
+    // the world one way, bent by the drifts so they wander. (Turning them by a noise of
+    // their own spun the pattern about the world's origin, kilometres off, so it changed
+    // from voxel to voxel.)
+    let q = vec2<f32>(dot(world, vec2<f32>(0.8, 0.6)), dot(world, vec2<f32>(-0.6, 0.8)) + drift * 28.0);
+    let grazed = smoothstep(0.56, 0.78, vnoise(vec2<f32>(q.x / 32.0, q.y / 7.5) + vec2<f32>(41.0, 13.0)));
+    // A slope turned to the midday sun (toward +z) dries; one turned from it stays damp.
+    let sunward = slope.y * smoothstep(0.05, 0.5, length(slope));
+    let s = G.season.x;
+    // The end of summer, when dry grass shows most.
+    let dry_season = smoothstep(0.30, 0.48, s) * (1.0 - smoothstep(0.60, 0.72, s));
+    var wet = wet_code + drift * 0.9 - sunward * 0.9 + select(0.0, 0.35, !open);
+    wet *= 1.0 + 0.6 * dry_season * step(wet, 0.0);
+    wet = clamp(wet, -1.0, 1.0);
+    let lum = dot(c, vec3<f32>(0.3, 0.59, 0.11));
+    var o = c;
+    // Lush: deeper and greener. Dry: thin, toward straw.
+    o = mix(o, o * vec3<f32>(0.80, 0.93, 0.78), max(wet, 0.0) * 0.55);
+    o = mix(o, vec3<f32>(1.20, 1.08, 0.52) * lum, max(-wet, 0.0) * 0.38);
+    // Worn by feet, or grazed short: paler, a little grey, the soil showing through.
+    let short = clamp(worn + grazed * 0.45, 0.0, 1.0);
+    o = mix(o, vec3<f32>(1.10, 1.02, 0.78) * lum * 1.08, short * 0.32);
+    // Clumps stand a little darker than the grass between them.
+    o *= 0.94 + 0.12 * clump;
+    // Under trees the grass is thin and drawn: duller and cooler.
+    if (!open) {
+        o = mix(o, vec3<f32>(dot(o, vec3<f32>(0.3, 0.59, 0.11))) * vec3<f32>(0.9, 1.0, 0.95), 0.22);
+    }
+    // High up it is short and grey-green in the cold.
+    let cold = smoothstep(150.0, 650.0, alt_m);
+    o = mix(o, vec3<f32>(dot(o, vec3<f32>(0.3, 0.59, 0.11))) * vec3<f32>(0.92, 1.0, 1.0), cold * 0.3);
+    // New growth in spring is brightest where the ground is wet.
+    let flush = smoothstep(0.03, 0.10, s) * (1.0 - smoothstep(0.16, 0.26, s));
+    o = mix(o, o * vec3<f32>(1.12, 1.15, 0.85), flush * clamp(wet + 0.5, 0.0, 1.0) * 0.5);
+    return o;
+}
+
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 // How far in from a face its voxel is looked for, in voxels: less than the thinnest
 // thing drawn (a skin an eighth of a voxel thick), and well clear of rounding.
@@ -280,15 +335,20 @@ fn shade(in: VOut) -> vec4<f32> {
     // each pixel one voxel or the other and the face would be speckled with both.
     let cell = floor(in.local - n * INWARD);
     let voxel = vec3<i32>(cell) + in.origin;
-    let jitter = f32((in.flags >> 1u) & 3u);
+    let kind = (in.flags >> 5u) & 7u;
+    let tag = (in.flags >> 8u) & 63u;
+    let grass = kind == PLANT_GRASS || kind == PLANT_GROUND;
+    // Grass takes most of its variety from where it grows (see `sward`), not at random.
+    var jitter = f32((in.flags >> 1u) & 3u);
+    if (grass) {
+        jitter *= 0.3;
+    }
     let h = hash3(voxel);
     let h2 = hash3(voxel.zxy + vec3<i32>(17, 31, 59));
     // Each cube gets its own slight brightness and warmth so merged faces still read as cubes.
     var base = in.color * (1.0 + (h - 0.5) * 0.09 * jitter);
     base *= vec3<f32>(1.0 + (h2 - 0.5) * 0.03 * jitter, 1.0, 1.0 - (h2 - 0.5) * 0.03 * jitter);
     // The season: leaf colour and fall, dry or wintry grass.
-    let kind = (in.flags >> 5u) & 7u;
-    let tag = (in.flags >> 8u) & 63u;
     if (kind == PLANT_FLOWER && tag != 0u) {
         // A flower in bud, out or gone to seed, by its own season.
         base = season_bloom(base, season_phase(G.flowering[tag], G.season.x, voxel.xz));
@@ -300,6 +360,11 @@ fn shade(in: VOut) -> vec4<f32> {
     let washed = (in.flags >> 16u) & 511u;
     if (washed != 0u) {
         base = wash(base, washed, voxel, centre, in.scale);
+    }
+    if (grass) {
+        let world_m = (vec2<f32>(voxel.xz) + 0.5) * (in.scale / VOXELS_PER_METRE);
+        let alt_m = (G.cam_wrapped.y + centre.y) / VOXELS_PER_METRE;
+        base = sward(base, tag, world_m, in.slope, alt_m, (in.flags & FLAG_SKY) != 0u, 1.0 - far);
     }
     let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
     base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);

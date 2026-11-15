@@ -13,8 +13,8 @@ use std::{
 
 use glam::{DVec3, IVec3};
 use voxel::{
-    CHUNK,
-    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees, wash_map},
+    CHUNK, PAD,
+    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_sward, tag_trees, wash_map},
 };
 use worldgen::{Cascade, SpringMark, Surf, World, features, scale::m, world::GameWorld};
 
@@ -794,6 +794,11 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             let corner = [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK];
             let mut tags = features::LeafTags::new(world.library(), world.materials(), &output.trees, IVec3::from_array(corner));
             tag_trees(&mut mesh, corner, |q| tags.tag(IVec3::from_array(q)));
+            // The tufts grow as the grass of the column they stand in.
+            tag_sward(&mut mesh, corner, |q| {
+                let (px, pz) = ((q[0] - corner[0] + 1) as usize, (q[2] - corner[2] + 1) as usize);
+                output.wash.get(px * PAD + pz).map_or(0, |w| w.2)
+            });
             (*cy, mesh)
         })
         .filter(|(_, mesh)| !mesh.is_empty())

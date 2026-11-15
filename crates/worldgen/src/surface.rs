@@ -14,6 +14,7 @@ mod cliff;
 mod coast;
 mod current;
 pub mod overhang;
+pub mod sward;
 mod ravine;
 mod sea_cliff;
 mod spring;
