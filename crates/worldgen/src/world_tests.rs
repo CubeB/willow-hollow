@@ -336,3 +336,58 @@ fn nothing_small_grows_up_through_a_bridge() {
     assert!(looked > 0);
     assert_eq!(under, 0, "{under} plants grow up into something solid");
 }
+
+#[test]
+fn nests_are_found_where_the_chunks_build_them() {
+    use crate::features::nests::{Host, NestKind};
+    let w = world();
+    let c = w.continent(0, 0);
+    // Land all over the continent, wooded or not, until a good few nests have turned up.
+    let mut nests = Vec::new();
+    let n = c.size;
+    let cs = c.cell_size();
+    'look: for i in (0..n * n).step_by(97) {
+        if c.ocean[i] {
+            continue;
+        }
+        let (x, z) = (((i % n) as f32 + 0.5) * cs, ((i / n) as f32 + 0.5) * cs);
+        let found = w.nests_near(x as i32, z as i32, 160);
+        // Asked again from a little way off, the same nests are where they were.
+        let again = w.nests_near(x as i32 + 40, z as i32 - 30, 220);
+        for nest in &found {
+            assert!(again.contains(nest), "{nest:?} not found again from nearby");
+        }
+        for nest in found {
+            if !nests.contains(&nest) {
+                nests.push(nest);
+            }
+            if nests.len() >= 24 {
+                break 'look;
+            }
+        }
+    }
+    assert!(nests.len() >= 6, "only {} nests on the test continent", nests.len());
+    let kinds = |k| nests.iter().filter(|n| n.kind == k).count();
+    eprintln!("{} bees' nests, {} wasps'", kinds(NestKind::Bees), kinds(NestKind::Wasps));
+    // The chunks hold each where it was said to be, unless something built stands there.
+    let at = |q: glam::IVec3| {
+        let (cx, cz) = (q.x.div_euclid(CHUNK), q.z.div_euclid(CHUNK));
+        let chunks = w.generate_column(cx, cz).chunks;
+        let (cy, ly) = (q.y.div_euclid(CHUNK), q.y.rem_euclid(CHUNK));
+        let (px, pz) = ((q.x - (cx * CHUNK - 1)) as usize, (q.z - (cz * CHUNK - 1)) as usize);
+        chunks.iter().find(|(y, _)| *y == cy).map(|(_, ch)| ch.get(px, ly as usize + 1, pz))
+    };
+    let mut built = 0;
+    for nest in &nests {
+        let as_said = match nest.host {
+            Host::Hollow | Host::Crevice => at(nest.door) == Some(voxel::AIR) && at(nest.door - nest.out) == Some(mat::NEST_HOLLOW),
+            Host::Branch => at(nest.door) == Some(mat::NEST_HOLLOW) && at(nest.door + glam::IVec3::Y * 2) == Some(mat::WASP_PAPER),
+        };
+        if as_said {
+            built += 1;
+        } else {
+            eprintln!("{nest:?} is not in the chunks");
+        }
+    }
+    assert!(built * 10 >= nests.len() * 9, "only {built} of {} nests are in the chunks", nests.len());
+}

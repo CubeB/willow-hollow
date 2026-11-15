@@ -9,6 +9,7 @@ mod fallen;
 mod farview;
 mod gfx;
 mod impostors;
+mod insects;
 mod inventory;
 mod journal;
 mod lod;
@@ -650,7 +651,20 @@ fn scan_surroundings(
     }
     // And the sticks fallen under the trees about.
     let sticks = fallen::near(world, voxels, camera);
-    (biome, leaves, flowers, low_ground(world, cx, cz), sticks)
+    // The nests in sight, and the flowers in bloom a bee from each could fly to: a few
+    // nests at most, so it is a few small squares of the world to look over.
+    let nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    let mut forage = Vec::new();
+    for n in nests.iter().filter(|n| n.kind == worldgen::features::nests::NestKind::Bees && insects::on_the_wing(n.kind, date)).take(3) {
+        let reach = m(insects::FORAGE as f32) as i32;
+        for (at, flower) in world.flowers_standing(n.door.x - reach, n.door.z - reach, 2 * reach + 1) {
+            use worldgen::features::plants::Flower;
+            if flower.blooming_at(date, at.x, at.z) && !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) {
+                forage.push((at.as_dvec3(), to_linear(flower.color())));
+            }
+        }
+    }
+    (biome, leaves, flowers, low_ground(world, cx, cz), sticks, (nests, forage))
 }
 
 /// The lowest ground or water within a short walk: where mist gathers. Standing in a
@@ -667,7 +681,10 @@ fn low_ground(world: &GameWorld, cx: i32, cz: i32) -> f32 {
 
 /// The biome, leaves and flowers round the camera, the low ground near it, and the
 /// sticks lying under the trees.
-type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>);
+type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>, Bees);
+
+/// The nests of bees and wasps near, and the flowers in bloom about them.
+type Bees = (Vec<worldgen::features::nests::Nest>, Spots);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -727,6 +744,8 @@ struct Running {
     flowers: Vec<(DVec3, [f32; 3])>,
     /// Sticks lying on the ground near the player, refreshed with them.
     fallen: Vec<fallen::Stick>,
+    /// The bees' and wasps' nests near, and the flowers about them.
+    nests: Bees,
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
@@ -974,6 +993,7 @@ impl Running {
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
+            nests: (Vec::new(), Vec::new()),
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
@@ -1737,7 +1757,7 @@ impl Running {
         }
         if let Some(found) = self.scanner.poll() {
             let low;
-            (self.biome, self.leaves, self.flowers, low, self.fallen) = found;
+            (self.biome, self.leaves, self.flowers, low, self.fallen, self.nests) = found;
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
@@ -1770,6 +1790,8 @@ impl Running {
             storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
             land: &|x, z| particles::land_under(&self.world, x, z),
+            nests: &self.nests.0,
+            forage: &self.nests.1,
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
         self.voxels.trim(self.camera.pos);
@@ -2343,7 +2365,7 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers, low, sticks) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
+        let (biome, leaves, flowers, low, sticks, nests) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
@@ -2408,6 +2430,8 @@ fn main() -> Result<()> {
                 storm: weather.now.storm,
                 time: step as f64 / 60.0,
                 land: &|x, z| particles::land_under(&world, x, z),
+                nests: &nests.0,
+                forage: &nests.1,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
@@ -2415,6 +2439,12 @@ fn main() -> Result<()> {
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
+        }
+        // Where the nests further about are, to aim a shot at one (RUST_LOG=game=debug).
+        if log::log_enabled!(log::Level::Debug) {
+            for n in world.nests_near(camera.pos.x as i32, camera.pos.z as i32, m(200.0) as i32) {
+                log::debug!("nest of {:?} in a {:?} at {} {} {}, facing {}", n.kind, n.host, n.door.x, n.door.y, n.door.z, n.out);
+            }
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));

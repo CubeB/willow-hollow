@@ -140,6 +140,45 @@ impl GameWorld {
         out
     }
 
+    /// The wild bees' and wasps' nests (see [`features::nests`]) whose door is within
+    /// `reach` voxels of the column at `(x, z)`, nearest first: the same nests the chunks
+    /// there are built with, found without building them. Never blocks, and only from
+    /// the continent `(x, z)` is on: nothing until it is simulated. This is what the bees
+    /// in the air fly from, and where a beekeeper will look for a colony to take.
+    pub fn nests_near(&self, x: i32, z: i32, reach: i32) -> Vec<features::nests::Nest> {
+        let (mx, mz) = cell_of(x, z);
+        let Some(c) = self.continent_if_ready(mx, mz) else { return Vec::new() };
+        // A nest's door is inside its host, so a host this much further out can hold one.
+        let span = 2 * (reach + features::MAX_REACH) + 1;
+        let (x0, z0) = (x - reach - features::MAX_REACH, z - reach - features::MAX_REACH);
+        let (lx0, lz0) = (x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE);
+        let margin = features::MAX_REACH + 1;
+        let sampler = Sampler::new(&c, self.seed, lx0 - margin, lz0 - margin, span + 2 * margin);
+        let lib = self.library();
+        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        // Chunks leave out what stands in a tor's rock; so must this.
+        let tors = self.tors.near(self.seed, &c, x0, z0, span);
+        let mut out: Vec<_> = placements
+            .iter()
+            .filter(|p| !tors.iter().any(|t| t.crowds(p.pos)))
+            .filter_map(|p| {
+                let biome = || sampler.column(p.pos.x - mx * MACRO_SIZE, p.pos.z - mz * MACRO_SIZE).biome;
+                features::nests::of(lib, &self.materials, p, biome, self.seed)
+            })
+            .filter(|n| {
+                let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+                dx * dx + dz * dz <= reach as i64 * reach as i64
+            })
+            .collect();
+        out.sort_by_key(|n| {
+            let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+            (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
+        });
+        // A placement cell can be met from both sides of a square; a nest is one nest.
+        out.dedup();
+        out
+    }
+
     /// Picks what grows on the column at `(x, z)`: columns built from now on have nothing
     /// growing there, and [`Self::flowers_in`] no longer names it. Whoever shows the
     /// column must build it again to see it gone.
@@ -966,6 +1005,16 @@ impl GameWorld {
         };
         for p in &placements {
             features::stamp(lib, &self.materials, p, &mut put);
+        }
+        // The bees' and wasps' nests in them, after every tree, so another's limb or
+        // leaves never fill a hollow.
+        for p in &placements {
+            let biome = || sampler.column(p.pos.x - mx * MACRO_SIZE, p.pos.z - mz * MACRO_SIZE).biome;
+            if let Some(nest) = features::nests::of(lib, &self.materials, p, biome, self.seed) {
+                for (q, v) in nest.voxels() {
+                    put(q, v, true);
+                }
+            }
         }
         for &(q, v) in &rock {
             put(q, v, true);

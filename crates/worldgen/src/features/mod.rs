@@ -14,6 +14,7 @@ pub mod designs;
 pub mod landmarks;
 pub mod moorstones;
 pub mod moss;
+pub mod nests;
 pub mod parts;
 pub mod pebbles;
 pub mod plants;

@@ -263,6 +263,14 @@ be a surprise, so add to the chances with care. Nothing makes a sound yet:
 `GameWorld::delights_near(x, z, reach)` lists the ones about a place, which is where
 the wind chimes' sound should start from when there are recordings.
 
+**Bees' and wasps' nests** (`crates/worldgen/src/features/nests.rs`) belong to the trees
+and boulders they are in, chosen by a hash of where each stands: a colony of bees in a
+hollow of an old tree or a crevice in a boulder, a wasps' globe under a branch.
+`GameWorld::nests_near(x, z, reach)` lists them, kind, host and door, without building
+any chunk; the bees and wasps in the air (`crates/game/src/insects.rs`) fly from it, and
+an apiary should look there for colonies. With `RUST_LOG=warn,game=debug` a screenshot
+logs the nests within 200 m of the camera, to aim a shot at one.
+
 **Generation speed.** Times chunk generation and prints a checksum of everything
 generated. A change that is only meant to make generation faster must leave the
 checksum as it was.
