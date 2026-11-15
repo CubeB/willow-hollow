@@ -275,7 +275,7 @@ impl Placed {
                 break;
             }
             if thing.is_fire() || d <= m64(SMALL_SIGHT) {
-                draw(thing, cam, clock, out);
+                draw_one(thing, cam, clock, out);
             }
         }
     }
@@ -337,8 +337,8 @@ impl Brush<'_> {
     }
 }
 
-/// Draws one thing.
-fn draw(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) {
+/// Draws one thing, wherever it is.
+pub fn draw_one(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) {
     let mut brush = Brush { out, base: (thing.pos - cam).as_vec3(), yaw: thing.yaw };
     if thing.is_fire() {
         fire(&mut brush, thing, clock);

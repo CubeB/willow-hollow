@@ -694,6 +694,13 @@ impl WorldVoxels {
             None => 0,
         }
     }
+
+    /// The trees and other features reaching into chunk column `col`, as it was
+    /// generated, generating it if it is not held yet.
+    pub fn trees(&mut self, col: (i32, i32)) -> &[worldgen::features::Placement] {
+        load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
+        self.trees.get(&col).map_or(&[], Vec::as_slice)
+    }
 }
 
 impl Voxels for WorldVoxels {

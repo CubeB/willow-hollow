@@ -4,6 +4,7 @@ mod camera;
 mod camp;
 mod character;
 mod env;
+mod fallen;
 mod farview;
 mod gfx;
 mod impostors;
@@ -434,27 +435,6 @@ const SMOULDERS: f32 = 1.5 / 24.0;
 /// How long the name of what has come to hand stays up, in seconds.
 const HAND_WORD: f32 = 2.6;
 
-/// Whether `v` is the wood of a standing tree, under which sticks are to be found.
-fn is_trunk(v: voxel::Voxel) -> bool {
-    use worldgen::materials as mat;
-    matches!(
-        v,
-        mat::BARK_OAK
-            | mat::BARK_BIRCH
-            | mat::BARK_PINE
-            | mat::BARK_REDWOOD
-            | mat::BARK_JUNGLE
-            | mat::BARK_PALM
-            | mat::BARK_WILLOW
-            | mat::BARK_ACACIA
-            | mat::BARK_BAOBAB
-            | mat::BARK_HOLLY
-            | mat::BARK_YEW
-            | mat::BARK_SCOTS
-            | mat::WOOD_DEAD
-    )
-}
-
 /// The ground under `(x, z)` nearest to height `y`: the top of the highest solid voxel
 /// with open air over it, looked for a little way up and down. None in water, or where
 /// there is no such ground.
@@ -635,7 +615,9 @@ fn scan_surroundings(
             flowers.push((at.as_dvec3(), to_linear(flower.color())));
         }
     }
-    (biome, leaves, flowers, low_ground(world, cx, cz))
+    // And the sticks fallen under the trees about.
+    let sticks = fallen::near(world, voxels, camera);
+    (biome, leaves, flowers, low_ground(world, cx, cz), sticks)
 }
 
 /// The lowest ground or water within a short walk: where mist gathers. Standing in a
@@ -650,8 +632,9 @@ fn low_ground(world: &GameWorld, cx: i32, cz: i32) -> f32 {
     low as f32
 }
 
-/// The biome, leaves and flowers round the camera, and the low ground near it.
-type Scan = (worldgen::biome::Biome, Leaves, Spots, f32);
+/// The biome, leaves and flowers round the camera, the low ground near it, and the
+/// sticks lying under the trees.
+type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -709,6 +692,8 @@ struct Running {
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
+    /// Sticks lying on the ground near the player, refreshed with them.
+    fallen: Vec<fallen::Stick>,
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
@@ -950,6 +935,7 @@ impl Running {
             particles: Particles::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
+            fallen: Vec::new(),
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
@@ -1137,19 +1123,14 @@ impl Running {
                 best = Some((d, (p.x, p.z), item));
             }
         }
-        // And sticks, from under any tree: by its trunk, once until more have fallen.
-        if best.is_none() {
-            for z in cz - span..=cz + span {
-                for x in cx - span..=cx + span {
-                    let d = DVec3::new(x as f64 + 0.5 - centre.x, 0.0, z as f64 + 0.5 - centre.z).length();
-                    if d > reach || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
-                        continue;
-                    }
-                    if (feet..=feet + 2).any(|y| is_trunk(self.voxels.voxel(x, y, z))) {
-                        best = Some((d, (x, z), inventory::sticks()));
-                    }
-                }
+        // And the sticks lying on the ground, until they are picked up.
+        for stick in &self.fallen {
+            let (x, z) = stick.spot();
+            let d = DVec3::new(stick.pos.x - centre.x, 0.0, stick.pos.z - centre.z).length();
+            if d > reach || (stick.pos.y - feet as f64).abs() > 3.0 || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+                continue;
             }
+            best = Some((d, (x, z), inventory::sticks()));
         }
         best.map(|b| (b.1, b.2))
     }
@@ -1163,8 +1144,11 @@ impl Running {
                 self.world.regrow(ox, oz);
                 self.streamer.replant(ox, oz);
             }
-            // (Sticks leave the tree as it was: there is nothing to build again.)
-            if item.id != "sticks" {
+            if item.id == "sticks" {
+                // All that lay there, which is not part of the world: nothing to build again.
+                let more = self.fallen.iter().find(|s| s.spot() == (x, z)).map_or(0, |s| s.count.saturating_sub(1));
+                self.pack.add_many(&item, more);
+            } else {
                 self.world.pick(x, z);
                 self.streamer.replant(x, z);
             }
@@ -1714,7 +1698,7 @@ impl Running {
         }
         if let Some(found) = self.scanner.poll() {
             let low;
-            (self.biome, self.leaves, self.flowers, low) = found;
+            (self.biome, self.leaves, self.flowers, low, self.fallen) = found;
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
@@ -1759,6 +1743,7 @@ impl Running {
         }
         self.placed.draw(self.camera.pos, clock, &mut self.props);
         let mut held_light = None;
+        fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2311,7 +2296,7 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers, low) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
+        let (biome, leaves, flowers, low, sticks) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
@@ -2350,6 +2335,7 @@ fn main() -> Result<()> {
             camera.yaw = (to.z.atan2(to.x) as f32).rem_euclid(std::f32::consts::TAU);
         }
         camp.draw(camera.pos, 0.6, &mut props);
+        fallen::draw(&sticks, &inventory::Pack::new(), camera.pos, &mut props);
         let fires: Vec<DVec3> = camp.near(camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
         // Smoke rises from them, and from the embers of the camps that were here already.
         let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);

@@ -198,6 +198,13 @@ tents once; a save from then still loads, without them.)
 ./target/release/game.exe --seed 1 --screenshot stars.png --over 42186,30679,5 --look 180,25 --time 23 --camp lit --rest
 ```
 
+Sticks lie fallen under the trees (`crates/game/src/fallen.rs`). They are not part of
+the world's generation, so they leave the `bench` checksum alone: where they lie comes
+from the trees the world grows and a hash of each tree's place. They are found again
+every couple of seconds round the player, on the same thread that looks for falling
+leaves; `RUST_LOG=warn,game::fallen=trace` logs where each lies, which is how to aim a
+screenshot at some. One picked up is a gathered spot in the pack, as a flower is.
+
 In a window, `--camp lit --rest` starts the run resting by the fire, and logs the hour
 the rest ended at: `--seed 1 --time 21 --camp lit --rest --frames 1500` watches a night
 go by.
