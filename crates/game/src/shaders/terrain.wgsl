@@ -222,11 +222,10 @@ const GRASS_TEXELS: f32 = 8.0;
 // it runs on from one block into the next without a seam, and stays put however the
 // camera moves. It is drawn rather than random: on a top, a few soft patches in three
 // close tones, and small tufts spread evenly, one to a square of four texels, each a
-// light blade tip with its leaves about it and its shadow below; on a side, the grass of
-// the top hanging over the edge in a fringe of blades in pairs, one of each pair longer,
-// a line of shadow under it, and the bank below a little darker and warmer. A plain face
-// with only a random brightness to each block read as cubes scattered with specks; this
-// reads as grass. `fine` and
+// light blade tip with its leaves about it and its shadow below. A plain face with only a
+// random brightness to each block read as cubes scattered with specks; this reads as
+// grass. Sides are left plain: a fringe of grass hanging over the edge was tried, and it
+// made the land look like a stack of game blocks rather than turf. `fine` and
 // `coarse` fade the tufts and the patches out as their texels shrink under a pixel, as
 // a mipmap would, toward the pattern's own average, so the far ground keeps its colour
 // and nothing sparkles.
@@ -256,24 +255,7 @@ fn grass_face(t: vec3<i32>, n: vec3<f32>, fine: f32, coarse: f32) -> vec3<f32> {
         b = (b - 0.0105) * fine;
         return 1.0 + tone * vec3<f32>(1.25, 1.0, 1.2) + b * vec3<f32>(1.1, 1.0, 0.7);
     }
-    if (n.y < -0.5) {
-        return vec3<f32>(1.0);
-    }
-    let along = select(t.x, t.z, abs(n.x) > 0.5);
-    // Texel rows down from the top of the voxel, 0 the highest.
-    let depth = 7 - (t.y & 7);
-    let ph = hash3(vec3<i32>(along >> 1u, t.y >> 3u, 389));
-    var reach = 1 + i32(ph * 3.0);
-    if ((along & 1) == i32(fract(ph * 5.7) * 2.0)) {
-        reach += 1;
-    }
-    var m = vec3<f32>(0.93, 0.89, 0.81);
-    if (depth < reach) {
-        m = vec3<f32>(1.06);
-    } else if (depth == reach) {
-        m = vec3<f32>(0.84);
-    }
-    return mix(vec3<f32>(1.0), m, fine);
+    return vec3<f32>(1.0);
 }
 
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
