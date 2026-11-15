@@ -116,6 +116,8 @@ struct Options {
     shot_pack: bool,
     /// Show the hotbar on a screenshot, with a few things in it.
     shot_hotbar: bool,
+    /// A line of words to show along the foot of a screenshot, as a prompt is shown.
+    shot_prompt: Option<String>,
     /// Make camp ahead of the camera before a screenshot: a tent, and a fire in this state.
     shot_camp: Option<u8>,
     /// With a camp made: lying in its tent on a screenshot, or resting in it from the
@@ -160,6 +162,7 @@ impl Default for Options {
             shot_pan: None,
             shot_pack: false,
             shot_hotbar: false,
+            shot_prompt: None,
             shot_camp: None,
             rest: false,
             picked: None,
@@ -197,6 +200,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --minimap             draw the corner map on a screenshot
   --pack                show the pack's window on a screenshot, with a few things in it
   --hotbar              show the hotbar on a screenshot, with a few things in it
+  --prompt TEXT         show TEXT along the foot of a screenshot, as a prompt is
   --camp STATE          make camp a few steps ahead before a screenshot: a tent, a few
                         things set down, and a fire that is laid, lit or burnt
   --rest                with --camp: on a screenshot, the view out of the tent's door,
@@ -289,6 +293,7 @@ fn parse_args() -> Result<Options> {
             "--minimap" => o.shot_map = Some(None),
             "--pack" => o.shot_pack = true,
             "--hotbar" => o.shot_hotbar = true,
+            "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
@@ -1837,11 +1842,7 @@ impl Running {
                 } else if journal_open {
                     journal::show(ctx, journal, journal_view);
                 } else if !grabbed && !map_open {
-                    egui::Area::new(egui::Id::unique("hint"))
-                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -150.0])
-                        .show(ctx, |ui| {
-                            ui.label(egui::RichText::new("Click the view (or press Tab) to look around").size(18.0));
-                        });
+                    overlay::bottom_line(ctx, "hint", "Click the view (or press Tab) to look around", 150.0, egui::Color32::from_gray(220));
                 }
                 // The hotbar is always there, but for the menu, the map and the pack
                 // (which shows it among its own slots).
@@ -1849,11 +1850,7 @@ impl Running {
                     inventory::hotbar(ctx, pack, hand_word.as_ref().map(|(text, shown)| (text.as_str(), *shown)));
                 }
                 if let Some(text) = prompt {
-                    egui::Area::new(egui::Id::unique("prompt"))
-                        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -112.0])
-                        .show(ctx, |ui| {
-                            ui.label(egui::RichText::new(text).size(18.0).color(egui::Color32::from_gray(235)));
-                        });
+                    overlay::bottom_line(ctx, "prompt", &text, 112.0, egui::Color32::from_gray(235));
                 }
                 if !show_debug {
                     return;
@@ -2412,6 +2409,9 @@ fn main() -> Result<()> {
             } else if text && let Some(pack) = &hotbar {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
+            }
+            if text && let Some(line) = &opts.shot_prompt {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
             let Some(map) = &mut map else { return };
             map.hour = env.time;

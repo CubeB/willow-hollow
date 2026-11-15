@@ -199,6 +199,32 @@ fn paint(
     }
 }
 
+/// A line of words along the bottom of the screen, `lift` points above its foot.
+///
+/// An anchored area is only as wide as it was the frame it was first measured, so a
+/// label left to wrap in one comes out a word to a line, a tall stack up the screen.
+/// The line is kept whole instead, and only wraps when it would run wider than most of
+/// the screen.
+pub fn bottom_line(ctx: &egui::Context, id: &str, text: &str, lift: f32, color: egui::Color32) {
+    let widest = (ctx.content_rect().width() * 0.8).max(200.0);
+    egui::Area::new(egui::Id::unique(id))
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -lift])
+        .interactable(false)
+        .show(ctx, |ui| {
+            ui.set_max_width(widest);
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_premultiplied(14, 17, 22, 150))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(14, 6))
+                .show(ui, |ui| {
+                    let words = egui::RichText::new(text).size(18.0).color(color);
+                    let galley = egui::WidgetText::from(words.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+                    let wrap = if galley.size().x > widest - 28.0 { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Extend };
+                    ui.add(egui::Label::new(words).wrap_mode(wrap));
+                });
+        });
+}
+
 /// Draws the map's names, given in pixels, with a soft halo so they read on any ground.
 pub fn map_labels(ctx: &egui::Context, labels: &[crate::minimap::Label]) {
     let ppp = ctx.pixels_per_point();
