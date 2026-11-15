@@ -10,7 +10,10 @@ struct Globals {
     sun_dir: vec4<f32>,
     // rgb: light colour. w: 1 by day, 0 by night (moonlight).
     sun_color: vec4<f32>,
+    // w: how far round the clouds' cycle of forming and clearing the sky is, radians
+    // (see cloud_mix).
     sky_zenith: vec4<f32>,
+    // w: how tall the clouds stand for their cover, 0..1, a half the usual (cloud_heap).
     sky_horizon: vec4<f32>,
     // x: fog density per voxel. y: horizontal distance at which voxel terrain hands
     // over to the far view. z: cloud cover (0..1), near enough the share of the sky the
@@ -76,9 +79,11 @@ struct Shadows {
 @group(0) @binding(1) var<uniform> S: Shadows;
 @group(0) @binding(2) var shadow_maps: texture_depth_2d_array;
 @group(0) @binding(3) var shadow_sampler: sampler_comparison;
-// The clouds' field, a value for each cell of their grid (see cloud_column). Each coarser
-// level of it holds the highest value in each square of cells: level CLOUD_LEVEL in
-// squares of CLOUD_COARSE, the last level (CLOUD_LEVELS - 1) in the whole grid.
+// The clouds' field (render::cloud_field): for each cell of their grid two patterns of
+// heaps and where the cell is in the cycle from the one to the other (see cloud_mix).
+// Each coarser level holds enough of the squares of cells under it to say how high the
+// field can stand in them (cloud_bound): level CLOUD_LEVEL in squares of CLOUD_COARSE,
+// the last level (CLOUD_LEVELS - 1) in the whole grid.
 @group(0) @binding(4) var cloud_field: texture_2d<f32>;
 
 fn hash3(p: vec3<i32>) -> f32 {
@@ -138,17 +143,36 @@ fn cloud_wrap(c: vec2<i32>) -> vec2<i32> {
 // further above. The square root makes the sides steep and the tops broad, as a heap of
 // cumulus is.
 fn cloud_column(c: vec2<i32>) -> vec2<f32> {
-    return cloud_heap(textureLoad(cloud_field, c, 0).r);
+    return cloud_heap(cloud_mix(textureLoad(cloud_field, c, 0)));
+}
+
+// The field in a cell (a texel of its finest level) as the cycle stands now: part of the
+// way from the one pattern of heaps to the other, as far as this stretch of sky has got.
+// Where the second pattern rises past the first a cloud forms, from its core outward, and
+// where it falls away one thins and breaks up. As render::cloud_mix.
+fn cloud_mix(t: vec4<f32>) -> f32 {
+    return mix(t.r, t.g, 0.5 - 0.5 * cos(G.sky_zenith.w + t.b * CLOUD_TURNS));
+}
+
+// The highest the field can stand anywhere in the square of cells a texel of a coarser
+// level covers, as the cycle stands now: as cloud_mix at the middle of the square's
+// places in the cycle, the highest of each pattern, and room for how far from the
+// middle any cell's place is.
+fn cloud_bound(t: vec4<f32>) -> f32 {
+    let top = max(t.r, t.g);
+    let off = min(t.a * CLOUD_TURNS * 0.5, 1.0);
+    return min(cloud_mix(t) + off * top, top);
 }
 
 // The column where the field stands at `v`. It only grows with `v`, so the highest value
-// in a stretch of the grid gives the tallest and deepest column in it.
+// in a stretch of the grid gives the tallest and deepest column in it. Heaps tower over
+// the same cover ahead of rain and sink as it clears (G.sky_horizon.w).
 fn cloud_heap(v: f32) -> vec2<f32> {
     let d = v - G.mist.w;
     if (d <= 0.0) {
         return vec2<f32>(0.0);
     }
-    let top = clamp(ceil(CLOUD_STEPS * sqrt(d * 3.2)), 1.0, CLOUD_STEPS);
+    let top = clamp(ceil(CLOUD_STEPS * sqrt(d * 3.2 * (0.4 + 1.2 * G.sky_horizon.w))), 1.0, CLOUD_STEPS);
     let belly = floor(CLOUD_BELLY * smoothstep(0.03, 0.14, d) + 0.5);
     return vec2<f32>(-belly, top);
 }
@@ -232,7 +256,8 @@ fn cloud_trace(dir: vec3<f32>, far: f32) -> vec4<f32> {
     }
     // The slab the clouds stand in today: as deep and as tall as the tallest of them all,
     // which the field's last level holds.
-    let tallest = cloud_heap(textureLoad(cloud_field, vec2<i32>(0), CLOUD_LEVELS - 1).r);
+    let whole = textureLoad(cloud_field, vec2<i32>(0), CLOUD_LEVELS - 1);
+    let tallest = cloud_heap(max(whole.r, whole.g));
     if (tallest.y <= 0.0) {
         return miss;
     }
@@ -274,7 +299,7 @@ fn cloud_trace(dir: vec3<f32>, far: f32) -> vec4<f32> {
         let out = min(min(next.x, next.y), t1);
         let c = ((cell % squares) + squares) % squares;
         // The tallest column in the square: the ray may pass clean over or under it all.
-        let heap = cloud_heap(textureLoad(cloud_field, c, CLOUD_LEVEL).r);
+        let heap = cloud_heap(cloud_bound(textureLoad(cloud_field, c, CLOUD_LEVEL)));
         if (heap.y > 0.0) {
             let top = G.cascades.w + heap.y * CLOUD_STEP;
             let bottom = G.cascades.w + heap.x * CLOUD_STEP;
@@ -361,7 +386,7 @@ fn cloud_seen(dir: vec3<f32>, far: f32) -> vec4<f32> {
     let own = 0.96 + 0.08 * hash3(vec3<i32>(cell.x, i32(row), cell.y));
     let foot = 0.93 + 0.07 * fract(level);
     // How far above the edge of its cloud the field stands here.
-    let d = textureLoad(cloud_field, cloud_wrap(cell), 0).r - G.mist.w;
+    let d = cloud_mix(textureLoad(cloud_field, cloud_wrap(cell), 0)) - G.mist.w;
     var color = vec3<f32>(0.0);
     if (n.y < -0.5) {
         // The flat underside, in the cloud's own shade: greyer the thicker the cover, and

@@ -208,6 +208,16 @@ eyes the camera is, which shows only by its light.
 ./target/release/game.exe --seed 1 --screenshot lantern.png --over 42186,30679,5 --look 180,-14 --time 23 --lantern --third --figure 60 --figure-speed 0 --no-audio
 ```
 
+**Clouds forming and clearing.** The clouds' field is two patterns of heaps, and each
+stretch of sky goes slowly from the one to the other and back (`cloud_mix` in
+`common.wgsl` and `render.rs`), faster while the weather is on the change. On a
+screenshot, `VOXEL_CLOUD_AGE=M` shows the sky M minutes on in steady weather; a few
+shots a few minutes apart show clouds forming and breaking up.
+
+```sh
+VOXEL_CLOUD_AGE=4 ./target/release/game.exe --seed 1 --screenshot clouds.png --over 42186,30679,60 --look 180,10 --time 14 --weather broken --no-audio
+```
+
 Stills cannot show flicker, shimmer or popping. Anything that moves (shadows, wind,
 light shafts, streaming) also needs a look in a live window.
 

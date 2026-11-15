@@ -33,6 +33,11 @@ pub struct Environment {
     /// The height of the clouds' flat bases above sea level, in voxels: `CLOUD_HEIGHT`
     /// over low country, and higher where the hills round about would stand up into them.
     pub cloud_base: f32,
+    /// How far round the clouds' slow cycle of forming and clearing the sky has come, in
+    /// radians (see `weather::CHURN`), and how tall the heaps stand for their cover, 0..1
+    /// with a half the usual: they tower ahead of rain and sink as it clears.
+    pub cloud_churn: f32,
+    pub cloud_swell: f32,
     /// Sine of the sun's elevation; negative at night.
     pub sun_elevation: f32,
     /// Time of year, 0 to 1 from the spring equinox.
@@ -144,6 +149,8 @@ impl Environment {
             mist_floor: 0.0,
             clouds: 0.45,
             cloud_base: CLOUD_HEIGHT,
+            cloud_churn: 0.0,
+            cloud_swell: 0.5,
             sun_elevation: elev,
             date,
         }

@@ -58,7 +58,18 @@ pub struct Sky {
     /// Gale: scales the gusts.
     pub storm: f32,
     pub fog: f32,
+    /// How tall the clouds stand for their cover, a half the usual: towering as a front
+    /// comes on, low and flat as it goes.
+    pub swell: f32,
+    /// How fast the clouds form and clear beyond their usual pace (`CHURN`): faster while
+    /// the weather is on the change.
+    pub stir: f32,
 }
+
+/// The clouds' slow cycle of forming and clearing (see cloud_mix in common.wgsl), in
+/// radians a second: a stretch of sky goes from one cloud to another and back in about
+/// sixteen minutes, in steady weather.
+pub const CHURN: f32 = std::f32::consts::TAU / 960.0;
 
 pub struct Weather {
     pub now: Sky,
@@ -71,6 +82,8 @@ pub struct Weather {
     /// How much the ground where the camera is lies under snow, 0..1, as the caller
     /// last told it: on white ground what falls is snow.
     pub snowy: f32,
+    /// How far round their cycle the clouds have come, radians.
+    pub churn: f32,
     forced: Option<Forced>,
     /// Whether the sky's cloud has been set to the date's yet.
     cloud_set: bool,
@@ -147,6 +160,8 @@ pub fn natural(date: f32, year_days: f32, warmth: f32, seed: u32) -> Sky {
     // A front that wanders in smooth noise and comes round again at the year's end, with
     // about one change every day and a half.
     let front = around_year(date, year_days, 1.5, seed ^ 0x77ea);
+    // And where it will be a quarter of a day on: the clouds build ahead of what comes.
+    let ahead = around_year(date + 0.25 / year_days.max(4.0), year_days, 1.5, seed ^ 0x77ea);
     // Spring showers, summer storms, autumn gales, winter snow and rain.
     let chance = through_year(date, [(0.10, 0.35), (0.32, 0.12), (0.58, 0.40), (0.85, 0.40)]);
     let heaviness = through_year(date, [(0.10, 0.55), (0.32, 1.0), (0.58, 0.85), (0.85, 0.6)]);
@@ -167,6 +182,10 @@ pub fn natural(date: f32, year_days: f32, warmth: f32, seed: u32) -> Sky {
         storm: precip * gale,
         fog: smooth(threshold - 0.5, threshold - 0.1, front) * (1.0 - precip) * foggy,
         cloud: cover(date, year_days, seed, front, threshold, precip),
+        // Heaps tower as the front that brings rain comes on and through the showers, and
+        // sink and spread as it moves off, while it is still raining.
+        swell: (0.35 + 0.55 * smooth(threshold - 0.4, threshold + 0.1, ahead) + 0.6 * (ahead - front)).clamp(0.0, 1.0),
+        stir: ((ahead - front).abs() * 10.0).min(2.0),
     }
 }
 
@@ -232,15 +251,16 @@ fn days_apart(a: f32, b: f32, year_days: f32) -> f32 {
 }
 
 fn forced_sky(f: Forced) -> Sky {
+    let usual = Sky { swell: 0.5, ..Sky::default() };
     match f {
-        Forced::Clear => Sky::default(),
-        Forced::Fair => Sky { cloud: FAIR, ..Sky::default() },
-        Forced::Broken => Sky { cloud: 0.6, overcast: greyness(0.6, 0.0), ..Sky::default() },
-        Forced::Overcast => Sky { cloud: 1.0, overcast: 0.8, ..Sky::default() },
-        Forced::Rain => Sky { rain: 0.8, cloud: 0.92, overcast: 0.8, storm: 0.3, ..Sky::default() },
-        Forced::Snow => Sky { snow: 0.8, cloud: 0.95, overcast: 0.7, storm: 0.1, ..Sky::default() },
-        Forced::Storm => Sky { rain: 1.0, cloud: 1.0, overcast: 1.0, storm: 1.0, ..Sky::default() },
-        Forced::Fog => Sky { cloud: 0.6, overcast: 0.3, fog: 0.9, ..Sky::default() },
+        Forced::Clear => usual,
+        Forced::Fair => Sky { cloud: FAIR, ..usual },
+        Forced::Broken => Sky { cloud: 0.6, overcast: greyness(0.6, 0.0), swell: 0.6, ..usual },
+        Forced::Overcast => Sky { cloud: 1.0, overcast: 0.8, swell: 0.4, ..usual },
+        Forced::Rain => Sky { rain: 0.8, cloud: 0.92, overcast: 0.8, storm: 0.3, swell: 0.8, ..usual },
+        Forced::Snow => Sky { snow: 0.8, cloud: 0.95, overcast: 0.7, storm: 0.1, swell: 0.4, ..usual },
+        Forced::Storm => Sky { rain: 1.0, cloud: 1.0, overcast: 1.0, storm: 1.0, swell: 1.0, ..usual },
+        Forced::Fog => Sky { cloud: 0.6, overcast: 0.3, fog: 0.9, swell: 0.3, ..usual },
     }
 }
 
@@ -251,7 +271,7 @@ impl Weather {
     pub fn new(forced: Option<Forced>) -> Self {
         // Until the first update brings in the date's own sky (straight away: see there),
         // a fair day.
-        let mut w = Self { now: Sky { cloud: FAIR, ..Sky::default() }, wet: 0.0, snowpack: 0.0, ice: 0.0, snowy: 0.0, forced, cloud_set: false, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
+        let mut w = Self { now: forced_sky(Forced::Fair), wet: 0.0, snowpack: 0.0, ice: 0.0, snowy: 0.0, churn: 0.0, forced, cloud_set: false, lying_for: None, lying: (0.0, 0.0), places_for: None, places: [(0.0, 0.0); Biome::ALL.len()] };
         if let Some(f) = forced {
             // A forced weather is already in place, and has been for a while.
             w.now = forced_sky(f);
@@ -335,8 +355,22 @@ impl Weather {
         if !std::mem::replace(&mut self.cloud_set, true) {
             s.cloud = target.cloud;
             s.overcast = target.overcast;
+            s.swell = target.swell;
+            // Each day's sky starts somewhere of its own in the clouds' cycle.
+            self.churn = (date * year_days * 7.3).fract() * std::f32::consts::TAU;
         }
-        s.cloud += (target.cloud - s.cloud) * ease;
+        // The cover follows the weather more slowly than the rain does: cloud gathers
+        // ahead of a shower and lingers as it clears, each heap growing or thinning in
+        // its own time rather than the whole sky fading together.
+        let gather = 1.0 - (-dt / 20.0).exp();
+        let before = s.cloud;
+        s.cloud += (target.cloud - s.cloud) * gather;
+        s.swell += (target.swell - s.swell) * gather;
+        s.stir += (target.stir - s.stir) * ease;
+        // The clouds churn faster while the cover is changing, so a sky clearing or
+        // closing in is seen to break up or build.
+        let changing = ((s.cloud - before).abs() / dt.max(1e-3) * 400.0).min(3.0);
+        self.churn = (self.churn + dt * CHURN * (1.0 + s.stir + changing)).rem_euclid(std::f32::consts::TAU);
         s.rain += (target.rain - s.rain) * ease;
         s.snow += (target.snow - s.snow) * ease;
         s.overcast += (target.overcast - s.overcast) * ease;
@@ -373,6 +407,8 @@ impl Weather {
         env.sky_glow = grey(env.sky_glow, 0.95);
         env.glow *= 1.0 - 0.8 * o;
         env.clouds = s.cloud.clamp(0.0, 1.0);
+        env.cloud_churn = self.churn;
+        env.cloud_swell = s.swell.clamp(0.0, 1.0);
         let precip = (s.rain + s.snow).min(1.0);
         // Rain and fog are grey and lie low: they thicken the haze, not the clear air.
         env.haze *= 1.0 + 4.0 * precip + 26.0 * s.fog;
