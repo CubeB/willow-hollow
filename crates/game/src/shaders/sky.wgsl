@@ -1,3 +1,56 @@
+
+// The northern lights (see aurora.rs). x: how bright they are now, 0 to 1. y: where
+// their curtains start in their slow folding, kept at 0 for now.
+struct AuroraLights {
+    a: vec4<f32>,
+};
+@group(1) @binding(0) var<uniform> AURORA: AuroraLights;
+
+// Where along the ground's north-south the curtain stands, at east-west position x:
+// a slow meander that drifts and folds over the minutes.
+fn aurora_fold(x: f32, t: f32, k: f32) -> f32 {
+    return 0.55 * sin(x * 0.42 + t * 0.021 + k) + 0.28 * sin(x * 1.07 - t * 0.037 + k * 2.3) + 0.5 * (fbm(vec2<f32>(x * 0.35 + t * 0.012, k)) - 0.5);
+}
+
+// Curtains of light hanging in the north of the sky, green at their lower edge and going
+// to violet higher up, rippling. The sky is at infinity, so the curtains are sheets
+// standing on a curving line on a plane a unit above the eye; a ray's points at a few
+// heights through them add up to the glow, which gives the sheets their depth and their
+// rays running up them.
+fn aurora(dir: vec3<f32>) -> vec3<f32> {
+    let strength = AURORA.a.x;
+    if (strength <= 0.001 || dir.y <= 0.015) {
+        return vec3<f32>(0.0);
+    }
+    let t = G.sun_dir.w;
+    let k = AURORA.a.y;
+    var sum = vec3<f32>(0.0);
+    let steps = 14;
+    for (var i = 0; i < steps; i++) {
+        let hn = (f32(i) + 0.5) / f32(steps);
+        let h = 1.0 + hn * 1.6;
+        let p = dir.xz * (h / dir.y);
+        // Toward the north (-z), a couple of curtains one behind the other.
+        var lit = 0.0;
+        for (var c = 0; c < 2; c++) {
+            let cf = f32(c);
+            let line = -2.4 - cf * 1.3 + aurora_fold(p.x + cf * 7.0, t, k + cf * 5.3);
+            let d = (p.y - line) / (0.16 + 0.08 * cf);
+            // Brightening and dimming along its length, in waves that run along it,
+            // and the fine rays up it.
+            let along = 0.55 + 0.45 * sin(p.x * 1.6 - t * 0.35 + cf * 2.0 + k);
+            let rays = 0.45 + 0.55 * vnoise(vec2<f32>(p.x * 9.0 + t * 0.08, cf * 13.0 + k));
+            lit += exp(-d * d) * along * rays * (1.0 - 0.45 * cf);
+        }
+        // A sharp lower edge, fading away above.
+        let profile = smoothstep(0.0, 0.07, hn) * exp(-hn * 2.4);
+        let colour = mix(vec3<f32>(0.12, 1.0, 0.38), vec3<f32>(0.55, 0.16, 0.85), smoothstep(0.3, 0.95, hn));
+        sum += colour * lit * profile;
+    }
+    // Low in the sky, through more air, the lights thin into the haze.
+    let low = smoothstep(0.015, 0.12, dir.y);
+    return sum / f32(steps) * strength * low * 1.1;
+}
 struct VOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) ndc: vec2<f32>,
@@ -58,6 +111,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         c += G.sun_color.rgb * (smoothstep(0.99975, 0.9999, s) * 60.0 + pow(max(s, 0.0), 300.0) * 3.0);
         // They come out as the dusk fades, and shine bright on a dark night.
         c += vec3<f32>(0.9, 0.95, 1.0) * stars(dir) * smoothstep(0.0, 0.25, dir.y) * 0.14 * darkness();
+        // And on some nights in the cold country, the northern lights.
+        c += aurora(dir);
     }
     return vec4<f32>(c, 1.0);
 }

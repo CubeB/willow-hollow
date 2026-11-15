@@ -1,5 +1,6 @@
 mod arena;
 mod audio;
+mod aurora;
 mod camera;
 mod camp;
 mod character;
@@ -101,6 +102,8 @@ struct Options {
     fresh: bool,
     /// A murmuration of starlings ahead, whatever the date, hour and country.
     murmuration: bool,
+    /// The northern lights out every night, wherever.
+    aurora: bool,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     /// Write the map of the continent around the start to this PNG, then exit.
@@ -168,6 +171,7 @@ impl Default for Options {
             weather: None,
             fresh: false,
             murmuration: false,
+            aurora: false,
             screenshot: None,
             map: None,
             audio: true,
@@ -246,6 +250,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
   --murmuration         starlings gathering ahead of the camera, whatever the date and hour
+  --aurora              the northern lights out tonight, wherever the camera is
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went (with --bigmap,
@@ -288,6 +293,7 @@ fn parse_args() -> Result<Options> {
             "--seed" => o.overrides.seed = Some(value()?.parse()?),
             "--fresh" => o.fresh = true,
             "--murmuration" => o.murmuration = true,
+            "--aurora" => o.aurora = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
@@ -759,6 +765,8 @@ struct Running {
     warmth: f32,
     /// The haze of the air here (season::humidity), eased as the biome changes.
     humidity: f32,
+    /// Northern lights every night, wherever (`--aurora`).
+    aurora_forced: bool,
     /// The low ground mist lies on near the camera, eased toward the last scan's answer.
     /// None until the first scan is in.
     mist_floor: Option<f32>,
@@ -1013,6 +1021,7 @@ impl Running {
             biome: worldgen::biome::Biome::Grassland,
             warmth: season::warmth(worldgen::biome::Biome::Grassland),
             humidity: season::humidity(worldgen::biome::Biome::Grassland),
+            aurora_forced: opts.aurora,
             mist_floor: None,
             mist_target: 0.0,
             weather: weather::Weather::new(opts.weather),
@@ -1870,6 +1879,13 @@ impl Running {
         lamps.extend(held_light);
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
+        // The northern lights, on the nights they are out where the camera is.
+        let lights = if self.aurora_forced {
+            1.0
+        } else {
+            aurora::cold(self.warmth, aurora::climate_at(&self.world, self.camera.pos.x, self.camera.pos.z)) * aurora::activity(self.env.date, self.settings.year_days, self.settings.seed)
+        };
+        aurora::light(&mut lit, lights);
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
         // The eye takes a couple of seconds to open up in the dark, and less to close
@@ -2384,6 +2400,10 @@ fn main() -> Result<()> {
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
+        // The northern lights, if they are out tonight here (or asked for).
+        let lights = if opts.aurora { 1.0 } else { aurora::cold(warmth, aurora::climate_at(&world, camera.pos.x, camera.pos.z)) * aurora::activity(env.date, settings.year_days, settings.seed) };
+        aurora::light(&mut env, lights);
+        log::info!("northern lights {:.2}", env.aurora);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
         env.adapt(player::enclosure(camera.pos, &mut voxels));

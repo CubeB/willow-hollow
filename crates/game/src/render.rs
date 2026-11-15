@@ -512,6 +512,10 @@ pub struct Renderer {
     depth_bind: wgpu::BindGroup,
     linear_sampler: wgpu::Sampler,
     sky: wgpu::RenderPipeline,
+    /// The northern lights' own uniform, read by the sky alone (see aurora.rs), and its
+    /// bind group.
+    aurora: wgpu::Buffer,
+    aurora_bind: wgpu::BindGroup,
     opaque: wgpu::RenderPipeline,
     opaque_inside: wgpu::RenderPipeline,
     water: wgpu::RenderPipeline,
@@ -859,10 +863,32 @@ impl Renderer {
             })]
         };
 
+        // The northern lights have a uniform of their own, bound for the sky alone, so
+        // they ask nothing of the scene's globals.
+        let aurora = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aurora"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let aurora_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aurora"),
+            entries: &[uniform_entry(0, wgpu::ShaderStages::FRAGMENT)],
+        });
+        let aurora_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aurora"),
+            layout: &aurora_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: aurora.as_entire_binding() }],
+        });
+        let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
+            bind_group_layouts: &[Some(&scene_layout_bg), Some(&aurora_layout)],
+            immediate_size: 0,
+        });
         let sky_module = shader(device, "sky", format!("{common}\n{}", include_str!("shaders/sky.wgsl")));
         let sky = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
-            layout: Some(&scene_layout),
+            layout: Some(&sky_layout),
             vertex: wgpu::VertexState {
                 module: &sky_module,
                 entry_point: Some("vs"),
@@ -1415,6 +1441,8 @@ impl Renderer {
             depth_bind,
             linear_sampler,
             sky,
+            aurora,
+            aurora_bind,
             opaque,
             opaque_inside,
             water,
@@ -1748,6 +1776,9 @@ impl Renderer {
             flowering: self.flowering,
         };
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        // The lights: drawn by the sky alone (see aurora.rs). Their curtains change
+        // shape with the time, so they need no other number.
+        gpu.queue.write_buffer(&self.aurora, 0, bytemuck::bytes_of(&[env.aurora, 0.0f32, 0.0, 0.0]));
 
         // Visible chunks, with their camera-relative offsets computed in f64.
         let frustum = Frustum::new(view_proj);
@@ -2102,6 +2133,7 @@ impl Renderer {
             }
             // The sky last, behind everything (see its pipeline).
             pass.set_pipeline(&self.sky);
+            pass.set_bind_group(1, &self.aurora_bind, &[]);
             pass.draw(0..3, 0..1);
             if let Some(t) = &self.timer {
                 t.mark_in_pass(&mut pass, 6);
