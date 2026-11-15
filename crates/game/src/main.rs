@@ -838,7 +838,9 @@ impl Running {
             .filter(|_| opts.overrides.keeps_position() && !opts.fresh)
             .and_then(|s| s.progress(settings.seed));
         // The pack goes with the world, wherever in it this run begins.
-        let pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
+        let mut pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
+        // Every wanderer has a lantern, those who set out before there were lanterns too.
+        pack.give_kit();
         // As does what has been set down in it.
         let placed = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(placed::Placed::new, |s| placed::Placed::from_text(&s.placed(settings.seed)));
 
@@ -2440,6 +2442,7 @@ fn main() -> Result<()> {
         let hotbar = opts.shot_hotbar.then(|| {
             use worldgen::features::plants::Flower;
             let mut pack = inventory::Pack::new();
+            pack.give_kit();
             for (item, n) in [(inventory::sticks(), 5), (inventory::of_flower(Flower::Poppy), 12), (inventory::of_flower(Flower::PennyBun), 2), (inventory::of_flower(Flower::Bluebell), 7)] {
                 pack.add_many(&item, n);
             }
