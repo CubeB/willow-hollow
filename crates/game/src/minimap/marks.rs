@@ -1,6 +1,8 @@
 //! Places worth walking to, found in a continent: waterfalls, lakes, peaks, tors, springs,
-//! river mouths and confluences, landmarks and the larger bridges. The map shows each
-//! as a soft unlabelled mark until it has been visited, then by its icon and name.
+//! river mouths and confluences, and landmarks. The map shows each as a soft unlabelled
+//! mark until it has been visited, then by its icon and name. Bridges are not among
+//! them: trails cross so many rivers that a bridge is something walked over on the way
+//! to somewhere, not a place to go and find.
 //!
 //! The water features are chosen as `mapgen --poi` chooses them (falls by drop, lakes by
 //! size, confluences by the size of the smaller river); those the place names already
@@ -13,7 +15,6 @@ use worldgen::{
     names::PlaceKind,
     scale::m,
     surface::Spring,
-    trails::CrossingKind,
 };
 
 /// What sort of place a mark stands for.
@@ -27,7 +28,6 @@ pub enum Kind {
     Mouth,
     Confluence,
     Landmark,
-    Bridge,
 }
 
 impl Kind {
@@ -81,10 +81,6 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         let at = Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5);
         let name = c.trails.names.site(k).map(|p| p.name.clone());
         marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name });
-    }
-    for x in c.trails.crossings.iter().filter(|x| x.kind == CrossingKind::Arch) {
-        let at = Vec2::new(x.x as f32 + 0.5, x.z as f32 + 0.5);
-        marks.push(Mark { kind: Kind::Bridge, at: world(at), reach: NEAR, name: None });
     }
 
     let land: Vec<usize> = (0..n * n).filter(|&i| !c.ocean[i]).collect();

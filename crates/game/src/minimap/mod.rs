@@ -1148,7 +1148,7 @@ impl Minimap {
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
                 // What stands there as a model of itself is its own mark.
-                let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Bridge | Kind::Tor);
+                let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Tor);
                 let mut on_water = false;
                 if let Some((p, _)) = at
                     && on_map
@@ -1297,7 +1297,6 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         // Granite grey, and smaller than a peak.
         Kind::Tor => (gpu::TRIANGLE, [0.50, 0.50, 0.48, 1.0], 0.85),
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
-        Kind::Bridge => (gpu::BAR, [0.52, 0.40, 0.28, 1.0], 1.0),
     };
     Instance::new(kind, p.into(), size * scale, color)
 }
@@ -1426,6 +1425,11 @@ mod tests {
         assert!(named > 0);
         assert!(s.marks.iter().any(|m| m.kind == Kind::Landmark));
         assert!(s.marks.iter().any(|m| m.kind.watery()));
+        // A bridge is walked over, not sought out: none has a mark of its own.
+        let arches: Vec<DVec2> = c.trails.crossings.iter().filter(|x| x.kind == worldgen::trails::CrossingKind::Arch).map(|x| DVec2::new(x.x as f64 + 0.5, x.z as f64 + 0.5)).collect();
+        for m in &s.marks {
+            assert!(!arches.iter().any(|a| a.distance(m.at) < 1.0), "{m:?} marks a bridge");
+        }
         // The same world finds the same places.
         let again = marks::find(&c, world.seed());
         assert_eq!(again.len(), s.marks.len());

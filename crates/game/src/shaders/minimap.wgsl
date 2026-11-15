@@ -26,7 +26,6 @@ const CIRCLE: u32 = 4u;
 const TRIANGLE: u32 = 5u;
 const DIAMOND: u32 = 6u;
 const RING: u32 = 7u;
-const BAR: u32 = 8u;
 const LINE: u32 = 9u;
 const PANEL: u32 = 10u;
 
@@ -165,10 +164,6 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         case RING: {
             let r = length(p);
             out = icon(max(r - in.size.x * 0.68, in.size.x * 0.28 - r), in.color, RIM);
-        }
-        case BAR: {
-            let b = abs(p) - vec2(in.size.x * 0.7, in.size.x * 0.22);
-            out = icon(length(max(b, vec2(0.0))) + min(max(b.x, b.y), 0.0), in.color, RIM);
         }
         case LINE: {
             let b = abs(p) - in.size + vec2(1.0);
