@@ -553,7 +553,18 @@ impl Minimap {
                 }
             }
         }
-        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version, season: self.season }).is_ok()
+        // The large map does not show what a landmark is until it has been come to: it
+        // could be zoomed in on and made out from far off. The corner map shows only the
+        // ground about the player, where it stands in plain sight.
+        let mut hidden = Vec::new();
+        if tag == LARGE {
+            for k in self.known.values() {
+                for (mark, _) in k.sheet.marks.iter().zip(&k.visited).filter(|(m, v)| m.kind == Kind::Landmark && !**v) {
+                    hidden.push(glam::IVec2::new(mark.at.x.floor() as i32, mark.at.y.floor() as i32));
+                }
+            }
+        }
+        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version, season: self.season, hidden }).is_ok()
     }
 
     /// Asks for a new model for the large map if the one it has no longer fits: the map
@@ -825,10 +836,18 @@ impl Minimap {
             self.version += 1;
         }
         if walked {
+            let mut found = false;
             for k in self.known.values_mut() {
                 for (mark, seen) in k.sheet.marks.iter().zip(&mut k.visited) {
-                    *seen |= mark.at.distance(at) <= mark.reach as f64;
+                    if !*seen && mark.at.distance(at) <= mark.reach as f64 {
+                        *seen = true;
+                        found = true;
+                    }
                 }
+            }
+            // A landmark come to is shown on the large map's model from now on.
+            if found {
+                self.version += 1;
             }
         }
     }

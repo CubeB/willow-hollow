@@ -90,6 +90,10 @@ const SMALL_MODEL_STEP: i32 = 8;
 /// The narrowest a thing people built is, in voxels, to be shown on columns wider than
 /// [`SMALL_MODEL_STEP`].
 const BUILDING: i32 = 6;
+/// How far outside what is built a landmark's middle may be and the building still be
+/// its, in voxels: a site's middle is on the ground levelled for it, which a ring of
+/// stones or a camp may stand round rather than on.
+const HIDDEN_MARGIN: i32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -126,6 +130,9 @@ pub struct Request {
     pub version: u64,
     /// The time of year to show, or None for a summer with no snow anywhere.
     pub season: Option<Season>,
+    /// Where the landmarks not yet come to stand, world voxels x and z: what is built
+    /// there is left off the model until they are.
+    pub hidden: Vec<IVec2>,
 }
 
 /// The time of year, as the map shows it: the leaves turned or down, and snow lying
@@ -609,6 +616,17 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
             if step > SMALL_MODEL_STEP && !large {
                 continue;
             }
+            let (lo, hi) = (IVec2::new(o.x + stamp.lo.x, o.y + stamp.lo.z), IVec2::new(o.x + stamp.hi.x, o.y + stamp.hi.z));
+            if req.hidden.iter().any(|h| h.cmpge(lo - IVec2::splat(HIDDEN_MARGIN)).all() && h.cmple(hi + IVec2::splat(HIDDEN_MARGIN)).all()) {
+                continue;
+            }
+            let mut blocks = Blocks::default();
+            for &(p, v) in &stamp.voxels {
+                let m = mats.get(v);
+                if m.kind.is_opaque() {
+                    blocks.add(IVec3::new(o.x + p.x, p.y, o.y + p.z), 1, m.color, m.emissive);
+                }
+            }
             let mid = (stamp.lo + stamp.hi) / 2;
             // A lit lantern keeps its column too, to show as a light after dark.
             let keep = (large || blocks.glows()).then(|| ((o.x + mid.x).div_euclid(step), (o.y + mid.z).div_euclid(step)));
@@ -1018,6 +1036,7 @@ mod tests {
             sheets: vec![((0, 0), c, picture)],
             version: 7,
             season: None,
+            hidden: Vec::new(),
         }
     }
 
@@ -1186,6 +1205,28 @@ mod tests {
         }
         let far = build(&world, &around(&world, 128, site.x, site.z, 20));
         assert_eq!(far.models, 0);
+    }
+
+    /// A landmark not yet come to is left off the model, however close in it is looked
+    /// at, and little else: the lanterns and benches of the trails about it still stand.
+    #[test]
+    fn a_landmark_not_yet_come_to_is_not_on_the_model() {
+        let world = GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
+        let c = world.continent(0, 0);
+        let mut hid = 0;
+        for site in c.trails.sites.iter().take(6) {
+            for step in [FINE_STEP, MIN_STEP] {
+                let mut req = around(&world, step, site.x, site.z, 40);
+                let shown = build(&world, &req);
+                req.hidden = vec![IVec2::new(site.x, site.z)];
+                let hidden = build(&world, &req);
+                assert!(hidden.models < shown.models, "step {step}: {} with it, {} without", shown.models, hidden.models);
+                // The landmark, and at most the few things laid about it.
+                assert!(hidden.models + 3 >= shown.models, "step {step}: {} with it, {} without", shown.models, hidden.models);
+                hid += 1;
+            }
+        }
+        assert!(hid >= 4);
     }
 
     #[test]
