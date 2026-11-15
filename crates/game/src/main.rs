@@ -127,6 +127,8 @@ struct Options {
     /// With a camp made: lying in its tent on a screenshot, or resting in it from the
     /// first frame of a run.
     rest: bool,
+    /// Hold a lit lantern on a screenshot.
+    shot_lantern: bool,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -171,6 +173,7 @@ impl Default for Options {
             shot_prompt: None,
             shot_camp: None,
             rest: false,
+            shot_lantern: false,
             picked: None,
             shot_journal: None,
             journal_fill: 16,
@@ -213,6 +216,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         things set down, and a fire that is laid, lit or burnt
   --rest                with --camp: on a screenshot, the view out of the tent's door,
                         as high as --look says; in a run, rest in the tent at once
+  --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -305,6 +309,7 @@ fn parse_args() -> Result<Options> {
             "--hotbar" => o.shot_hotbar = true,
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
+            "--lantern" => o.shot_lantern = true,
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
                     "laid" => placed::LAID,
@@ -473,6 +478,12 @@ fn firelight(heart: DVec3, clock: f32) -> (DVec3, f32) {
     let phase = (heart.x * 0.7 + heart.z * 1.3) as f32;
     let flicker = 0.16 * (clock * 11.0 + phase).sin() + 0.09 * (clock * 23.0 + phase * 2.0).sin() + 0.05 * (clock * 4.1).sin();
     (heart + DVec3::new(0.0, m64(0.25), 0.0), 1.25 + flicker)
+}
+
+/// How brightly a lantern's candle burns at `clock` seconds: steady, with a small
+/// unsettled flicker, less than a fire's.
+fn candle(clock: f32) -> f32 {
+    1.15 + 0.05 * (clock * 7.3).sin() + 0.035 * (clock * 17.9 + 1.3).sin() + 0.03 * (clock * 2.3).sin()
 }
 
 /// Makes camp a few steps ahead of someone whose eye is at `eye`, looking along `yaw`:
@@ -749,6 +760,8 @@ struct Running {
     last_yaw: f32,
     /// The view is from behind the player's figure, not through its eyes.
     third: bool,
+    /// The lantern's shutter is closed: held, it gives no light.
+    shuttered: bool,
     gait: character::Gait,
     world: Arc<GameWorld>,
     camera: Camera,
@@ -900,6 +913,7 @@ impl Running {
             renderer,
             last_yaw: camera.yaw,
             third: false,
+            shuttered: false,
             gait: character::Gait::new(camera.yaw),
             camera,
             walking: !flying,
@@ -1173,6 +1187,12 @@ impl Running {
             return;
         }
         let Some(stack) = self.pack.in_hand().cloned() else { return };
+        // The lantern is not set down: it is carried, lit or shuttered.
+        if stack.item.id == "lantern" {
+            self.shuttered = !self.shuttered;
+            self.say(if self.shuttered { "The lantern is shuttered" } else { "The lantern is lit" });
+            return;
+        }
         let Some(at) = self.spot_ahead() else {
             self.say("There is nowhere here to put it");
             return;
@@ -1729,6 +1749,7 @@ impl Running {
             vehicles::draw_boat(boat.pos, boat.heading, clock, self.camera.pos, &mut self.props);
         }
         self.placed.draw(self.camera.pos, clock, &mut self.props);
+        let mut held_light = None;
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -1755,6 +1776,13 @@ impl Running {
                 // The glider is a rod on the back until the wing itself is out.
                 let furled = (self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
                 character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
+                // A lantern in hand lights the way, unless it is shuttered; not with both
+                // hands on the glider's bar.
+                if self.pack.in_hand().is_some_and(|s| s.item.id == "lantern") && self.player.mode != Mode::Glide {
+                    let lit = if self.shuttered { 0.0 } else { candle(clock) };
+                    let flame = character::draw_lantern(feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
+                    held_light = (lit > 0.0).then_some((flame, lit));
+                }
             }
         }
 
@@ -1767,6 +1795,7 @@ impl Running {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let mut lamps: Vec<(DVec3, f32)> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(burning.iter().map(|&heart| firelight(heart, clock)));
+        lamps.extend(held_light);
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
@@ -2344,6 +2373,16 @@ fn main() -> Result<()> {
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
+        // A lit lantern in the hand: of the figure if there is one, else of whoever's eyes
+        // the camera is, standing (seen only by its light).
+        if opts.shot_lantern {
+            let (mut unseen, standing) = (Vec::new(), character::Gait::new(camera.yaw));
+            let (feet, gait, into) = match &figure {
+                Some((feet, gait)) => (*feet, gait, &mut props),
+                None => (camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), &standing, &mut unseen),
+            };
+            lamps.push((character::draw_lantern(feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
+        }
         // The map, as the player would have it after walking here.
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut map = opts.shot_map.map(|large| {

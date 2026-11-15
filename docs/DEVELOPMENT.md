@@ -199,6 +199,15 @@ In a window, `--camp lit --rest` starts the run resting in the tent, and logs th
 the rest ended at: `--seed 1 --time 21 --camp lit --rest --frames 1500` watches a night
 go by.
 
+**The lantern.** Every pack is given a lantern, at the far end of the hotbar; it is lit
+while it is held, and a right click shutters it. `--lantern` puts a lit one on a
+screenshot: in the hand of the figure with `--third`, or else in the hand of whoever's
+eyes the camera is, which shows only by its light.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot lantern.png --over 42186,30679,5 --look 180,-14 --time 23 --lantern --third --figure 60 --figure-speed 0 --no-audio
+```
+
 Stills cannot show flicker, shimmer or popping. Anything that moves (shadows, wind,
 light shafts, streaming) also needs a look in a live window.
 

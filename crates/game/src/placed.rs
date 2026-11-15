@@ -474,7 +474,7 @@ fn small(b: &mut Brush, item: &Item) {
             b.piece([0.05, 0.035, 0.12], [0.12, 0.04, 0.04], shade(c, 0.8));
         }
         // Not things that lie about, but a save may say anything: a bundle.
-        Shape::Tent | Shape::Fire => b.piece([0.0, 0.1, 0.0], [0.3, 0.2, 0.5], c),
+        Shape::Tent | Shape::Fire | Shape::Lantern => b.piece([0.0, 0.1, 0.0], [0.3, 0.2, 0.5], c),
     }
 }
 

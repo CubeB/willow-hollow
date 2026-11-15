@@ -39,10 +39,11 @@ pub enum Shape {
     Stick,
     Tent,
     Fire,
+    Lantern,
 }
 
 impl Shape {
-    const ALL: [(Shape, &'static str); 9] = [
+    const ALL: [(Shape, &'static str); 10] = [
         (Shape::Flower, "flower"),
         (Shape::Spike, "spike"),
         (Shape::Sprig, "sprig"),
@@ -52,6 +53,7 @@ impl Shape {
         (Shape::Stick, "stick"),
         (Shape::Tent, "tent"),
         (Shape::Fire, "fire"),
+        (Shape::Lantern, "lantern"),
     ];
 
     pub(crate) fn word(self) -> &'static str {
@@ -76,6 +78,7 @@ impl Shape {
             Shape::Stick => ["........", "......l.", ".d...c..", "..c.c...", "...cd...", "..c..d..", ".c....d.", "........"],
             Shape::Tent => ["........", "...bb...", "...lc...", "..lccd..", "..lbbd..", ".lcbbdd.", ".lcbbdd.", "........"],
             Shape::Fire => ["........", "...y....", "..yy.y..", "..yyyy..", ".cyyyyc.", ".dccccd.", "wdwddwdw", "........"],
+            Shape::Lantern => ["...dd...", "..d..d..", "..dddd..", "..lyyc..", "..lyyc..", "..lyyc..", "..dddd..", "........"],
         }
     }
 }
@@ -156,6 +159,15 @@ pub fn tent() -> Item {
     Item::new("tent", "Tent", "Canvas, two poles and a bedroll: somewhere to wait for morning.", [204, 182, 136], Shape::Tent)
 }
 
+/// The lantern every wanderer sets out with, to light the way after dark.
+pub fn lantern() -> Item {
+    Item::new("lantern", "Lantern", "Brass and glass about a candle: a warm light to walk by at night.", [176, 136, 72], Shape::Lantern)
+}
+
+/// What a wanderer sets out with, in the order it was first handed out: a pack is given
+/// whatever of it came after what it already had (see `Pack::give_kit`).
+const KIT: u8 = 2;
+
 /// A fire laid in a ring of stones. It is never carried: it is what three sticks become.
 pub fn campfire() -> Item {
     Item::new("campfire", "Campfire", "A ring of stones, and a fire laid in it.", [236, 132, 52], Shape::Fire)
@@ -169,6 +181,7 @@ pub fn use_of(id: &str) -> &'static str {
     match id {
         "tent" => "right click to pitch it",
         "sticks" => "right click to lay a fire",
+        "lantern" => "lit while it is held; right click to shutter it",
         _ => "right click to set it down",
     }
 }
@@ -190,8 +203,9 @@ pub struct Pack {
     years: f64,
     /// Which slot of the hotbar is held, counting from 0.
     held: usize,
-    /// Whether the tent a wanderer sets out with has been handed over.
-    kit: bool,
+    /// How much of what a wanderer sets out with has been handed over: 1 the tent, 2 the
+    /// lantern too.
+    kit: u8,
     /// Changed since it was last saved.
     pub unsaved: bool,
 }
@@ -204,7 +218,7 @@ impl Default for Pack {
 
 impl Pack {
     pub fn new() -> Self {
-        Self { slots: vec![None; ALL], gathered: HashMap::new(), order: VecDeque::new(), years: 0.0, held: 0, kit: false, unsaved: false }
+        Self { slots: vec![None; ALL], gathered: HashMap::new(), order: VecDeque::new(), years: 0.0, held: 0, kit: 0, unsaved: false }
     }
 
     /// Every slot: the pack's own, then the hotbar's.
@@ -246,13 +260,24 @@ impl Pack {
         self.hold((self.held as i32 + by).rem_euclid(HOTBAR as i32) as usize)
     }
 
-    /// Hands over the tent a wanderer sets out with, once in the life of a pack: to a
-    /// new pack, or to one from before there were tents.
+    /// Hands over what a wanderer sets out with, each thing once in the life of a pack:
+    /// to a new pack, or to one from before there were tents or lanterns.
     pub fn give_kit(&mut self) {
-        if !self.kit {
-            self.kit = true;
-            self.unsaved = true;
+        if self.kit < 1 {
             self.add(&tent());
+        }
+        if self.kit < 2 {
+            // At the far end of the hotbar, out of the way of what is picked, if it is free.
+            let last = ALL - 1;
+            if self.slots[last].is_none() {
+                self.slots[last] = Some(Stack { item: lantern(), count: 1 });
+            } else {
+                self.add(&lantern());
+            }
+        }
+        if self.kit < KIT {
+            self.kit = KIT;
+            self.unsaved = true;
         }
     }
 
@@ -401,8 +426,8 @@ impl Pack {
         if self.held != 0 {
             out += &format!("held = {}\n", self.held);
         }
-        if self.kit {
-            out += "kit = 1\n";
+        if self.kit > 0 {
+            out += &format!("kit = {}\n", self.kit);
         }
         if !self.order.is_empty() {
             out += &format!("years = {}\n", self.years);
@@ -423,7 +448,7 @@ impl Pack {
             if key == "held" {
                 pack.held = value.parse::<usize>().ok().filter(|k| *k < HOTBAR).unwrap_or(0);
             } else if key == "kit" {
-                pack.kit = value == "1";
+                pack.kit = value.parse::<u8>().unwrap_or(0).min(KIT);
             } else if key == "years" {
                 pack.years = value.parse::<f64>().ok().filter(|y| y.is_finite() && *y >= 0.0).unwrap_or(0.0);
             } else if key == "gathered" {
@@ -791,6 +816,13 @@ mod tests {
         assert_eq!((old.count("x"), old.count("y"), old.count("tent")), (4, 0, 0));
         old.give_kit();
         assert_eq!(old.hotbar()[0].as_ref().map(|s| s.item.id.as_str()), Some("tent"));
+        // And one given its tent before there were lanterns is given its lantern, once.
+        let mut tented = Pack::from_text("hot 0 = 1|tent|204,182,136|tent|Tent|\nkit = 1\n");
+        tented.give_kit();
+        tented.give_kit();
+        assert_eq!((tented.count("tent"), tented.count("lantern")), (1, 1));
+        assert_eq!(tented.hotbar()[HOTBAR - 1].as_ref().map(|s| s.item.clone()), Some(lantern()));
+        assert_eq!(Pack::from_text(&tented.to_text()).to_text(), tented.to_text());
         // A save from before spots had dates still reads.
         assert!(Pack::from_text("gathered = 4,5;6,-7\n").gathered(6, -7));
     }
