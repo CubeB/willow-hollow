@@ -27,6 +27,11 @@ use crate::inventory::{self, Item, Shape};
 const NOTES: usize = 400;
 /// How near a small place (a cairn, a waterfall, a tor) must be come to be reached.
 const NEAR: f32 = m(45.0);
+/// How near a lake's shore, and a river's bank, must be come for its name to be known.
+/// Water lies open and is seen from well off, and a walk that keeps to the hillside
+/// above a river has still come to it: only a small place has to be stood at.
+pub const LAKE_REACH: f32 = m(150.0);
+pub const RIVER_REACH: f32 = m(100.0);
 /// How near a place must be for a find to be written down as made beside it.
 const BESIDE: f32 = m(250.0);
 /// How near a river's bank counts as walking along it.
@@ -386,8 +391,8 @@ impl Journal {
                 PlaceKind::Region => continue,
                 PlaceKind::Range | PlaceKind::Fault | PlaceKind::Rift => (d <= 0.0, false),
                 PlaceKind::Island | PlaceKind::Bay | PlaceKind::Inlet => (centre <= p.radius * 0.7, false),
-                PlaceKind::Lake => (d <= NEAR + p.radius * 0.1, true),
-                PlaceKind::River => (d <= m(25.0), true),
+                PlaceKind::Lake => (d <= LAKE_REACH + p.radius * 0.1, true),
+                PlaceKind::River => (d <= RIVER_REACH, true),
                 PlaceKind::Peak => (afoot && (d <= 0.0 || centre <= NEAR), true),
                 PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town => (afoot && d <= NEAR, true),
             };
@@ -1114,6 +1119,36 @@ mod tests {
             j.survey(&c, peak.at, true);
             assert!(j.places().iter().any(|v| v.name == peak.name));
         }
+    }
+
+    /// A river or a lake is known by name from the hillside above it, a good way off, as
+    /// a small place is not.
+    #[test]
+    fn rivers_and_lakes_are_come_to_from_well_off() {
+        let c = world();
+        let names = &c.trails.names;
+        let mut tried = 0;
+        for p in names.places.iter().filter(|p| matches!(p.kind, PlaceKind::River | PlaceKind::Lake)) {
+            let reach = if p.kind == PlaceKind::Lake { LAKE_REACH + p.radius * 0.1 } else { RIVER_REACH };
+            // Away from it, each way, until a point is the distance wanted from it.
+            let away = |want: f32| {
+                let from = p.line.get(p.line.len() / 2).copied().unwrap_or(p.at);
+                (0..8).find_map(|k| {
+                    let dir = Vec2::from_angle(k as f32 * 0.785);
+                    let at = (1..400).map(|s| from + dir * s as f32 * m(2.0)).find(|q| p.distance(*q) >= want)?;
+                    (p.distance(at) < want + m(5.0)).then_some(at)
+                })
+            };
+            let (Some(near), Some(far)) = (away(reach - m(10.0)), away(reach + m(60.0))) else { continue };
+            assert!(p.distance(near) > m(45.0), "{}", p.name);
+            let mut j = Journal::new();
+            j.survey(&c, far, true);
+            assert!(!j.places().iter().any(|v| v.name == p.name), "{} from {} m", p.name, p.distance(far) / VOXELS_PER_METRE);
+            j.survey(&c, near, true);
+            assert!(j.places().iter().any(|v| v.name == p.name), "{} not from {} m", p.name, p.distance(near) / VOXELS_PER_METRE);
+            tried += 1;
+        }
+        assert!(tried >= 2, "only {tried} rivers and lakes to try");
     }
 
     #[test]

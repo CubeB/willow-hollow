@@ -68,8 +68,9 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
     for p in &c.trails.names.places {
         let (kind, reach) = match p.kind {
             PlaceKind::Falls => (Kind::Falls, NEAR),
-            // From the shore: the radius is the lake's as a circle of the same area.
-            PlaceKind::Lake => (Kind::Lake, p.radius * 1.1 + NEAR),
+            // From the shore, from as far as the journal knows a lake by name: the
+            // radius is the lake's as a circle of the same area.
+            PlaceKind::Lake => (Kind::Lake, p.radius * 1.1 + crate::journal::LAKE_REACH),
             PlaceKind::Peak => (Kind::Peak, p.radius.max(NEAR)),
             // A tor is reached by standing among its piles.
             PlaceKind::Tor => (Kind::Tor, NEAR),
