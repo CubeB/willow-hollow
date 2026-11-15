@@ -11,7 +11,7 @@
 //! left out, which gives the slab its ragged edge.
 //!
 //! Everything standing on the ground is a [`Solid`], a box: the parts of a tree, and the
-//! runs of cells a building or a tor is gathered into ([`Model`]). Once they are all
+//! columns a building or a tor raises, in the land's own blocks ([`Blocks`]). Once they are all
 //! known, the sun on every column and every box is worked out and kept in the corners of
 //! the mesh, with how open to the sky each corner is.
 //!
@@ -222,8 +222,6 @@ struct Tree {
 #[derive(Clone, Copy)]
 struct Cell {
     top: i16,
-    /// The height the top was made from, in voxels: the ground, or the water's surface.
-    surface: f32,
     color: [f32; 3],
     water: bool,
     tree: Option<Tree>,
@@ -354,15 +352,15 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                             // the water's own blue where it is deep.
                             let level = (w - 1) as f32;
                             let deep = ((level - col.ground) / DEEP).clamp(0.0, 1.0);
-                            Cell { top: block(level), surface: level, color: mix(shallows, water, deep * (2.0 - deep)), water: true, tree: None }
+                            Cell { top: block(level), color: mix(shallows, water, deep * (2.0 - deep)), water: true, tree: None }
                         } else if col.river < step as f32 * 0.3 {
                             // A stream too narrow to fill the column still shows as a thread.
-                            Cell { top: block(col.ground), surface: col.ground, color: shallows, water: true, tree: None }
+                            Cell { top: block(col.ground), color: shallows, water: true, tree: None }
                         } else {
                             let (surface, _) = crate::lod::skin(&col, 0.0);
                             // The trees are the world's own (`stands`), put on after.
                             let color = snowed(req.season.as_ref(), mats.get(surface).color.map(f32::from), col.biome, col.ground);
-                            Cell { top: block(col.ground), surface: col.ground, color, water: false, tree: None }
+                            Cell { top: block(col.ground), color, water: false, tree: None }
                         };
                         cells[z * n + x] = Some(cell);
                     }
@@ -442,10 +440,10 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                 let t = ((gz * TEX / size) * TEX + gx * TEX / size) * 4;
                 let color = [picture[t] as f32, picture[t + 1] as f32, picture[t + 2] as f32];
                 let cell = if c.ocean[i] {
-                    Cell { top: 0, surface: 0.0, color, water: true, tree: None }
+                    Cell { top: 0, color, water: true, tree: None }
                 } else if farview::lake_at(c, gx, gz) {
                     let level = if c.lake[i] != NO_LAKE { c.lake[i] } else { c.height[i] };
-                    Cell { top: block(level * OLD_VOXEL).max(1), surface: level * OLD_VOXEL, color, water: true, tree: None }
+                    Cell { top: block(level * OLD_VOXEL).max(1), color, water: true, tree: None }
                 } else {
                     let biome = worldgen::biome::Biome::from_u8(c.biome[i]);
                     let tree = features::canopy(biome, mats).filter(|t| hash(wx, wz, 1) < t.1 * 0.6).map(|(color, _, _)| Tree {
@@ -466,7 +464,7 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                         }
                     }
                     let ground = sum / count as f32 * OLD_VOXEL;
-                    Cell { top: block(ground).max(1), surface: ground, color: snowed(req.season.as_ref(), color, biome, ground), water: false, tree }
+                    Cell { top: block(ground).max(1), color: snowed(req.season.as_ref(), color, biome, ground), water: false, tree }
                 };
                 cells[z * n + x] = Some(cell);
             }
@@ -590,62 +588,49 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
         }
     }
 
-    // What people built, and the tors, as small models of themselves: gathered into
-    // cells finer than the columns, so that a hut has its walls and roof, a bridge its
-    // deck and a tor its stacks. On wide columns they are drawn larger than life, as a
-    // map's signs are, or they would be lost.
+    // What people built, and the tors, in the same blocks as the land they stand on: each
+    // column they cover is raised to their top, roofed in the colour they show from above
+    // and walled in the colour of their sides. A finer model of them, with its walls and
+    // eaves, stood out from the plain blocks about it as something pasted on; this way a
+    // hut is a block or two of the map, as a knoll is. One too small to cover a column
+    // still has the column under its middle, or it would be lost on wide columns.
     let mut models = 0;
     if step <= MODEL_STEP {
-        let under = |wx: i32, wz: i32| {
-            let (cx, cz) = (wx.div_euclid(step) - req.origin.0, wz.div_euclid(step) - req.origin.1);
-            if cx < 0 || cz < 0 || cx >= n as i32 || cz >= n as i32 {
+        let cell_at = |cx: i32, cz: i32| {
+            let (x, z) = (cx - req.origin.0, cz - req.origin.1);
+            if x < 0 || z < 0 || x >= n as i32 || z >= n as i32 {
                 return None;
             }
-            cells[cz as usize * n + cx as usize]
+            cells[z as usize * n + x as usize]
         };
-        let q = (step / 8).max(1);
-        let grow = |extent: i32| if step > SMALL_MODEL_STEP { (1.3 * step as f32 / extent.max(1) as f32).clamp(1.0, 2.5) } else { 1.0 };
         for (stamp, o) in built.values() {
             let extent = stamp.hi - stamp.lo + IVec3::ONE;
-            if step > SMALL_MODEL_STEP && extent.x.max(extent.z) < BUILDING {
+            let large = extent.x.max(extent.z) >= BUILDING;
+            if step > SMALL_MODEL_STEP && !large {
                 continue;
             }
             let mid = (stamp.lo + stamp.hi) / 2;
-            let Some(ground) = under(o.x + mid.x, o.y + mid.z) else { continue };
-            let mut model = Model::new(q);
-            for &(p, v) in &stamp.voxels {
-                model.add(p.div_euclid(IVec3::splat(q)), v, mats);
-            }
-            // A bridge is made broader, not longer.
-            let (gx, gz) = (grow(extent.x), grow(extent.z));
-            let gy = gx.min(gz);
-            let from = ((o.x + mid.x - corner.0) as f32, (o.y + mid.z - corner.1) as f32);
+            // A lit lantern keeps its column too, to show as a light after dark.
+            let keep = (large || blocks.glows()).then(|| ((o.x + mid.x).div_euclid(step), (o.y + mid.z).div_euclid(step)));
             let before = solids.len();
-            model.boxes((q * q * q / 8).max(1) as u32, &mut solids, |v| {
-                [
-                    (from.0 + (v.x - mid.x as f32) * gx) / step as f32,
-                    ground.top as f32 + (v.y - ground.surface) * gy * tall / step as f32,
-                    (from.1 + (v.z - mid.z as f32) * gz) / step as f32,
-                ]
-            });
+            solids.extend(blocks.raise(step, req.origin, keep, &cell_at, &block));
             models += (solids.len() > before) as usize;
         }
         for tor in rocks.values() {
-            let Some(ground) = under(tor.origin.x, tor.origin.z) else { continue };
-            let mut model = Model::new(q);
+            // Sampled a few times to a column, which is enough to tell how much of it the
+            // rock covers and how high it stands.
+            let q = (step / 4).max(1);
             let (lo, hi) = (tor.lo.div_euclid(IVec3::splat(q)), tor.hi.div_euclid(IVec3::splat(q)));
-            tor.raster_coarse(q, lo.x, lo.z, (hi.x - lo.x).max(hi.z - lo.z) + 1, |c, v| model.add(c, v, mats));
-            let g = grow((tor.hi.x - tor.lo.x).max(tor.hi.z - tor.lo.z) / 2).min(1.6);
-            let mid = tor.origin;
-            let from = ((mid.x - corner.0) as f32, (mid.z - corner.1) as f32);
-            let before = solids.len();
-            model.boxes(1, &mut solids, |v| {
-                [
-                    (from.0 + (v.x - mid.x as f32) * g) / step as f32,
-                    ground.top as f32 + (v.y - ground.surface) * g * tall / step as f32,
-                    (from.1 + (v.z - mid.z as f32) * g) / step as f32,
-                ]
+            let mut blocks = Blocks::default();
+            tor.raster_coarse(q, lo.x, lo.z, (hi.x - lo.x).max(hi.z - lo.z) + 1, |c, v| {
+                let m = mats.get(v);
+                if m.kind.is_opaque() {
+                    blocks.add(c * q, q, m.color, false);
+                }
             });
+            let keep = Some((tor.origin.x.div_euclid(step), tor.origin.z.div_euclid(step)));
+            let before = solids.len();
+            solids.extend(blocks.raise(step, req.origin, keep, &cell_at, &block));
             models += (solids.len() > before) as usize;
         }
     }
@@ -738,92 +723,143 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
 /// Every face of a [`Solid`].
 const ALL: u8 = 0b11111;
 
-/// A building, a bridge or a tor gathered into cells `q` voxels wide, to be drawn as a
-/// few boxes rather than voxel by voxel.
-struct Model {
-    q: i32,
-    cells: HashMap<IVec3, Brick>,
+/// A building, a bridge or a tor as the map's blocks have it: gathered up a column of
+/// voxels (or of cubes sampled from it) at a time, then into the model's columns.
+#[derive(Default)]
+struct Blocks {
+    piles: HashMap<(i32, i32), Pile>,
 }
 
-/// What one cell of a [`Model`] holds: its voxels' colours added up, how many there are,
-/// and how many of them give off light.
-#[derive(Clone, Copy, Default)]
-struct Brick {
-    color: [u32; 3],
+/// One upright pile of a [`Blocks`]: how wide it is, its lowest and highest voxel (the
+/// highest is the first above it), the colour of its top, its colours added up, how many
+/// were added and how many of them give off light.
+#[derive(Clone, Copy)]
+struct Pile {
+    size: i32,
+    lo: i32,
+    hi: i32,
+    top: [f32; 3],
+    sum: [f32; 3],
     count: u32,
     glows: u32,
 }
 
-impl Model {
-    fn new(q: i32) -> Self {
-        Self { q, cells: HashMap::new() }
-    }
+/// What one column of the model holds of a [`Blocks`].
+#[derive(Clone, Copy, Debug)]
+struct Column {
+    /// How much of the column it covers, 0 to 1, and how far across it it reaches, in
+    /// voxels, the longer way.
+    cover: f32,
+    span: i32,
+    lo: i32,
+    hi: i32,
+    /// Its colour from above, and from the side.
+    roof: [f32; 3],
+    wall: [f32; 3],
+    glows: bool,
+}
 
-    /// Adds voxel `v` to cell `c`, unless it is air or water.
-    fn add(&mut self, c: IVec3, v: voxel::Voxel, mats: &voxel::Materials) {
-        let m = mats.get(v);
-        if !m.kind.is_opaque() {
-            return;
+impl Blocks {
+    /// Adds a cube `size` voxels wide with its low corner at world voxel `p`.
+    fn add(&mut self, p: IVec3, size: i32, color: [u8; 3], glows: bool) {
+        let c = color.map(f32::from);
+        let pile = self.piles.entry((p.x, p.z)).or_insert(Pile { size, lo: i32::MAX, hi: i32::MIN, top: c, sum: [0.0; 3], count: 0, glows: 0 });
+        if p.y + size > pile.hi {
+            pile.hi = p.y + size;
+            pile.top = c;
         }
-        let b = self.cells.entry(c).or_default();
+        pile.lo = pile.lo.min(p.y);
         for k in 0..3 {
-            b.color[k] += m.color[k] as u32;
+            pile.sum[k] += c[k];
         }
-        b.count += 1;
-        b.glows += m.emissive as u32;
+        pile.count += 1;
+        pile.glows += glows as u32;
     }
 
-    /// The model as boxes, added to `out`: each run of cells of one colour up a column of
-    /// them is one box, with only the faces that show. A cell counts if it holds `need`
-    /// voxels; `place` takes a point in voxels to where it is on the map's model.
-    fn boxes(&self, need: u32, out: &mut Vec<Solid>, place: impl Fn(glam::Vec3) -> [f32; 3]) {
-        let full = |x: i32, y: i32, z: i32| self.cells.get(&IVec3::new(x, y, z)).is_some_and(|b| b.count >= need);
-        let mut columns: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
-        for (c, b) in &self.cells {
-            if b.count >= need {
-                columns.entry((c.x, c.z)).or_default().push(c.y);
+    fn glows(&self) -> bool {
+        self.piles.values().any(|p| p.glows > 0)
+    }
+
+    /// What it makes of the model's columns, `step` voxels wide, by column.
+    fn columns(&self, step: i32) -> HashMap<(i32, i32), Column> {
+        // Area, the reach each way, and the colours, added up.
+        let mut sums: HashMap<(i32, i32), (f32, [i32; 4], Column, [f32; 3], u32, u32)> = HashMap::new();
+        for (&(x, z), p) in &self.piles {
+            let key = (x.div_euclid(step), z.div_euclid(step));
+            let area = (p.size * p.size) as f32;
+            let s = sums.entry(key).or_insert((0.0, [i32::MAX, i32::MAX, i32::MIN, i32::MIN], Column { cover: 0.0, span: 0, lo: i32::MAX, hi: i32::MIN, roof: [0.0; 3], wall: [0.0; 3], glows: false }, [0.0; 3], 0, 0));
+            s.0 += area;
+            s.1 = [s.1[0].min(x), s.1[1].min(z), s.1[2].max(x + p.size), s.1[3].max(z + p.size)];
+            s.2.lo = s.2.lo.min(p.lo);
+            s.2.hi = s.2.hi.max(p.hi);
+            for k in 0..3 {
+                s.2.roof[k] += p.top[k] * area;
+                s.3[k] += p.sum[k];
             }
+            s.4 += p.count;
+            s.5 += p.glows;
         }
-        let q = self.q as f32;
-        for ((x, z), mut ys) in columns {
-            ys.sort_unstable();
-            let brick = |y: i32| self.cells[&IVec3::new(x, y, z)];
-            let shade = |y: i32| {
-                let b = brick(y);
-                b.color.map(|v| v as f32 / b.count as f32)
-            };
-            let alike = |a: [f32; 3], b: [f32; 3]| (0..3).all(|k| (a[k] - b[k]).abs() < 18.0);
-            let mut k = 0;
-            while k < ys.len() {
-                let from = k;
-                let first = shade(ys[from]);
-                let glows = brick(ys[from]).glows * 2 >= brick(ys[from]).count;
-                while k + 1 < ys.len() && ys[k + 1] == ys[k] + 1 && alike(shade(ys[k + 1]), first) && (brick(ys[k + 1]).glows * 2 >= brick(ys[k + 1]).count) == glows {
-                    k += 1;
-                }
-                let (y0, y1) = (ys[from], ys[k]);
-                k += 1;
-                let mut faces = !full(x, y1 + 1, z) as u8;
+        sums.into_iter()
+            .map(|(key, (area, reach, mut c, wall, count, glows))| {
+                c.cover = (area / (step * step) as f32).min(1.0);
+                c.span = (reach[2] - reach[0]).max(reach[3] - reach[1]);
+                c.roof = c.roof.map(|v| v / area);
+                c.wall = wall.map(|v| v / count.max(1) as f32);
+                // A lamp is small beside its post, and is what is seen after dark.
+                c.glows = glows * 8 >= count;
+                (key, c)
+            })
+            .collect()
+    }
+
+    /// The boxes it stands on the model as, in the model's columns from `origin` and its
+    /// blocks: on each column it covers a good part of, or crosses (as a bridge's deck or
+    /// a wall does), a pile from its foot to its top, roofed in its colour from above.
+    /// `keep` is a column it has whatever it covers of it. `cell_at` gives the land at a
+    /// column, by its place from the world's origin, and `block` the block a height in
+    /// voxels falls in.
+    fn raise(&self, step: i32, origin: (i32, i32), keep: Option<(i32, i32)>, cell_at: &dyn Fn(i32, i32) -> Option<Cell>, block: &dyn Fn(f32) -> i16) -> Vec<Solid> {
+        let mut piles: HashMap<(i32, i32), (i16, i16, Column)> = HashMap::new();
+        for (key, c) in self.columns(step) {
+            let crosses = c.span * 4 >= step * 3 && c.cover * 16.0 >= 0.99;
+            if !(c.cover >= 0.25 || crosses || keep == Some(key)) {
+                continue;
+            }
+            let Some(cell) = cell_at(key.0, key.1) else { continue };
+            // Standing on the land, unless it is held up off it, as a bridge's deck is.
+            let foot = block(c.lo as f32);
+            let foot = if foot <= cell.top + 1 { cell.top } else { foot };
+            let top = block(c.hi as f32).max(foot + 1);
+            piles.insert(key, (foot, top, c));
+        }
+        let mut out = Vec::new();
+        for (&(x, z), &(foot, top, c)) in &piles {
+            let (x0, z0) = ((x - origin.0) as f32, (z - origin.1) as f32);
+            // Each face shows unless the pile beside it covers it.
+            let faces = |y0: i16, y1: i16| {
+                let mut faces = 0u8;
                 for (face, dx, dz) in [(1, 1, 0), (2, -1, 0), (3, 0, 1), (4, 0, -1)] {
-                    if (y0..=y1).any(|y| !full(x + dx, y, z + dz)) {
+                    if !piles.get(&(x + dx, z + dz)).is_some_and(|n| n.0 <= y0 && n.1 >= y1) {
                         faces |= 1 << face;
                     }
                 }
-                if faces == 0 {
-                    continue;
-                }
-                let mut color = [0.0f32; 3];
-                for y in y0..=y1 {
-                    let c = shade(y);
-                    for k in 0..3 {
-                        color[k] += c[k] / (y1 - y0 + 1) as f32;
-                    }
-                }
-                let lo = place(glam::Vec3::new(x as f32, y0 as f32, z as f32) * q);
-                let hi = place(glam::Vec3::new((x + 1) as f32, (y1 + 1) as f32, (z + 1) as f32) * q);
-                out.push(Solid { lo, hi, color, own: footprint(lo, hi), faces, kind: if glows { GLOWS } else { 0 } });
+                faces
+            };
+            let mut put = |y0: i16, y1: i16, color: [f32; 3], top: bool, kind: u8| {
+                let (lo, hi) = ([x0, y0 as f32, z0], [x0 + 1.0, y1 as f32, z0 + 1.0]);
+                out.push(Solid { lo, hi, color, own: footprint(lo, hi), faces: faces(y0, y1) | top as u8, kind });
+            };
+            let kind = if c.glows { GLOWS } else { 0 };
+            // As a column of the land has its turf on top and earth under it: its roof,
+            // and its walls under that.
+            if top - foot >= 2 {
+                put(foot, top - 1, c.wall, false, 0);
+                put(top - 1, top, c.roof, true, kind);
+            } else {
+                put(foot, top, c.roof, true, kind);
             }
         }
+        out
     }
 }
 
@@ -1083,34 +1119,53 @@ mod tests {
         }
     }
 
+    /// What people built is drawn in the land's own blocks: whole columns, whole blocks
+    /// high, roofed in the colour seen from above, with only the faces that show.
     #[test]
-    fn a_model_is_boxes_with_only_the_faces_that_show() {
-        let world = GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
-        let mats = world.materials();
-        // A block two cells each way: four columns of cells, each a run of two.
-        let mut model = Model::new(1);
-        for i in 0..8 {
-            model.add(IVec3::new(i & 1, (i >> 1) & 1, i >> 2), mat::GRANITE, mats);
+    fn a_building_is_whole_blocks_of_the_map_as_the_land_is() {
+        const STEP: i32 = 8;
+        const ROOF: [u8; 3] = [150, 60, 40];
+        const WALL: [u8; 3] = [200, 200, 190];
+        let ground = Cell { top: 10, color: [0.0; 3], water: false, tree: None };
+        let cell_at = |_: i32, _: i32| Some(ground);
+        let block = |v: f32| (v / STEP as f32).round() as i16;
+        // A hut 12 voxels square and 20 high, walls under a roof, on the ground at 80,
+        // across the corner of four columns; and a plank of a deck a voxel wide and 30
+        // long, held up over the water.
+        let mut hut = Blocks::default();
+        for x in 4..16 {
+            for z in 4..16 {
+                for y in 80..100 {
+                    hut.add(IVec3::new(x, y, z), 1, if y == 99 { ROOF } else { WALL }, false);
+                }
+            }
         }
-        // Air and water are not part of it.
-        model.add(IVec3::new(5, 0, 0), voxel::AIR, mats);
-        model.add(IVec3::new(6, 0, 0), mat::WATER, mats);
-        let mut out = Vec::new();
-        model.boxes(1, &mut out, |v| v.to_array());
-        assert_eq!(out.len(), 4);
-        for s in &out {
-            assert_eq!((s.hi[0] - s.lo[0], s.hi[1] - s.lo[1], s.hi[2] - s.lo[2]), (1.0, 2.0, 1.0));
-            // Its top and its two outer sides; the sides against its neighbours are not drawn.
-            assert_eq!(s.faces & 1, 1);
-            assert_eq!(s.faces.count_ones(), 3, "{:05b}", s.faces);
-            assert_eq!(s.color, mats.get(mat::GRANITE).color.map(f32::from));
+        let boxes = hut.raise(STEP, (0, 0), None, &cell_at, &block);
+        // Four columns of it, each a wall and a roof.
+        assert_eq!(boxes.len(), 8);
+        for s in &boxes {
+            for k in 0..3 {
+                assert_eq!(s.lo[k].fract(), 0.0, "{:?}", s.lo);
+                assert_eq!(s.hi[k].fract(), 0.0, "{:?}", s.hi);
+            }
+            assert!(s.lo[1] >= 10.0 && s.hi[1] <= 13.0);
+            let roofed = s.faces & 1 == 1;
+            assert_eq!(roofed, s.color == ROOF.map(f32::from), "{:?}", s.color);
+            // Two sides of each face out, the two against its neighbours do not.
+            assert_eq!((s.faces >> 1).count_ones(), 2, "{:05b}", s.faces);
         }
-        // A cell with too little in it is left out.
-        let mut thin = Model::new(4);
-        thin.add(IVec3::ZERO, mat::GRANITE, mats);
-        let mut out = Vec::new();
-        thin.boxes(8, &mut out, |v| v.to_array());
-        assert!(out.is_empty());
+        let mut deck = Blocks::default();
+        for x in 0..30 {
+            deck.add(IVec3::new(x, 120, 17), 1, WALL, false);
+        }
+        let boxes = deck.raise(STEP, (0, 0), None, &cell_at, &block);
+        assert_eq!(boxes.len(), 4, "a column of deck across each column it crosses");
+        assert!(boxes.iter().all(|s| s.lo[1] == 15.0 && s.hi[1] == 16.0), "held up off the ground");
+        // A post too small to cover any of its column is lost, unless it is to be kept.
+        let mut post = Blocks::default();
+        post.add(IVec3::new(3, 80, 3), 1, WALL, false);
+        assert!(post.raise(STEP, (0, 0), None, &cell_at, &block).is_empty());
+        assert_eq!(post.raise(STEP, (0, 0), Some((0, 0)), &cell_at, &block).len(), 1);
     }
 
     /// Close in, what people built stands on the map as a model of itself; far out,
