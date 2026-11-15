@@ -124,6 +124,8 @@ struct Options {
     shot_prompt: Option<String>,
     /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
+    /// How far ahead that camp is made, in metres.
+    camp_ahead: f64,
     /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
@@ -172,6 +174,7 @@ impl Default for Options {
             shot_hotbar: false,
             shot_prompt: None,
             shot_camp: None,
+            camp_ahead: 4.2,
             rest: false,
             shot_lantern: false,
             picked: None,
@@ -213,7 +216,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --hotbar              show the hotbar on a screenshot, with a few things in it
   --prompt TEXT         show TEXT along the foot of a screenshot, as a prompt is
   --camp STATE          make camp a few steps ahead before a screenshot: a fire that is
-                        laid, lit or burnt, and a few things set down
+                        laid, lit, out (put out a moment ago) or burnt, and a few
+                        things set down
+  --camp-ahead M        make that camp M metres ahead instead (default 4.2), to see its
+                        smoke from far off
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
@@ -310,12 +316,14 @@ fn parse_args() -> Result<Options> {
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
             "--lantern" => o.shot_lantern = true,
+            "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
                     "laid" => placed::LAID,
                     "lit" => placed::BURNING,
+                    "out" => placed::OUT,
                     "burnt" => placed::BURNT,
-                    other => bail!("unknown fire '{other}': laid, lit or burnt"),
+                    other => bail!("unknown fire '{other}': laid, lit, out or burnt"),
                 });
             }
             "--picked" => o.picked = Some(value()?.parse()?),
@@ -421,6 +429,8 @@ const BOARD_REACH: f64 = m64(4.8);
 const PLACE_REACH: f64 = m64(3.0);
 /// How long a fire burns once lit, in days: from dusk until well into the morning.
 const FIRE_BURNS: f32 = 14.0 / 24.0;
+/// How long a fire smoulders once it has gone out, in days.
+const SMOULDERS: f32 = 1.5 / 24.0;
 /// How long the name of what has come to hand stays up, in seconds.
 const HAND_WORD: f32 = 2.6;
 
@@ -494,25 +504,33 @@ fn by_the_fire(voxels: &mut WorldVoxels, fire: &placed::Thing, from: DVec3) -> D
     DVec3::new(p.x, ground_near(voxels, p.x, fire.pos.y + 1.0, p.z).unwrap_or(fire.pos.y), p.z)
 }
 
-/// Makes camp a few steps ahead of someone whose eye is at `eye`, looking along `yaw`:
+/// Makes camp `far` metres ahead of someone whose eye is at `eye`, looking along `yaw`:
 /// a fire in `state` and a few things set down about it. Behind them or to one side
 /// instead, if there is water or a cliff ahead. For showing a camp without having made
 /// one.
-fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8) {
+fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8, far: f64) {
     use worldgen::features::plants::Flower;
     let foot = eye.y - player::EYE_HEIGHT;
     for turned in [0.0, std::f32::consts::PI, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
         let yaw = yaw + turned;
         let (ahead, across) = (DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64), DVec3::new(-yaw.sin() as f64, 0.0, yaw.cos() as f64));
         let mut spot = |along: f64, aside: f64| {
+            let along = along + far - 4.2;
             let p = eye + ahead * m64(along) + across * m64(aside);
-            let y = ground_near(voxels, p.x, foot + 2.0, p.z).or_else(|| ground_near(voxels, p.x, foot - 4.0, p.z))?;
+            let y = ground_near(voxels, p.x, foot + 2.0, p.z).or_else(|| ground_near(voxels, p.x, foot - 4.0, p.z));
+            // Far off, the ground may be well above or below the feet.
+            let y = y.or_else(|| (along > 10.0).then(|| (-30..30).rev().find_map(|k| ground_near(voxels, p.x, foot + 8.0 * k as f64, p.z))).flatten())?;
             Some(DVec3::new(p.x, y, p.z))
         };
         let Some(fire) = spot(4.2, 0.0) else { continue };
+        log::info!("camp made at {:.0} {:.0} {:.0}, {:.0} m from the eye", fire.x, fire.y, fire.z, fire.distance(eye) / m64(1.0));
         camp.put(placed::Thing::new(inventory::campfire(), 1, fire, yaw));
         if let Some(at) = camp.within_reach(fire).filter(|_| state != placed::LAID) {
             camp.set_state(at, state);
+        }
+        // A fire burnt down has long since stopped smoking; one put out has only just.
+        if state == placed::BURNT {
+            camp.pass(1.0, f64::MAX);
         }
         for (item, count, along, aside, turn) in [
             (inventory::sticks(), 3, 3.6, -1.3, 0.4),
@@ -896,7 +914,7 @@ impl Running {
         let mut voxels = WorldVoxels::new(world.clone());
         let mut rest = None;
         if let Some(state) = opts.shot_camp {
-            sample_camp(&mut placed, &mut voxels, camera.pos, camera.yaw, state);
+            sample_camp(&mut placed, &mut voxels, camera.pos, camera.yaw, state, opts.camp_ahead);
             if opts.rest
                 && !flying
                 && let Some((_, fire)) = placed.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_fire())
@@ -1231,27 +1249,31 @@ impl Running {
         self.placed.put(placed::Thing::new(stack.item, stack.count, DVec3::new(p.x, y, p.z), self.camera.yaw + std::f32::consts::FRAC_PI_2));
     }
 
-    /// Takes up the thing set down that is within reach, back into the pack.
+    /// Takes up the thing set down that is within reach, back into the pack. A fire
+    /// burning is put out instead, and one that is not is taken apart.
     fn take_up(&mut self) {
         if !self.walking || self.player.mode != Mode::Walk || self.rest.is_some() {
             return;
         }
         let Some(at) = self.placed.within_reach(self.hands()) else { return };
         let Some(thing) = self.placed.get(at).cloned() else { return };
-        if thing.is_fire() {
-            if thing.state != placed::LAID {
-                self.say("The ring of stones stays");
-                return;
-            }
-            // A fire never lit comes apart into its sticks.
-            let left = self.pack.add_many(&inventory::sticks(), inventory::FIRE_STICKS);
+        if thing.burns() {
+            // Smothered and stamped out, it smoulders for a while.
+            self.placed.set_state(at, placed::OUT);
+            self.say("The fire is put out");
+        } else if thing.is_fire() {
+            // It comes apart into what of its sticks is not burnt through, and its stones
+            // are scattered.
+            let back = thing.salvage();
+            let left = self.pack.add_many(&inventory::sticks(), back);
             if left > 0 {
-                self.pack.spend("sticks", inventory::FIRE_STICKS - left);
+                self.pack.spend("sticks", back - left);
                 self.say("Your pack is full");
                 return;
             }
             self.placed.take(at);
-            self.say(format!("Sticks  \u{d7} {}", self.pack.count("sticks")));
+            self.map.camps = self.placed.camps();
+            self.say(if back > 0 { format!("Sticks  \u{d7} {}", self.pack.count("sticks")) } else { "The fire is cleared away".into() });
         } else {
             let left = self.pack.add_many(&thing.item, thing.count);
             if left == thing.count {
@@ -1286,11 +1308,13 @@ impl Running {
             return self.ember_near().map(|_| format!("E to rest by the fire until {until}"));
         };
         Some(if thing.burns() {
-            format!("E to rest by the fire until {until}")
+            format!("E to rest by the fire until {until}   \u{b7}   left click to put it out")
         } else if thing.is_fire() && thing.state == placed::LAID {
             "E to light the fire   \u{b7}   left click to take the sticks back".into()
+        } else if thing.is_fire() && thing.salvage() > 0 {
+            "E to light the fire again   \u{b7}   left click to take it apart for its sticks".into()
         } else if thing.is_fire() {
-            "E to light the fire again".into()
+            "E to light the fire again   \u{b7}   left click to clear it away".into()
         } else if thing.count > 1 {
             format!("Left click to pick up  {}  \u{d7} {}", thing.item.name, thing.count)
         } else {
@@ -1702,7 +1726,8 @@ impl Running {
         let surf: Vec<_> = self.streamer.surf_near(self.camera.pos, m(60.0)).copied().collect();
         // Every fire burning near: the player's own, and the embers of older camps.
         let burning: Vec<DVec3> = self.placed.near(self.camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
-        let fires: Vec<DVec3> = burning.iter().chain(&self.embers).copied().collect();
+        let mut fires = self.placed.smoking(self.camera.pos, m64(particles::SMOKE_SIGHT), (SMOULDERS / self.settings.year_days.max(1.0)) as f64);
+        fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -2313,7 +2338,7 @@ fn main() -> Result<()> {
         // A camp a few steps ahead: a fire, and a few things set down.
         let mut camp = placed::Placed::new();
         if let Some(state) = opts.shot_camp {
-            sample_camp(&mut camp, &mut voxels, camera.pos, camera.yaw, state);
+            sample_camp(&mut camp, &mut voxels, camera.pos, camera.yaw, state, opts.camp_ahead);
         }
         // Lying by its fire, facing it, looking up as high as --look says.
         if opts.rest
@@ -2327,7 +2352,8 @@ fn main() -> Result<()> {
         camp.draw(camera.pos, 0.6, &mut props);
         let fires: Vec<DVec3> = camp.near(camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
         // Smoke rises from them, and from the embers of the camps that were here already.
-        let smoking: Vec<DVec3> = fires.iter().copied().chain(embers_near(&streamer, &mut voxels, camera.pos)).collect();
+        let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);
+        smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         let mut particles = Particles::new();
         for step in 0..(opts.ambient * 60.0) as u32 {

@@ -21,6 +21,8 @@ use crate::{
 pub const LAID: u8 = 0;
 pub const BURNING: u8 = 1;
 pub const BURNT: u8 = 2;
+/// Put out before it had burned down, its sticks only half burnt.
+pub const OUT: u8 = 3;
 
 /// How far off the small things and the camps are still drawn, in metres.
 const SMALL_SIGHT: f64 = 45.0;
@@ -55,6 +57,17 @@ impl Thing {
     /// Whether it is a fire, burning.
     pub fn burns(&self) -> bool {
         self.is_fire() && self.state == BURNING
+    }
+
+    /// How many sticks a fire not burning gives back when it is taken apart: all of
+    /// them from one never lit, those not burnt through from one put out, and none from
+    /// ashes.
+    pub fn salvage(&self) -> u32 {
+        match self.state {
+            LAID => inventory::FIRE_STICKS,
+            OUT => inventory::FIRE_STICKS - 1,
+            _ => 0,
+        }
     }
 
     /// How near, in voxels, the player must be to reach it.
@@ -181,6 +194,21 @@ impl Placed {
         out
     }
 
+    /// The fires within `radius` voxels of `pos` that smoke, each with how much: 1 for
+    /// one burning, and a little, less and less, for one that has gone out in the last
+    /// `smoulder` years.
+    pub fn smoking(&self, pos: DVec3, radius: f64, smoulder: f64) -> Vec<(DVec3, f32)> {
+        self.near(pos, radius)
+            .filter_map(|(_, t)| {
+                if t.burns() {
+                    return Some((t.heart(), 1.0));
+                }
+                let cold = (self.years - t.since) / smoulder.max(1e-9);
+                (t.is_fire() && matches!(t.state, OUT | BURNT) && cold < 1.0).then(|| (t.heart(), 0.4 * (1.0 - cold as f32)))
+            })
+            .collect()
+    }
+
     /// Where the player has camped: every fire of theirs that has ever burned.
     pub fn camps(&self) -> Vec<DVec2> {
         self.columns.values().flatten().filter(|t| t.is_fire() && t.state != LAID).map(|t| DVec2::new(t.pos.x, t.pos.z)).collect()
@@ -223,7 +251,7 @@ impl Placed {
                         count: stack.count,
                         pos: DVec3::new(x, y, z),
                         yaw: yaw.trim().parse::<f32>().ok().filter(|v| v.is_finite())?,
-                        state: state.trim().parse::<u8>().ok()?.min(BURNT),
+                        state: state.trim().parse::<u8>().ok()?.min(OUT),
                         since: since.trim().parse::<f64>().ok().filter(|v| v.is_finite())?,
                     })
                 })();
@@ -325,7 +353,7 @@ fn draw(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) 
     }
 }
 
-/// A fire in its ring of stones: laid ready, burning, or burnt down to ash.
+/// A fire in its ring of stones: laid ready, burning, put out, or burnt down to ash.
 fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
     let salt = (thing.pos.x.floor() as i32 as u32).wrapping_mul(31) ^ (thing.pos.z.floor() as i32 as u32).wrapping_mul(17);
     // The ring: nine stones, no two alike.
@@ -337,10 +365,11 @@ fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
         b.tilted([0.44 * a.cos(), tall / 2.0, 0.44 * a.sin()], [0.2 + 0.06 * r3, tall, 0.15 + 0.05 * r1], grey, a * 1.7 + r2, [0.0; 2], 0.0);
     }
     let burning = thing.state == BURNING;
-    // The bed: bare earth, embers, or ash.
+    // The bed: bare earth, embers, wet black char, or ash.
     let bed = match thing.state {
         LAID => [0.09, 0.07, 0.05],
         BURNING => [0.05, 0.04, 0.035],
+        OUT => [0.03, 0.028, 0.026],
         _ => [0.20, 0.19, 0.18],
     };
     b.tilted([0.0, 0.02, 0.0], [0.6, 0.04, 0.6], bed, 0.4, [0.0; 2], 0.0);
@@ -352,8 +381,13 @@ fn fire(b: &mut Brush, thing: &Thing, clock: f32) {
         }
         return;
     }
-    // Three sticks stood together over a little kindling.
-    let wood = if burning { shade(WOOD, 0.35) } else { WOOD };
+    // Three sticks stood together over a little kindling; put out, still standing but
+    // blackened, the kindling gone to char.
+    let wood = match thing.state {
+        BURNING => shade(WOOD, 0.35),
+        OUT => shade(WOOD, 0.2),
+        _ => WOOD,
+    };
     let (long, lean) = (0.52f32, 0.72f32);
     for k in 0..3 {
         let a = k as f32 * std::f32::consts::TAU / 3.0 + 0.3;
@@ -469,6 +503,29 @@ mod tests {
         assert!(placed.pass(0.002, 0.01));
         assert_eq!(placed.get(at).map(|t| t.state), Some(BURNT));
         assert_eq!(placed.camps(), vec![DVec2::new(1.0, 2.0)]);
+    }
+
+    #[test]
+    fn a_fire_put_out_smoulders_a_while_and_gives_back_what_is_left_of_it() {
+        let mut placed = Placed::new();
+        placed.put(fire(1.0, 2.0));
+        let at = placed.within_reach(DVec3::new(1.0, 12.0, 2.0)).unwrap();
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(inventory::FIRE_STICKS));
+        assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty(), "a laid fire does not smoke");
+        placed.set_state(at, BURNING);
+        assert_eq!(placed.smoking(DVec3::ZERO, 100.0, 0.01)[0].1, 1.0);
+        placed.pass(0.001, 1.0);
+        placed.set_state(at, OUT);
+        assert!(!placed.get(at).unwrap().burns() && placed.camps().len() == 1);
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(inventory::FIRE_STICKS - 1));
+        let wisp = placed.smoking(DVec3::ZERO, 100.0, 0.01)[0].1;
+        assert!(wisp > 0.0 && wisp < 1.0);
+        // It is still put out when it is read back, and in time it is cold.
+        assert_eq!(Placed::from_text(&placed.to_text()).get(at).map(|t| t.state), Some(OUT));
+        placed.pass(0.02, 1.0);
+        assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty());
+        placed.set_state(at, BURNT);
+        assert_eq!(placed.get(at).map(Thing::salvage), Some(0));
     }
 
     #[test]
