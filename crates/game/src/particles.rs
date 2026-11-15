@@ -240,6 +240,18 @@ const MAX_PARTICLES: usize = 8000;
 const MAX_FALLING: usize = 1500;
 /// How far off (voxels, across) a falling leaf is let go of, being out of sight.
 const LEAF_REACH: f64 = 110.0 * VOXELS_PER_METRE as f64;
+/// The colours butterflies come in: whites, a sulphur yellow, oranges, a blue and a brown,
+/// as the common ones of meadows are.
+const BUTTERFLY_COLOURS: [[f32; 3]; 7] = [
+    [0.95, 0.95, 0.9],
+    [0.93, 0.9, 0.55],
+    [0.95, 0.55, 0.15],
+    [0.85, 0.35, 0.1],
+    [0.45, 0.6, 0.95],
+    [0.5, 0.33, 0.2],
+    [0.98, 0.98, 0.98],
+];
+
 /// How far off (voxels) a raindrop's splash is still drawn.
 const SPLASH_REACH: f64 = 11.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
@@ -583,10 +595,17 @@ impl Particles {
             }
         }
 
-        // Butterflies over the flowers, while they are out and the day is dry.
+        // Butterflies over the flowers, while they are out and the day is dry: a few, seen
+        // now and then, not a cloud of them. Each is a colour of its own, never near the
+        // flower it rose from, so it shows against the flowers instead of hiding in them.
         let in_flower = s.date > 0.08 && s.date < 0.66;
-        if day && in_flower && dry && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 18 && self.unit() < dt * 0.8 {
-            let (pos, color) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
+        if day && in_flower && dry && !s.flowers.is_empty() && self.count(PKind::Butterfly) < 6 && self.unit() < dt * 0.2 {
+            let (pos, flower) = s.flowers[(self.unit() * s.flowers.len() as f32) as usize % s.flowers.len()];
+            let first = (self.unit() * BUTTERFLY_COLOURS.len() as f32) as usize;
+            let color = (0..BUTTERFLY_COLOURS.len())
+                .map(|i| BUTTERFLY_COLOURS[(first + i) % BUTTERFLY_COLOURS.len()])
+                .find(|c| (0..3).map(|k| (c[k] - flower[k]).powi(2)).sum::<f32>() > 0.12)
+                .unwrap_or(BUTTERFLY_COLOURS[0]);
             let particle = Particle {
                 kind: PKind::Butterfly,
                 pos: pos + DVec3::new(0.5, (1.2 * U) as f64, 0.5),
@@ -594,7 +613,7 @@ impl Particles {
                 age: 0.0,
                 life: self.range(18.0, 30.0),
                 size: Vec3::new(0.17, 0.02, 0.2),
-                color: [color[0] * 0.8 + 0.2, color[1] * 0.8 + 0.1, color[2] * 0.8 + 0.1],
+                color,
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
                 rot: Vec3::ZERO,
@@ -1445,8 +1464,16 @@ mod leaf_tests {
             }
             p.count(PKind::Butterfly)
         };
-        assert!(count(0.25, 0.0, 0.6) > 5);
+        assert!((2..=6).contains(&count(0.25, 0.0, 0.6)));
         assert_eq!((count(0.85, 0.0, 0.6), count(0.25, 0.6, 0.6), count(0.25, 0.0, -0.3)), (0, 0, 0));
+        // None the colour of the red flower they rose from.
+        let mut p = Particles::new();
+        for step in 0..60 * 120 {
+            let mut s = still_air(camera, step as f64 / 60.0);
+            (s.flowers, s.date, s.sun_elevation) = (&flowers, 0.25, 0.6);
+            p.update(1.0 / 60.0, &s, &mut Ground);
+            assert!(p.particles.iter().filter(|q| q.kind == PKind::Butterfly).all(|q| (0..3).map(|k| (q.color[k] - flowers[0].1[k]).powi(2)).sum::<f32>() > 0.12));
+        }
     }
 
     #[test]
