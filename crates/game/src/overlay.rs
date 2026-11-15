@@ -210,6 +210,7 @@ pub fn bottom_line(ctx: &egui::Context, id: &str, text: &str, lift: f32, color: 
     egui::Area::new(egui::Id::unique(id))
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -lift])
         .interactable(false)
+        .fade_in(false)
         .show(ctx, |ui| {
             ui.set_max_width(widest);
             egui::Frame::new()
