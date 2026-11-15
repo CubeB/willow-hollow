@@ -153,7 +153,9 @@ palette! {
     IVY_LEAF          = ( 72, 136,  58), Foliage, 3;
     IVY_LEAF_PALE     = (136, 180,  80), Foliage, 3;
     IVY_LEAF_RED      = (176,  74,  52), Foliage, 3;
-    IVY_FLOWER        = (206, 208, 120), Foliage, 2;
+    // Ivy flowers in round heads of small green flowers, pale against the dark leaves
+    // but never yellow: a yellow cluster reads as gorse or lichen from a step away.
+    IVY_FLOWER        = (176, 214, 124), Foliage, 2;
     IVY_BERRY_GREEN   = (110, 134,  74), Foliage, 1;
     IVY_BERRY         = ( 40,  40,  66), Foliage, 1;
     CREEPER_LEAF_DARK = ( 60, 104,  48), Foliage, 3;
