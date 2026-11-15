@@ -911,6 +911,33 @@ pub fn build_parts(kind: Landmark, palette: &Palette, seed: u32, length: i32) ->
 /// each in its intact or decayed form by the site's [`History`].
 pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
     let palette = &palette.varied(seed);
+    finish(kind, palette, seed, length, generate(kind, palette, seed, length))
+}
+
+/// [`build_site`], or instead one of the structures saved from the structure editor for
+/// this kind, when the seed picks one (see [`super::designs`]). This is what the world
+/// builds; with nothing saved it is [`build_site`].
+pub fn build_placed(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    match super::designs::pick(kind, seed) {
+        Some(design) => {
+            let palette = &palette.varied(seed);
+            finish(kind, palette, seed, length, design.shape(palette, seed))
+        }
+        None => build_site(kind, palette, seed, length),
+    }
+}
+
+/// Lays the props about a built model, and hands back its voxels, fine parts and props.
+pub fn finish(kind: Landmark, palette: &Palette, seed: u32, length: i32, mut s: Shape) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
+    let props = props::dress(kind, palette, seed, History::of(kind, seed), &s, length * crate::scale::BLOCK);
+    let fine = s.take_fine();
+    (s.into_voxels(), fine, props)
+}
+
+/// The generator's own model of a landmark, weathered and aged, before any props are
+/// laid about it. `palette` is used as it is: [`build_site`] varies it for the place
+/// first. The structure editor copies from this.
+pub fn generate(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Shape {
     let history = History::of(kind, seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();
@@ -937,9 +964,7 @@ pub fn build_site(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> 
         parts::weather_stone(&mut s, &mut rng, palette, chip);
     }
     decay(&mut s, kind, palette, seed, history);
-    let props = props::dress(kind, palette, seed, history, &s, length * crate::scale::BLOCK);
-    let fine = s.take_fine();
-    (s.into_voxels(), fine, props)
+    s
 }
 
 /// A lamp on a post beside a trail, in the style `hash` picks.

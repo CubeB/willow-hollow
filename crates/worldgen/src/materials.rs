@@ -15,6 +15,10 @@ macro_rules! palette {
 
         $( pub const $name: Voxel = Id::$name as Voxel; )*
 
+        /// Every material by the name it has in the code, for files that name them (the
+        /// structures made in the editor). A name stays put when ids are renumbered.
+        pub const NAMES: &[(&str, Voxel)] = &[ $( (stringify!($name), $name), )* ];
+
         pub fn build() -> Materials {
             let mut m = Materials::new();
             $(
@@ -298,6 +302,16 @@ palette! {
     STEM              = ( 84, 136,  64), Foliage, 2;
     LEAF_GLOSS        = ( 48, 112,  56), Foliage, 2;
     LEAF_GREY         = (130, 148, 120), Foliage, 2;
+}
+
+/// The material called `name` in the code (see [`NAMES`]), ignoring case.
+pub fn by_name(name: &str) -> Option<Voxel> {
+    NAMES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|&(_, v)| v)
+}
+
+/// The name of material `v` in the code, or None for air and ids out of range.
+pub fn name_of(v: Voxel) -> Option<&'static str> {
+    NAMES.iter().find(|&&(_, id)| id == v).map(|&(n, _)| n)
 }
 
 /// Thickness of one rock layer, in voxels.

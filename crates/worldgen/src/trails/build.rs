@@ -851,6 +851,13 @@ fn layout(kind: Landmark) -> Layout {
     }
 }
 
+/// The side of a landmark that is turned to face the way most people come, in quarter
+/// turns from +X (1 is +Z), or None if it is turned as its seed has it. The structure
+/// editor shows it, so a saved structure keeps its door where the trail arrives.
+pub fn front(kind: Landmark) -> Option<u32> {
+    layout(kind).front
+}
+
 /// A land site placed but not yet built: it is built once the trails to it are known,
 /// so its door can face the way most people come.
 struct PendingSite {
@@ -1034,7 +1041,7 @@ fn finish_site(net: &mut Network, site: &PendingSite, toward: Option<Vec2>) -> u
         (Some(front), Some(d)) => (turns_toward(d) + 4 - front) % 4,
         _ => site.seed & 3,
     };
-    let (voxels, fine, props) = landmarks::build_site(site.kind, &site.palette, site.seed, 0);
+    let (voxels, fine, props) = landmarks::build_placed(site.kind, &site.palette, site.seed, 0);
     net.add_stamp_with(absolute(voxels, site.origin, turns), parts::place_fine(&fine, site.origin, turns));
     hold_props(net, props, site.origin, turns);
     turns
