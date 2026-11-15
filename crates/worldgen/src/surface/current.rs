@@ -71,6 +71,16 @@ impl Sampler<'_> {
         let across = 1.0 + sd / hw; // 0 mid-stream, 1 at the edge
         // Slowest against the banks.
         let mut v = speed(piece.fall(t), hw) * (1.0 - 0.55 * across * across);
+        // The river's channel is routed on across a lake it runs into, and where the
+        // lake is no higher than the river the water there matches the channel's level.
+        // That water is the lake's, and lies still: the current dies away over the last
+        // stretch before the shore, so nothing flows on out across the open water.
+        if let Some(depth) = self.lake_depth(lx, lz) {
+            v *= 1.0 - smoothstep(1.0 - m(2.0), 1.0, depth);
+            if v <= 0.0 {
+                return None;
+            }
+        }
         if water == 0 {
             // A tidal reach: the sea holds it back, and out past the mouth it spreads
             // and fades into the sea.
@@ -101,6 +111,48 @@ mod tests {
         assert!(p.tangent(1.0).abs_diff_eq(vec2(0.0, 1.0), 1e-4));
         let mid = p.tangent(0.5);
         assert!(mid.abs_diff_eq(vec2(1.0, 1.0).normalize(), 1e-4), "{mid}");
+    }
+
+    /// Where a river runs into a lake its current runs up to the shore and stops there:
+    /// nothing flows on across the lake along the channel the river was routed by (#178).
+    #[test]
+    fn rivers_stop_running_where_they_enter_a_lake() {
+        use crate::{
+            continent::{NO_LAKE, SimConfig, generate},
+            macro_layout::cell_desc,
+            surface::{MIN_RIVER_Q, node},
+        };
+        let c = generate(cell_desc(7, 0, 0), SimConfig { size: 1024 });
+        let (mut mouths, mut running, mut out_on_lake, mut lake_water) = (0, 0, 0, 0);
+        for i in 0..c.size * c.size {
+            let r = c.rcv[i] as usize;
+            if c.ocean[i] || c.lake[i] != NO_LAKE || c.discharge[i] < MIN_RIVER_Q || c.ocean[r] || c.lake[r] == NO_LAKE {
+                continue;
+            }
+            mouths += 1;
+            // From the last node above the lake to the first one in it.
+            let (a, b) = (node(&c, i), node(&c, r));
+            let (lo, hi) = (a.min(b) - 32.0, a.max(b) + 32.0);
+            let s = Sampler::new(&c, 7, lo.x as i32, lo.y as i32, (hi - lo).max_element() as i32);
+            for z in lo.y as i32..hi.y as i32 {
+                for x in lo.x as i32..hi.x as i32 {
+                    let col = s.column(x, z);
+                    if col.water_surface().is_none() {
+                        continue;
+                    }
+                    let current = s.current(x, z, &col);
+                    running += current.is_some() as u32;
+                    if s.lake_depth(x, z).is_some_and(|d| d > 1.0) {
+                        lake_water += 1;
+                        out_on_lake += current.is_some() as u32;
+                    }
+                }
+            }
+        }
+        eprintln!("{mouths} rivers into lakes: {running} running columns, {out_on_lake} of {lake_water} lake columns running");
+        assert!(mouths > 5 && lake_water > 1000, "too few rivers into lakes to tell");
+        assert!(running > 500, "the rivers above the lakes do not run");
+        assert_eq!(out_on_lake, 0, "the current runs on out across a lake");
     }
 
     #[test]

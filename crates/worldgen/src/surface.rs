@@ -907,6 +907,27 @@ impl<'a> Sampler<'a> {
         best
     }
 
+    /// Where a lake's grid reaches continent-local column `(lx, lz)`: how far its
+    /// natural ground lies below the lake's water, in voxels (more than 1 out in the
+    /// lake, as [`column`](Self::column) decides it, and less up on the shore).
+    /// `None` away from lakes.
+    fn lake_depth(&self, lx: i32, lz: i32) -> Option<f32> {
+        let c = self.c;
+        let cs = c.cell_size();
+        let max = (c.size - 1) as f32;
+        let (fx, fz) = (((lx as f32 + 0.5) / cs - 0.5).clamp(0.0, max), ((lz as f32 + 0.5) / cs - 0.5).clamp(0.0, max));
+        let (x0, z0) = ((fx as usize).min(c.size - 2), (fz as usize).min(c.size - 2));
+        let corners = [z0 * c.size + x0, z0 * c.size + x0 + 1, (z0 + 1) * c.size + x0, (z0 + 1) * c.size + x0 + 1];
+        let lake = corners.iter().map(|&i| c.lake[i]).fold(NO_LAKE, f32::max);
+        if lake == NO_LAKE {
+            return None;
+        }
+        let wx = (c.desc.mx as i64 * MACRO_SIZE as i64 + lx as i64) as f64;
+        let wz = (c.desc.mz as i64 * MACRO_SIZE as i64 + lz as i64) as f64;
+        let (ground, _) = natural_ground(c, self.world_seed, fx, fz, wx, wz);
+        Some(pool_level(c.desc.seed, lake) as f32 - ground)
+    }
+
     /// Levels the ground under landmarks and along trails. Returns the distance to the
     /// nearest such thing, and on a trail column what the trail was worn into. `slope`
     /// is the steepness of the smooth land, in voxels of rise per voxel.
