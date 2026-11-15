@@ -758,6 +758,9 @@ struct Running {
     last_fall_speed: f32,
     was_grounded: bool,
     was_swimming: bool,
+    /// Seconds since the player was last swimming: only going in after a while out
+    /// splashes, not the chest bobbing in and out at the top of a swim.
+    dry_for: f32,
     fleet: Fleet,
     /// Solid models to draw this frame.
     props: Vec<particles::ParticleInstance>,
@@ -978,6 +981,7 @@ impl Running {
             last_fall_speed: 0.0,
             was_grounded: false,
             was_swimming: false,
+            dry_for: 0.0,
             fleet: Fleet::new(world.clone()),
             props: Vec::new(),
             shades: Vec::new(),
@@ -1704,9 +1708,10 @@ impl Running {
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
-        let entered_water = (self.player.swimming && !self.was_swimming && self.walking)
+        let entered_water = (self.player.swimming && !self.was_swimming && self.walking && self.dry_for > 0.75)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
+        self.dry_for = if self.player.swimming { 0.0 } else { self.dry_for + dt };
         let cascades: Vec<_> = self.streamer.cascades_near(self.camera.pos, m(120.0)).copied().collect();
         let springs: Vec<_> = self.streamer.springs_near(self.camera.pos, m(40.0)).copied().collect();
         let surf: Vec<_> = self.streamer.surf_near(self.camera.pos, m(60.0)).copied().collect();
