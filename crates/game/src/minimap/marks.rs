@@ -45,6 +45,23 @@ pub struct Mark {
     /// How near the player must come for it to count as visited, in voxels.
     pub reach: f32,
     pub name: Option<String>,
+    /// Whether the map hints at it before it has been visited. A share of what people
+    /// built is left unmarked, to come on unawares.
+    pub hint: bool,
+}
+
+/// The share of landmarks the map gives no hint of.
+pub const SURPRISES: f32 = 0.3;
+
+/// Whether the landmark at continent-local column `(x, z)` of a world is one the map
+/// keeps quiet about: picked by a hash of the seed and the place, so it is the same
+/// every time the world is played, and owes nothing to the order sites are found in.
+pub fn surprise(world_seed: u32, x: i32, z: i32) -> bool {
+    let mut h = world_seed.wrapping_mul(0x9e37_79b9) ^ (x as u32).wrapping_mul(0x85eb_ca6b) ^ (z as u32).wrapping_mul(0xc2b2_ae35) ^ 0x51ed_270b;
+    h = (h ^ (h >> 16)).wrapping_mul(0x7feb_352d);
+    h = (h ^ (h >> 15)).wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    ((h >> 8) as f32 / (1u32 << 24) as f32) < SURPRISES
 }
 
 /// Fewest cells apart two river mouths, or two confluences, are picked.
@@ -76,12 +93,14 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
             PlaceKind::Tor => (Kind::Tor, NEAR),
             _ => continue,
         };
-        marks.push(Mark { kind, at: world(p.at), reach, name: Some(p.name.clone()) });
+        marks.push(Mark { kind, at: world(p.at), reach, name: Some(p.name.clone()), hint: true });
     }
     for (k, s) in c.trails.sites.iter().enumerate() {
         let at = Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5);
         let name = c.trails.names.site(k).map(|p| p.name.clone());
-        marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name });
+        // Continent-local, so a site's luck does not change with where its continent lies.
+        let hint = !surprise(world_seed, s.x, s.z);
+        marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name, hint });
     }
 
     let land: Vec<usize> = (0..n * n).filter(|&i| !c.ocean[i]).collect();
@@ -91,7 +110,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         .map(|&i| (c.discharge[i], i))
         .collect();
     for i in spaced(n, mouths, 8, RIVER_SPACING) {
-        marks.push(Mark { kind: Kind::Mouth, at: world(centre(i)), reach: NEAR * 2.0, name: None });
+        marks.push(Mark { kind: Kind::Mouth, at: world(centre(i)), reach: NEAR * 2.0, name: None, hint: true });
     }
     // Where the second-largest river into a cell is itself a real river.
     let (mut first, mut second) = (vec![0.0f32; n * n], vec![0.0f32; n * n]);
@@ -106,7 +125,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
     }
     let joins = land.iter().filter(|&&i| second[i] >= MIN_TRIBUTARY).map(|&i| (second[i], i)).collect();
     for i in spaced(n, joins, 8, RIVER_SPACING) {
-        marks.push(Mark { kind: Kind::Confluence, at: world(centre(i)), reach: NEAR * 1.5, name: None });
+        marks.push(Mark { kind: Kind::Confluence, at: world(centre(i)), reach: NEAR * 1.5, name: None, hint: true });
     }
     // The springs that well up into a pool of some size, a few to a continent.
     let springs: Vec<(f32, usize, Vec2)> = land
@@ -117,7 +136,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         .collect();
     let at_of: std::collections::HashMap<usize, Vec2> = springs.iter().map(|s| (s.1, s.2)).collect();
     for i in spaced(n, springs.iter().map(|s| (s.0, s.1)).collect(), 10, 64.0) {
-        marks.push(Mark { kind: Kind::Spring, at: world(at_of[&i]), reach: NEAR, name: None });
+        marks.push(Mark { kind: Kind::Spring, at: world(at_of[&i]), reach: NEAR, name: None, hint: true });
     }
     marks
 }
@@ -146,6 +165,20 @@ fn spaced(n: usize, mut v: Vec<(f32, usize)>, count: usize, spacing: f32) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// About the share of landmarks asked for is left unmarked, the same ones each time
+    /// a world is played, and other ones in another world.
+    #[test]
+    fn a_share_of_landmarks_is_left_unmarked_the_same_each_time() {
+        let sites: Vec<(i32, i32)> = (0..4000).map(|k| ((k * 7919) % 65536, (k * 104_729) % 65536)).collect();
+        let quiet = |seed: u32| sites.iter().map(|&(x, z)| surprise(seed, x, z)).collect::<Vec<bool>>();
+        let one = quiet(1);
+        let share = one.iter().filter(|&&q| q).count() as f32 / sites.len() as f32;
+        assert!((share - SURPRISES).abs() < 0.03, "{share}");
+        assert_eq!(one, quiet(1));
+        let differ = one.iter().zip(quiet(2)).filter(|(a, b)| **a != *b).count();
+        assert!(differ > sites.len() / 5, "{differ}");
+    }
 
     #[test]
     fn spaced_keeps_the_best_and_drops_their_neighbours() {

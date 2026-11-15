@@ -1156,7 +1156,7 @@ impl Minimap {
         let span = (self.span / VOXELS_PER_METRE as f64) as f32;
         let me = xz(self.player);
         let me_px = place(me).map(|p| p.0);
-        let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
+        let (icon, glow) = if self.open { (6.5 * f.s, 15.0 * f.s) } else { (4.5 * f.s, 9.0 * f.s) };
         let mut hints: Vec<(f64, DVec2)> = Vec::new();
         let mut icons = Vec::new();
         for key in self.known.keys() {
@@ -1202,14 +1202,18 @@ impl Minimap {
                     if !modelled && !on_water {
                         icons.push(icon_of(mark, p, icon));
                     }
+                } else if !mark.hint {
+                    // Left for the player to come on unawares.
                 } else if let Some((p, _)) = at
                     && on_map
                     && seen
                 {
-                    let tint = if mark.kind.watery() { [0.88, 0.96, 1.0] } else { [1.0, 0.97, 0.86] };
+                    // A little block of the world's own kind, glowing, as the map is made
+                    // of blocks: water's blue, or a warm stone.
+                    let tint = if mark.kind.watery() { [0.56, 0.80, 0.97] } else { [0.97, 0.80, 0.50] };
                     let phase = (mark.at.x * 0.013 + mark.at.y * 0.007) as f32;
                     let breathe = 0.85 + 0.15 * (self.clock * 1.1 + phase).sin();
-                    out.push(Instance::new(gpu::GLOW, p.into(), glow, [tint[0], tint[1], tint[2], 0.8 * breathe]));
+                    out.push(Instance::new(gpu::UNFOUND, p.into(), glow, [tint[0], tint[1], tint[2], 0.95 * breathe]));
                 } else if !visited {
                     let d = mark.at.distance(me);
                     if d <= HINT {

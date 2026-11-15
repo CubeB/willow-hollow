@@ -28,6 +28,7 @@ const DIAMOND: u32 = 6u;
 const RING: u32 = 7u;
 const LINE: u32 = 9u;
 const PANEL: u32 = 10u;
+const UNFOUND: u32 = 11u;
 
 const RIM: vec3<f32> = vec3<f32>(0.95, 0.935, 0.89);
 const INK: vec3<f32> = vec3<f32>(0.16, 0.15, 0.14);
@@ -92,6 +93,58 @@ fn sd_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
     return -sqrt(d.x) * sign(d.y);
 }
 
+fn hash2(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.547);
+}
+
+// A place not yet come to, `s` pixels from its middle to a corner: a block seen from
+// above at a slant, as the map's own are, each face laid in three by three voxels of a
+// slightly different shade with a dark seam between, over a soft glow. `p` is in pixels
+// from its middle, y down.
+fn unfound(p: vec2<f32>, s: f32, color: vec4<f32>) -> vec4<f32> {
+    let r = length(p) / (s * 1.7);
+    let glow = exp(-r * r * 4.0) * (1.0 - smoothstep(0.75, 1.0, r));
+    var out = vec4(color.rgb, color.a * 0.8 * glow);
+    let k = 0.8660254;
+    let q = abs(p);
+    // The hexagon the block's outline makes, pointy at top and bottom.
+    let d = max(q.x - k * s, 0.5 * q.x + k * q.y - k * s);
+    if d > 1.5 {
+        return out;
+    }
+    // Which face, and where on it, 0 to 1 each way along its edges.
+    var uv = vec2(0.0);
+    var shade = 1.0;
+    var face = 0.0;
+    if p.y < 0.0 && abs(p.x) * 0.57735 < -p.y {
+        uv = vec2(p.x / (k * s) - 2.0 * p.y / s, -p.x / (k * s) - 2.0 * p.y / s) * 0.5;
+        shade = 1.25;
+        face = 1.0;
+    } else if p.x < 0.0 {
+        let v = -p.x / (k * s);
+        uv = vec2(v, (p.y + 0.5 * s * v) / s);
+        shade = 0.8;
+        face = 2.0;
+    } else {
+        let u = p.x / (k * s);
+        uv = vec2(u, (p.y + 0.5 * s * u) / s);
+        shade = 0.52;
+        face = 3.0;
+    }
+    let cell = floor(clamp(uv, vec2(0.0), vec2(0.999)) * 3.0);
+    shade *= 0.92 + 0.16 * hash2(cell + vec2(face * 7.0, face * 3.0));
+    // The seams between voxels, about a pixel wide whatever the size.
+    let f = fract(uv * 3.0);
+    let edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * s / 3.0;
+    let seam = 1.0 - 0.35 * clamp(1.0 - edge / 0.6, 0.0, 1.0);
+    let block = vec4(min(color.rgb * shade * seam, vec3(1.0)), color.a);
+    // A dark rim round it, as the map's icons have a light one, so it reads on snow.
+    let inside = clamp(0.5 - d, 0.0, 1.0);
+    let rim = clamp(0.5 - (d - 1.2), 0.0, 1.0);
+    let edged = vec4(mix(INK, block.rgb, inside), color.a * mix(0.9 * rim, 1.0, inside));
+    return over(out, edged);
+}
+
 fn over(under: vec4<f32>, top: vec4<f32>) -> vec4<f32> {
     let a = top.a + under.a * (1.0 - top.a);
     if a <= 0.0 {
@@ -141,6 +194,9 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             let glow = exp(-r2 * 4.0) * fade;
             let core = exp(-r2 * 30.0);
             out = vec4(mix(in.color.rgb, vec3(1.0), core * 0.5), in.color.a * (glow * 0.8 + core * 0.4));
+        }
+        case UNFOUND: {
+            out = unfound(p, in.size.x * 0.62, in.color);
         }
         case ARROW: {
             let s = in.size.x;
