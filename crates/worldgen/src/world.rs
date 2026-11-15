@@ -316,6 +316,40 @@ pub(crate) fn overhangs(seed: u32, sampler: &Sampler, columns: &[Column], (lx0, 
     out
 }
 
+/// Takes out every small plant on a column of ground that something solid now stands
+/// over within the plant's height: the plants are grown before the bridges, buildings
+/// and trees are put down, and a reed on the bank under a bridge would otherwise stand
+/// up through its deck. The whole plant goes, not only what pokes through, or a stalk
+/// would be left ending at the underside of the planks. `columns` are the padded
+/// columns from `wx0`, `wz0`; plants in a cave, below the ground, are left be.
+fn headroom(out: &[(i32, PaddedChunk)], mats: &Materials, columns: &[Column], wx0: i32, wz0: i32, plants: &mut Vec<PlantBox>) {
+    use features::attach::Voxels;
+    if plants.is_empty() {
+        return;
+    }
+    let voxels = features::attach::ColumnVoxels::new(out, wx0, wz0);
+    let top = |x: i32, z: i32| columns[(x - wx0) as usize * PAD + (z - wz0) as usize].top();
+    let solid = |p: IVec3| mats.get(voxels.voxel(p)).kind == voxel::Kind::Solid;
+    let mut blocked: HashSet<(i32, i32)> = HashSet::new();
+    for b in plants.iter() {
+        let (lo, hi) = (IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)), (IVec3::from_array(b.hi) - 1).div_euclid(IVec3::splat(CELLS)));
+        let ground = top(lo.x, lo.z);
+        if lo.y < ground || blocked.contains(&(lo.x, lo.z)) {
+            continue;
+        }
+        let over = (lo.x..=hi.x).any(|x| (lo.z..=hi.z).any(|z| (lo.y.max(ground + 1)..=hi.y).any(|y| solid(IVec3::new(x, y, z)))));
+        if over {
+            blocked.insert((lo.x, lo.z));
+        }
+    }
+    if !blocked.is_empty() {
+        plants.retain(|b| {
+            let lo = IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS));
+            lo.y < top(lo.x, lo.z) || !blocked.contains(&(lo.x, lo.z))
+        });
+    }
+}
+
 /// The darker, weathered form of a cliff rock, for the streaks water leaves down a face.
 fn stained(rock: Voxel) -> Voxel {
     match rock {
@@ -938,6 +972,7 @@ impl GameWorld {
                 put(p + origin, v, true);
             }
         }
+        headroom(&out, &self.materials, &columns, wx0, wz0, &mut plants);
         if !planted {
             // Whatever the caves grew goes with the rest of the plants.
             plants.clear();
