@@ -122,9 +122,9 @@ struct Options {
     shot_hotbar: bool,
     /// A line of words to show along the foot of a screenshot, as a prompt is shown.
     shot_prompt: Option<String>,
-    /// Make camp ahead of the camera before a screenshot: a tent, and a fire in this state.
+    /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
-    /// With a camp made: lying in its tent on a screenshot, or resting in it from the
+    /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
     /// Hold a lit lantern on a screenshot.
@@ -212,10 +212,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --pack                show the pack's window on a screenshot, with a few things in it
   --hotbar              show the hotbar on a screenshot, with a few things in it
   --prompt TEXT         show TEXT along the foot of a screenshot, as a prompt is
-  --camp STATE          make camp a few steps ahead before a screenshot: a tent, a few
-                        things set down, and a fire that is laid, lit or burnt
-  --rest                with --camp: on a screenshot, the view out of the tent's door,
-                        as high as --look says; in a run, rest in the tent at once
+  --camp STATE          make camp a few steps ahead before a screenshot: a fire that is
+                        laid, lit or burnt, and a few things set down
+  --rest                with --camp: on a screenshot, the view lying by the fire, as
+                        high as --look says; in a run, rest by the fire at once
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
@@ -486,10 +486,18 @@ fn candle(clock: f32) -> f32 {
     1.15 + 0.05 * (clock * 7.3).sin() + 0.035 * (clock * 17.9 + 1.3).sin() + 0.03 * (clock * 2.3).sin()
 }
 
+/// Where someone resting by `fire` lies, coming to it from `from`: on the ground a step
+/// short of its ring, feet to the warmth.
+fn by_the_fire(voxels: &mut WorldVoxels, fire: &placed::Thing, from: DVec3) -> DVec3 {
+    let toward = DVec3::new(from.x - fire.pos.x, 0.0, from.z - fire.pos.z).normalize_or(DVec3::X);
+    let p = fire.pos + toward * m64(1.3);
+    DVec3::new(p.x, ground_near(voxels, p.x, fire.pos.y + 1.0, p.z).unwrap_or(fire.pos.y), p.z)
+}
+
 /// Makes camp a few steps ahead of someone whose eye is at `eye`, looking along `yaw`:
-/// a fire in `state`, a tent beyond it with its door toward the fire, and a few things
-/// set down about it. Behind them or to one side instead, if there is water or a cliff
-/// ahead. For showing a camp without having made one.
+/// a fire in `state` and a few things set down about it. Behind them or to one side
+/// instead, if there is water or a cliff ahead. For showing a camp without having made
+/// one.
 fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8) {
     use worldgen::features::plants::Flower;
     let foot = eye.y - player::EYE_HEIGHT;
@@ -501,12 +509,11 @@ fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, 
             let y = ground_near(voxels, p.x, foot + 2.0, p.z).or_else(|| ground_near(voxels, p.x, foot - 4.0, p.z))?;
             Some(DVec3::new(p.x, y, p.z))
         };
-        let (Some(fire), Some(tent)) = (spot(4.2, 0.0), spot(6.6, 2.3)) else { continue };
+        let Some(fire) = spot(4.2, 0.0) else { continue };
         camp.put(placed::Thing::new(inventory::campfire(), 1, fire, yaw));
         if let Some(at) = camp.within_reach(fire).filter(|_| state != placed::LAID) {
             camp.set_state(at, state);
         }
-        camp.put(placed::Thing::new(inventory::tent(), 1, tent, yaw + 2.1));
         for (item, count, along, aside, turn) in [
             (inventory::sticks(), 3, 3.6, -1.3, 0.4),
             (inventory::of_flower(Flower::Poppy), 3, 3.0, 0.9, 2.0),
@@ -723,7 +730,7 @@ struct Running {
     journal_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
-    /// What has been set down in this world: flowers, tents, fires.
+    /// What has been set down in this world: flowers, sticks, fires.
     placed: placed::Placed,
     /// The thing set down that is within reach, if one is; looked for with `within_reach`.
     thing_near: Option<placed::Handle>,
@@ -828,9 +835,7 @@ impl Running {
             .filter(|_| opts.overrides.keeps_position() && !opts.fresh)
             .and_then(|s| s.progress(settings.seed));
         // The pack goes with the world, wherever in it this run begins.
-        let mut pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
-        // Every wanderer has a tent, those who set out before there were tents too.
-        pack.give_kit();
+        let pack = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(inventory::Pack::new, |s| inventory::Pack::from_text(&s.pack(settings.seed)));
         // As does what has been set down in it.
         let placed = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(placed::Placed::new, |s| placed::Placed::from_text(&s.placed(settings.seed)));
 
@@ -894,11 +899,11 @@ impl Running {
             sample_camp(&mut placed, &mut voxels, camera.pos, camera.yaw, state);
             if opts.rest
                 && !flying
-                && let Some((_, tent)) = placed.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_tent())
+                && let Some((_, fire)) = placed.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_fire())
             {
-                player.pos = tent.bed().0;
-                rest = Some(camp::Rest::begin(&Environment::at(time, date), true));
-                log::info!("resting in the tent from {time:.2} h");
+                player.pos = by_the_fire(&mut voxels, fire, camera.pos);
+                rest = Some(camp::Rest::begin(&Environment::at(time, date)));
+                log::info!("resting by the fire from {time:.2} h");
             }
         }
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
@@ -1180,8 +1185,8 @@ impl Running {
         ground_near(&mut self.voxels, p.x, self.player.pos.y + 1.0, p.z).map(|y| DVec3::new(p.x, y, p.z))
     }
 
-    /// Uses what is held: pitches the tent, lays a fire of sticks, or sets the thing
-    /// down, where the player is looking.
+    /// Uses what is held: lays a fire of sticks, or sets the thing down, where the
+    /// player is looking.
     fn use_held(&mut self) {
         if !self.walking || self.player.mode != Mode::Walk || self.rest.is_some() {
             return;
@@ -1199,20 +1204,6 @@ impl Running {
         };
         let yaw = self.camera.yaw;
         match stack.item.id.as_str() {
-            "tent" => {
-                // A tent wants level ground the size of itself.
-                let level = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
-                    .iter()
-                    .all(|(dx, dz)| ground_near(&mut self.voxels, at.x + dx * m64(0.9), at.y, at.z + dz * m64(0.9)).is_some_and(|y| (y - at.y).abs() <= 1.0));
-                if !level {
-                    self.say("The ground here is too steep for a tent");
-                    return;
-                }
-                self.pack.spend("tent", 1);
-                // Its door toward whoever pitched it.
-                self.placed.put(placed::Thing::new(stack.item, 1, at, yaw + std::f32::consts::FRAC_PI_2));
-                self.say("The tent is pitched");
-            }
             "sticks" => {
                 if !self.pack.spend("sticks", inventory::FIRE_STICKS) {
                     self.say(format!("A fire wants {} sticks", inventory::FIRE_STICKS));
@@ -1294,9 +1285,7 @@ impl Running {
         let Some(thing) = self.thing_near.and_then(|at| self.placed.get(at)) else {
             return self.ember_near().map(|_| format!("E to rest by the fire until {until}"));
         };
-        Some(if thing.is_tent() {
-            format!("E to rest in the tent until {until}   \u{b7}   left click to strike it")
-        } else if thing.burns() {
+        Some(if thing.burns() {
             format!("E to rest by the fire until {until}")
         } else if thing.is_fire() && thing.state == placed::LAID {
             "E to light the fire   \u{b7}   left click to take the sticks back".into()
@@ -1309,8 +1298,8 @@ impl Running {
         })
     }
 
-    /// Lights the fire within reach, or lies down to rest in the tent or by the fire
-    /// that is. Whether there was anything of the kind to do.
+    /// Lights the fire within reach, or settles down to rest by the one burning there.
+    /// Whether there was anything of the kind to do.
     fn make_camp(&mut self) -> bool {
         let thing = self.thing_near.and_then(|at| Some((at, self.placed.get(at)?.clone())));
         match thing {
@@ -1320,20 +1309,15 @@ impl Running {
                 self.say("The fire catches");
                 true
             }
-            Some((_, thing)) if thing.is_tent() => {
-                // In at the door, to lie on the bedroll with the head by it.
-                self.player.pos = thing.bed().0;
-                self.player.vel = glam::Vec3::ZERO;
-                self.rest = Some(camp::Rest::begin(&self.env, true));
-                true
-            }
             Some((_, thing)) if thing.is_fire() => {
-                self.rest = Some(camp::Rest::begin(&self.env, false));
+                self.player.vel = glam::Vec3::ZERO;
+                self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
             Some(_) => false,
             None if self.ember_near().is_some() => {
-                self.rest = Some(camp::Rest::begin(&self.env, false));
+                self.player.vel = glam::Vec3::ZERO;
+                self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
             None => false,
@@ -2326,18 +2310,19 @@ fn main() -> Result<()> {
                 vehicles::draw_glider(*feet, gait.facing, open, flight, camera.pos, &mut props);
             }
         }
-        // A camp a few steps ahead: a fire, a tent facing it, and a few things set down.
+        // A camp a few steps ahead: a fire, and a few things set down.
         let mut camp = placed::Placed::new();
         if let Some(state) = opts.shot_camp {
             sample_camp(&mut camp, &mut voxels, camera.pos, camera.yaw, state);
         }
-        // Lying in its tent, head by the door, looking out of it as high as --look says.
+        // Lying by its fire, facing it, looking up as high as --look says.
         if opts.rest
-            && let Some((_, tent)) = camp.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_tent())
+            && let Some((_, fire)) = camp.near(camera.pos, m64(30.0)).find(|(_, t)| t.is_fire())
         {
-            let (bed, door) = tent.bed();
-            camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::begin(&env, true).lowered() as f64), 0.0);
-            camera.yaw = (door.y.atan2(door.x) as f32).rem_euclid(std::f32::consts::TAU);
+            let bed = by_the_fire(&mut voxels, fire, camera.pos);
+            let to = fire.pos - bed;
+            camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::begin(&env).lowered() as f64), 0.0);
+            camera.yaw = (to.z.atan2(to.x) as f32).rem_euclid(std::f32::consts::TAU);
         }
         camp.draw(camera.pos, 0.6, &mut props);
         let fires: Vec<DVec3> = camp.near(camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
@@ -2424,7 +2409,6 @@ fn main() -> Result<()> {
             for k in 3..inventory::HOTBAR {
                 pack.shift(inventory::SLOTS + k, 20 + k - 3);
             }
-            pack.give_kit();
             for _ in 0..5 {
                 pack.add(&inventory::sticks());
             }
@@ -2440,16 +2424,15 @@ fn main() -> Result<()> {
             let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
             (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue()), view)
         });
-        // A hotbar as it might be an hour into a walk: the tent, sticks, things picked.
+        // A hotbar as it might be an hour into a walk: sticks, things picked.
         let hotbar = opts.shot_hotbar.then(|| {
             use worldgen::features::plants::Flower;
             let mut pack = inventory::Pack::new();
-            pack.give_kit();
             for (item, n) in [(inventory::sticks(), 5), (inventory::of_flower(Flower::Poppy), 12), (inventory::of_flower(Flower::PennyBun), 2), (inventory::of_flower(Flower::Bluebell), 7)] {
                 pack.add_many(&item, n);
             }
-            pack.shift(inventory::SLOTS + 4, inventory::SLOTS + 6);
-            pack.hold(1);
+            pack.shift(inventory::SLOTS + 3, inventory::SLOTS + 5);
+            pack.hold(0);
             pack
         });
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {

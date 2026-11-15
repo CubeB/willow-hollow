@@ -6,8 +6,8 @@
 //! shows the slots as a grid of small pictures drawn in squares, as everything here is:
 //! drag one onto another to move, join or swap them, click one to read about it or let
 //! it go. Seven more slots are the hotbar, always in view along the foot of the screen:
-//! one of them is held, and what is in it is what is set down, pitched or laid when the
-//! player uses their hands. A pack is kept with its world's save.
+//! one of them is held, and what is in it is what is set down or laid when the player
+//! uses their hands. A pack is kept with its world's save.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -37,13 +37,13 @@ pub enum Shape {
     Mushroom,
     Reed,
     Stick,
-    Tent,
     Fire,
     Lantern,
 }
 
 impl Shape {
-    const ALL: [(Shape, &'static str); 10] = [
+    // There were tents once: a thing saved as one no longer reads, and is left out.
+    const ALL: [(Shape, &'static str); 9] = [
         (Shape::Flower, "flower"),
         (Shape::Spike, "spike"),
         (Shape::Sprig, "sprig"),
@@ -51,7 +51,6 @@ impl Shape {
         (Shape::Mushroom, "mushroom"),
         (Shape::Reed, "reed"),
         (Shape::Stick, "stick"),
-        (Shape::Tent, "tent"),
         (Shape::Fire, "fire"),
         (Shape::Lantern, "lantern"),
     ];
@@ -76,7 +75,6 @@ impl Shape {
             Shape::Mushroom => ["........", "..cccc..", ".clccdc.", ".cccccd.", "...ww...", "...ww...", "...ww...", "..hwwh.."],
             Shape::Reed => ["...b....", "...b....", "...c....", "...c....", "...d..h.", "...g.h..", "..hgh...", "...g...."],
             Shape::Stick => ["........", "......l.", ".d...c..", "..c.c...", "...cd...", "..c..d..", ".c....d.", "........"],
-            Shape::Tent => ["........", "...bb...", "...lc...", "..lccd..", "..lbbd..", ".lcbbdd.", ".lcbbdd.", "........"],
             Shape::Fire => ["........", "...y....", "..yy.y..", "..yyyy..", ".cyyyyc.", ".dccccd.", "wdwddwdw", "........"],
             Shape::Lantern => ["...dd...", "..d..d..", "..dddd..", "..lyyc..", "..lyyc..", "..lyyc..", "..dddd..", "........"],
         }
@@ -154,18 +152,14 @@ pub fn sticks() -> Item {
     Item::new("sticks", "Sticks", "Dry wood from under a tree. Three will lay a fire.", [150, 116, 80], Shape::Stick)
 }
 
-/// The tent every wanderer sets out with.
-pub fn tent() -> Item {
-    Item::new("tent", "Tent", "Canvas, two poles and a bedroll: somewhere to wait for morning.", [204, 182, 136], Shape::Tent)
-}
-
 /// The lantern every wanderer sets out with, to light the way after dark.
 pub fn lantern() -> Item {
     Item::new("lantern", "Lantern", "Brass and glass about a candle: a warm light to walk by at night.", [176, 136, 72], Shape::Lantern)
 }
 
 /// What a wanderer sets out with, in the order it was first handed out: a pack is given
-/// whatever of it came after what it already had (see `Pack::give_kit`).
+/// whatever of it came after what it already had (see `Pack::give_kit`). Kit 1 was a
+/// tent, which there are no longer; 2 is the lantern.
 const KIT: u8 = 2;
 
 /// A fire laid in a ring of stones. It is never carried: it is what three sticks become.
@@ -179,7 +173,6 @@ pub const FIRE_STICKS: u32 = 3;
 /// What using the thing called `id` does, in a few words, for the line under its name.
 pub fn use_of(id: &str) -> &'static str {
     match id {
-        "tent" => "right click to pitch it",
         "sticks" => "right click to lay a fire",
         "lantern" => "lit while it is held; right click to shutter it",
         _ => "right click to set it down",
@@ -203,8 +196,8 @@ pub struct Pack {
     years: f64,
     /// Which slot of the hotbar is held, counting from 0.
     held: usize,
-    /// How much of what a wanderer sets out with has been handed over: 1 the tent, 2 the
-    /// lantern too.
+    /// How much of what a wanderer sets out with has been handed over: 1 the tent there
+    /// once was, 2 the lantern.
     kit: u8,
     /// Changed since it was last saved.
     pub unsaved: bool,
@@ -261,11 +254,8 @@ impl Pack {
     }
 
     /// Hands over what a wanderer sets out with, each thing once in the life of a pack:
-    /// to a new pack, or to one from before there were tents or lanterns.
+    /// to a new pack, or to one from before there were lanterns.
     pub fn give_kit(&mut self) {
-        if self.kit < 1 {
-            self.add(&tent());
-        }
         if self.kit < 2 {
             // At the far end of the hotbar, out of the way of what is picked, if it is free.
             let last = ALL - 1;
@@ -800,28 +790,28 @@ mod tests {
         assert_eq!((reed.item.shape, reed.item.color, reed.item.about.as_str()), (Shape::Reed, [112, 84, 54], "A velvet head   from the water's edge."));
         assert!(back.gathered(-100, 0) && back.gathered(347, -149) && !back.gathered(5, 5));
         assert_eq!(back.to_text(), text.replace(" | ", "   "));
-        // What is in the hotbar, which slot of it is held, and the tent, come back too.
+        // What is in the hotbar, and which slot of it is held, come back too.
         let mut pack = Pack::new();
-        pack.give_kit();
-        pack.give_kit();
+        pack.add(&sticks());
         pack.add(&thing("poppy"));
         pack.shift(SLOTS + 1, SLOTS + 5);
         pack.hold(5);
         let back = Pack::from_text(&pack.to_text());
         assert_eq!(back.to_text(), pack.to_text());
-        assert_eq!((back.count("tent"), back.held(), back.in_hand().map(|s| s.item.id.as_str())), (1, 5, Some("poppy")));
-        assert_eq!(back.hotbar()[0].as_ref().map(|s| s.item.clone()), Some(tent()));
-        // A pack from before there was a hotbar reads as it did, and is given its tent.
+        assert_eq!((back.count("sticks"), back.held(), back.in_hand().map(|s| s.item.id.as_str())), (1, 5, Some("poppy")));
+        assert_eq!(back.hotbar()[0].as_ref().map(|s| s.item.clone()), Some(sticks()));
+        // A pack from before there was a hotbar reads as it did, and is given its lantern.
         let mut old = Pack::from_text("slot 3 = 4|flower|1,2,3|x|X|about\nslot 30 = 4|flower|1,2,3|y|Y|about\n");
-        assert_eq!((old.count("x"), old.count("y"), old.count("tent")), (4, 0, 0));
+        assert_eq!((old.count("x"), old.count("y"), old.count("lantern")), (4, 0, 0));
         old.give_kit();
-        assert_eq!(old.hotbar()[0].as_ref().map(|s| s.item.id.as_str()), Some("tent"));
-        // And one given its tent before there were lanterns is given its lantern, once.
-        let mut tented = Pack::from_text("hot 0 = 1|tent|204,182,136|tent|Tent|\nkit = 1\n");
+        assert_eq!(old.hotbar()[HOTBAR - 1].as_ref().map(|s| s.item.clone()), Some(lantern()));
+        // One from when there were tents reads without its tent, and is given its
+        // lantern, once.
+        let mut tented = Pack::from_text("hot 0 = 1|tent|204,182,136|tent|Tent|Canvas.\nhot 1 = 5|stick|150,116,80|sticks|Sticks|Dry wood.\nkit = 1\n");
+        assert_eq!((tented.count("tent"), tented.count("sticks"), tented.slots().iter().flatten().count()), (0, 5, 1));
         tented.give_kit();
         tented.give_kit();
-        assert_eq!((tented.count("tent"), tented.count("lantern")), (1, 1));
-        assert_eq!(tented.hotbar()[HOTBAR - 1].as_ref().map(|s| s.item.clone()), Some(lantern()));
+        assert_eq!((tented.count("tent"), tented.count("lantern")), (0, 1));
         assert_eq!(Pack::from_text(&tented.to_text()).to_text(), tented.to_text());
         // A save from before spots had dates still reads.
         assert!(Pack::from_text("gathered = 4,5;6,-7\n").gathered(6, -7));
