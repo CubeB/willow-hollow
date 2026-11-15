@@ -3,6 +3,7 @@ mod audio;
 mod camera;
 mod camp;
 mod character;
+mod editor;
 mod env;
 mod fallen;
 mod farview;
@@ -140,6 +141,8 @@ struct Options {
     journal_fill: usize,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
+    /// Open the structure editor instead of the game, starting as these say.
+    structures: Option<editor::Options>,
 }
 
 impl Default for Options {
@@ -182,6 +185,7 @@ impl Default for Options {
             shot_journal: None,
             journal_fill: 16,
             walked: Vec::new(),
+            structures: None,
         }
     }
 }
@@ -242,7 +246,20 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         the large map is open throughout)
   --drift V             fly straight ahead at V metres a second
   --circle R            with --drift, fly a circle of radius R metres instead
-  --no-vsync            uncapped frame rate";
+  --no-vsync            uncapped frame rate
+
+The structure editor, for looking at the landmarks and drawing your own:
+  --structures          open it instead of the game
+  --structure WHAT      start at a kind (shrine), a saved one (shrine/high-gate), landing,
+                        lantern/N or signpost
+  --variant N           the generator's variant N
+  --place N             seen in place N of its list (0 to 8)
+  --layer L             cut away everything above layer L
+  --copy                start drawing on a copy of the variant
+  --orbit YAW,PITCH[,D] the view, in degrees, D voxels off
+  --hover X,Y           on a screenshot, as if the cursor were at X,Y
+  --structures-dir DIR  read and save structures in DIR, not the repository's
+  With --screenshot FILE and --size, draws the editor once to a PNG.";
 
 fn list<T: std::str::FromStr>(s: &str, sep: char, n: usize) -> Result<Vec<T>> {
     let v: Vec<T> = s
@@ -361,6 +378,22 @@ fn parse_args() -> Result<Options> {
             "--drift" => o.drift = Some(value()?.parse()?),
             "--circle" => o.circle = Some(value()?.parse::<f32>()?.max(1.0)),
             "--no-vsync" => o.overrides.vsync = Some(false),
+            "--structures" => drop(o.structures.get_or_insert_default()),
+            "--structure" => o.structures.get_or_insert_default().show = Some(value()?),
+            "--variant" => o.structures.get_or_insert_default().variant = Some(value()?.parse()?),
+            "--place" => o.structures.get_or_insert_default().place = Some(value()?.parse()?),
+            "--layer" => o.structures.get_or_insert_default().layer = Some(value()?.parse()?),
+            "--copy" => o.structures.get_or_insert_default().copy = true,
+            "--structures-dir" => o.structures.get_or_insert_default().dir = Some(value()?.into()),
+            "--orbit" => {
+                let v: Vec<f32> = value()?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>()?;
+                anyhow::ensure!(v.len() == 2 || v.len() == 3, "--orbit takes YAW,PITCH or YAW,PITCH,DISTANCE");
+                o.structures.get_or_insert_default().orbit = Some((v[0], v[1], v.get(2).copied()));
+            }
+            "--hover" => {
+                let v = list::<f32>(&value()?, ',', 2)?;
+                o.structures.get_or_insert_default().hover = Some((v[0], v[1]));
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -2254,6 +2287,12 @@ fn main() -> Result<()> {
         .filter_module("naga", log::LevelFilter::Warn)
         .init();
     let opts = parse_args()?;
+
+    if let Some(mut structures) = opts.structures.clone() {
+        structures.screenshot = opts.screenshot.clone();
+        structures.size = opts.size;
+        return editor::run(structures);
+    }
 
     if let Some(path) = &opts.map {
         let settings = opts.overrides.applied_to(Settings::default());
