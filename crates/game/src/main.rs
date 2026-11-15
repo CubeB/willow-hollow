@@ -80,6 +80,10 @@ struct Options {
     /// the wing this far open.
     figure_speed: f32,
     figure_glide: Option<f32>,
+    /// With --figure-glide, the wing banked this many degrees (right wing down) and the
+    /// figure rising this many metres a second (negative diving).
+    figure_bank: f32,
+    figure_rise: f32,
     /// How far the figure on a screenshot has swung its furled glider up from its back.
     figure_furl: f32,
     look: (f32, f32),
@@ -143,6 +147,8 @@ impl Default for Options {
             third: None,
             figure_speed: 4.16,
             figure_glide: None,
+            figure_bank: 0.0,
+            figure_rise: -1.5,
             figure_furl: 0.0,
             look: (35.0, -18.0),
             time: None,
@@ -186,6 +192,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure DEG          as --third, with the figure turned DEG degrees from the view
   --figure-speed V      the figure runs at V metres a second (default 4.16)
   --figure-glide T      the figure glides, its wing T of the way open (0-1)
+  --figure-bank DEG     with --figure-glide, the wing banked DEG degrees, right wing down
+  --figure-rise V       with --figure-glide, rising V metres a second (default -1.5)
   --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
@@ -257,6 +265,8 @@ fn parse_args() -> Result<Options> {
             "--figure" => o.third = Some(value()?.parse()?),
             "--figure-speed" => o.figure_speed = value()?.parse()?,
             "--figure-glide" => o.figure_glide = Some(value()?.parse()?),
+            "--figure-bank" => o.figure_bank = value()?.parse()?,
+            "--figure-rise" => o.figure_rise = value()?.parse()?,
             "--figure-furl" => o.figure_furl = value()?.parse()?,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
@@ -1729,7 +1739,9 @@ impl Running {
             self.glider = (self.glider + if flying { dt / 0.7 } else { -dt / 0.8 }).clamp(0.0, 1.0);
             if self.glider > GLIDER_UP {
                 let open = (self.glider - GLIDER_UP) / (1.0 - GLIDER_UP);
-                vehicles::draw_glider(self.player.pos, self.camera.yaw, open, self.camera.pos, &mut self.props);
+                let rise = self.player.vel.y / worldgen::scale::VOXELS_PER_METRE;
+                let flight = vehicles::Flight::of(self.player.bank, rise, clock);
+                vehicles::draw_glider(self.player.pos, self.camera.yaw, open, flight, self.camera.pos, &mut self.props);
             }
             {
                 // Sitting, the hips are where the thwart is.
@@ -2281,7 +2293,8 @@ fn main() -> Result<()> {
             let furled = opts.figure_glide.is_none().then_some(opts.figure_furl);
             character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
             if let Some(open) = opts.figure_glide {
-                vehicles::draw_glider(*feet, gait.facing, open, camera.pos, &mut props);
+                let flight = vehicles::Flight::of(opts.figure_bank.to_radians(), opts.figure_rise, 0.0);
+                vehicles::draw_glider(*feet, gait.facing, open, flight, camera.pos, &mut props);
             }
         }
         // A camp a few steps ahead: a fire, a tent facing it, and a few things set down.
