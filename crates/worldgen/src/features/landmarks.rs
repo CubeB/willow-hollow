@@ -972,7 +972,7 @@ pub fn build_ruined_tower(palette: &Palette, seed: u32) -> (Vec<(IVec3, Voxel)>,
 
 fn build_site_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower: bool) -> (Vec<(IVec3, Voxel)>, Vec<voxel::mesh::PlantBox>, Vec<props::Placed>) {
     let palette = &palette.varied(seed);
-    finish(kind, palette, seed, length, generate(kind, palette, seed, length))
+    finish(kind, palette, seed, length, generate_as(kind, palette, seed, length, tower))
 }
 
 /// [`build_site`], or instead one of the structures saved from the structure editor for
@@ -999,6 +999,11 @@ pub fn finish(kind: Landmark, palette: &Palette, seed: u32, length: i32, mut s: 
 /// laid about it. `palette` is used as it is: [`build_site`] varies it for the place
 /// first. The structure editor copies from this.
 pub fn generate(kind: Landmark, palette: &Palette, seed: u32, length: i32) -> Shape {
+    generate_as(kind, palette, seed, length, false)
+}
+
+/// [`generate`], or for ruins with `tower` the tumbledown tower of a hilltop.
+fn generate_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower: bool) -> Shape {
     let history = History::of(kind, seed);
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();

@@ -20,6 +20,17 @@ use worldgen::{
 
 use super::view::{self, Grid, Orbit, Vertex};
 
+/// The lamps there are to look at: the one put up beside the trails, and the posts that
+/// stand at the corners of a landmark. (The old gate lantern is no longer put up.)
+const LAMPS: [LampStyle; 5] = [LampStyle::Stick, LampStyle::Post, LampStyle::Crook, LampStyle::Stone, LampStyle::Pair];
+
+fn lamp_name(style: LampStyle) -> String {
+    match style {
+        LampStyle::Stick => "Trail lantern".to_string(),
+        style => format!("Lamp post: {style:?}"),
+    }
+}
+
 /// Places to see a structure in: the palette of each, as a site there would have it.
 pub const PLACES: [(&str, Biome, Voxel); 9] = [
     ("Broadleaf wood, grey stone", Biome::Deciduous, mat::STONE),
@@ -246,7 +257,7 @@ impl Editor {
         match head {
             "landing" => self.select(Showing::Landing),
             "signpost" => self.select(Showing::Signpost),
-            "lantern" | "lanterns" => self.select(Showing::Lantern(tail.and_then(|t| t.parse().ok()).unwrap_or(0).min(LampStyle::ALL.len() - 1))),
+            "lantern" | "lanterns" => self.select(Showing::Lantern(tail.and_then(|t| t.parse().ok()).unwrap_or(0).min(LAMPS.len() - 1))),
             _ => {
                 let Some(k) = designs::KINDS.iter().position(|&kind| designs::kind_word(kind) == head) else {
                     self.message = format!("There is no kind of structure called {head}");
@@ -304,7 +315,7 @@ impl Editor {
             Showing::Generator(k) => format!("{}: the generator's own, variant {}", kind_label(designs::KINDS[k]), self.variant),
             Showing::Saved(k, i) => format!("{}: {}", kind_label(designs::KINDS[k]), self.kinds[k].entries[i].design.name),
             Showing::Landing => format!("Landing, variant {}", self.variant),
-            Showing::Lantern(s) => format!("Trail lantern: {:?}, variant {}", LampStyle::ALL[s], self.variant),
+            Showing::Lantern(s) => format!("{}, variant {}", lamp_name(LAMPS[s]), self.variant),
             Showing::Signpost => "Signpost".into(),
         }
     }
@@ -351,7 +362,7 @@ impl Editor {
             }
             Showing::Landing => landmarks::build_site(Landmark::Landing, &local, seed, 12),
             Showing::Lantern(s) => {
-                let (v, f) = landmarks::trail_lantern_styled(&local, 3, seed, LampStyle::ALL[s], 0, parts::GATE_HALF);
+                let (v, f) = landmarks::trail_lantern_styled(&local, 3, seed, LAMPS[s], 0, parts::GATE_HALF, true);
                 (v, f, Vec::new())
             }
             Showing::Signpost => (landmarks::signpost(&local.varied(seed), &[0.4, 2.3, 4.4]), Vec::new(), Vec::new()),
@@ -905,8 +916,8 @@ impl Editor {
         if ui.selectable_label(self.showing == Showing::Landing, "Landing").clicked() {
             chosen = Some(Showing::Landing);
         }
-        for (s, style) in LampStyle::ALL.iter().enumerate() {
-            if ui.selectable_label(self.showing == Showing::Lantern(s), format!("Trail lantern: {style:?}")).clicked() {
+        for (s, style) in LAMPS.iter().enumerate() {
+            if ui.selectable_label(self.showing == Showing::Lantern(s), lamp_name(*style)).clicked() {
                 chosen = Some(Showing::Lantern(s));
             }
         }

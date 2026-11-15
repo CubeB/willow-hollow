@@ -1396,7 +1396,7 @@ impl Layer<'_> {
                 < match cause {
                     LanternCause::Approach => 0.4,
                     LanternCause::Bridge | LanternCause::Junction => 0.25,
-                    LanternCause::Plain => 0.1,
+                    LanternCause::Plain => 0.15,
                 };
             let (q, turns) = (pts[i] + normal * side * (widths[i] + m(1.0)), turns_toward(-normal * side));
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
