@@ -135,7 +135,15 @@ fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale
     // No two plants quite alike. And darker than their own colours: a plant standing
     // shades itself and the ground round it, where this is flat ground in the sun.
     let h = hash3(voxel.zyx + vec3<i32>(3, 11, 5));
-    var c = season_apply(body.rgb, col, kinds.x, s, 0u) * (0.5 + 0.2 * h);
+    // Grass growing on grass is barely to be told from it. Only a few of a meadow's
+    // voxels grow a tuft, and each going dark as the tufts gave out scattered the far
+    // grass with dark specks, which the far view, past the voxels, never had. Grass
+    // leaves only a faint deepening where it stood.
+    let grassy = flowering == 0u && kinds.x == PLANT_GRASS;
+    if (grassy) {
+        amount *= 0.3;
+    }
+    var c = season_apply(body.rgb, col, kinds.x, s, 0u) * select(0.5 + 0.2 * h, 0.85, grassy);
     // Its flowers show on some columns and not on others, as bright specks in the dark
     // of the leaves: mixed into every one, heather went a flat lilac.
     if (fract(h * 17.0) < share) {
@@ -204,6 +212,68 @@ fn sward(c: vec3<f32>, code: u32, world: vec2<f32>, slope: vec2<f32>, alt_m: f32
     let flush = smoothstep(0.03, 0.10, s) * (1.0 - smoothstep(0.16, 0.26, s));
     o = mix(o, o * vec3<f32>(1.12, 1.15, 0.85), flush * clamp(wet + 0.5, 0.0, 1.0) * 0.5);
     return o;
+}
+
+// Texels to a voxel along each edge for the pattern on grass blocks: 5 cm each.
+const GRASS_TEXELS: f32 = 8.0;
+
+// The pattern drawn on the faces of a grass block, as a colour to multiply it by. It is
+// laid on a grid of texels counted from the world's origin (`t`, the texel shaded), so
+// it runs on from one block into the next without a seam, and stays put however the
+// camera moves. It is drawn rather than random: on a top, a few soft patches in three
+// close tones, and small tufts spread evenly, one to a square of four texels, each a
+// light blade tip with its leaves about it and its shadow below; on a side, the grass of
+// the top hanging over the edge in a fringe of blades in pairs, one of each pair longer,
+// a line of shadow under it, and the bank below a little darker and warmer. A plain face
+// with only a random brightness to each block read as cubes scattered with specks; this
+// reads as grass. `fine` and
+// `coarse` fade the tufts and the patches out as their texels shrink under a pixel, as
+// a mipmap would, toward the pattern's own average, so the far ground keeps its colour
+// and nothing sparkles.
+fn grass_face(t: vec3<i32>, n: vec3<f32>, fine: f32, coarse: f32) -> vec3<f32> {
+    if (n.y > 0.5) {
+        let p = t.xz;
+        // Patches: value noise read once a texel, so their edges step with the texels,
+        // cut into three tones. The dark tone is a deeper green, not a grey.
+        let v = vnoise((vec2<f32>(p) + 0.5) / 5.0 + vec2<f32>(17.3, 4.1));
+        let tone = (clamp(floor(v * 3.0), 0.0, 2.0) - 1.0) * 0.045 * coarse;
+        // Tufts: one in seven squares in ten, set one texel in from the square's edge
+        // so the whole of it falls inside its square.
+        let c = vec2<i32>(p.x >> 2u, p.y >> 2u);
+        let h = hash3(vec3<i32>(c.x, 613, c.y));
+        let d = p - (c * 4 + vec2<i32>(1 + i32(h * 2.0), 1 + i32(fract(h * 7.31) * 2.0)));
+        var b = 0.0;
+        if (fract(h * 13.7) < 0.7) {
+            if (d.x == 0 && d.y == 0) {
+                b = 0.14;
+            } else if ((abs(d.x) == 1 && d.y == 0) || (d.x == 0 && d.y == -1)) {
+                b = 0.06;
+            } else if (d.x == 0 && d.y == 1) {
+                b = -0.08;
+            }
+        }
+        // Less the tufts' average, so that faded out they leave the colour as it was.
+        b = (b - 0.0105) * fine;
+        return 1.0 + tone * vec3<f32>(1.25, 1.0, 1.2) + b * vec3<f32>(1.1, 1.0, 0.7);
+    }
+    if (n.y < -0.5) {
+        return vec3<f32>(1.0);
+    }
+    let along = select(t.x, t.z, abs(n.x) > 0.5);
+    // Texel rows down from the top of the voxel, 0 the highest.
+    let depth = 7 - (t.y & 7);
+    let ph = hash3(vec3<i32>(along >> 1u, t.y >> 3u, 389));
+    var reach = 1 + i32(ph * 3.0);
+    if ((along & 1) == i32(fract(ph * 5.7) * 2.0)) {
+        reach += 1;
+    }
+    var m = vec3<f32>(0.93, 0.89, 0.81);
+    if (depth < reach) {
+        m = vec3<f32>(1.06);
+    } else if (depth == reach) {
+        m = vec3<f32>(0.84);
+    }
+    return mix(vec3<f32>(1.0), m, fine);
 }
 
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
@@ -365,6 +435,21 @@ fn shade(in: VOut) -> vec4<f32> {
         let world_m = (vec2<f32>(voxel.xz) + 0.5) * (in.scale / VOXELS_PER_METRE);
         let alt_m = (G.cam_wrapped.y + centre.y) / VOXELS_PER_METRE;
         base = sward(base, tag, world_m, in.slope, alt_m, (in.flags & FLAG_SKY) != 0u, 1.0 - far);
+    }
+    // The pattern on a grass block's faces, near enough for its texels to be seen. How
+    // big a texel is on screen is taken across its narrower way, as a face seen edge on
+    // foreshortens it, so the pattern fades before it can shimmer.
+    if (kind == PLANT_GROUND && in.scale < 1.5) {
+        let tan_half = length(G.cam_up.xyz) / max(length(G.cam_fwd.xyz), 1e-6);
+        let pixel = length(in.rel) * 2.0 * tan_half / 1080.0;
+        let facing = max(abs(dot(n, normalize(in.rel))), 0.15);
+        let texel = in.scale / GRASS_TEXELS * facing / max(pixel, 1e-6);
+        let fine = smoothstep(1.2, 3.0, texel);
+        let coarse = smoothstep(0.5, 1.2, texel);
+        if (coarse > 0.0) {
+            let within = clamp(floor((in.local - cell) * GRASS_TEXELS), vec3<f32>(0.0), vec3<f32>(GRASS_TEXELS - 1.0));
+            base *= grass_face(voxel * i32(GRASS_TEXELS) + vec3<i32>(within), n, fine, coarse);
+        }
     }
     let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
     base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
