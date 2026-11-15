@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use glam::IVec3;
 use voxel::{Materials, Voxel, mesh::PlantBox};
 
-use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, for_each_site};
+use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, Voxels, for_each_site};
 use super::shape::Rng;
 use crate::{
     biome::Biome,
@@ -259,7 +259,7 @@ fn grow_within(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, budget: usi
         mats,
         |v| host_of(v).is_some(),
         |site| {
-            if let Some(p) = judge(site, soil) {
+            if let Some(p) = judge(site, soil).filter(|_| !indoors(voxels, site)) {
                 patches.push(p);
             }
         },
@@ -297,6 +297,26 @@ fn grow_within(voxels: &ColumnVoxels, mats: &Materials, soil: &Soil, budget: usi
         mine.truncate(budget);
         out.append(&mut mine);
     }
+}
+
+/// How far up from a face a roof over it is looked for, in metres.
+const ROOF_REACH: f32 = 8.0;
+
+/// Whether a site is indoors: the first thing over it is a roof, or the boards of a
+/// floor or a deck. Moss and lichen want the rain and the light a roof keeps off. A ruin
+/// has lost its roof, so its walls go as green as any wall out in the weather, and
+/// under trees and overhangs of rock moss grows as it always has.
+fn indoors(voxels: &ColumnVoxels, site: &Site) -> bool {
+    if site.canopy == 0 {
+        return false;
+    }
+    for dy in 1..=m(ROOF_REACH) as i32 {
+        match voxels.voxel(site.air + IVec3::Y * dy) {
+            voxel::AIR => continue,
+            v => return matches!(v, mat::THATCH | mat::SLATE | mat::ROOF_TILE | mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED),
+        }
+    }
+    false
 }
 
 /// Decides whether a site grows moss.
