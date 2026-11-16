@@ -4,6 +4,7 @@ struct Globals {
     view_proj: mat4x4<f32>,
     // Camera basis scaled so that fwd + ndc.x * right + ndc.y * up is the view ray.
     cam_right: vec4<f32>,
+    // w: how tall a pixel is at one voxel of distance, for a screen 1080 lines high.
     cam_up: vec4<f32>,
     cam_fwd: vec4<f32>,
     // xyz: direction toward the sun (or moon at night). w: time in seconds.

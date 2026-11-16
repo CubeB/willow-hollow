@@ -1744,7 +1744,9 @@ impl Renderer {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_right: v4(right * tan * aspect, 0.0),
-            cam_up: v4(up * tan, 0.0),
+            // w: how tall a pixel is per voxel of distance, taking the screen as 1080 lines
+            // (see distant in terrain.wgsl), the same for every pixel of the frame.
+            cam_up: v4(up * tan, (up * tan).length() / fwd.length().max(1e-6) * 2.0 / 1080.0),
             cam_fwd: v4(fwd, 0.0),
             sun_dir: v4(env.sun_dir, time),
             sun_color: v4(env.sun_color, env.daylight as u8 as f32),

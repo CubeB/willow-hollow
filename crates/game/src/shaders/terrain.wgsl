@@ -371,10 +371,10 @@ fn fs_inside(in: VOut) -> @location(0) vec4<f32> {
 // is about one. Out there the grid of tops and sides is finer than the pixels and would
 // shimmer in bands (moire) as the view moves, so faces are drawn more alike: sides lit
 // and coloured more like the tops they stand under, as the far view draws a slope.
-// The screen height is not in the globals, so this takes 1080 lines.
+// The screen height is not in the globals, so this takes 1080 lines (G.cam_up.w, worked
+// out once a frame).
 fn distant(rel: vec3<f32>, scale: f32) -> f32 {
-    let tan_half = length(G.cam_up.xyz) / max(length(G.cam_fwd.xyz), 1e-6);
-    let pixel = length(rel) * 2.0 * tan_half / 1080.0;
+    let pixel = length(rel) * G.cam_up.w;
     return 1.0 - smoothstep(1.2, 4.0, scale / max(pixel, 1e-6));
 }
 
@@ -422,8 +422,7 @@ fn shade(in: VOut) -> vec4<f32> {
     // big a texel is on screen is taken across its narrower way, as a face seen edge on
     // foreshortens it, so the pattern fades before it can shimmer.
     if (kind == PLANT_GROUND && in.scale < 1.5) {
-        let tan_half = length(G.cam_up.xyz) / max(length(G.cam_fwd.xyz), 1e-6);
-        let pixel = length(in.rel) * 2.0 * tan_half / 1080.0;
+        let pixel = length(in.rel) * G.cam_up.w;
         let facing = max(abs(dot(n, normalize(in.rel))), 0.15);
         let texel = in.scale / GRASS_TEXELS * facing / max(pixel, 1e-6);
         let fine = smoothstep(1.2, 3.0, texel);
