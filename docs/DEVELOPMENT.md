@@ -127,6 +127,18 @@ and on the GPU pass by pass. Compare the numbers before and after a change.
 ./target/release/game.exe --seed 1 --frames 2500 --over 42186,30679,60 --look 0,-15 --drift 25 --no-vsync --no-audio --size 1920x1080
 ```
 
+`WH_FRAME_CSV=frames.csv` adds a line per frame: every CPU lap, every GPU pass and what
+the streamer did. For a real comparison, run the whole suite of scenes in
+`tools/bench/scenes.txt` on an otherwise idle machine, once before a change and once
+after: `OUT=before bash tools/bench/bench.sh` (it stops if anything else is running;
+`LAPTOP=1` holds the game to 8 CPUs at 960x540, and `tools/bench/take.sh` with
+`imgdiff.py` checks that the picture has not changed). A screenshot is drawn at however
+long its loading took, which moves the leaves and water; `VOXEL_CLOCK=S` draws it at S
+seconds instead, so that two shots of the same build match exactly (take.sh sets it).
+Every loading wait gives up after 90 s without progress, prints what each worker is doing
+and exits with code 3; `WILLOW_WAIT_LIMIT=S` changes the limit. What was made faster, the
+numbers, and the changes still waiting for a yes are in [PERFORMANCE.md](PERFORMANCE.md).
+
 **The in-game map.** A screenshot can have the corner map or the large map drawn on it,
 as the player would have it after walking to where the camera is. `--minimap` draws the
 corner map; `--bigmap KM` opens the large map, KM kilometres across (0.16 to 26), with
@@ -262,6 +274,29 @@ reason to stand where it does and a chance of being taken up when the reason hol
 be a surprise, so add to the chances with care. Nothing makes a sound yet:
 `GameWorld::delights_near(x, z, reach)` lists the ones about a place, which is where
 the wind chimes' sound should start from when there are recordings.
+
+**Bees' and wasps' nests** (`crates/worldgen/src/features/nests.rs`) belong to the trees
+and boulders they are in, chosen by a hash of where each stands: a colony of bees in a
+hollow of an old tree or a crevice in a boulder, a wasps' globe under a branch.
+`GameWorld::nests_near(x, z, reach)` lists them, kind, host and door, without building
+any chunk; the bees and wasps in the air (`crates/game/src/insects.rs`) fly from it, and
+an apiary should look there for colonies. With `RUST_LOG=warn,game=debug` a screenshot
+logs the nests within 200 m of the camera, to aim a shot at one.
+
+**Starlings.** On about one evening in five of late autumn, over open country or reeds, a
+murmuration gathers at dusk (`crates/game/src/starlings.rs`). `--murmuration` puts one
+ahead of the camera whatever the date, hour and country; give it `--ambient 20` or more
+to see the cloud a while after it has gathered.
+
+**The northern lights** come out on some nights in the cold country: the cold biomes, and
+the cold north of a continent or its high ground (`crates/game/src/aurora.rs`; drawn in
+`sky.wgsl` from a uniform of their own). `--aurora` has them out tonight wherever the
+camera is; north is toward -z, `--look 270,18`. A screenshot logs how bright they are.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot aurora.png --over 42186,30679,4 --look 270,18 --time 23 --season winter --aurora --no-audio
+./target/release/game.exe --seed 1 --screenshot starlings.png --over 42186,30679,4 --look 180,8 --time 16.6 --date november --murmuration --ambient 20 --no-audio
+```
 
 **Generation speed.** Times chunk generation and prints a checksum of everything
 generated. A change that is only meant to make generation faster must leave the

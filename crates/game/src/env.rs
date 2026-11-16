@@ -42,6 +42,8 @@ pub struct Environment {
     pub sun_elevation: f32,
     /// Time of year, 0 to 1 from the spring equinox.
     pub date: f32,
+    /// How bright the northern lights are, 0 to 1 (see aurora.rs); 0 unless set.
+    pub aurora: f32,
 }
 
 /// Height of the cloud base above sea level over low country, in voxels.
@@ -153,6 +155,7 @@ impl Environment {
             cloud_swell: 0.5,
             sun_elevation: elev,
             date,
+            aurora: 0.0,
         }
     }
 }

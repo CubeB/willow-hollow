@@ -10,9 +10,14 @@ struct Camera {
 @group(1) @binding(0) var<uniform> C: Camera;
 
 struct VIn {
-    // 0..1 corner of the unit box, and its outward normal.
+    // 0..1 corner of the unit box on one side, and its outward normal; then the same
+    // corner of the opposite side. Only one of the two can face the camera.
     @location(0) corner: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(6) opposite: vec3<f32>,
+    @location(7) opposite_normal: vec3<f32>,
+    // The colour of a bare broadleaf crown (impostors::BARE_CROWN).
+    @location(8) bare: vec4<f32>,
     // Per box: world voxel position of the low corner, size in voxels, colour.
     @location(2) lo: vec3<i32>,
     @location(3) size: vec4<u32>,
@@ -37,25 +42,30 @@ fn vs(in: VIn) -> VOut {
     var out: VOut;
     let low = vec3<f32>(in.lo - C.voxel.xyz) - C.frac.xyz;
     let size = vec3<f32>(in.size.xyz);
-    let rel = low + in.corner * size;
+    // The side whose outward normal points toward the camera, judged from the box's
+    // middle: if either side of the pair faces the camera, this is that one; if neither
+    // does, the one taken is culled as a back face, as both were.
+    let toward = dot(low + size * 0.5, in.normal) < 0.0;
+    let corner = select(in.opposite, in.corner, toward);
+    let rel = low + corner * size;
     out.rel = rel;
     out.color = srgb_to_linear(in.color.rgb);
-    out.normal = in.normal;
+    out.normal = select(in.opposite_normal, in.normal, toward);
     out.snow = biome_snow(in.size.w);
     out.sun = skyline_light(vec2<f32>(in.tree.yz) / 255.0) * cloud_light(low + size * 0.5);
     // The season: leaves turn and fall with the near tree's (a whole box at once, so every
-    // corner agrees). The box's plant kind rides in the colour's alpha.
-    // Kind 8 and up is a broadleaf's bare crown, drawn just when its leaves are down. The
-    // tree's tag (season_tree) rides in its own instance byte.
+    // corner agrees). The box's plant kind rides in the colour's alpha, the tree's tag
+    // (season_tree) in its own instance byte. A broadleaf's crown with its leaves down is
+    // the grey-brown of bare twigs.
     let kind = u32(round(in.color.a * 255.0));
-    let bare = kind >= 8u;
-    let leaf = season_box_leaf(out.color, in.lo, kind & 7u, G.season.x, in.tree.x);
-    if (!bare) {
+    let leaf = season_box_leaf(out.color, in.lo, kind, G.season.x, in.tree.x);
+    if (leaf.a < 0.5) {
+        out.color = srgb_to_linear(in.bare.rgb);
+    } else {
         out.color = leaf.rgb;
     }
-    let fallen = (leaf.a < 0.5) != bare;
     // Nearer than this the real voxel trees are drawn instead.
-    if (fallen || length((low + size * 0.5).xz) < G.fog.y) {
+    if (length((low + size * 0.5).xz) < G.fog.y) {
         out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
     } else {
         out.clip = G.view_proj * vec4<f32>(rel, 1.0);

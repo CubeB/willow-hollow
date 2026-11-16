@@ -352,6 +352,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok((key, wait)) = sheets.recv() {
                     let c = if wait { Some(w.continent(key.0, key.1)) } else { w.continent_if_ready(key.0, key.1) };
                     let t = std::time::Instant::now();
@@ -370,6 +371,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map relief".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok(req) = reliefs.recv() {
                     let t = std::time::Instant::now();
                     let made = relief::build(&w, &req);
@@ -391,6 +393,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map disk".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok(job) = jobs.recv() {
                     match job {
                         Disk::Load(key, path) => {
@@ -553,7 +556,18 @@ impl Minimap {
                 }
             }
         }
-        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version, season: self.season }).is_ok()
+        // The large map does not show what a landmark is until it has been come to: it
+        // could be zoomed in on and made out from far off. The corner map shows only the
+        // ground about the player, where it stands in plain sight.
+        let mut hidden = Vec::new();
+        if tag == LARGE {
+            for k in self.known.values() {
+                for (mark, _) in k.sheet.marks.iter().zip(&k.visited).filter(|(m, v)| m.kind == Kind::Landmark && !**v) {
+                    hidden.push(glam::IVec2::new(mark.at.x.floor() as i32, mark.at.y.floor() as i32));
+                }
+            }
+        }
+        self.relief_ask.send(Request { tag, n, step, origin, mask, sheets, version: self.version, season: self.season, hidden }).is_ok()
     }
 
     /// Asks for a new model for the large map if the one it has no longer fits: the map
@@ -825,10 +839,18 @@ impl Minimap {
             self.version += 1;
         }
         if walked {
+            let mut found = false;
             for k in self.known.values_mut() {
                 for (mark, seen) in k.sheet.marks.iter().zip(&mut k.visited) {
-                    *seen |= mark.at.distance(at) <= mark.reach as f64;
+                    if !*seen && mark.at.distance(at) <= mark.reach as f64 {
+                        *seen = true;
+                        found = true;
+                    }
                 }
+            }
+            // A landmark come to is shown on the large map's model from now on.
+            if found {
+                self.version += 1;
             }
         }
     }
@@ -853,17 +875,46 @@ impl Minimap {
     }
 
     /// Waits until everything the map needs around `eye` has arrived, for screenshots.
+    /// If nothing arrives for [`crate::terrain::wait_limit`], says what it was waiting
+    /// for and exits the process with a failure, rather than hang or go on without it.
     pub fn settle(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3) {
+        let (began, limit) = (std::time::Instant::now(), crate::terrain::wait_limit());
+        let mut progressed = began;
+        let mut was = None;
+        log::info!("stage: waiting for the map");
         loop {
             self.update(gpu, eye, forward, false, 0.0);
             if self.pending.is_empty() && self.loading.is_empty() && !self.relief_pending && !self.small_pending {
                 break;
             }
-            match self.answers.recv_timeout(std::time::Duration::from_secs(120)) {
-                Ok(a) => self.take(gpu, a),
-                Err(_) => break,
+            // `update` takes what has come in too: anything changing is progress.
+            let now = Some((self.pending.len(), self.loading.len(), self.relief_pending, self.small_pending, self.version));
+            if now != was {
+                (was, progressed) = (now, std::time::Instant::now());
             }
+            match self.answers.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(a) => {
+                    self.take(gpu, a);
+                    progressed = std::time::Instant::now();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if progressed.elapsed() <= limit => {}
+                Err(e) => {
+                    log::error!(
+                        "hung waiting for the map ({e:?}) after {:.0} s: sheets {:?}, masks loading {:?}, relief {}, corner relief {}",
+                        began.elapsed().as_secs_f32(),
+                        self.pending,
+                        self.loading.keys().collect::<Vec<_>>(),
+                        self.relief_pending,
+                        self.small_pending
+                    );
+                    std::process::exit(3);
+                }
+            }
+            // Whatever comes in is taken by `update` too, so a pause keeps this from
+            // spinning should answers keep coming and never finish it.
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        log::info!("stage: map ready after {:.2} s", began.elapsed().as_secs_f32());
         self.last_seen = None;
         self.update(gpu, eye, forward, false, 0.0);
     }
@@ -1137,7 +1188,7 @@ impl Minimap {
         let span = (self.span / VOXELS_PER_METRE as f64) as f32;
         let me = xz(self.player);
         let me_px = place(me).map(|p| p.0);
-        let (icon, glow) = if self.open { (6.5 * f.s, 11.0 * f.s) } else { (4.5 * f.s, 6.5 * f.s) };
+        let (icon, glow) = if self.open { (6.5 * f.s, 15.0 * f.s) } else { (4.5 * f.s, 9.0 * f.s) };
         let mut hints: Vec<(f64, DVec2)> = Vec::new();
         let mut icons = Vec::new();
         for key in self.known.keys() {
@@ -1148,7 +1199,7 @@ impl Minimap {
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
                 // What stands there as a model of itself is its own mark.
-                let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Bridge | Kind::Tor);
+                let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Tor);
                 let mut on_water = false;
                 if let Some((p, _)) = at
                     && on_map
@@ -1183,14 +1234,18 @@ impl Minimap {
                     if !modelled && !on_water {
                         icons.push(icon_of(mark, p, icon));
                     }
+                } else if !mark.hint {
+                    // Left for the player to come on unawares.
                 } else if let Some((p, _)) = at
                     && on_map
                     && seen
                 {
-                    let tint = if mark.kind.watery() { [0.88, 0.96, 1.0] } else { [1.0, 0.97, 0.86] };
+                    // A little block of the world's own kind, glowing, as the map is made
+                    // of blocks: water's blue, or a warm stone.
+                    let tint = if mark.kind.watery() { [0.56, 0.80, 0.97] } else { [0.97, 0.80, 0.50] };
                     let phase = (mark.at.x * 0.013 + mark.at.y * 0.007) as f32;
                     let breathe = 0.85 + 0.15 * (self.clock * 1.1 + phase).sin();
-                    out.push(Instance::new(gpu::GLOW, p.into(), glow, [tint[0], tint[1], tint[2], 0.8 * breathe]));
+                    out.push(Instance::new(gpu::UNFOUND, p.into(), glow, [tint[0], tint[1], tint[2], 0.95 * breathe]));
                 } else if !visited {
                     let d = mark.at.distance(me);
                     if d <= HINT {
@@ -1297,7 +1352,6 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         // Granite grey, and smaller than a peak.
         Kind::Tor => (gpu::TRIANGLE, [0.50, 0.50, 0.48, 1.0], 0.85),
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
-        Kind::Bridge => (gpu::BAR, [0.52, 0.40, 0.28, 1.0], 1.0),
     };
     Instance::new(kind, p.into(), size * scale, color)
 }
@@ -1426,6 +1480,11 @@ mod tests {
         assert!(named > 0);
         assert!(s.marks.iter().any(|m| m.kind == Kind::Landmark));
         assert!(s.marks.iter().any(|m| m.kind.watery()));
+        // A bridge is walked over, not sought out: none has a mark of its own.
+        let arches: Vec<DVec2> = c.trails.crossings.iter().filter(|x| x.kind == worldgen::trails::CrossingKind::Arch).map(|x| DVec2::new(x.x as f64 + 0.5, x.z as f64 + 0.5)).collect();
+        for m in &s.marks {
+            assert!(!arches.iter().any(|a| a.distance(m.at) < 1.0), "{m:?} marks a bridge");
+        }
         // The same world finds the same places.
         let again = marks::find(&c, world.seed());
         assert_eq!(again.len(), s.marks.len());

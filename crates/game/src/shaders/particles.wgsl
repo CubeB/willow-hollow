@@ -55,9 +55,19 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         color = in.color.rgb * in.glow;
     } else {
         let ndl = max(dot(in.normal, G.sun_dir.xyz), 0.0);
+        let sun = sun_visibility(in.rel, in.normal);
         // A lantern or a fire lights what stands by it, as it does the ground.
-        let light = G.sun_color.rgb * ndl * sun_visibility(in.rel, in.normal) + ambient(in.normal) + local_lights(in.rel, in.normal);
+        let light = G.sun_color.rgb * ndl * sun + ambient(in.normal) + local_lights(in.rel, in.normal);
         color = in.color.rgb * light;
+        // A glow below zero is a gloss, as on a crow's black feathers: a blue-purple
+        // shine where the sun glances off, and a little of the sky's at the edges.
+        if (in.glow < 0.0) {
+            let view = normalize(-in.rel);
+            let between = normalize(view + G.sun_dir.xyz);
+            let shine = pow(max(dot(in.normal, between), 0.0), 10.0) * ndl * sun;
+            let edge = pow(1.0 - max(dot(in.normal, view), 0.0), 3.0);
+            color += -in.glow * (G.sun_color.rgb * shine * vec3<f32>(0.022, 0.026, 0.075) + ambient(in.normal) * edge * vec3<f32>(0.01, 0.01, 0.028));
+        }
     }
     return vec4<f32>(apply_fog(color, in.rel), in.color.a);
 }

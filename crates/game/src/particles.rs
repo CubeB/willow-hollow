@@ -225,6 +225,12 @@ pub struct Surroundings<'a> {
     /// The height of the land at a place, roughly (see [`land_under`]), or None where it
     /// is not known yet: what flocks keep above.
     pub land: &'a dyn Fn(f64, f64) -> Option<f64>,
+    /// The bees' and wasps' nests near the player, and the flowers in bloom about them,
+    /// which the bees fly out to (see insects.rs).
+    pub nests: &'a [worldgen::features::nests::Nest],
+    pub forage: &'a [(DVec3, [f32; 3])],
+    /// The hour of the day, 0 to 24: dusk is told from dawn by it.
+    pub hour: f32,
 }
 
 /// The height of the land around `(x, z)` from the continent's map, in voxels: the
@@ -252,6 +258,9 @@ pub struct Particles {
     rng: u32,
     bird_timer: f32,
     flocks: Vec<Flock>,
+    insects: crate::insects::Insects,
+    /// A murmuration on the odd late autumn evening (starlings.rs).
+    pub starlings: crate::starlings::Starlings,
     /// Each leaf site's shedding weight and leaf colour this frame (see `shedding`).
     shed: Vec<(f32, [f32; 3])>,
     pub wind: Wind,
@@ -296,6 +305,8 @@ impl Particles {
             rng: 0x2545_f491,
             bird_timer: 20.0,
             flocks: Vec::new(),
+            insects: crate::insects::Insects::new(),
+            starlings: crate::starlings::Starlings::new(),
             shed: Vec::new(),
             wind: Wind::new(),
         }
@@ -643,6 +654,14 @@ impl Particles {
             };
             self.spawn(particle);
         }
+
+        // Bees and wasps about their nests, in the day's warmth and out of the rain.
+        let flying = s.sun_elevation > 0.05 && s.rain + s.snow < 0.2 && s.storm < 0.5;
+        self.insects.update(dt, s.camera, s.nests, s.forage, s.date, flying, s.time);
+
+        // Starlings gathering over the reeds at dusk, on the odd evening of late autumn.
+        let calm = s.rain + s.snow < 0.1 && s.storm < 0.4;
+        self.starlings.update(dt, s.camera, s.biome, s.date, s.hour, s.sun_elevation, calm, s.land);
 
         // Now and then a flock passes overhead.
         self.bird_timer -= dt;
@@ -1057,6 +1076,8 @@ impl Particles {
         for flock in &self.flocks {
             flock.draw(s.camera, &mut self.instances);
         }
+        self.insects.draw(s.camera, s.time, &mut self.instances);
+        self.starlings.draw(s.camera, &mut self.instances);
     }
 
     /// Where each flock in the sky is, its birds' middle, and how many birds it has.
@@ -1456,6 +1477,9 @@ mod leaf_tests {
             storm: 0.0,
             time,
             land: &|_, _| Some(0.0),
+            nests: &[],
+            forage: &[],
+            hour: 12.0,
         }
     }
 

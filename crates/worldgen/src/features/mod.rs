@@ -14,6 +14,7 @@ pub mod designs;
 pub mod landmarks;
 pub mod moorstones;
 pub mod moss;
+pub mod nests;
 pub mod parts;
 pub mod pebbles;
 pub mod plants;
@@ -88,6 +89,13 @@ impl Placement {
     /// How far the far end of the model is above its origin, or below if negative.
     fn rise(&self) -> i32 {
         self.lie.map_or(0, |l| l.rise)
+    }
+
+    /// How far across the ground from `pos` any of it lies: its model, or a big tree's
+    /// buttresses where they spread further.
+    pub fn reach(&self, lib: &Library) -> i32 {
+        let model = lib.get(self.species, self.variant).reach;
+        self.roots.map_or(model, |r| model.max(r.spread()))
     }
 
     /// The highest voxel the model can reach.
@@ -568,7 +576,7 @@ impl PlaceCache {
 /// Features overlapping the square of columns at continent-local `(lx0, lz0)`, `span`
 /// wide. `sampler` must cover that square plus the largest reach.
 pub fn place(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
-    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true)
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true, None)
 }
 
 /// The trees of [`place`] alone, the giants and the ordinary ones, each where it stands
@@ -576,7 +584,18 @@ pub fn place(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i
 /// boulders and logs, and without working out the roots bared on a slope: several
 /// times quicker, for drawing where the trees are (the map).
 pub fn place_trees(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
-    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES], false)
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES], false, None)
+}
+
+/// The features of [`place`] whose species `keep` says yes to, in the same order, each
+/// where it stands in the world and of the same species, variant, turn and lie, but
+/// without the roots bared on a slope. A feature left out is dropped as soon as its
+/// species is known, before the ground round it is read, so this is quicker than
+/// filtering what [`place`] gives: for the coarse rings, which draw only what stands
+/// tall.
+#[allow(clippy::too_many_arguments)]
+pub fn place_only(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32), keep: fn(Species) -> bool) -> Vec<Placement> {
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], false, Some(keep))
 }
 
 /// [`place`], remembering each cell in `cache` for the next to ask. A cache must only
@@ -592,12 +611,13 @@ pub fn place_cached(
     span: i32,
     macro_origin: (i32, i32),
 ) -> Vec<Placement> {
-    place_in(Some(cache), world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true)
+    place_in(Some(cache), world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES, SMALL], true, None)
 }
 
 /// The features of `layers` (giants before trees, as a giant keeps trees from under it);
-/// with `roots`, the roots bared beside each tree too. Only with all the layers and
-/// roots may it remember cells in `cache`.
+/// with `roots`, the roots bared beside each tree too; with `keep`, only the species it
+/// says yes to. Only with all the layers and roots, and all species, may it remember
+/// cells in `cache`.
 #[allow(clippy::too_many_arguments)]
 fn place_in(
     cache: Option<&PlaceCache>,
@@ -610,8 +630,9 @@ fn place_in(
     macro_origin: (i32, i32),
     layers: &[Layer],
     roots: bool,
+    keep: Option<fn(Species) -> bool>,
 ) -> Vec<Placement> {
-    debug_assert!(roots || cache.is_none());
+    debug_assert!((roots && keep.is_none()) || cache.is_none());
     let mut out = Vec::new();
     // Where giants were chosen to stand, across the ground.
     let mut giants: Vec<(i32, i32)> = Vec::new();
@@ -630,7 +651,7 @@ fn place_in(
                 let grown = match cache.and_then(|c| c.get(&key)) {
                     Some(grown) => grown,
                     None => {
-                        let grown = cell.grow(world_seed, lib, sampler, &layer, macro_origin, roots);
+                        let grown = cell.grow(world_seed, lib, sampler, &layer, macro_origin, roots, keep);
                         // Kept only if the sampler covers all the ground the cell looked at,
                         // so that the next to ask gets what it would have worked out itself.
                         if let Some(cache) = cache
@@ -674,7 +695,8 @@ impl Cell {
 
     /// What grows in the cell, if anything, reading the ground no further than the
     /// layer's reach from where it stands.
-    fn grow(&self, world_seed: u32, lib: &Library, sampler: &Sampler, layer: &Layer, macro_origin: (i32, i32), with_roots: bool) -> Grown {
+    #[allow(clippy::too_many_arguments)]
+    fn grow(&self, world_seed: u32, lib: &Library, sampler: &Sampler, layer: &Layer, macro_origin: (i32, i32), with_roots: bool, keep: Option<fn(Species) -> bool>) -> Grown {
         let (x, z) = (self.x, self.z);
         let roll = |k: u32| self.roll(k);
         let nothing = |chosen: bool| Grown { chosen, feature: None };
@@ -698,6 +720,11 @@ impl Cell {
             } else if neglect > 0.45 && roll(9) < near * neglect {
                 (species, cleared) = (Species::Bush, true);
             }
+        }
+        // Not wanted: chosen all the same, as from here on it always is, whether or not
+        // it grows, so that a giant left out still keeps the trees from under it.
+        if keep.is_some_and(|keep| !keep(species)) {
+            return nothing(true);
         }
         let mut pos = IVec3::new(x, col.top() + 1, z);
         // Steep ground: nothing roots there but the rock itself.
@@ -744,7 +771,8 @@ impl Cell {
                 let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
                 c.water_surface().is_none().then_some(c.top())
             };
-            roots::find(lib, species, variant, turns, pos, world_seed, ground)
+            // Buttresses keep within the layer's reach: as far as a chunk looks for trees.
+            roots::find(lib, species, variant, turns, pos, world_seed, layer.reach - 2, ground)
         };
         Grown {
             chosen: true,

@@ -8,11 +8,11 @@ use std::{
         Arc, Mutex,
         mpsc::{Receiver, Sender, channel},
     },
+    time::Instant,
 };
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec3};
-use voxel::plant;
 use worldgen::{
     World,
     features::{self, shape::rotate, trees::{self, Species}},
@@ -36,6 +36,9 @@ pub const REACH: f32 = worldgen::scale::m(2800.0);
 const UNLOAD_SLACK: i32 = 2;
 /// Squares being built at once.
 const MAX_IN_FLIGHT: usize = 6;
+/// How long a frame may spend uploading finished squares, in milliseconds. A burst of
+/// them arriving together once took nearly 8 ms in one frame.
+const UPLOAD_MS: f32 = 1.0;
 /// Frames between looking again at squares whose continent wasn't simulated yet.
 const RETRY_FRAMES: u32 = 120;
 
@@ -50,7 +53,7 @@ pub struct BoxInstance {
     pub biome: u8,
     pub color: [u8; 3],
     /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near
-    /// tree's, plus [`BARE`] for the bare crown shown once they have.
+    /// tree's. A broadleaf's crown shows [`BARE_CROWN`] once they have.
     pub plant: u8,
     /// The tree's tag (features::tree_tag) in the first byte, so it turns and drops on
     /// the near tree's date; then the skylines where it stands (farview::Skylines), so a
@@ -58,10 +61,9 @@ pub struct BoxInstance {
     pub tree: [u8; 4],
 }
 
-/// Marks the box standing for a broadleaf's bare crown in winter, in place of its leaves.
-const BARE: u8 = 8;
-/// The colour of a crown of bare twigs from afar, as the far view's bare forest.
-const BARE_CROWN: [u8; 3] = [92, 80, 72];
+/// The colour of a crown of bare twigs from afar, as the far view's bare forest: what a
+/// broadleaf's crown box shows once its leaves are down (see impostor.wgsl).
+pub const BARE_CROWN: [u8; 3] = [92, 80, 72];
 
 /// The boxes of a model, turned, relative to where it stands: low corner, size, colour, plant kind.
 type ModelBoxes = Arc<Vec<(IVec3, [u8; 3], [u8; 3], u8)>>;
@@ -87,11 +89,6 @@ impl Models {
             let size = [size.x as u8, size.y as u8, size.z as u8];
             let m = mats.get(b.voxel);
             boxes.push((lo, size, m.color, m.plant));
-            // A broadleaf's crown has a twin in the grey-brown of bare twigs, drawn in its
-            // place once its leaves are down.
-            if m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN {
-                boxes.push((lo, size, BARE_CROWN, m.plant | BARE));
-            }
         }
         let model: ModelBoxes = Arc::new(boxes);
         self.cache.lock().expect("model cache poisoned").insert(key, model.clone());
@@ -109,9 +106,20 @@ pub struct Tile {
 
 struct Built {
     tile: (i32, i32),
-    /// None if its continent hasn't been simulated yet.
-    boxes: Option<Vec<BoxInstance>>,
+    boxes: Result<Vec<BoxInstance>, Wait>,
 }
+
+/// Why a square could not be built yet.
+enum Wait {
+    /// Its continent hasn't been simulated: it is looked at again now and then.
+    Continent,
+    /// Its continent's skylines are still being worked out, which is soon done: it is
+    /// asked for again in a moment, rather than the worker waiting for them.
+    Skylines,
+}
+
+/// The phases a far-tree job goes through.
+static TILE_WATCH: crate::terrain::Watch = crate::terrain::Watch::new(&["idle", "building"]);
 
 pub struct Impostors {
     world: Arc<GameWorld>,
@@ -126,6 +134,11 @@ pub struct Impostors {
     /// Waiting for their continent.
     waiting: Vec<(i32, i32)>,
     retry: u32,
+    /// Waiting for their continent's skylines, and since when.
+    soon: Vec<(i32, i32)>,
+    soon_since: Instant,
+    /// When a square last arrived.
+    progressed: Instant,
     center: Option<(i32, i32)>,
     arena: VertexArena,
     /// Boxes loaded, for statistics.
@@ -137,6 +150,7 @@ impl Impostors {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .thread_name(|i| format!("impostors-{i}"))
+            .start_handler(|_| crate::threads::background())
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();
@@ -151,6 +165,9 @@ impl Impostors {
             wanted: Vec::new(),
             waiting: Vec::new(),
             retry: 0,
+            soon: Vec::new(),
+            soon_since: Instant::now(),
+            progressed: Instant::now(),
             center: None,
             arena: VertexArena::new(gpu, "tree impostors", 32 << 20, size_of::<BoxInstance>() as u64),
             boxes: 0,
@@ -167,7 +184,7 @@ impl Impostors {
 
     /// A line on how far loading has got, for the log of a timed run.
     pub fn progress(&self) -> String {
-        format!("tree squares {} loaded, {} queued, {} building, {} waiting", self.tiles.len(), self.wanted.len(), self.pending.len(), self.waiting.len())
+        format!("tree squares {} loaded, {} queued, {} building, {} waiting, {} waiting for skylines", self.tiles.len(), self.wanted.len(), self.pending.len(), self.waiting.len(), self.soon.len())
     }
 
     fn in_reach(tile: (i32, i32), center: (i32, i32), slack: i32) -> bool {
@@ -176,7 +193,13 @@ impl Impostors {
         dx * dx + dz * dz <= r * r
     }
 
+    /// Call once per frame. Uploads finished squares for about [`UPLOAD_MS`] at most; the
+    /// rest wait in the channel for the next frame.
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
+        self.update_within(gpu, camera, UPLOAD_MS);
+    }
+
+    fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
         let here = (
             (camera.x / TILE as f64).floor() as i32,
             (camera.z / TILE as f64).floor() as i32,
@@ -191,25 +214,49 @@ impl Impostors {
             self.wanted.append(&mut self.waiting);
             self.sort_wanted(here);
         }
+        if !self.soon.is_empty() && self.soon_since.elapsed().as_secs_f32() > 0.1 {
+            self.wanted.append(&mut self.soon);
+        }
 
         while self.pending.len() < MAX_IN_FLIGHT {
             let Some(tile) = self.wanted.pop() else { break };
             self.pending.insert(tile);
             let (world, models, tx) = (self.world.clone(), self.models.clone(), self.tx.clone());
             self.pool.spawn(move || {
+                TILE_WATCH.set((0, tile.0, tile.1), 1);
                 let boxes = build_tile(&world, &models, tile);
                 let _ = tx.send(Built { tile, boxes });
+                TILE_WATCH.idle();
             });
         }
 
-        while let Ok(built) = self.rx.try_recv() {
+        // At least one square a frame, so that they always get there.
+        let began = Instant::now();
+        let mut first = true;
+        while first || began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
+            let Ok(built) = self.rx.try_recv() else { break };
+            first = false;
             self.pending.remove(&built.tile);
+            // Sent back to wait for skylines is no sign of loading going on.
+            if !matches!(built.boxes, Err(Wait::Skylines)) {
+                self.progressed = Instant::now();
+            }
             if !Self::in_reach(built.tile, here, UNLOAD_SLACK) {
                 continue;
             }
-            let Some(boxes) = built.boxes else {
-                self.waiting.push(built.tile);
-                continue;
+            let boxes = match built.boxes {
+                Ok(boxes) => boxes,
+                Err(Wait::Continent) => {
+                    self.waiting.push(built.tile);
+                    continue;
+                }
+                Err(Wait::Skylines) => {
+                    if self.soon.is_empty() {
+                        self.soon_since = Instant::now();
+                    }
+                    self.soon.push(built.tile);
+                    continue;
+                }
             };
             let tile = self.upload(gpu, built.tile, &boxes);
             self.boxes += boxes.len() as u64;
@@ -248,6 +295,8 @@ impl Impostors {
         });
         self.boxes = self.boxes.saturating_sub(dropped);
         self.waiting.retain(|t| Self::in_reach(*t, here, UNLOAD_SLACK));
+        // Those waiting for skylines are wanted again below if they still are.
+        self.soon.clear();
         self.wanted.clear();
         let r = (REACH / TILE as f32) as i32;
         for dx in -r..=r {
@@ -268,27 +317,45 @@ impl Impostors {
         });
     }
 
-    /// Blocks until every square that can be built has been (for screenshots).
+    /// Blocks until every square that can be built has been (for screenshots). If
+    /// nothing arrives for [`crate::terrain::wait_limit`], says what was being built and
+    /// exits the process with a failure, rather than hang.
     pub fn wait_idle(&mut self, gpu: &Gpu, camera: DVec3) {
+        let (began, limit) = (Instant::now(), crate::terrain::wait_limit());
+        self.progressed = began;
+        log::info!("stage: waiting for the far trees");
         loop {
-            self.update(gpu, camera);
-            if self.wanted.is_empty() && self.pending.is_empty() {
+            self.update_within(gpu, camera, f32::INFINITY);
+            if self.wanted.is_empty() && self.pending.is_empty() && self.soon.is_empty() {
                 break;
+            }
+            if self.progressed.elapsed() > limit {
+                let busy: Vec<String> = TILE_WATCH.busy().iter().map(|(t, (_, x, z), phase, secs)| format!("impostors-{t}: square ({x}, {z}) {phase} for {secs:.1} s")).collect();
+                log::error!(
+                    "hung waiting for the far trees: nothing arrived for {:.0} s; {}; {}; squares sent to build {:?}",
+                    self.progressed.elapsed().as_secs_f32(),
+                    self.progress(),
+                    busy.join("; "),
+                    self.pending.iter().take(16).collect::<Vec<_>>()
+                );
+                std::process::exit(3);
             }
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        log::info!("stage: far trees loaded after {:.2} s, {}", began.elapsed().as_secs_f32(), self.progress());
     }
 }
 
-fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Vec<BoxInstance>> {
+fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Result<Vec<BoxInstance>, Wait> {
     let (x0, z0) = (tile.0 * TILE, tile.1 * TILE);
     let (mx, mz) = cell_of(x0, z0);
-    let continent = world.continent_if_ready(mx, mz)?;
+    let continent = world.continent_if_ready(mx, mz).ok_or(Wait::Continent)?;
+    // Never waited for here: see `farview::Skylines`.
+    let skylines = farview::Skylines::soon(&continent).ok_or(Wait::Skylines)?;
     let (lx0, lz0) = (x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE);
     let margin = features::MAX_REACH + 1;
     let sampler = Sampler::new(&continent, world.seed(), lx0 - margin, lz0 - margin, TILE + 2 * margin);
     let lib = world.library();
-    let skylines = farview::Skylines::get(&continent);
     let mut boxes = Vec::new();
     for p in features::place(world.seed(), lib, &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE)) {
         // Each tree belongs to the square its trunk is in.
@@ -335,7 +402,7 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Option<Ve
             });
         }
     }
-    Some(boxes)
+    Ok(boxes)
 }
 
 #[cfg(test)]

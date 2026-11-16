@@ -306,6 +306,12 @@ palette! {
     LEAF_GREY         = (130, 148, 120), Foliage, 2;
     // The glass of a lantern nobody has lit: smoky, and dark against the lit ones.
     LANTERN_COLD      = (128, 118,  94), Solid, 0;
+    // Wild bees' and wasps' nests (features::nests): the dark inside a hollow, the comb
+    // glimpsed in it, and a wasps' nest's paper in its two greys.
+    NEST_HOLLOW       = ( 26,  20,  16), Solid, 1;
+    HONEYCOMB         = (204, 150,  52), Solid, 2;
+    WASP_PAPER        = (156, 152, 142), Solid, 3;
+    WASP_PAPER_DARK   = (118, 114, 106), Solid, 2;
 }
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.

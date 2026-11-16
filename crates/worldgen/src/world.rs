@@ -25,6 +25,34 @@ use crate::{
 };
 
 type Slot = Arc<OnceLock<Arc<Continent>>>;
+type AfterMade = Arc<OnceLock<Box<dyn Fn(&Arc<Continent>) + Send + Sync>>>;
+
+/// The continents asked for by [`GameWorld::continent_soon`], and the thread that
+/// simulates them, started when first wanted.
+#[derive(Default)]
+struct Soon {
+    asked: HashSet<(i32, i32)>,
+    queue: Option<std::sync::mpsc::Sender<((i32, i32), Slot)>>,
+}
+
+/// Fills a continent's slot, simulating it if no one has, and if this thread did, hands
+/// it to `after` once the slot is filled and nothing is held.
+fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: &AfterMade) -> Arc<Continent> {
+    let mut made = false;
+    let c = slot
+        .get_or_init(|| {
+            made = true;
+            let mut c = continent::generate(cell_desc(seed, mx, mz), config);
+            c.trails = trails::build(&c, seed);
+            c.trails.names = crate::names::survey(&c, seed);
+            Arc::new(c)
+        })
+        .clone();
+    if made && let Some(f) = after.get() {
+        f(&c);
+    }
+    c
+}
 
 pub struct GameWorld {
     seed: u32,
@@ -35,6 +63,8 @@ pub struct GameWorld {
     /// Simulated macro-cells. Each slot is filled once, by whichever thread asks first;
     /// others asking for the same cell wait for it rather than simulating it again.
     continents: Mutex<HashMap<(i32, i32), Slot>>,
+    soon: Mutex<Soon>,
+    after_made: AfterMade,
     /// Climbing plants grown lately, shared by the chunk columns they span.
     climbers: features::climber::PlantCache,
     /// Caves laid out lately, by world cell.
@@ -60,6 +90,8 @@ impl GameWorld {
             config,
             library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
+            soon: Default::default(),
+            after_made: Default::default(),
             climbers: Default::default(),
             caves: Default::default(),
             placed: Default::default(),
@@ -82,22 +114,56 @@ impl GameWorld {
         self.tors.near(self.seed, c, x0, z0, span)
     }
 
-    /// The simulated macro-cell `(mx, mz)`, generating it if needed (about 3 seconds).
-    pub fn continent(&self, mx: i32, mz: i32) -> Arc<Continent> {
-        let slot = self
-            .continents
+    fn slot(&self, mx: i32, mz: i32) -> Slot {
+        self.continents
             .lock()
             .expect("continent map poisoned")
             .entry((mx, mz))
             .or_default()
-            .clone();
-        slot.get_or_init(|| {
-            let mut c = continent::generate(cell_desc(self.seed, mx, mz), self.config);
-            c.trails = trails::build(&c, self.seed);
-            c.trails.names = crate::names::survey(&c, self.seed);
-            Arc::new(c)
-        })
-        .clone()
+            .clone()
+    }
+
+    /// The simulated macro-cell `(mx, mz)`, generating it if needed (about 3 seconds).
+    pub fn continent(&self, mx: i32, mz: i32) -> Arc<Continent> {
+        fill(&self.slot(mx, mz), self.seed, self.config, (mx, mz), &self.after_made)
+    }
+
+    /// The macro-cell if it is ready; if not, None at once, and it is simulated on a
+    /// thread of its own, so that whoever cannot wait for it can do something else and
+    /// ask again. Each is asked for there only once.
+    pub fn continent_soon(&self, mx: i32, mz: i32) -> Option<Arc<Continent>> {
+        let slot = self.slot(mx, mz);
+        if let Some(c) = slot.get() {
+            return Some(c.clone());
+        }
+        let mut soon = self.soon.lock().expect("continent queue poisoned");
+        let Soon { asked, queue } = &mut *soon;
+        if asked.insert((mx, mz)) {
+            let queue = queue.get_or_insert_with(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<((i32, i32), Slot)>();
+                let (seed, config, after) = (self.seed, self.config, self.after_made.clone());
+                // One at a time, in the order asked: they are seconds each, and the
+                // workers asking have other columns to build meanwhile.
+                std::thread::Builder::new()
+                    .name("continent".into())
+                    .spawn(move || {
+                        for (key, slot) in rx {
+                            fill(&slot, seed, config, key, &after);
+                        }
+                    })
+                    .expect("continent thread");
+                tx
+            });
+            let _ = queue.send(((mx, mz), slot));
+        }
+        None
+    }
+
+    /// Gives what is worked out from each continent once (the far view's skylines) to
+    /// `f`, which is called on the thread that simulated the continent, as soon as it
+    /// has, and holding no lock. Only the first call has any effect.
+    pub fn after_made(&self, f: impl Fn(&Arc<Continent>) + Send + Sync + 'static) {
+        let _ = self.after_made.set(Box::new(f));
     }
 
     /// The macro-cell if it has already been simulated. Never blocks.
@@ -137,6 +203,45 @@ impl GameWorld {
                 }));
             }
         }
+        out
+    }
+
+    /// The wild bees' and wasps' nests (see [`features::nests`]) whose door is within
+    /// `reach` voxels of the column at `(x, z)`, nearest first: the same nests the chunks
+    /// there are built with, found without building them. Never blocks, and only from
+    /// the continent `(x, z)` is on: nothing until it is simulated. This is what the bees
+    /// in the air fly from, and where a beekeeper will look for a colony to take.
+    pub fn nests_near(&self, x: i32, z: i32, reach: i32) -> Vec<features::nests::Nest> {
+        let (mx, mz) = cell_of(x, z);
+        let Some(c) = self.continent_if_ready(mx, mz) else { return Vec::new() };
+        // A nest's door is inside its host, so a host this much further out can hold one.
+        let span = 2 * (reach + features::MAX_REACH) + 1;
+        let (x0, z0) = (x - reach - features::MAX_REACH, z - reach - features::MAX_REACH);
+        let (lx0, lz0) = (x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE);
+        let margin = features::MAX_REACH + 1;
+        let sampler = Sampler::new(&c, self.seed, lx0 - margin, lz0 - margin, span + 2 * margin);
+        let lib = self.library();
+        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        // Chunks leave out what stands in a tor's rock; so must this.
+        let tors = self.tors.near(self.seed, &c, x0, z0, span);
+        let mut out: Vec<_> = placements
+            .iter()
+            .filter(|p| !tors.iter().any(|t| t.crowds(p.pos)))
+            .filter_map(|p| {
+                let biome = || sampler.column(p.pos.x - mx * MACRO_SIZE, p.pos.z - mz * MACRO_SIZE).biome;
+                features::nests::of(lib, &self.materials, p, biome, self.seed)
+            })
+            .filter(|n| {
+                let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+                dx * dx + dz * dz <= reach as i64 * reach as i64
+            })
+            .collect();
+        out.sort_by_key(|n| {
+            let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+            (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
+        });
+        // A placement cell can be met from both sides of a square; a nest is one nest.
+        out.dedup();
         out
     }
 
@@ -679,7 +784,12 @@ impl GameWorld {
                 }
                 // The border columns belong to neighbouring chunk columns.
                 let own = !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32));
-                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }));
+                // Grass over rock is thin: at the foot of a tor and at the edge of a cliff
+                // or scree.
+                let by_rock = skin.0 == mat::TURF
+                    || (0..3).any(|i| (0..3).any(|j| matches!(wide[(px + i) * WIDE + pz + j].cover, Cover::Cliff | Cover::Scree | Cover::Boulders)));
+                let sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
+                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }, sward));
                 if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
                     features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
@@ -720,15 +830,15 @@ impl GameWorld {
             PAD as i32,
             (mx * MACRO_SIZE, mz * MACRO_SIZE),
         );
-        // Only the features whose model can touch this column.
+        // Only the features whose model, or buttresses, can touch this column.
         let mut placements: Vec<_> = placements
             .into_iter()
             .filter(|p| {
-                let t = lib.get(p.species, p.variant);
-                p.pos.x + t.reach >= wx0
-                    && p.pos.x - t.reach < wx0 + PAD as i32
-                    && p.pos.z + t.reach >= wz0
-                    && p.pos.z - t.reach < wz0 + PAD as i32
+                let reach = p.reach(lib);
+                p.pos.x + reach >= wx0
+                    && p.pos.x - reach < wx0 + PAD as i32
+                    && p.pos.z + reach >= wz0
+                    && p.pos.z - reach < wz0 + PAD as i32
             })
             .collect();
         if !tors.is_empty() {
@@ -962,6 +1072,16 @@ impl GameWorld {
         for p in &placements {
             features::stamp(lib, &self.materials, p, &mut put);
         }
+        // The bees' and wasps' nests in them, after every tree, so another's limb or
+        // leaves never fill a hollow.
+        for p in &placements {
+            let biome = || sampler.column(p.pos.x - mx * MACRO_SIZE, p.pos.z - mz * MACRO_SIZE).biome;
+            if let Some(nest) = features::nests::of(lib, &self.materials, p, biome, self.seed) {
+                for (q, v) in nest.voxels() {
+                    put(q, v, true);
+                }
+            }
+        }
         for &(q, v) in &rock {
             put(q, v, true);
         }
@@ -1075,6 +1195,35 @@ mod tests {
 
     use super::*;
     use crate::continent::SimConfig;
+
+    #[test]
+    fn a_continent_asked_for_soon_is_made_elsewhere_once_and_the_same() {
+        let w = GameWorld::with_config(7, SimConfig { size: 128 });
+        let made = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = made.clone();
+        w.after_made(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        // Not there yet, and asking again before it is starts nothing more.
+        assert!(w.continent_soon(1, -1).is_none());
+        assert!(w.continent_soon(1, -1).is_none());
+        let began = std::time::Instant::now();
+        let c = loop {
+            if let Some(c) = w.continent_soon(1, -1) {
+                break c;
+            }
+            assert!(began.elapsed().as_secs() < 120, "the continent asked for never came");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(Arc::ptr_eq(&c, &w.continent(1, -1)));
+        let again = GameWorld::with_config(7, SimConfig { size: 128 }).continent(1, -1);
+        assert_eq!(c.height, again.height);
+        // It is handed on just after it is ready, once.
+        while made.load(std::sync::atomic::Ordering::Relaxed) == 0 && began.elapsed().as_secs() < 120 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(made.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn every_column_grows_a_climbing_plant_the_same_way() {

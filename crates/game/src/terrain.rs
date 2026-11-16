@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
     time::Instant,
@@ -13,8 +13,8 @@ use std::{
 
 use glam::{DVec3, IVec3};
 use voxel::{
-    CHUNK,
-    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_trees, wash_map},
+    CHUNK, PAD,
+    mesh::{CELLS, ChunkMesh, Falls, Vertex, add_plants, cover_columns, mesh_chunk_under_sky, tag_sward, tag_trees, wash_map},
 };
 use worldgen::{Cascade, SpringMark, Surf, World, features, scale::m, world::GameWorld};
 
@@ -72,10 +72,14 @@ struct Marks {
     biomes: [u32; 8],
     skylines: [[u8; 2]; 4],
     slopes: [[i8; 2]; 4],
+    /// The skylines of a continent under a corner were still being worked out: the
+    /// column is built again once they are, rather than with the wrong ones for good.
+    unready: bool,
 }
 
 impl Marks {
     fn of(world: &GameWorld, col: Col) -> Self {
+        CHUNK_WATCH.set(col, watch::MARKS);
         // A grid of points in world voxels, whose edges neighbouring columns share.
         let size = CHUNK << col.0;
         let (x, z) = (col.1 * size, col.2 * size);
@@ -85,11 +89,56 @@ impl Marks {
             biomes[k / 4] |= (crate::farview::biome_at(world, x + dx, z + dz) as u32) << (8 * (k % 4));
         }
         let corners = [(0, 0), (size, 0), (0, size), (size, size)];
+        let skylines = corners.map(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz));
         Self {
             biomes,
-            skylines: corners.map(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz)),
+            skylines: skylines.map(|s| s.unwrap_or_default()),
             slopes: corners.map(|(dx, dz)| crate::farview::slope_at(world, x + dx, z + dz)),
+            unready: skylines.iter().any(Option::is_none),
         }
+    }
+}
+
+/// Whether a column can be built now without waiting on anything: its continent made
+/// and the skylines at its corners worked out. Whatever is not ready is started on.
+fn ready_to_build(world: &GameWorld, col: Col) -> bool {
+    let size = CHUNK << col.0;
+    let (x, z) = (col.1 * size, col.2 * size);
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_soon(mx, mz).is_some()
+        && [(0, 0), (size, 0), (0, size), (size, size)].iter().all(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz).is_some())
+}
+
+/// A column's meshes as they go to the GPU: all their vertices in one run, so that the
+/// column takes one span of the arena and one write.
+struct ColumnMesh {
+    /// Each chunk's opaque vertices then its water, chunk after chunk from the bottom.
+    verts: Vec<Vertex>,
+    chunks: Vec<ChunkPart>,
+}
+
+/// One chunk of a [`ColumnMesh`]: its height in chunks, how many quads of opaque and
+/// of water it has, and where each face direction starts within the opaque ones.
+struct ChunkPart {
+    cy: i32,
+    opaque: u32,
+    water: u32,
+    faces: [u32; 13],
+}
+
+impl ColumnMesh {
+    /// Packs the chunk meshes of a column, in order of height, into one.
+    fn pack(meshes: Vec<(i32, ChunkMesh)>) -> Self {
+        let total = meshes.iter().map(|(_, m)| m.opaque.len() + m.water.len()).sum();
+        let mut verts = Vec::with_capacity(total);
+        let mut chunks = Vec::with_capacity(meshes.len());
+        for (cy, mesh) in meshes {
+            verts.extend_from_slice(&mesh.opaque);
+            verts.extend_from_slice(&mesh.water);
+            let quads = |v: &[Vertex]| (v.len() / 4) as u32;
+            chunks.push(ChunkPart { cy, opaque: quads(&mesh.opaque), water: quads(&mesh.water), faces: mesh.faces });
+        }
+        Self { verts, chunks }
     }
 }
 
@@ -97,7 +146,7 @@ struct ColumnResult {
     col: Col,
     marks: Marks,
     /// None if the job was skipped because the camera had moved away.
-    chunks: Option<Vec<(i32, ChunkMesh)>>,
+    chunks: Option<ColumnMesh>,
     /// Whether the small plants are in these meshes.
     planted: bool,
     cascades: Vec<Cascade>,
@@ -109,6 +158,33 @@ struct ColumnResult {
     growing: Vec<(IVec3, voxel::Voxel)>,
     gen_ms: f32,
     mesh_ms: f32,
+}
+
+impl ColumnResult {
+    /// A result with only these set, and nothing found in the column. Every result is
+    /// made from this, with whatever else its job found written over it, so that a
+    /// field added later needs a value here and nowhere else.
+    fn new(col: Col, marks: Marks, chunks: Option<Vec<(i32, ChunkMesh)>>, planted: bool) -> Self {
+        Self {
+            col,
+            marks,
+            // Packed here, on the worker, so the main thread only has to copy it once.
+            chunks: chunks.map(ColumnMesh::pack),
+            planted,
+            cascades: Vec::new(),
+            springs: Vec::new(),
+            surf: Vec::new(),
+            lamps: Vec::new(),
+            growing: Vec::new(),
+            gen_ms: 0.0,
+            mesh_ms: 0.0,
+        }
+    }
+
+    /// A job skipped because the camera had moved away.
+    fn skipped(col: Col) -> Self {
+        Self::new(col, Marks::default(), None, false)
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -126,6 +202,44 @@ pub struct Stats {
     /// For each level: columns built, and the worker time generating and meshing them
     /// in total, in milliseconds.
     pub built: [(u32, f32, f32); LEVELS],
+    /// This frame, for the per-frame log: ms in rebuild_wanted, ms in the upload loop,
+    /// columns received, vertex bytes uploaded, and bytes the arena grew by (all of
+    /// which the GPU copies over that frame).
+    pub f_rebuild_ms: f32,
+    pub f_upload_ms: f32,
+    pub f_received: u32,
+    pub f_bytes: u64,
+    pub f_grown: u64,
+}
+
+/// How long uploading a column takes, as running averages of the time a column took
+/// and of its size: a column is expected to take that time in proportion to its size.
+struct UploadCost {
+    ms: f32,
+    bytes: f32,
+}
+
+impl Default for UploadCost {
+    /// About what a column measured, until there are columns to go by.
+    fn default() -> Self {
+        Self { ms: 0.1, bytes: 128.0 * 1024.0 }
+    }
+}
+
+impl UploadCost {
+    fn predict(&self, bytes: f32) -> f32 {
+        self.ms * bytes / self.bytes.max(1.0)
+    }
+
+    /// Takes in a column of `bytes` that took `ms`. A column held up far longer than
+    /// the budget, by the thread being pre-empted say, counts as just over it, so that
+    /// one such stall does not hold back the columns after it for long.
+    fn learn(&mut self, bytes: f32, ms: f32, budget: f32) {
+        if bytes > 0.0 && budget.is_finite() {
+            self.ms += (ms.min(budget) - self.ms) * 0.05;
+            self.bytes += (bytes - self.bytes) * 0.05;
+        }
+    }
 }
 
 /// Camera column and load radius, shared with workers so stale jobs can bail out.
@@ -174,6 +288,21 @@ pub struct Streamer {
     pending: HashSet<Col>,
     /// Columns still to request, the most pressing last (so it is popped first).
     wanted: Vec<Col>,
+    /// Columns whose continent or skylines were not ready when they came to be built,
+    /// sent back by the workers rather than kept waiting, and asked for again once ready.
+    waiting: Vec<Col>,
+    waits: (Sender<Col>, Receiver<Col>),
+    /// When `waiting` was last looked through.
+    retried: Instant,
+    /// A finished column taken from the workers that would have run past the frame's
+    /// upload budget: the first to go up next frame. Still counted as pending.
+    held: Option<ColumnResult>,
+    /// What uploading a column has been taking, to tell whether the next fits.
+    upload_cost: UploadCost,
+    /// When a column last arrived, or there was nothing to wait for: how a hang is told.
+    progressed: Instant,
+    /// Whether the hang has been reported, so it is reported once.
+    hung: bool,
     /// How far out each level is drawn (see `bands`), following what is loaded.
     shown: [f32; LEVELS],
     last_update: Option<Instant>,
@@ -202,6 +331,9 @@ const BAND_EASE: f32 = 0.2;
 const COARSE_LEAD: f32 = 1.5;
 /// Seconds between steps back out of a view that was pulled in for lack of GPU memory.
 const REGROW_SECONDS: f32 = 4.0;
+/// How far beyond the coarsest level continents are simulated ahead of being needed, in
+/// voxels: a few seconds of flying fast.
+const PREFETCH: f32 = m(2000.0);
 /// How far from the camera small plants are drawn.
 pub const PLANT_REACH: f32 = m(100.0);
 /// Columns within this many columns of the camera carry their small plants: the reach
@@ -225,6 +357,7 @@ impl Streamer {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("chunk-{i}"))
+            .start_handler(|_| crate::threads::background())
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();
@@ -245,6 +378,13 @@ impl Streamer {
             growing: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
+            waiting: Vec::new(),
+            waits: channel(),
+            retried: Instant::now(),
+            held: None,
+            upload_cost: UploadCost::default(),
+            progressed: Instant::now(),
+            hung: false,
             shown: [0.0; LEVELS],
             last_update: None,
             center: None,
@@ -300,6 +440,7 @@ impl Streamer {
                 .pending
                 .iter()
                 .chain(&self.wanted)
+                .chain(&self.waiting)
                 .filter(|c| c.0 == level && !self.columns.contains_key(*c))
                 .map(|c| self.focus.distance(*c))
                 .filter(|d| (*d + s) * CHUNK as f32 >= inside)
@@ -333,15 +474,37 @@ impl Streamer {
             .map(|l| format!("{}+{}q+{}p", count(l, &mut self.columns.keys()), count(l, &mut self.wanted.iter()), count(l, &mut self.pending.iter())))
             .collect();
         let bands = self.bands().map(|b| (b / CHUNK as f32).round());
-        format!("radius {}, columns loaded+queued+building by level {}, bands {bands:?} columns, meshes {} of {} MiB", self.radius(), levels.join(" "), self.stats.mesh_bytes >> 20, self.arena.capacity_bytes() >> 20)
+        format!("radius {}, columns loaded+queued+building by level {}, bands {bands:?} columns, meshes {} of {} MiB, {} waiting for a continent", self.radius(), levels.join(" "), self.stats.mesh_bytes >> 20, self.arena.capacity_bytes() >> 20, self.waiting.len())
     }
 
     pub fn is_idle(&self) -> bool {
-        self.wanted.is_empty() && self.pending.is_empty()
+        self.wanted.is_empty() && self.pending.is_empty() && self.waiting.is_empty()
     }
 
-    pub fn chunks(&self) -> impl Iterator<Item = &GpuChunk> {
-        self.columns.values().flatten()
+    /// If loading has stopped, a report of where: nothing has arrived for
+    /// [`wait_limit`] while there were columns to build. Then each column being built
+    /// with the phase it is in, and those queued or waiting.
+    pub fn stalled(&self) -> Option<String> {
+        let idle = self.progressed.elapsed();
+        if self.is_idle() || idle < wait_limit() {
+            return None;
+        }
+        let busy = CHUNK_WATCH.busy();
+        let mut lines: Vec<String> = busy.iter().map(|(t, col, phase, secs)| format!("chunk-{t}: column {col:?} in {phase} for {secs:.1} s")).collect();
+        let queued: Vec<&Col> = self.pending.iter().filter(|c| !busy.iter().any(|b| b.1 == **c)).collect();
+        lines.push(format!("{} more sent to the pool and not started: {:?}", queued.len(), queued.iter().take(16).collect::<Vec<_>>()));
+        lines.push(format!("{} waiting for a continent or its skylines: {:?}", self.waiting.len(), self.waiting.iter().take(16).collect::<Vec<_>>()));
+        Some(format!("nothing loaded for {:.1} s; {}; {}", idle.as_secs_f32(), self.progress(), lines.join("; ")))
+    }
+
+    /// The loaded columns, each its chunks.
+    pub fn columns(&self) -> impl Iterator<Item = &[GpuChunk]> {
+        self.columns.values().map(Vec::as_slice)
+    }
+
+    /// The chunks of one loaded column of `level`, at `(x, z)` in columns of that level.
+    pub fn column(&self, level: u8, x: i32, z: i32) -> Option<&[GpuChunk]> {
+        self.columns.get(&(level, x, z)).map(Vec::as_slice)
     }
 
     /// The buffer every chunk's vertices live in.
@@ -417,27 +580,79 @@ impl Streamer {
             (cam.x / CHUNK as f64).floor() as i32,
             (cam.z / CHUNK as f64).floor() as i32,
         );
+        self.stats.f_rebuild_ms = 0.0;
+        self.stats.f_received = 0;
+        let bytes_before = self.stats.mesh_bytes;
+        let capacity_before = self.arena.capacity_bytes();
         if self.center != Some(center) {
+            let t = Instant::now();
             self.center = Some(center);
             self.focus.cx.store(center.0, Ordering::Relaxed);
             self.focus.cz.store(center.1, Ordering::Relaxed);
             self.rebuild_wanted(center);
+            self.stats.f_rebuild_ms = t.elapsed().as_secs_f32() * 1000.0;
+            self.prefetch(cam);
         }
+        self.requeue();
 
         while self.pending.len() < self.max_in_flight {
             let Some(col) = self.wanted.pop() else { break };
             self.pending.insert(col);
             let plants = col.0 == 0 && in_plant_range(col, center, PLANT_COLUMNS + 1);
             let (world, models, tx, focus) = (self.world.clone(), self.models.clone(), self.tx.clone(), self.focus.clone());
+            let waits = self.waits.0.clone();
             self.pool.spawn(move || {
+                // A job never waits on a continent or its skylines: it hands the column
+                // back to be asked for again once they are ready. Waiting would hold up
+                // the worker, and could leave it waiting on work it was itself to do.
+                CHUNK_WATCH.set(col, watch::CHECK);
+                if focus.in_range(col, UNLOAD_SLACK) && !ready_to_build(&world, col) {
+                    let _ = waits.send(col);
+                    CHUNK_WATCH.idle();
+                    return;
+                }
+                CHUNK_WATCH.set(col, watch::BUILD);
                 let result = build_column(&world, &models, &focus, col, plants);
-                let _ = tx.send(result);
+                CHUNK_WATCH.set(col, watch::SEND);
+                if result.marks.unready {
+                    let _ = waits.send(col);
+                } else {
+                    let _ = tx.send(result);
+                }
+                CHUNK_WATCH.idle();
             });
         }
 
+        while let Ok(col) = self.waits.1.try_recv() {
+            self.pending.remove(&col);
+            self.waiting.push(col);
+        }
         let began = Instant::now();
-        while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
-            let Ok(result) = self.rx.try_recv() else { break };
+        let mut uploaded = 0;
+        loop {
+            let spent = began.elapsed().as_secs_f32() * 1000.0;
+            if spent >= upload_ms {
+                break;
+            }
+            let result = match self.held.take() {
+                Some(result) => result,
+                None => match self.rx.try_recv() {
+                    Ok(result) => result,
+                    Err(_) => break,
+                },
+            };
+            // The budget is checked against what the column will take too, not only
+            // between columns: one that would run past it waits for the next frame,
+            // unless nothing has gone up this frame yet, so that loading always moves.
+            let bytes = result.chunks.as_ref().map_or(0, |m| size_of_val(m.verts.as_slice())) as f32;
+            if uploaded > 0 && spent + self.upload_cost.predict(bytes) > upload_ms {
+                self.held = Some(result);
+                break;
+            }
+            uploaded += 1;
+            let t = Instant::now();
+            self.stats.f_received += 1;
+            self.progressed = Instant::now();
             self.pending.remove(&result.col);
             let in_range = self.focus.in_range(result.col, UNLOAD_SLACK);
             match result.chunks {
@@ -485,6 +700,16 @@ impl Streamer {
                 None if self.focus.in_range(result.col, 0) => self.wanted.push(result.col),
                 _ => {}
             }
+            self.upload_cost.learn(bytes, t.elapsed().as_secs_f32() * 1000.0, upload_ms);
+        }
+        self.stats.f_upload_ms = began.elapsed().as_secs_f32() * 1000.0;
+        self.stats.f_bytes = self.stats.mesh_bytes.saturating_sub(bytes_before);
+        self.stats.f_grown = self.arena.capacity_bytes().saturating_sub(capacity_before);
+        if self.is_idle() {
+            (self.progressed, self.hung) = (Instant::now(), false);
+        } else if !self.hung && let Some(report) = self.stalled() {
+            log::error!("terrain loading hung: {report}");
+            self.hung = true;
         }
         self.regrow_view();
         let now = Instant::now();
@@ -507,15 +732,64 @@ impl Streamer {
         }
     }
 
-    /// Blocks until everything in range is loaded (used for screenshots).
+    /// Blocks until everything in range is loaded (used for screenshots). If loading
+    /// stops (see [`Streamer::stalled`]), says where and exits the process with a
+    /// failure, rather than hang.
     pub fn wait_idle(&mut self, gpu: &Gpu, cam: DVec3) {
+        let began = Instant::now();
+        log::info!("stage: waiting for the terrain around {:.0} {:.0}", cam.x, cam.z);
         loop {
             self.update(gpu, cam, f32::INFINITY);
             if self.is_idle() {
                 self.follow_bands(f32::INFINITY);
                 break;
             }
+            // `update` has said where.
+            if self.hung {
+                log::error!("hung waiting for the terrain: giving up");
+                std::process::exit(3);
+            }
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        log::info!("stage: terrain loaded after {:.2} s, {} columns", began.elapsed().as_secs_f32(), self.columns.len());
+    }
+
+    /// Asks again for the columns handed back to wait whose continent and skylines are
+    /// ready now, a few times a second.
+    fn requeue(&mut self) {
+        if self.waiting.is_empty() || self.retried.elapsed().as_secs_f32() < 0.1 {
+            return;
+        }
+        self.retried = Instant::now();
+        let (world, focus) = (&self.world, &self.focus);
+        let mut ready = Vec::new();
+        self.waiting.retain(|&col| {
+            if !focus.in_range(col, 0) {
+                return false;
+            }
+            let now = ready_to_build(world, col);
+            if now {
+                ready.push(col);
+            }
+            !now
+        });
+        self.wanted.extend(ready);
+    }
+
+    /// Has the continents within reach of the coarsest level, and a margin beyond,
+    /// simulated ahead of being needed, on a thread of their own (see
+    /// `GameWorld::continent_soon`).
+    fn prefetch(&self, cam: DVec3) {
+        let r = (reach(LEVELS as u8 - 1, self.radius()) * CHUNK as f32 + PREFETCH) as i32;
+        let (x, z) = (cam.x.floor() as i32, cam.z.floor() as i32);
+        let here = worldgen::macro_layout::cell_of(x, z);
+        let (lo, hi) = (worldgen::macro_layout::cell_of(x - r, z - r), worldgen::macro_layout::cell_of(x + r, z + r));
+        // The camera's own first: they are made in the order asked.
+        self.world.continent_soon(here.0, here.1);
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                self.world.continent_soon(mx, mz);
+            }
         }
     }
 
@@ -541,6 +815,8 @@ impl Streamer {
             self.recount();
         }
 
+        // Those waiting are wanted again below if they still are, and wait again if so.
+        self.waiting.clear();
         self.wanted.clear();
         for level in 0..LEVELS as u8 {
             let s = step(level) as i32;
@@ -565,63 +841,39 @@ impl Streamer {
         // sooner still, so that they keep well ahead of the camera rather than waiting
         // for the finest to finish: at speed it never does, and they would never start.
         // Columns only wanted again for their plants come after everything missing.
-        let columns = &self.columns;
-        self.wanted.sort_unstable_by_key(|c| {
-            let replant = if columns.contains_key(c) { 1 << 40 } else { 0 };
-            let lead = step(c.0) * COARSE_LEAD.powi(c.0 as i32);
-            std::cmp::Reverse((focus.distance(*c) / lead * 16.0) as i64 + replant)
-        });
+        sort_wanted(&mut self.wanted, &self.columns, &focus);
     }
 
-    /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
-    fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>, marks: Marks) -> Option<Vec<GpuChunk>> {
-        let mut chunks = Vec::with_capacity(meshes.len());
-        for (cy, mesh) in meshes {
-            let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
-                release(&mut self.arena, &chunks);
-                self.recount();
-                return None;
-            };
-            chunk.biomes = marks.biomes;
-            chunk.skylines = marks.skylines;
-            chunk.slopes = marks.slopes;
-            chunks.push(chunk);
-        }
-        Some(chunks)
-    }
-
-    /// Stores one chunk's meshes, or None if the GPU has no room for them.
-    fn upload(&mut self, gpu: &Gpu, level: u8, pos: IVec3, mesh: ChunkMesh) -> Option<GpuChunk> {
-        let opaque = self.store(gpu, &mesh.opaque)?;
-        let Some(water) = self.store(gpu, &mesh.water) else {
-            if let Some(span) = opaque {
-                self.arena.remove(span);
-            }
-            return None;
+    /// Uploads a whole column, or nothing at all if the GPU cannot hold it. The column
+    /// goes up as one span of the arena and one write, which each chunk's meshes are
+    /// parts of: a write each made a column cost up to a dozen, every one with a
+    /// staging buffer of its own and a walk of the arena's free list.
+    fn upload_column(&mut self, gpu: &Gpu, col: Col, mesh: ColumnMesh, marks: Marks) -> Option<Vec<GpuChunk>> {
+        let span = if mesh.verts.is_empty() { None } else { Some(self.arena.add(gpu, &mesh.verts)?) };
+        self.stats.quads += span.map_or(0, |s| s.quads as u64);
+        self.stats.mesh_bytes += size_of_val(mesh.verts.as_slice()) as u64;
+        self.stats.chunks += mesh.chunks.len();
+        let mut offset = 0;
+        let mut part = |quads: u32| {
+            let at = offset;
+            offset += quads;
+            (quads > 0).then(|| span.expect("vertices to be part of").part(at, quads))
         };
-        self.stats.chunks += 1;
-        Some(GpuChunk {
-            level,
-            pos,
-            opaque,
-            water,
-            faces: mesh.faces,
-            biomes: [0; 8],
-            skylines: [[0; 2]; 4],
-            slopes: [[0; 2]; 4],
-        })
-    }
-
-    /// Puts vertices in the arena. The outer None means the GPU has no room; the inner
-    /// one that there was nothing to store.
-    fn store(&mut self, gpu: &Gpu, verts: &[Vertex]) -> Option<Option<MeshSpan>> {
-        if verts.is_empty() {
-            return Some(None);
-        }
-        let span = self.arena.add(gpu, verts)?;
-        self.stats.quads += span.quads as u64;
-        self.stats.mesh_bytes += size_of_val(verts) as u64;
-        Some(Some(span))
+        let chunks = mesh
+            .chunks
+            .iter()
+            .map(|c| GpuChunk {
+                level: col.0,
+                pos: IVec3::new(col.1, c.cy, col.2),
+                opaque: part(c.opaque),
+                water: part(c.water),
+                faces: c.faces,
+                biomes: marks.biomes,
+                skylines: marks.skylines,
+                slopes: marks.slopes,
+            })
+            .collect();
+        Some(chunks)
     }
 
     /// Pulls the view in after running out of GPU memory, which unloads the outer
@@ -727,6 +979,25 @@ fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Mat
     out
 }
 
+/// The order columns are asked for in, the most pressing last (see `rebuild_wanted`).
+fn wanted_key(c: &Col, columns: &HashMap<Col, Vec<GpuChunk>>, focus: &Focus) -> std::cmp::Reverse<i64> {
+    let replant = if columns.contains_key(c) { 1 << 40 } else { 0 };
+    let lead = step(c.0) * COARSE_LEAD.powi(c.0 as i32);
+    std::cmp::Reverse((focus.distance(*c) / lead * 16.0) as i64 + replant)
+}
+
+/// Sorts `wanted` by [`wanted_key`]. Up to 3 x 51 x 51 columns are sorted each time the
+/// camera crosses into another column, and the key, with its square root and its hash
+/// lookup, worked out on every comparison took 6-8 ms. So each key is worked out once.
+/// The pairs are sorted by the same unstable sort on the same keys, which moves them
+/// exactly as it moved the columns, so equal keys come out in the order they did.
+fn sort_wanted(wanted: &mut Vec<Col>, columns: &HashMap<Col, Vec<GpuChunk>>, focus: &Focus) {
+    let mut keyed: Vec<(std::cmp::Reverse<i64>, Col)> = wanted.iter().map(|c| (wanted_key(c, columns, focus), *c)).collect();
+    keyed.sort_unstable_by_key(|k| k.0);
+    wanted.clear();
+    wanted.extend(keyed.into_iter().map(|k| k.1));
+}
+
 fn in_plant_range(col: Col, center: (i32, i32), columns: i32) -> bool {
     let (dx, dz) = (col.1 - center.0, col.2 - center.1);
     dx * dx + dz * dz <= columns * columns
@@ -753,19 +1024,7 @@ fn roofs(chunks: &[(i32, voxel::PaddedChunk)], mats: &voxel::Materials) -> Vec<V
 
 fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
     if !focus.in_range(col, UNLOAD_SLACK) {
-        return ColumnResult {
-            col,
-            marks: Marks::default(),
-            chunks: None,
-            planted: false,
-            cascades: Vec::new(),
-            springs: Vec::new(),
-            surf: Vec::new(),
-            lamps: Vec::new(),
-            growing: Vec::new(),
-            gen_ms: 0.0,
-            mesh_ms: 0.0,
-        };
+        return ColumnResult::skipped(col);
     }
     if col.0 > 0 {
         return build_coarse_column(world, models, col);
@@ -794,6 +1053,11 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
             let corner = [col.1 * CHUNK, *cy * CHUNK, col.2 * CHUNK];
             let mut tags = features::LeafTags::new(world.library(), world.materials(), &output.trees, IVec3::from_array(corner));
             tag_trees(&mut mesh, corner, |q| tags.tag(IVec3::from_array(q)));
+            // The tufts grow as the grass of the column they stand in.
+            tag_sward(&mut mesh, corner, |q| {
+                let (px, pz) = ((q[0] - corner[0] + 1) as usize, (q[2] - corner[2] + 1) as usize);
+                output.wash.get(px * PAD + pz).map_or(0, |w| w.2)
+            });
             (*cy, mesh)
         })
         .filter(|(_, mesh)| !mesh.is_empty())
@@ -803,10 +1067,6 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     let lamps = lamp_voxels(&output.chunks, col, world.materials());
     let growing = gatherable(&output.plants);
     ColumnResult {
-        col,
-        marks: Marks::of(world, col),
-        chunks: Some(chunks),
-        planted: plants,
         cascades: output.cascades,
         springs: output.springs,
         surf: output.surf,
@@ -814,13 +1074,19 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         growing,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+        ..ColumnResult::new(col, Marks::of(world, col), Some(chunks), plants)
     }
 }
 
 /// A column of one of the coarse rings: no plants, cascades or spray this far out.
 fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> ColumnResult {
+    build_coarse_column_with(world, models, col, false)
+}
+
+/// [`build_coarse_column`], finding the features as `lod::generate_with` is told to.
+fn build_coarse_column_with(world: &GameWorld, models: &lod::Models, col: Col, every_feature: bool) -> ColumnResult {
     let t0 = Instant::now();
-    let (chunks, trees, wash) = lod::generate(world, models, col.0, col.1, col.2);
+    let (chunks, trees, wash) = lod::generate_with(world, models, col.0, col.1, col.2, every_feature);
     let t1 = Instant::now();
     // Trunks in coarse cells, for giving each tree's leaves its own date: here simply the
     // nearest tree's, as coarse cells are too big to say exactly.
@@ -848,19 +1114,85 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
     meshes.reverse();
     let t2 = Instant::now();
     ColumnResult {
-        col,
-        marks: Marks::of(world, col),
-        chunks: Some(meshes),
-        // Coarse columns never need building again with plants.
-        planted: true,
-        cascades: Vec::new(),
-        springs: Vec::new(),
-        surf: Vec::new(),
-        lamps: Vec::new(),
-        growing: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+        // Coarse columns never need building again with plants.
+        ..ColumnResult::new(col, Marks::of(world, col), Some(meshes), true)
     }
+}
+
+/// The phases a chunk job goes through, as [`CHUNK_WATCH`] names them.
+mod watch {
+    pub const CHECK: u64 = 1;
+    pub const BUILD: u64 = 2;
+    pub const MARKS: u64 = 3;
+    pub const SEND: u64 = 4;
+}
+
+/// What each chunk worker is doing.
+static CHUNK_WATCH: Watch = Watch::new(&["idle", "checking its continent is ready", "generating and meshing", "marks", "sending"]);
+
+/// What each worker of a pool is doing, so that a load that stops can say where: for
+/// each thread, the column (or square) it is on, and the phase it is in and since when.
+/// Two relaxed stores a phase; read only to report.
+pub(crate) struct Watch {
+    names: &'static [&'static str],
+    at: [AtomicU64; WATCHED],
+    phase: [AtomicU64; WATCHED],
+}
+
+const WATCHED: usize = 64;
+
+impl Watch {
+    /// `names` names the phases, the first being idle.
+    pub(crate) const fn new(names: &'static [&'static str]) -> Self {
+        Self { names, at: [const { AtomicU64::new(0) }; WATCHED], phase: [const { AtomicU64::new(0) }; WATCHED] }
+    }
+
+    /// The calling pool worker is now in `phase` on `(level, x, z)`.
+    pub(crate) fn set(&self, (level, x, z): (u8, i32, i32), phase: u64) {
+        let Some(i) = rayon::current_thread_index().filter(|&i| i < WATCHED) else { return };
+        self.at[i].store(((x as u32 as u64) << 32) | z as u32 as u64, Ordering::Relaxed);
+        self.phase[i].store(((level as u64) << 60) | (phase << 52) | (watch_ms() & ((1 << 52) - 1)), Ordering::Relaxed);
+    }
+
+    /// The calling pool worker is done with its job.
+    pub(crate) fn idle(&self) {
+        if let Some(i) = rayon::current_thread_index().filter(|&i| i < WATCHED) {
+            self.phase[i].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Where each busy worker is: its thread, its column, the phase's name, and the
+    /// seconds it has been in it.
+    pub(crate) fn busy(&self) -> Vec<(usize, (u8, i32, i32), &'static str, f32)> {
+        let now = watch_ms();
+        (0..WATCHED)
+            .filter_map(|i| {
+                let p = self.phase[i].load(Ordering::Relaxed);
+                let phase = ((p >> 52) & 0xff) as usize;
+                if phase == 0 {
+                    return None;
+                }
+                let at = self.at[i].load(Ordering::Relaxed);
+                let col = ((p >> 60) as u8, (at >> 32) as u32 as i32, at as u32 as i32);
+                let secs = now.saturating_sub(p & ((1 << 52) - 1)) as f32 / 1000.0;
+                Some((i, col, self.names.get(phase).copied().unwrap_or("?"), secs))
+            })
+            .collect()
+    }
+}
+
+fn watch_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// How long a wait for loading may go with nothing arriving before it is taken for hung:
+/// `WILLOW_WAIT_LIMIT` seconds, or 90.
+pub(crate) fn wait_limit() -> std::time::Duration {
+    let secs = std::env::var("WILLOW_WAIT_LIMIT").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(90.0);
+    std::time::Duration::from_secs_f32(secs.max(0.1))
 }
 
 #[cfg(test)]
@@ -878,6 +1210,74 @@ mod tests {
             .filter(|&i| !c.ocean[i] && c.height[i] > 4.0)
             .map(|i| (((i % c.size) as i32 * cs).div_euclid(CHUNK), ((i / c.size) as i32 * cs).div_euclid(CHUNK)))
             .collect()
+    }
+
+    /// The columns wanted come out of the sort with each key worked out once in exactly
+    /// the order sorting with the key worked out on every comparison gave them, equal
+    /// keys and all.
+    #[test]
+    fn wanted_columns_sort_into_the_same_order_as_they_did() {
+        for (radius, (cx, cz)) in [(24, (0, 0)), (25, (1000, -37)), (12, (-5, 3)), (40, (77, 77))] {
+            let focus = Focus { cx: AtomicI32::new(cx), cz: AtomicI32::new(cz), radius: AtomicI32::new(radius) };
+            let mut wanted = Vec::new();
+            let mut columns = HashMap::new();
+            for level in 0..LEVELS as u8 {
+                let s = step(level) as i32;
+                let span = (reach(level, radius) / step(level)).ceil() as i32 + 1;
+                for dx in -span..=span {
+                    for dz in -span..=span {
+                        let col = (level, cx.div_euclid(s) + dx, cz.div_euclid(s) + dz);
+                        if !focus.in_range(col, 0) {
+                            continue;
+                        }
+                        // Some loaded already, being wanted again for their plants.
+                        if (dx * 7 + dz * 3).rem_euclid(5) == 0 {
+                            columns.insert(col, Vec::new());
+                        }
+                        wanted.push(col);
+                    }
+                }
+            }
+            let mut before = wanted.clone();
+            let t = Instant::now();
+            before.sort_unstable_by_key(|c| wanted_key(c, &columns, &focus));
+            let old_ms = t.elapsed().as_secs_f32() * 1000.0;
+            let t = Instant::now();
+            sort_wanted(&mut wanted, &columns, &focus);
+            let new_ms = t.elapsed().as_secs_f32() * 1000.0;
+            println!("radius {radius}: {} columns sorted in {old_ms:.2} ms before, {new_ms:.2} ms now", wanted.len());
+            assert!(wanted.len() > 1000);
+            assert_eq!(wanted, before, "radius {radius} at {cx},{cz}");
+        }
+    }
+
+    /// The quick way of finding a coarse column's trees gives the very same meshes as
+    /// finding every feature and keeping the tall ones, on land of every kind.
+    #[test]
+    fn coarse_columns_mesh_the_same_found_the_quick_way() {
+        let world = GameWorld::with_config(3, SimConfig { size: 256 });
+        let models = lod::Models::default();
+        let (mut columns, mut quads, mut trees) = (0, 0, 0);
+        for (i, (cx, cz)) in land(&world).into_iter().enumerate().step_by(3) {
+            let level = 1 + (i % 2) as u8;
+            let col = (level, cx >> level, cz >> level);
+            let mesh = |every| {
+                let r = build_coarse_column_with(&world, &models, col, every);
+                let m = r.chunks.expect("built");
+                let parts: Vec<_> = m.chunks.iter().map(|c| (c.cy, c.opaque, c.water, c.faces)).collect();
+                (bytemuck::cast_slice::<Vertex, u8>(&m.verts).to_vec(), parts)
+            };
+            let (quick, every) = (mesh(false), mesh(true));
+            assert!(quick == every, "column {col:?} meshes differently found the quick way");
+            columns += 1;
+            quads += quick.0.len() / (4 * size_of::<Vertex>());
+            trees += lod::generate(&world, &models, col.0, col.1, col.2).1.len();
+            if columns >= 40 {
+                break;
+            }
+        }
+        assert!(columns >= 20 && quads > 0, "only {columns} columns, {quads} quads compared");
+        assert!(trees > 0, "no trees in the columns compared");
     }
 
     #[test]

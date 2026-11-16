@@ -11,11 +11,12 @@ pub const CIRCLE: u32 = 4;
 pub const TRIANGLE: u32 = 5;
 pub const DIAMOND: u32 = 6;
 pub const RING: u32 = 7;
-pub const BAR: u32 = 8;
 /// A plain bar, as long and as thick as its size.
 pub const LINE: u32 = 9;
 /// The map's own shape, filled with one colour: what the corner map's model lies on.
 pub const PANEL: u32 = 10;
+/// A place not yet come to: a small glowing block, its faces laid in voxels.
+pub const UNFOUND: u32 = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]

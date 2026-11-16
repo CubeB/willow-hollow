@@ -45,7 +45,11 @@ const TRIP_FALLOFF: f32 = m(2500.0);
 /// sideways, and how far each step of the shift goes.
 const FIT_SPACING: usize = 8;
 const FIT_STEP: f32 = m(3.2);
-const FIT_SHIFTS: usize = 7;
+const FIT_SHIFTS: usize = 9;
+/// How far, in shifts, a trail leans to either side of its routed line, and over how
+/// many fitted points one swing of the lean runs.
+const FIT_LEAN: f32 = 3.0;
+const FIT_SWING: f64 = 9.0;
 /// Steepest a trail may rise, as a slope.
 const MAX_SLOPE: f32 = 0.45;
 /// Longest water a trail will bridge, in trail steps.
@@ -92,6 +96,44 @@ fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
         out.extend(run.iter().map(|p| sampler.column(p.x.floor() as i32, p.y.floor() as i32)));
     }
     out
+}
+
+/// Longest span, in trail steps, one felled trunk will cross.
+const LOG_SPAN: usize = 16;
+
+/// Width, in simulation units, of the river whose channel passes nearest continent-local
+/// `p`, or 0 if none passes within reach (a lake's edge, say). Read from the drifted
+/// river nodes the surface draws its channels between, not the grid cells, since a
+/// river can wander a cell or more off its cell's centre.
+pub fn river_width_at(c: &Continent, p: Vec2) -> f32 {
+    let cs = c.cell_size();
+    let n = c.size as i32;
+    let (x, z) = ((p.x / cs) as i32, (p.y / cs) as i32);
+    let (mut best, mut width) = (f32::MAX, 0.0);
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            let (nx, nz) = (x + dx, z + dz);
+            if nx < 0 || nz < 0 || nx >= n || nz >= n {
+                continue;
+            }
+            let i = (nz * n + nx) as usize;
+            let r = c.rcv[i] as usize;
+            if c.ocean[i] || r == i || c.discharge[i] < crate::surface::MIN_RIVER_Q {
+                continue;
+            }
+            let (a, b) = (crate::surface::node(c, i), crate::surface::node(c, r));
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            let w = Continent::river_width(c.discharge[i]);
+            // Measured from the bank rather than the middle, so the wide river is not
+            // passed over for a brook whose centreline happens to be nearer.
+            let d = (p - (a + ab * t)).length() - w * OLD_VOXEL * 0.5;
+            if d < best {
+                (best, width) = (d, w);
+            }
+        }
+    }
+    if best < m(20.0) { width } else { 0.0 }
 }
 
 fn is_wet(col: &Column) -> bool {
@@ -204,12 +246,24 @@ fn fit(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Vec2> {
     }
     let cols = sample(c, seed, &probes);
     let last = at.len() - 1;
+    // The line the trail leans toward is not quite the routed one but a slow swing
+    // either side of it, so a long stretch over open ground wanders as a path walked by
+    // eye does. It is only a lean: a rise, a dip or wet ground outweighs it, so the
+    // bends it makes are taken where the land allows them. Faded out at the ends.
+    let salt = hash2(seed ^ 0x3e4d, pts[0].x as i32, pts[0].y as i32);
+    let lean: Vec<f32> = (0..at.len())
+        .map(|j| {
+            let fade = (j.min(last - j) as f32 / 6.0).min(1.0);
+            let swing = perlin2(salt, j as f64 / FIT_SWING, (salt % 997) as f64 * 0.37);
+            (swing * 2.6).clamp(-1.0, 1.0) * FIT_LEAN * fade
+        })
+        .collect();
     let place = |j: usize, k: usize| -> f32 {
         if (j == 0 || j == last) && k != mid {
             return f32::INFINITY;
         }
         let col = &cols[j * FIT_SHIFTS + k];
-        let mut cost = 0.35 * (k as f32 - mid as f32).abs();
+        let mut cost = 0.35 * (k as f32 - mid as f32 - lean[j]).abs();
         if is_wet(col) {
             cost += 400.0;
         } else if col.river < m(2.4) {
@@ -1244,12 +1298,13 @@ impl Layer<'_> {
                 .filter_map(|i| cols[i].water_surface().map(|k| k - cols[i].top()))
                 .max()
                 .unwrap_or(0);
-            let kind = if span <= 5 && depth <= 3 * BLOCK {
-                CrossingKind::Stones
-            } else if span <= 16 {
-                if rng.unit() < 0.5 { CrossingKind::Log } else { CrossingKind::Plank }
-            } else {
-                CrossingKind::Arch
+            // By the span and by the river: a long span over a small stream or a lake's
+            // edge still gets timber, and only a long span or a big river stone. A log
+            // will only reach so far; past that the timber bridge is planked on trestles.
+            let width = river_width_at(self.c, pts[mid]);
+            let kind = match route::crossing_kind(span, width, depth <= 3 * BLOCK) {
+                CrossingKind::Plank if span <= LOG_SPAN && rng.unit() < 0.5 => CrossingKind::Log,
+                kind => kind,
             };
             net.crossings.push(Crossing {
                 kind,
@@ -1516,7 +1571,10 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     for (a, b, _) in order {
         let (sa, sb) = (net.sites[a], net.sites[b]);
         let (ca, cb) = (cell_of(at[a].0, at[a].1), cell_of(at[b].0, at[b].1));
-        let Some(path) = router.search(ca, cb) else { continue };
+        let Some(path) = router.search(ca, cb) else {
+            net.unlinked += 1;
+            continue;
+        };
 
         for (first, last) in fresh_runs(&path, &router.used) {
             // Where this piece begins and ends: at a site, or on the trail it joins.

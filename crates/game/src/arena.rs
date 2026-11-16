@@ -23,6 +23,14 @@ impl MeshSpan {
     pub fn first(&self) -> u32 {
         self.start
     }
+
+    /// The `quads` of this span that start `offset` into it: one of several meshes
+    /// stored together. Each part may be removed on its own, and once all of them are,
+    /// the whole span is free again.
+    pub fn part(&self, offset: u32, quads: u32) -> MeshSpan {
+        debug_assert!(offset + quads <= self.quads);
+        MeshSpan { start: self.start + offset, quads }
+    }
 }
 
 /// First-fit allocator over a range of quads. Neighbouring free blocks are merged.
@@ -193,6 +201,18 @@ mod tests {
         list.free(b, 30);
         assert_eq!(list.blocks.len(), 1);
         assert_eq!(list.alloc(90), Some(0));
+    }
+
+    #[test]
+    fn the_parts_of_a_span_freed_one_by_one_free_it_all() {
+        let mut list = FreeList::new(100);
+        let span = MeshSpan { start: list.alloc(60).unwrap(), quads: 60 };
+        let parts = [span.part(0, 10), span.part(10, 35), span.part(45, 15)];
+        for p in [parts[1], parts[2], parts[0]] {
+            list.free(p.start, p.quads);
+        }
+        assert_eq!(list.blocks.len(), 1);
+        assert_eq!(list.alloc(100), Some(0));
     }
 
     #[test]

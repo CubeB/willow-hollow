@@ -290,6 +290,18 @@ fn draw_trails(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
             dot(x, z, r, color, img);
         }
     }
+    // Bridges: stone ones as a red ring, timber ones as a small yellow dot.
+    for x in &c.trails.crossings {
+        let (px, pz) = to_px(x.x as f32, x.z as f32);
+        match x.kind {
+            worldgen::trails::CrossingKind::Arch => {
+                dot(px, pz, 4, [200, 20, 20], img);
+                dot(px, pz, 2, [255, 255, 255], img);
+            }
+            worldgen::trails::CrossingKind::Log | worldgen::trails::CrossingKind::Plank => dot(px, pz, 2, [250, 210, 40], img),
+            worldgen::trails::CrossingKind::Stones => {}
+        }
+    }
     for s in &c.trails.sites {
         let (x, z) = to_px(s.x as f32, s.z as f32);
         dot(x, z, 4, [20, 20, 20], img);
@@ -516,7 +528,8 @@ fn print_poi(c: &Continent) {
     }
     for x in &c.trails.crossings {
         let (wx, wz) = local(x.x, x.z);
-        println!("  poi crossing   {wx},{wz}  {:?}, span {}", x.kind, x.span);
+        let river = worldgen::trails::build::river_width_at(c, [x.x as f32, x.z as f32].into());
+        println!("  poi crossing   {wx},{wz}  {:?}, span {}, river {river:.1}", x.kind, x.span);
     }
     // Tors on the moor, the great ones first.
     {
@@ -750,11 +763,12 @@ fn main() -> Result<()> {
     c.trails = worldgen::trails::build(&c, o.seed);
     c.trails.names = worldgen::names::survey(&c, o.seed);
     println!(
-        "  {} landmarks, {} trails, {} crossings, {} structures in {:.2} s",
+        "  {} landmarks, {} trails, {} crossings, {} structures, {} links unrouted, in {:.2} s",
         c.trails.sites.len(),
         c.trails.lines.len(),
         c.trails.crossings.len(),
         c.trails.stamp_count(),
+        c.trails.unlinked,
         t.elapsed().as_secs_f32()
     );
     print_trail_stats(&c);

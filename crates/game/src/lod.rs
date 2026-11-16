@@ -180,10 +180,23 @@ fn lowest_ground(sampler: &Sampler, corners: &[Column], lx0: i32, lz0: i32, step
 
 /// The chunks of one coarse column: `(chunk y, voxels)`, in coarse cells, and the tall
 /// features stamped into them, in order (for telling whose leaves are whose). Then, for
-/// each padded cell, the height of its ground and the colour the plants growing there
-/// give it (as `ColumnOutput::wash`): the plant of one of the columns under the cell
-/// stands for them all, so a drift of heather is as thick here as it is close to.
-pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>, Vec<(i32, u8)>) {
+/// each padded cell, the height of its ground, the colour the plants growing there give
+/// it and how the grass grows there (as `ColumnOutput::wash`): the plant of one of the
+/// columns under the cell stands for them all, so a drift of heather is as thick here
+/// as it is close to.
+#[cfg(test)]
+pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>, Vec<(i32, u8, u8)>) {
+    generate_with(world, models, level, cx, cz, false)
+}
+
+/// [`generate`] (which the game reaches through `terrain`'s coarse columns). With `every_feature` the features are found as a full-size column
+/// finds them, all of them with their roots, and those too small to see thrown away
+/// after; without it, which is quicker and must come out the same, those are never
+/// looked at (see `features::place_only`). Profiled at level 2, finding the features
+/// was a fifth of the work and became a tenth; sampling the ground for the lowest point
+/// under each cell is half of it, and cannot be had for less without sampling less of
+/// the ground, which would move the cells.
+pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32, every_feature: bool) -> (Vec<(i32, PaddedChunk)>, Vec<Placement>, Vec<(i32, u8, u8)>) {
     let step = 1 << level;
     let span = CHUNK * step;
     let (wx0, wz0) = (cx * span - step, cz * span - step);
@@ -237,13 +250,23 @@ pub fn generate(world: &GameWorld, models: &Models, level: u8, cx: i32, cz: i32)
             lo = lo.min(top);
             hi = hi.max(top).max(water.unwrap_or(i32::MIN));
             let grows = water.is_none() && cliff.is_none();
-            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }));
+            // The grass as the full-size ground has it, so it does not change at the
+            // ring's edge: from the column at the cell's corner, its slope across the cell.
+            let by_rock = four.iter().any(|c| matches!(c.cover, Cover::Cliff | Cover::Scree | Cover::Boulders));
+            let sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
+            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }, sward));
             cells.push(Cell { top, water, surface, under, cliff });
         }
     }
 
     let lib = world.library();
-    let placements: Vec<_> = features::place(world.seed(), lib, &sampler, lx0, lz0, width, (mx * MACRO_SIZE, mz * MACRO_SIZE))
+    let origin = (mx * MACRO_SIZE, mz * MACRO_SIZE);
+    let found = if every_feature {
+        features::place(world.seed(), lib, &sampler, lx0, lz0, width, origin)
+    } else {
+        features::place_only(world.seed(), lib, &sampler, lx0, lz0, width, origin, stands_tall)
+    };
+    let placements: Vec<_> = found
         .into_iter()
         .filter(|p| {
             let t = lib.get(p.species, p.variant);

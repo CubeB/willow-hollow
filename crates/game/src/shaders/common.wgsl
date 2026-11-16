@@ -4,7 +4,10 @@ struct Globals {
     view_proj: mat4x4<f32>,
     // Camera basis scaled so that fwd + ndc.x * right + ndc.y * up is the view ray.
     cam_right: vec4<f32>,
+    // w: how tall a pixel is at one voxel of distance, for a screen 1080 lines high.
     cam_up: vec4<f32>,
+    // w: the height in metres up to which no ground holds snow this frame, in any biome
+    // (see snow_depth in ground.wgsl), or far below the world where some may lie anywhere.
     cam_fwd: vec4<f32>,
     // xyz: direction toward the sun (or moon at night). w: time in seconds.
     sun_dir: vec4<f32>,
@@ -551,7 +554,28 @@ fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
     // is haze, the sun's glow in it.
     let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
     let glow = sun_haze(dot(rel, G.sun_dir.xyz) / max(dist, 1e-4)) * (1.0 - exp(-haze));
-    return color * through + (sky_base(dir) + glow) * (1.0 - through);
+    return color * through + (air_light(dir, through) + glow) * (1.0 - through);
+}
+
+// The light the air between the eye and a far thing gives off toward the eye. While the
+// sun is up it lights the low air as it lights the sky, and that is the horizon's colour.
+// Once it has set, the bright horizon is high air the sun still reaches, far off over
+// the edge of the world; the air down among the hills has only the dark sky above to
+// light it. A ridge a few kilometres off at dusk, or under the moon, is then a dim shape
+// against the sky, where it had faded into the glow and so looked lit as if by day.
+// Only through so much air that the land is all but gone (`through` near 0) is the
+// colour the sky's again, so that the farthest land still dissolves into the sky behind.
+fn air_light(dir: vec3<f32>, through: vec3<f32>) -> vec3<f32> {
+    let sky = sky_base(dir);
+    let sunk = smoothstep(0.0, -0.1, G.sun_pos.y);
+    if (sunk <= 0.0) {
+        return sky;
+    }
+    // The sky overhead and round about, as lights the ground (see `ambient`).
+    let dome = min(mix(mix(G.sky_horizon.rgb, G.sky_glow.rgb, 0.4), G.sky_zenith.rgb, 0.6), sky);
+    let gone = 1.0 - through;
+    let deep = gone * gone * gone * gone;
+    return mix(sky, mix(dome, sky, deep), sunk);
 }
 
 // Warm light from nearby fireflies, falling off over about eight metres.
@@ -663,16 +687,61 @@ fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     // A wide filter on a face turned from the sun would reach under the face itself.
     let slope = sqrt(1.0 - ndl * ndl) / max(ndl, 0.25);
     let z = lp.z - (radius - 1.0) * texel * 0.5 * slope / span;
-    // Taps spread evenly over a disc, more of them where it is widest.
-    let taps = select(select(5, 8, c == 1), 12, c == 0);
+    // Taps spread evenly over a disc, more of them where it is widest. Each cascade has a
+    // loop of its own with a fixed count, so it unrolls and its offsets are constants.
+    let reach = radius / SHADOW_SIZE;
     var sum = 0.0;
-    for (var i = 0; i < taps; i++) {
-        let turn = f32(i) * 2.39996;
-        let out = sqrt((f32(i) + 0.5) / f32(taps)) * radius / SHADOW_SIZE;
-        sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + vec2<f32>(cos(turn), sin(turn)) * out, c, z);
+    var taps = 5.0;
+    if (c == 0) {
+        taps = 12.0;
+        for (var i = 0; i < 12; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_12[i] * reach, c, z);
+        }
+    } else if (c == 1) {
+        taps = 8.0;
+        for (var i = 0; i < 8; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_8[i] * reach, c, z);
+        }
+    } else {
+        for (var i = 0; i < 5; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_5[i] * reach, c, z);
+        }
     }
-    return vec2<f32>(sum / f32(taps), 1.0);
+    return vec2<f32>(sum / taps, 1.0);
 }
+
+// The taps of cascade_light's filter over a disc of radius 1, for 12, 8 and 5 of them:
+// tap i of n at sqrt((i + 0.5) / n) from the middle, turned i * 2.39996 radians (the golden
+// angle), so they spread evenly whatever their number. Worked out once, in f32, rather
+// than with a cos, sin and sqrt for every tap of every pixel.
+const PCF_TAPS_12 = array<vec2<f32>, 12>(
+    vec2<f32>(0.204124153, 0.0),
+    vec2<f32>(-0.260698497, 0.238822713),
+    vec2<f32>(0.0399013013, -0.454688042),
+    vec2<f32>(0.328598619, 0.428590238),
+    vec2<f32>(-0.6030128, -0.106656536),
+    vec2<f32>(0.571219087, -0.363375992),
+    vec2<f32>(-0.191050008, 0.710750699),
+    vec2<f32>(-0.364394337, -0.701581657),
+    vec2<f32>(0.790564001, 0.288689852),
+    vec2<f32>(-0.822432637, 0.339516312),
+    vec2<f32>(0.396443814, -0.847249866),
+    vec2<f32>(0.293014765, 0.93406409));
+const PCF_TAPS_8 = array<vec2<f32>, 8>(
+    vec2<f32>(0.25, 0.0),
+    vec2<f32>(-0.319289148, 0.29249689),
+    vec2<f32>(0.0488689169, -0.556876838),
+    vec2<f32>(0.402449489, 0.524913669),
+    vec2<f32>(-0.738536775, -0.130627036),
+    vec2<f32>(0.699597657, -0.445042878),
+    vec2<f32>(-0.233987495, 0.870488286),
+    vec2<f32>(-0.446290076, -0.859258533));
+const PCF_TAPS_5 = array<vec2<f32>, 5>(
+    vec2<f32>(0.316227764, 0.0),
+    vec2<f32>(-0.403872401, 0.36998257),
+    vec2<f32>(0.0618148297, -0.704399705),
+    vec2<f32>(0.509062827, 0.663969159),
+    vec2<f32>(-0.9341833, -0.165231586));
 
 // Fraction of direct sunlight reaching a point: cascaded shadow maps, filtered wider
 // the further the shadow has fallen, then cloud shadow. `beyond` is what to take it as

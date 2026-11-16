@@ -67,8 +67,9 @@ pub struct ColumnOutput {
     /// Small plants standing on the columns inside this chunk column.
     pub plants: Vec<PlantBox>,
     /// For each padded column (`x * PAD + z`), the height of its ground and the colour the
-    /// plant growing there gives it from afar (see [`features::plants::wash_at`]; 0 for none).
-    pub wash: Vec<(i32, u8)>,
+    /// plant growing there gives it from afar (see [`features::plants::wash_at`]; 0 for none),
+    /// and how the grass grows there (its [`surface::sward::code`]).
+    pub wash: Vec<(i32, u8, u8)>,
     /// The trees and other features reaching into this column, in the order they were
     /// stamped: what [`features::leaf_tag`] reads to tell whose leaf is whose.
     pub trees: Vec<features::Placement>,

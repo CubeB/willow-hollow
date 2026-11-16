@@ -5,16 +5,95 @@ use std::{cmp::Reverse, collections::BinaryHeap};
 
 use glam::{Vec2, vec2};
 
+use super::CrossingKind;
 use crate::{
     biome::Biome,
     continent::{Continent, NO_LAKE},
     noise::perlin2,
-    scale::OLD_VOXEL,
+    scale::{OLD_VOXEL, m},
     surface::MIN_RIVER_Q,
 };
 
 /// Search gives up after expanding this many cells.
 const MAX_EXPANDED: u32 = 400_000;
+
+/// Widest water, in trail steps, waded on stepping stones.
+pub const FORD_SPAN: usize = 5;
+/// Widest water, in trail steps, a timber bridge is put across: past this a trestle
+/// would need so many bents in the current that only stone will do.
+pub const TIMBER_SPAN: usize = 28;
+/// A river at least this wide, in simulation units, is taken over on stone whatever
+/// the span: its floods and the timber they carry down would take a wooden bridge away
+/// within a few winters.
+pub const STONE_RIVER: f32 = 16.0;
+/// Below this width, in simulation units, a river is a stream whose water spreads slack
+/// and shallow where a trail meets it at a slant or it opens out, so a trestle can
+/// stand in it further out: timber reaches [`SLACK_SPAN`] more steps over it.
+const SLACK_RIVER: f32 = 7.0;
+const SLACK_SPAN: usize = 16;
+
+/// What each kind of crossing costs to build, as so much easy ground walked, in
+/// simulation units. People would far rather walk a long way round than build a stone
+/// bridge: it takes a mason, a quarry and a summer, where a footbridge takes a few
+/// felled trees and a ford nothing at all. So the stone bridge costs a fixed sum worth
+/// several kilometres of walking, and a timber one only a few hundred metres, rising
+/// with its span.
+const FORD_COST: f32 = 40.0;
+const FORD_PER_STEP: f32 = 8.0;
+const TIMBER_COST: f32 = 220.0;
+const TIMBER_PER_STEP: f32 = 30.0;
+const STONE_COST: f32 = 7000.0;
+const STONE_PER_STEP: f32 = 150.0;
+
+/// How a trail gets over water `span` trail steps across, in a river `width`
+/// simulation units wide (0 for standing water). `shallow` is whether it can be waded.
+/// The router and the builder both decide by this, so a route is costed by the
+/// crossing that will really be built.
+pub fn crossing_kind(span: usize, width: f32, shallow: bool) -> CrossingKind {
+    if span <= FORD_SPAN && shallow {
+        CrossingKind::Stones
+    } else if width < STONE_RIVER && span <= TIMBER_SPAN + if width < SLACK_RIVER { SLACK_SPAN } else { 0 } {
+        CrossingKind::Plank
+    } else {
+        CrossingKind::Arch
+    }
+}
+
+/// The span, in trail steps, a trail should expect to bridge to cross a river `width`
+/// simulation units wide. The water at the surface spreads a little wider than the
+/// simulated channel, and a trail seldom crosses quite square.
+pub fn expected_span(width: f32) -> usize {
+    (width * 1.3 + 1.0).ceil() as usize
+}
+
+/// The effort of getting across a river `width` simulation units wide, as so much easy
+/// ground walked.
+pub fn crossing_cost(width: f32) -> f32 {
+    let span = expected_span(width);
+    // Only brooks are shallow enough to wade.
+    match crossing_kind(span, width, width < 3.0) {
+        CrossingKind::Stones => FORD_COST + FORD_PER_STEP * span as f32,
+        CrossingKind::Arch => STONE_COST + STONE_PER_STEP * span as f32,
+        _ => TIMBER_COST + TIMBER_PER_STEP * span as f32 + 2.0 * (span * span) as f32,
+    }
+}
+
+/// A slow unevenness over the land that a map does not show: a thicket here, a field
+/// wall or a soft patch there, a way someone happened to go first. It bends routes in
+/// long gentle curves, but only where the land leaves a choice, since slope and water
+/// still cost far more. 1 to [`MEANDER`] + 1, smooth over about [`MEANDER_SCALE`].
+const MEANDER: f32 = 0.6;
+const MEANDER_SCALE: f32 = m(500.0);
+
+fn meander(c: &Continent, i: usize) -> f32 {
+    let cs = c.cell_size();
+    let (x, z) = ((i % c.size) as f32 * cs, (i / c.size) as f32 * cs);
+    let seed = c.desc.seed ^ 0x3ea7;
+    let n = perlin2(seed, (x / MEANDER_SCALE) as f64, (z / MEANDER_SCALE) as f64)
+        + 0.5 * perlin2(seed ^ 0x51, (x / MEANDER_SCALE * 2.3) as f64, (z / MEANDER_SCALE * 2.3) as f64);
+    1.0 + MEANDER * (n * 0.7 + 0.5).clamp(0.0, 1.0)
+}
+
 /// Walking along an existing trail costs this fraction of breaking new ground, which is
 /// what makes trails join up instead of running side by side.
 const REUSE: f32 = 0.35;
@@ -107,9 +186,12 @@ pub fn terrain_factor(c: &Continent, i: usize) -> f32 {
     f += match Biome::from_u8(c.biome[i]) {
         Biome::OldGrowth | Biome::Rainforest => 0.3,
         Biome::Alpine => 0.3,
+        // Sodden ground: every step sinks, and a path across it needs a causeway.
+        Biome::Marsh | Biome::Bog => 1.2,
+        Biome::Mangrove => 1.5,
         _ => 0.0,
     };
-    f.max(0.8)
+    f.max(0.8) * meander(c, i)
 }
 
 impl<'a> Router<'a> {
@@ -137,20 +219,29 @@ impl<'a> Router<'a> {
         let grade = (c.height[b] - c.height[a]).abs() / dist;
         let terrain = (self.terrain[a] + self.terrain[b]) * 0.5;
         let mut cost = dist * terrain * (1.0 + 6.0 * grade + 90.0 * grade * grade);
-        let q = c.discharge[b];
-        if q >= MIN_RIVER_Q {
-            // Water costs more the wider it is: a brook is little, while a river is
-            // worth a long detour to go around it or find a narrow place. Every cell
-            // with a stream counts, as a trail kept in one would cross it again and again.
-            let width = Continent::river_width(q);
-            cost += 150.0 + width * width * 6.0 + if width > 4.0 { 600.0 + width * 60.0 } else { 0.0 };
-        }
         // Low ground beside the sea or a lake is shallows, marsh and mud flats at the
         // scale people walk: a trail kept to it would need a long bridge over water
         // that a path a little inland goes round dry-shod.
         cost += dist * self.shallows[b];
+        // Getting over water costs what the crossing it needs would take to build.
+        // Every cell with a stream counts, as a trail kept in one would cross it again
+        // and again. A diagonal step between two river cells slips through the corner
+        // where the river turns, but at the surface it crosses that river all the same.
+        let mut q = c.discharge[b];
+        let n = c.size;
+        let (ax, az, bx, bz) = (a % n, a / n, b % n, b / n);
+        if ax != bx && az != bz {
+            let (p, r) = (az * n + bx, bz * n + ax);
+            if c.discharge[p] >= MIN_RIVER_Q && c.discharge[r] >= MIN_RIVER_Q && !c.ocean[p] && !c.ocean[r] {
+                q = q.max(c.discharge[p].min(c.discharge[r]));
+            }
+        }
+        let crossing = if q >= MIN_RIVER_Q { crossing_cost(Continent::river_width(q)) } else { 0.0 };
         if self.used[b] != 0 {
-            cost *= REUSE;
+            // Along a trail already made, over the crossing already built for it.
+            cost = (cost + crossing * 0.1) * REUSE;
+        } else {
+            cost += crossing;
         }
         Some(cost)
     }

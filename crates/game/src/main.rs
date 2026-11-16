@@ -1,14 +1,17 @@
 mod arena;
 mod audio;
+mod aurora;
 mod camera;
 mod camp;
 mod character;
+mod crows;
 mod editor;
 mod env;
 mod fallen;
 mod farview;
 mod gfx;
 mod impostors;
+mod insects;
 mod inventory;
 mod journal;
 mod lod;
@@ -20,9 +23,11 @@ mod player;
 mod profile;
 mod render;
 mod season;
+mod starlings;
 mod settings;
 mod weather;
 mod terrain;
+mod threads;
 mod vehicles;
 
 use std::{
@@ -97,6 +102,10 @@ struct Options {
     weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
     fresh: bool,
+    /// A murmuration of starlings ahead, whatever the date, hour and country.
+    murmuration: bool,
+    /// The northern lights out every night, wherever.
+    aurora: bool,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     /// Write the map of the continent around the start to this PNG, then exit.
@@ -133,6 +142,11 @@ struct Options {
     rest: bool,
     /// Hold a lit lantern on a screenshot.
     shot_lantern: bool,
+    /// Set crows out on a screenshot: feeding on the ground, perched, flying, landing
+    /// or at the rookery, at the place of that sort nearest to a point ahead.
+    shot_crows: Option<String>,
+    /// How far ahead that point is, in metres.
+    crows_ahead: f64,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -163,6 +177,8 @@ impl Default for Options {
             date: None,
             weather: None,
             fresh: false,
+            murmuration: false,
+            aurora: false,
             screenshot: None,
             map: None,
             audio: true,
@@ -181,6 +197,8 @@ impl Default for Options {
             camp_ahead: 4.2,
             rest: false,
             shot_lantern: false,
+            shot_crows: None,
+            crows_ahead: 12.0,
             picked: None,
             shot_journal: None,
             journal_fill: 16,
@@ -228,6 +246,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
+  --crows HOW           set crows out on a screenshot near a point ahead: ground, perch,
+                        tree, rock, fly, land, roost or any (they never take fright)
+  --crows-ahead M       that point M metres ahead (default 12)
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -240,6 +261,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --walked X,Z;X,Z..    on a screenshot's map, as if walked from X,Z through the rest
                         to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
+  --murmuration         starlings gathering ahead of the camera, whatever the date and hour
+  --aurora              the northern lights out tonight, wherever the camera is
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went (with --bigmap,
@@ -281,6 +304,8 @@ fn parse_args() -> Result<Options> {
         match a.as_str() {
             "--seed" => o.overrides.seed = Some(value()?.parse()?),
             "--fresh" => o.fresh = true,
+            "--murmuration" => o.murmuration = true,
+            "--aurora" => o.aurora = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
@@ -334,6 +359,14 @@ fn parse_args() -> Result<Options> {
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
             "--lantern" => o.shot_lantern = true,
+            "--crows" => {
+                let how = value()?;
+                if !["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"].contains(&how.as_str()) {
+                    bail!("unknown crows '{how}': ground, perch, tree, rock, fly, land, roost or any");
+                }
+                o.shot_crows = Some(how);
+            }
+            "--crows-ahead" => o.crows_ahead = value()?.parse::<f64>()?.clamp(0.0, 500.0),
             "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
@@ -650,7 +683,20 @@ fn scan_surroundings(
     }
     // And the sticks fallen under the trees about.
     let sticks = fallen::near(world, voxels, camera);
-    (biome, leaves, flowers, low_ground(world, cx, cz), sticks)
+    // The nests in sight, and the flowers in bloom a bee from each could fly to: a few
+    // nests at most, so it is a few small squares of the world to look over.
+    let nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    let mut forage = Vec::new();
+    for n in nests.iter().filter(|n| n.kind == worldgen::features::nests::NestKind::Bees && insects::on_the_wing(n.kind, date)).take(3) {
+        let reach = m(insects::FORAGE as f32) as i32;
+        for (at, flower) in world.flowers_standing(n.door.x - reach, n.door.z - reach, 2 * reach + 1) {
+            use worldgen::features::plants::Flower;
+            if flower.blooming_at(date, at.x, at.z) && !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) {
+                forage.push((at.as_dvec3(), to_linear(flower.color())));
+            }
+        }
+    }
+    (biome, leaves, flowers, low_ground(world, cx, cz), sticks, (nests, forage))
 }
 
 /// The lowest ground or water within a short walk: where mist gathers. Standing in a
@@ -667,7 +713,10 @@ fn low_ground(world: &GameWorld, cx: i32, cz: i32) -> f32 {
 
 /// The biome, leaves and flowers round the camera, the low ground near it, and the
 /// sticks lying under the trees.
-type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>);
+type Scan = (worldgen::biome::Biome, Leaves, Spots, f32, Vec<fallen::Stick>, Bees);
+
+/// The nests of bees and wasps near, and the flowers in bloom about them.
+type Bees = (Vec<worldgen::features::nests::Nest>, Spots);
 
 /// Runs [`scan_surroundings`] on its own thread. The scan can touch dozens of chunk
 /// columns that aren't cached, which would stall a frame.
@@ -684,6 +733,7 @@ impl Scanner {
         std::thread::Builder::new()
             .name("scanner".into())
             .spawn(move || {
+                crate::threads::background();
                 let mut voxels = WorldVoxels::new(world.clone());
                 // Ends when the game drops `ask`.
                 while let Ok((camera, salt, date)) = questions.recv() {
@@ -722,11 +772,15 @@ struct Running {
     impostors: Impostors,
     env: Environment,
     particles: Particles,
+    /// The crows about the player, and their nests.
+    crows: crows::Crows,
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
     /// Sticks lying on the ground near the player, refreshed with them.
     fallen: Vec<fallen::Stick>,
+    /// The bees' and wasps' nests near, and the flowers about them.
+    nests: Bees,
     scan_timer: f32,
     scanner: Scanner,
     biome: worldgen::biome::Biome,
@@ -734,6 +788,8 @@ struct Running {
     warmth: f32,
     /// The haze of the air here (season::humidity), eased as the biome changes.
     humidity: f32,
+    /// Northern lights every night, wherever (`--aurora`).
+    aurora_forced: bool,
     /// The low ground mist lies on near the camera, eased toward the last scan's answer.
     /// None until the first scan is in.
     mist_floor: Option<f32>,
@@ -838,6 +894,13 @@ struct Running {
     cpu: CpuTimer,
     /// Every frame's length in milliseconds, kept only when measuring.
     frame_log: Option<Vec<f32>>,
+    sub: profile::SubTimer,
+    last_dt_ms: f32,
+    csv: Option<std::io::BufWriter<std::fs::File>>,
+    /// Columns the main thread generated itself for a lookup, and the milliseconds that
+    /// took: in the last frame, and in all frames (see `player::take_sync_loads`).
+    sync_frame: (u32, f32),
+    sync_total: (u32, f32),
     drift: Option<f32>,
     circle: Option<f32>,
     map: Minimap,
@@ -922,6 +985,7 @@ impl Running {
         log::info!("startup: world after {:.2} s", began.elapsed().as_secs_f32());
         camera.fov_y = settings.fov.to_radians();
         camera.sensitivity = settings.sensitivity;
+        let looking = camera.forward();
         let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
         let mut player = Player::new(feet);
         if let Some(p) = progress.filter(|p| p.travel == Travel::Sailing) {
@@ -970,15 +1034,25 @@ impl Running {
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
             env: Environment::at(time, date),
-            particles: Particles::new(),
+            particles: {
+                let mut p = Particles::new();
+                // Asked for: ahead of where the camera first looks.
+                if opts.murmuration {
+                    p.starlings.forced = Some(looking);
+                }
+                p
+            },
+            crows: crows::Crows::new(world.clone()),
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
+            nests: (Vec::new(), Vec::new()),
             scan_timer: 0.0,
             scanner: Scanner::new(world.clone()),
             biome: worldgen::biome::Biome::Grassland,
             warmth: season::warmth(worldgen::biome::Biome::Grassland),
             humidity: season::humidity(worldgen::biome::Biome::Grassland),
+            aurora_forced: opts.aurora,
             mist_floor: None,
             mist_target: 0.0,
             weather: weather::Weather::new(opts.weather),
@@ -1036,6 +1110,11 @@ impl Running {
             loaded: false,
             cpu: CpuTimer::new(),
             frame_log: opts.frames.map(|n| Vec::with_capacity(n as usize)),
+            sub: profile::SubTimer::new(),
+            last_dt_ms: 0.0,
+            csv: open_csv(),
+            sync_frame: (0, 0.0),
+            sync_total: (0, 0.0),
             drift: opts.drift,
             circle: opts.circle,
             gpu,
@@ -1581,6 +1660,8 @@ impl Running {
             self.cpu.reset_worst();
         }
         self.cpu.start();
+        self.sub.start();
+        self.last_dt_ms = raw_dt * 1000.0;
         if let Some(speed) = self.drift {
             if let Some(radius) = self.circle {
                 self.camera.yaw = (self.camera.yaw + speed / radius * dt).rem_euclid(std::f32::consts::TAU);
@@ -1674,9 +1755,21 @@ impl Running {
             }
         }
         self.cpu.lap(0);
+        self.sub.lap(0);
+        // Stamped on the GPU on either side, so that the copies of what these upload, and
+        // of an arena that grows, show apart from the frame's passes.
+        if let Some(t) = &self.renderer.timer {
+            t.mark_alone(&self.gpu, profile::UPLOAD_BEGIN);
+        }
         self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
+        self.sub.lap(1);
         self.far.update(&self.gpu, self.camera.pos);
+        self.sub.lap(2);
         self.impostors.update(&self.gpu, self.camera.pos);
+        if let Some(t) = &self.renderer.timer {
+            t.mark_alone(&self.gpu, profile::UPLOAD_END);
+        }
+        self.sub.lap(3);
         self.cpu.lap(1);
 
         // The day turns.
@@ -1729,6 +1822,7 @@ impl Running {
             *floor += (self.mist_target - *floor) * (1.0 - (-0.25 * dt).exp());
         }
 
+        self.sub.lap(4);
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
         if self.scan_timer <= 0.0 {
@@ -1737,10 +1831,11 @@ impl Running {
         }
         if let Some(found) = self.scanner.poll() {
             let low;
-            (self.biome, self.leaves, self.flowers, low, self.fallen) = found;
+            (self.biome, self.leaves, self.flowers, low, self.fallen, self.nests) = found;
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
+        self.sub.lap(5);
         let entered_water = (self.player.swimming && !self.was_swimming && self.walking && self.dry_for > 0.75)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
@@ -1770,11 +1865,27 @@ impl Running {
             storm: self.weather.now.storm,
             time: self.last_frame.duration_since(self.start).as_secs_f64(),
             land: &|x, z| particles::land_under(&self.world, x, z),
+            nests: &self.nests.0,
+            forage: &self.nests.1,
+            hour: self.env.time,
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
+        self.sub.lap(6);
         self.voxels.trim(self.camera.pos);
         self.particles.update(dt, &surroundings, &mut self.voxels.lazily());
+        self.sub.lap(7);
+        let around = crows::Around {
+            camera: self.camera.pos,
+            sun_elevation: self.env.sun_elevation,
+            hour: self.env.time,
+            date: self.env.date,
+            rain: self.weather.now.rain,
+            land: &|x, z| particles::land_under(&self.world, x, z),
+        };
+        self.crows.update(dt, &around);
+        self.sub.lap(20);
         self.update_footsteps(dt);
+        self.sub.lap(8);
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
         self.props.clear();
@@ -1785,6 +1896,7 @@ impl Running {
         self.placed.draw(self.camera.pos, clock, &mut self.props);
         let mut held_light = None;
         fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
+        self.crows.draw(self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -1821,10 +1933,12 @@ impl Running {
             }
         }
 
+        self.sub.lap(9);
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
+        self.sub.lap(10);
 
         self.cpu.lap(2);
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
@@ -1833,6 +1947,13 @@ impl Running {
         lamps.extend(held_light);
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
+        // The northern lights, on the nights they are out where the camera is.
+        let lights = if self.aurora_forced {
+            1.0
+        } else {
+            aurora::cold(self.warmth, aurora::climate_at(&self.world, self.camera.pos.x, self.camera.pos.z)) * aurora::activity(self.env.date, self.settings.year_days, self.settings.seed)
+        };
+        aurora::light(&mut lit, lights);
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
         // The eye takes a couple of seconds to open up in the dark, and less to close
@@ -1862,17 +1983,23 @@ impl Running {
         // before waiting for the window's next image, which is not free until the last
         // frame is done with: the GPU then draws this frame through the wait, rather
         // than standing idle until the frame has been put together after it.
+        self.sub.lap(11);
         self.renderer.draw(&self.gpu, &mut encoder, &scene);
+        self.sub.lap(12);
         self.gpu.queue.submit([encoder.finish()]);
+        self.sub.lap(13);
         self.cpu.lap(4);
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
         self.cpu.lap(3);
+        self.sub.lap(14);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.renderer.finish(&self.gpu, &mut encoder, &view);
+        self.sub.lap(15);
         self.map.draw(&self.gpu, &mut encoder, &view, (self.surface.config.width, self.surface.config.height));
+        self.sub.lap(16);
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;
@@ -1986,10 +2113,16 @@ impl Running {
         }
         self.quit |= choice.quit;
         self.cpu.lap(5);
+        self.sub.lap(17);
+        if let Some(t) = &mut self.renderer.timer {
+            t.mark(&mut encoder, 15);
+            t.resolve(&mut encoder);
+        }
 
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        self.sub.lap(18);
         // Only now: the surface can't be reconfigured while a frame from it is held.
         let was = std::mem::replace(&mut self.settings, settings);
         self.apply_settings(was);
@@ -1997,6 +2130,12 @@ impl Running {
             timer.after_submit(&self.gpu);
         }
         self.cpu.lap(6);
+        self.sub.lap(19);
+        // Columns the main thread had to generate itself this frame, for the log.
+        self.sync_frame = player::take_sync_loads();
+        self.sync_total.0 += self.sync_frame.0;
+        self.sync_total.1 += self.sync_frame.1;
+        self.write_csv_row();
         self.frame += 1;
     }
 }
@@ -2215,6 +2354,12 @@ impl ApplicationHandler for App {
                 }
                 if self.opts.frames.is_some() && r.frame % 120 == 0 {
                     log::info!("frame {}: {}; {}", r.frame, r.streamer.progress(), r.impostors.progress());
+                    // A timed run whose terrain has stopped loading fails, rather than
+                    // timing a world that is not there.
+                    if r.streamer.stalled().is_some() {
+                        log::error!("timed run hung: the terrain stopped loading (see above)");
+                        std::process::exit(3);
+                    }
                 }
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
                     let (s, d) = (r.streamer.stats, r.renderer.stats);
@@ -2236,6 +2381,7 @@ impl ApplicationHandler for App {
                         let n = *n as f32;
                         log::info!("level {level}: {n} columns built, {:.2} ms to generate and {:.2} ms to mesh each", generate / n, mesh / n);
                     }
+                    log::info!("main thread generated {} columns itself, in {:.1} ms", r.sync_total.0, r.sync_total.1);
                     log::info!(
                         "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles, {} far tree boxes, arena {} MiB",
                         r.frame,
@@ -2343,10 +2489,14 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
-        let (biome, leaves, flowers, low, sticks) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
+        let (biome, leaves, flowers, low, sticks, nests) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
+        // The northern lights, if they are out tonight here (or asked for).
+        let lights = if opts.aurora { 1.0 } else { aurora::cold(warmth, aurora::climate_at(&world, camera.pos.x, camera.pos.z)) * aurora::activity(env.date, settings.year_days, settings.seed) };
+        aurora::light(&mut env, lights);
+        log::info!("northern lights {:.2}", env.aurora);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
         env.adapt(player::enclosure(camera.pos, &mut voxels));
@@ -2389,6 +2539,9 @@ fn main() -> Result<()> {
         smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         let mut particles = Particles::new();
+        if opts.murmuration {
+            particles.starlings.forced = Some(camera.forward());
+        }
         for step in 0..(opts.ambient * 60.0) as u32 {
             let surroundings = Surroundings {
                 camera: camera.pos,
@@ -2408,13 +2561,47 @@ fn main() -> Result<()> {
                 storm: weather.now.storm,
                 time: step as f64 / 60.0,
                 land: &|x, z| particles::land_under(&world, x, z),
+                nests: &nests.0,
+                forage: &nests.1,
+                hour: env.time,
             };
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
         log::info!("season {:.2} ({}), biome {biome:?}, ground {:?}", env.date, season::month_name(env.date), weather.ground(env.date, warmth));
+        // Crows on a map made at once, and any set out as --crows says, given the same
+        // seconds of life as the rest.
+        let mut crows = crows::Crows::without_lookout();
+        crows.set_sites(crows::survey::Survey::new(world.clone()).look(camera.pos, env.date));
+        if let Some(how) = &opts.shot_crows {
+            let ahead = camera.pos + camera.forward().as_dvec3().with_y(0.0).normalize_or(DVec3::X) * m64(opts.crows_ahead);
+            crows.stage(how, ahead, camera.pos);
+        }
+        for _ in 0..(opts.ambient * 60.0) as u32 {
+            let around = crows::Around {
+                camera: camera.pos,
+                sun_elevation: env.sun_elevation,
+                hour: env.time,
+                date: env.date,
+                rain: weather.now.rain,
+                land: &|x, z| particles::land_under(&world, x, z),
+            };
+            crows.update(1.0 / 60.0, &around);
+        }
+        crows.report(camera.pos);
+        crows.draw(camera.pos, &mut props);
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
+        }
+        if let Some((at, n)) = particles.starlings.now() {
+            let off = at - camera.pos;
+            log::info!("murmuration of {n} starlings at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
+        }
+        // Where the nests further about are, to aim a shot at one (RUST_LOG=game=debug).
+        if log::log_enabled!(log::Level::Debug) {
+            for n in world.nests_near(camera.pos.x as i32, camera.pos.z as i32, m(200.0) as i32) {
+                log::debug!("nest of {:?} in a {:?} at {} {} {}, facing {}", n.kind, n.host, n.door.x, n.door.y, n.door.z, n.out);
+            }
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
@@ -2552,4 +2739,69 @@ fn main() -> Result<()> {
     let mut app = App { opts, run: None };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+
+/// Measurement build: a per-frame CSV, to the file named by WH_FRAME_CSV.
+fn open_csv() -> Option<std::io::BufWriter<std::fs::File>> {
+    use std::io::Write;
+    let path = std::env::var("WH_FRAME_CSV").ok()?;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
+    let mut head = vec!["frame".to_string(), "dt_ms".to_string()];
+    head.extend(profile::CPU_SPANS.iter().map(|n| format!("cpu_{n}")));
+    head.extend(profile::SUB_SPANS.iter().map(|n| format!("sub_{n}")));
+    head.push("gpu_fresh".into());
+    head.extend(profile::GPU_SPANS.iter().map(|n| format!("gpu_{}", n.replace(' ', ""))));
+    for n in ["queued", "in_flight", "rebuild_ms", "upload_ms", "received", "upload_bytes", "grown_bytes", "columns", "chunks_drawn", "quads_drawn", "shadow1_draws", "shadow2_draws", "shadow3_draws", "far_tiles", "impostor_boxes", "particles", "props", "shades", "x", "y", "z", "sync_cols", "sync_ms"] {
+        head.push(n.into());
+    }
+    let _ = writeln!(w, "{}", head.join(","));
+    Some(w)
+}
+
+impl Running {
+    fn write_csv_row(&mut self) {
+        use std::io::Write;
+        let Some(w) = &mut self.csv else { return };
+        let mut row: Vec<String> = vec![self.frame.to_string(), format!("{:.3}", self.last_dt_ms)];
+        row.extend(self.cpu.raw.iter().map(|v| format!("{v:.3}")));
+        row.extend(self.sub.ms.iter().map(|v| format!("{v:.3}")));
+        match &self.renderer.timer {
+            Some(t) => {
+                row.push((t.fresh as u8).to_string());
+                row.extend(t.raw.iter().map(|v| format!("{v:.3}")));
+            }
+            None => {
+                row.push("0".into());
+                row.extend(profile::GPU_SPANS.iter().map(|_| "0".to_string()));
+            }
+        }
+        let (s, d) = (self.streamer.stats, self.renderer.stats);
+        row.extend([
+            s.queued.to_string(),
+            s.in_flight.to_string(),
+            format!("{:.3}", s.f_rebuild_ms),
+            format!("{:.3}", s.f_upload_ms),
+            s.f_received.to_string(),
+            s.f_bytes.to_string(),
+            s.f_grown.to_string(),
+            s.columns.to_string(),
+            d.chunks_drawn.to_string(),
+            d.quads_drawn.to_string(),
+            d.shadow_draws[0].to_string(),
+            d.shadow_draws[1].to_string(),
+            d.shadow_draws[2].to_string(),
+            d.far_tiles.to_string(),
+            d.impostor_boxes.to_string(),
+            self.particles.len().to_string(),
+            self.props.len().to_string(),
+            self.shades.len().to_string(),
+            format!("{:.1}", self.camera.pos.x),
+            format!("{:.1}", self.camera.pos.y),
+            format!("{:.1}", self.camera.pos.z),
+            self.sync_frame.0.to_string(),
+            format!("{:.3}", self.sync_frame.1),
+        ]);
+        let _ = writeln!(w, "{}", row.join(","));
+    }
 }
