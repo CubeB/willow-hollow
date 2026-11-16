@@ -126,6 +126,14 @@ pub struct Stats {
     /// For each level: columns built, and the worker time generating and meshing them
     /// in total, in milliseconds.
     pub built: [(u32, f32, f32); LEVELS],
+    /// This frame, for the per-frame log: ms in rebuild_wanted, ms in the upload loop,
+    /// columns received, vertex bytes uploaded, and bytes the arena grew by (all of
+    /// which the GPU copies over that frame).
+    pub f_rebuild_ms: f32,
+    pub f_upload_ms: f32,
+    pub f_received: u32,
+    pub f_bytes: u64,
+    pub f_grown: u64,
 }
 
 /// Camera column and load radius, shared with workers so stale jobs can bail out.
@@ -417,11 +425,17 @@ impl Streamer {
             (cam.x / CHUNK as f64).floor() as i32,
             (cam.z / CHUNK as f64).floor() as i32,
         );
+        self.stats.f_rebuild_ms = 0.0;
+        self.stats.f_received = 0;
+        let bytes_before = self.stats.mesh_bytes;
+        let capacity_before = self.arena.capacity_bytes();
         if self.center != Some(center) {
+            let t = Instant::now();
             self.center = Some(center);
             self.focus.cx.store(center.0, Ordering::Relaxed);
             self.focus.cz.store(center.1, Ordering::Relaxed);
             self.rebuild_wanted(center);
+            self.stats.f_rebuild_ms = t.elapsed().as_secs_f32() * 1000.0;
         }
 
         while self.pending.len() < self.max_in_flight {
@@ -438,6 +452,7 @@ impl Streamer {
         let began = Instant::now();
         while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
             let Ok(result) = self.rx.try_recv() else { break };
+            self.stats.f_received += 1;
             self.pending.remove(&result.col);
             let in_range = self.focus.in_range(result.col, UNLOAD_SLACK);
             match result.chunks {
@@ -486,6 +501,9 @@ impl Streamer {
                 _ => {}
             }
         }
+        self.stats.f_upload_ms = began.elapsed().as_secs_f32() * 1000.0;
+        self.stats.f_bytes = self.stats.mesh_bytes.saturating_sub(bytes_before);
+        self.stats.f_grown = self.arena.capacity_bytes().saturating_sub(capacity_before);
         self.regrow_view();
         let now = Instant::now();
         let dt = self.last_update.map_or(f32::INFINITY, |t| (now - t).as_secs_f32());

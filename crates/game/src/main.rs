@@ -892,6 +892,9 @@ struct Running {
     cpu: CpuTimer,
     /// Every frame's length in milliseconds, kept only when measuring.
     frame_log: Option<Vec<f32>>,
+    sub: profile::SubTimer,
+    last_dt_ms: f32,
+    csv: Option<std::io::BufWriter<std::fs::File>>,
     drift: Option<f32>,
     circle: Option<f32>,
     map: Minimap,
@@ -1101,6 +1104,9 @@ impl Running {
             loaded: false,
             cpu: CpuTimer::new(),
             frame_log: opts.frames.map(|n| Vec::with_capacity(n as usize)),
+            sub: profile::SubTimer::new(),
+            last_dt_ms: 0.0,
+            csv: open_csv(),
             drift: opts.drift,
             circle: opts.circle,
             gpu,
@@ -1646,6 +1652,8 @@ impl Running {
             self.cpu.reset_worst();
         }
         self.cpu.start();
+        self.sub.start();
+        self.last_dt_ms = raw_dt * 1000.0;
         if let Some(speed) = self.drift {
             if let Some(radius) = self.circle {
                 self.camera.yaw = (self.camera.yaw + speed / radius * dt).rem_euclid(std::f32::consts::TAU);
@@ -1739,9 +1747,21 @@ impl Running {
             }
         }
         self.cpu.lap(0);
+        self.sub.lap(0);
+        // Stamped on the GPU on either side, so that the copies of what these upload, and
+        // of an arena that grows, show apart from the frame's passes.
+        if let Some(t) = &self.renderer.timer {
+            t.mark_alone(&self.gpu, profile::UPLOAD_BEGIN);
+        }
         self.streamer.update(&self.gpu, self.camera.pos, UPLOAD_MS);
+        self.sub.lap(1);
         self.far.update(&self.gpu, self.camera.pos);
+        self.sub.lap(2);
         self.impostors.update(&self.gpu, self.camera.pos);
+        if let Some(t) = &self.renderer.timer {
+            t.mark_alone(&self.gpu, profile::UPLOAD_END);
+        }
+        self.sub.lap(3);
         self.cpu.lap(1);
 
         // The day turns.
@@ -1794,6 +1814,7 @@ impl Running {
             *floor += (self.mist_target - *floor) * (1.0 - (-0.25 * dt).exp());
         }
 
+        self.sub.lap(4);
         // Ambient life. Every so often, look around for leaves and flowers to spawn from.
         self.scan_timer -= dt;
         if self.scan_timer <= 0.0 {
@@ -1806,6 +1827,7 @@ impl Running {
             self.mist_floor.get_or_insert(low);
             self.mist_target = low;
         }
+        self.sub.lap(5);
         let entered_water = (self.player.swimming && !self.was_swimming && self.walking && self.dry_for > 0.75)
             .then(|| self.player.pos + DVec3::new(0.0, m64(0.8), 0.0));
         self.was_swimming = self.player.swimming;
@@ -1840,8 +1862,10 @@ impl Running {
             hour: self.env.time,
         };
         // Leaves and rain can wait a frame for ground that is not generated yet.
+        self.sub.lap(6);
         self.voxels.trim(self.camera.pos);
         self.particles.update(dt, &surroundings, &mut self.voxels.lazily());
+        self.sub.lap(7);
         let around = crows::Around {
             camera: self.camera.pos,
             sun_elevation: self.env.sun_elevation,
@@ -1851,7 +1875,9 @@ impl Running {
             land: &|x, z| particles::land_under(&self.world, x, z),
         };
         self.crows.update(dt, &around);
+        self.sub.lap(20);
         self.update_footsteps(dt);
+        self.sub.lap(8);
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
         self.props.clear();
@@ -1899,10 +1925,12 @@ impl Running {
             }
         }
 
+        self.sub.lap(9);
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
+        self.sub.lap(10);
 
         self.cpu.lap(2);
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
@@ -1947,17 +1975,23 @@ impl Running {
         // before waiting for the window's next image, which is not free until the last
         // frame is done with: the GPU then draws this frame through the wait, rather
         // than standing idle until the frame has been put together after it.
+        self.sub.lap(11);
         self.renderer.draw(&self.gpu, &mut encoder, &scene);
+        self.sub.lap(12);
         self.gpu.queue.submit([encoder.finish()]);
+        self.sub.lap(13);
         self.cpu.lap(4);
         let Some(frame) = self.surface.acquire(&self.gpu) else {
             return;
         };
         self.cpu.lap(3);
+        self.sub.lap(14);
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.renderer.finish(&self.gpu, &mut encoder, &view);
+        self.sub.lap(15);
         self.map.draw(&self.gpu, &mut encoder, &view, (self.surface.config.width, self.surface.config.height));
+        self.sub.lap(16);
 
         let size = [self.surface.config.width, self.surface.config.height];
         let cam = &self.camera;
@@ -2071,10 +2105,16 @@ impl Running {
         }
         self.quit |= choice.quit;
         self.cpu.lap(5);
+        self.sub.lap(17);
+        if let Some(t) = &mut self.renderer.timer {
+            t.mark(&mut encoder, 15);
+            t.resolve(&mut encoder);
+        }
 
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.gpu.queue.present(frame);
+        self.sub.lap(18);
         // Only now: the surface can't be reconfigured while a frame from it is held.
         let was = std::mem::replace(&mut self.settings, settings);
         self.apply_settings(was);
@@ -2082,6 +2122,8 @@ impl Running {
             timer.after_submit(&self.gpu);
         }
         self.cpu.lap(6);
+        self.sub.lap(19);
+        self.write_csv_row();
         self.frame += 1;
     }
 }
@@ -2678,4 +2720,67 @@ fn main() -> Result<()> {
     let mut app = App { opts, run: None };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+
+/// Measurement build: a per-frame CSV, to the file named by WH_FRAME_CSV.
+fn open_csv() -> Option<std::io::BufWriter<std::fs::File>> {
+    use std::io::Write;
+    let path = std::env::var("WH_FRAME_CSV").ok()?;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path).ok()?);
+    let mut head = vec!["frame".to_string(), "dt_ms".to_string()];
+    head.extend(profile::CPU_SPANS.iter().map(|n| format!("cpu_{n}")));
+    head.extend(profile::SUB_SPANS.iter().map(|n| format!("sub_{n}")));
+    head.push("gpu_fresh".into());
+    head.extend(profile::GPU_SPANS.iter().map(|n| format!("gpu_{}", n.replace(' ', ""))));
+    for n in ["queued", "in_flight", "rebuild_ms", "upload_ms", "received", "upload_bytes", "grown_bytes", "columns", "chunks_drawn", "quads_drawn", "shadow1_draws", "shadow2_draws", "shadow3_draws", "far_tiles", "impostor_boxes", "particles", "props", "shades", "x", "y", "z"] {
+        head.push(n.into());
+    }
+    let _ = writeln!(w, "{}", head.join(","));
+    Some(w)
+}
+
+impl Running {
+    fn write_csv_row(&mut self) {
+        use std::io::Write;
+        let Some(w) = &mut self.csv else { return };
+        let mut row: Vec<String> = vec![self.frame.to_string(), format!("{:.3}", self.last_dt_ms)];
+        row.extend(self.cpu.raw.iter().map(|v| format!("{v:.3}")));
+        row.extend(self.sub.ms.iter().map(|v| format!("{v:.3}")));
+        match &self.renderer.timer {
+            Some(t) => {
+                row.push((t.fresh as u8).to_string());
+                row.extend(t.raw.iter().map(|v| format!("{v:.3}")));
+            }
+            None => {
+                row.push("0".into());
+                row.extend(profile::GPU_SPANS.iter().map(|_| "0".to_string()));
+            }
+        }
+        let (s, d) = (self.streamer.stats, self.renderer.stats);
+        row.extend([
+            s.queued.to_string(),
+            s.in_flight.to_string(),
+            format!("{:.3}", s.f_rebuild_ms),
+            format!("{:.3}", s.f_upload_ms),
+            s.f_received.to_string(),
+            s.f_bytes.to_string(),
+            s.f_grown.to_string(),
+            s.columns.to_string(),
+            d.chunks_drawn.to_string(),
+            d.quads_drawn.to_string(),
+            d.shadow_draws[0].to_string(),
+            d.shadow_draws[1].to_string(),
+            d.shadow_draws[2].to_string(),
+            d.far_tiles.to_string(),
+            d.impostor_boxes.to_string(),
+            self.particles.len().to_string(),
+            self.props.len().to_string(),
+            self.shades.len().to_string(),
+            format!("{:.1}", self.camera.pos.x),
+            format!("{:.1}", self.camera.pos.y),
+            format!("{:.1}", self.camera.pos.z),
+        ]);
+        let _ = writeln!(w, "{}", row.join(","));
+    }
 }

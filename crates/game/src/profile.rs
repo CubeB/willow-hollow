@@ -11,9 +11,27 @@ use std::{
 
 use crate::gfx::Gpu;
 
-/// The stretches of a frame on the GPU, in the order they run.
-pub const GPU_SPANS: [&str; 10] = ["shadow 1", "shadow 2", "shadow 3", "far", "terrain", "sky", "water", "shafts", "bloom", "tonemap"];
-const STAMPS: u32 = GPU_SPANS.len() as u32 + 1;
+/// The stretches of a frame on the GPU. The passes come first, in the order they run,
+/// each ending at the stamp of its own index plus one. "gap" is the GPU waiting between
+/// the frame's two submissions.
+///
+/// The last two run before the passes, but are listed after them so that the passes'
+/// stamps keep their numbers. "upload" lies between [`UPLOAD_BEGIN`] and [`UPLOAD_END`],
+/// stamped around the streamer's, far view's and impostors' updates: the copies of what
+/// they wrote, and of a growing arena into its larger buffer, which it submits on its
+/// own there. "pre" runs from then to the first pass. Both also hold any time the GPU
+/// spent waiting for the CPU to get that far.
+pub const GPU_SPANS: [&str; 17] = [
+    "shadow 1", "shadow 2", "shadow 3", "far", "impostors", "terrain", "props", "sky", "water", "particles", "shafts", "bloom", "gap", "tonemap", "ui",
+    "upload", "pre",
+];
+/// The spans that can be the GPU idling rather than working, left out of its total.
+pub const GPU_IDLE: [&str; 3] = ["gap", "upload", "pre"];
+const PASS_SPANS: usize = GPU_SPANS.len() - 2;
+/// The stamp before the streamer's uploads, and the one after the impostors'.
+pub const UPLOAD_BEGIN: u32 = PASS_SPANS as u32 + 1;
+pub const UPLOAD_END: u32 = UPLOAD_BEGIN + 1;
+const STAMPS: u32 = UPLOAD_END + 1;
 const STAMP_BYTES: u64 = 8;
 /// Results take a few frames to come back, so several can be on their way at once.
 const SLOTS: usize = 4;
@@ -34,6 +52,9 @@ pub struct GpuTimer {
     tick_ms: f32,
     /// Smoothed milliseconds per span.
     pub ms: [f32; GPU_SPANS.len()],
+    /// The latest unsmoothed result, and whether it arrived this frame.
+    pub raw: [f32; GPU_SPANS.len()],
+    pub fresh: bool,
 }
 
 impl GpuTimer {
@@ -71,6 +92,8 @@ impl GpuTimer {
             writing: None,
             tick_ms: gpu.queue.get_timestamp_period() / 1e6,
             ms: [0.0; GPU_SPANS.len()],
+            raw: [0.0; GPU_SPANS.len()],
+            fresh: false,
         })
     }
 
@@ -82,6 +105,14 @@ impl GpuTimer {
     /// Marks the end of span `index - 1`, inside a pass.
     pub fn mark_in_pass(&self, pass: &mut wgpu::RenderPass, index: u32) {
         pass.write_timestamp(&self.set, index);
+    }
+
+    /// Writes stamp `index` in a submission of its own, so that it falls between what
+    /// was submitted before and after it.
+    pub fn mark_alone(&self, gpu: &Gpu, index: u32) {
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.write_timestamp(&self.set, index);
+        gpu.queue.submit([encoder.finish()]);
     }
 
     /// Copies this frame's timestamps out, if a slot is free.
@@ -106,13 +137,23 @@ impl GpuTimer {
         for slot in self.slots.iter_mut().filter(|s| s.busy && s.ready.load(Ordering::Acquire)) {
             if let Ok(data) = slot.buffer.slice(..).get_mapped_range() {
                 let stamps: &[u64] = bytemuck::cast_slice(&data);
-                newest = Some(std::array::from_fn::<f32, { GPU_SPANS.len() }, _>(|i| stamps[i + 1].wrapping_sub(stamps[i]) as f32));
+                let (begin, end) = (UPLOAD_BEGIN as usize, UPLOAD_END as usize);
+                newest = Some(std::array::from_fn::<f32, { GPU_SPANS.len() }, _>(|i| {
+                    let (from, to) = match i {
+                        _ if i < PASS_SPANS => (i, i + 1),
+                        _ if i == PASS_SPANS => (begin, end),
+                        _ => (end, 0),
+                    };
+                    stamps[to].wrapping_sub(stamps[from]) as f32
+                }));
             }
             slot.buffer.unmap();
             slot.ready.store(false, Ordering::Release);
             slot.busy = false;
         }
+        self.fresh = newest.is_some();
         if let Some(ticks) = newest {
+            self.raw = ticks.map(|t| t * self.tick_ms);
             for (ms, t) in self.ms.iter_mut().zip(ticks) {
                 *ms += (t * self.tick_ms - *ms) * 0.05;
             }
@@ -122,7 +163,8 @@ impl GpuTimer {
     /// One line for humans.
     pub fn summary(&self) -> String {
         let parts: Vec<String> = GPU_SPANS.iter().zip(self.ms).map(|(name, ms)| format!("{name} {ms:.2}")).collect();
-        format!("GPU {:.1} ms: {}", self.ms.iter().sum::<f32>(), parts.join(", "))
+        let work: f32 = GPU_SPANS.iter().zip(self.ms).filter(|(name, _)| !GPU_IDLE.contains(name)).map(|(_, ms)| ms).sum();
+        format!("GPU {work:.1} ms: {}", parts.join(", "))
     }
 }
 
@@ -136,6 +178,8 @@ pub struct CpuTimer {
     pub ms: [f32; CPU_SPANS.len()],
     /// The longest each span has taken since the last reset.
     worst: [f32; CPU_SPANS.len()],
+    /// This frame's unsmoothed laps.
+    pub raw: [f32; CPU_SPANS.len()],
 }
 
 impl CpuTimer {
@@ -144,6 +188,7 @@ impl CpuTimer {
             last: Instant::now(),
             ms: [0.0; CPU_SPANS.len()],
             worst: [0.0; CPU_SPANS.len()],
+            raw: [0.0; CPU_SPANS.len()],
         }
     }
 
@@ -161,6 +206,7 @@ impl CpuTimer {
         let ms = (now - self.last).as_secs_f32() * 1000.0;
         self.ms[index] += (ms - self.ms[index]) * 0.05;
         self.worst[index] = self.worst[index].max(ms);
+        self.raw[index] = ms;
         self.last = now;
     }
 
@@ -172,6 +218,30 @@ impl CpuTimer {
     pub fn worst_summary(&self) -> String {
         let parts: Vec<String> = CPU_SPANS.iter().zip(self.worst).map(|(name, ms)| format!("{name} {ms:.1}")).collect();
         format!("CPU worst: {}", parts.join(", "))
+    }
+}
+
+/// Finer laps of the main thread, for the per-frame log (measurement build only).
+pub const SUB_SPANS: [&str; 21] = [
+    "sim", "streamer", "farview", "impostors", "day", "scan", "near", "particles", "footsteps", "props", "map", "scene", "draw", "submit1",
+    "acquire", "finish", "mapdraw", "overlay", "present", "after", "crows",
+];
+pub struct SubTimer {
+    last: Instant,
+    pub ms: [f32; SUB_SPANS.len()],
+}
+impl SubTimer {
+    pub fn new() -> Self {
+        Self { last: Instant::now(), ms: [0.0; SUB_SPANS.len()] }
+    }
+    pub fn start(&mut self) {
+        self.last = Instant::now();
+        self.ms = [0.0; SUB_SPANS.len()];
+    }
+    pub fn lap(&mut self, i: usize) {
+        let now = Instant::now();
+        self.ms[i] += (now - self.last).as_secs_f32() * 1000.0;
+        self.last = now;
     }
 }
 

@@ -2114,6 +2114,9 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.sea.slice(..));
             pass.draw_indexed(0..6, 0, sea_instance..sea_instance + 1);
 
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 4);
+            }
             // Far trees stand on the far view, drawn with it.
             if !impostor_list.is_empty() {
                 pass.set_pipeline(&self.impostor);
@@ -2124,7 +2127,7 @@ impl Renderer {
                 pass.set_vertex_buffer(1, self.instances.slice(..));
             }
             if let Some(t) = &self.timer {
-                t.mark_in_pass(&mut pass, 4);
+                t.mark_in_pass(&mut pass, 5);
             }
 
             pass.set_pipeline(&self.opaque_inside);
@@ -2132,6 +2135,9 @@ impl Renderer {
             draw_chunks(&mut pass, indirect, &draws, opaque_list);
             pass.set_pipeline(&self.opaque);
             draw_chunks(&mut pass, indirect, &draws, edge_list);
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 6);
+            }
 
             if prop_count > 0 {
                 pass.set_pipeline(&self.props);
@@ -2140,14 +2146,14 @@ impl Renderer {
                 pass.draw(0..36, 0..prop_count as u32);
             }
             if let Some(t) = &self.timer {
-                t.mark_in_pass(&mut pass, 5);
+                t.mark_in_pass(&mut pass, 7);
             }
             // The sky last, behind everything (see its pipeline).
             pass.set_pipeline(&self.sky);
             pass.set_bind_group(1, &self.aurora_bind, &[]);
             pass.draw(0..3, 0..1);
             if let Some(t) = &self.timer {
-                t.mark_in_pass(&mut pass, 6);
+                t.mark_in_pass(&mut pass, 8);
             }
         }
 
@@ -2185,6 +2191,9 @@ impl Renderer {
             pass.set_vertex_buffer(0, chunk_vertices.slice(..));
             pass.set_vertex_buffer(1, self.instances.slice(..));
             draw_chunks(&mut pass, indirect, &draws, water_list.clone());
+            if let Some(t) = &self.timer {
+                t.mark_in_pass(&mut pass, 9);
+            }
             if particle_count > 0 {
                 pass.set_pipeline(&self.particles);
                 pass.set_bind_group(0, &self.scene_bind, &[]);
@@ -2193,8 +2202,11 @@ impl Renderer {
                 pass.draw(0..36, 0..particle_count as u32);
             }
         }
+        else if let Some(t) = &self.timer {
+            t.mark(encoder, 9);
+        }
         if let Some(t) = &self.timer {
-            t.mark(encoder, 7);
+            t.mark(encoder, 10);
         }
 
         // --- Light shafts ----------------------------------------------------------
@@ -2227,7 +2239,7 @@ impl Renderer {
             }
         }
         if let Some(t) = &self.timer {
-            t.mark(encoder, 8);
+            t.mark(encoder, 11);
         }
 
         // --- Bloom and tonemap ---------------------------------------------------
@@ -2240,17 +2252,19 @@ impl Renderer {
         let b_bind = self.image_bind_group(device, &self.bloom_b.view, &self.hdr.view);
         fullscreen(encoder, "blur v", &self.blur_v, &b_bind, &self.bloom_a.view);
         if let Some(t) = &self.timer {
-            t.mark(encoder, 9);
+            t.mark(encoder, 12);
         }
     }
 
     /// Writes the tonemapped image of what [`Renderer::draw`] drew to `target`.
     pub fn finish(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        if let Some(t) = &self.timer {
+            t.mark(encoder, 13);
+        }
         let final_bind = self.image_bind_group(&gpu.device, &self.hdr.view, &self.bloom_a.view);
         fullscreen(encoder, "tonemap", &self.tonemap, &final_bind, target);
         if let Some(t) = &mut self.timer {
-            t.mark(encoder, 10);
-            t.resolve(encoder);
+            t.mark(encoder, 14);
         }
     }
 }
