@@ -67,7 +67,8 @@ pub struct FarVertex {
     /// Land: the wash of the flowers or heather that lie over it (its number in the
     /// globals' tables, 0 for none), which the shader colours by the date as it does the
     /// nearer ground; how much of the ground's colour it takes the place of; and how much
-    /// of that is still seen under the land's forest, out beyond the tree models.
+    /// of that is still seen under the land's forest, out beyond the tree models. Last,
+    /// how far the land lies in a hollow or on a ridge (see [`hollow`]).
     pub wash: [u8; 4],
 }
 
@@ -883,6 +884,52 @@ fn far_surface_y(c: &Continent, stride: usize, lx: f32, lz: f32) -> f32 {
     }
 }
 
+/// Grid cells out to the two rings of land a point is compared with in [`hollow`]: about
+/// 75 and 150 m, the size of the folds of hills that the eye reads from far off.
+const HOLLOW_RINGS: [f32; 2] = [3.0, 6.0];
+/// What a hollow byte counts per unit of [`hollow`]'s measure (HOLLOW_SCALE in
+/// common.wgsl).
+const HOLLOW_SCALE: f32 = 320.0;
+
+/// How far the land at grid point `(gx, gz)` of `c` (cell centres at whole numbers) lies
+/// below the land around it, a hollow, over 128, or above it, a ridge, under 128: the
+/// rise from it to the mean of the land round it over the distance to that land, in
+/// [`HOLLOW_SCALE`]ths. Less of the sky reaches down into a valley than onto a ridge, and
+/// that, more than the sun, is what shows the shape of distant hills. It is the same
+/// whatever the detail of the mesh it is drawn on, so the far view at any stride and the
+/// voxel terrain (see [`hollow_at`]) agree where they meet. The sea counts as level.
+fn hollow(c: &Continent, gx: f32, gz: f32) -> u8 {
+    let size = c.size;
+    let at = |x: f32, z: f32| {
+        let (x, z) = (x.clamp(0.0, size as f32 - 1.001), z.clamp(0.0, size as f32 - 1.001));
+        let (i, j) = (x as usize, z as usize);
+        let (fx, fz) = (x - i as f32, z - j as f32);
+        let h = |i: usize, j: usize| (c.height[j * size + i] * OLD_VOXEL).max(0.0);
+        let row = |j: usize| h(i, j) * (1.0 - fx) + h(i + 1, j) * fx;
+        row(j) * (1.0 - fz) + row(j + 1) * fz
+    };
+    let here = at(gx, gz);
+    let mut sum = 0.0;
+    for r in HOLLOW_RINGS {
+        let around = [(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r), (r, r), (-r, r), (r, -r), (-r, -r)];
+        let mean = around.iter().map(|&(dx, dz)| at(gx + dx, gz + dz)).sum::<f32>() / 8.0;
+        sum += (mean - here) / (r * c.cell_size());
+    }
+    let k = sum / HOLLOW_RINGS.len() as f32;
+    (128.0 + k * HOLLOW_SCALE).round().clamp(1.0, 255.0) as u8
+}
+
+/// [`hollow`] at a world position, in voxels: 128, level, where the continent is not made
+/// yet.
+pub fn hollow_at(world: &GameWorld, x: i32, z: i32) -> u8 {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or(128, |c| {
+        let cell = c.cell_size();
+        // The far view's vertices stand in the middle of their cells.
+        hollow(&c, (x - mx * MACRO_SIZE) as f32 / cell - 0.5, (z - mz * MACRO_SIZE) as f32 / cell - 0.5)
+    })
+}
+
 fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize) -> CellMesh {
     let cs = c.cell_size();
     let size = c.size;
@@ -913,6 +960,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
+                    let hollow = hollow(c, x as f32, z as f32);
                     let pos = |y: f32| Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     let (level, depth) = wetness(c, x, z, stride);
                     let mut land = look(c, mats, canopies, idx, gx.hypot(gz));
@@ -969,7 +1017,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         grad: [pack(gx), pack(gz)],
                         far: [far[0], far[1], far[2], wet],
                         place: [c.biome[idx], land.plant, skylines.angles[idx][0], skylines.angles[idx][1]],
-                        wash: [land.wash.0, (land.wash.1.clamp(0.0, 1.0) * 255.0).round() as u8, (land.wash.2.clamp(0.0, 1.0) * 255.0).round() as u8, 0],
+                        wash: [land.wash.0, (land.wash.1.clamp(0.0, 1.0) * 255.0).round() as u8, (land.wash.2.clamp(0.0, 1.0) * 255.0).round() as u8, hollow],
                     });
                 }
             }

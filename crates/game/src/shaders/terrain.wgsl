@@ -39,9 +39,9 @@ struct VOut {
 };
 
 // The chunks' instances (render::Instance), as words: offset 3, origin 3, scale, band 2,
-// biomes 8, slopes 2.
+// biomes 8, slopes 2, hollows.
 @group(1) @binding(1) var<storage, read> instances: array<u32>;
-const INSTANCE_WORDS: u32 = 19u;
+const INSTANCE_WORDS: u32 = 20u;
 
 // What the fragment shader needs of a chunk's instance, as the vertex shader hands it on.
 struct Chunk {
@@ -52,6 +52,9 @@ struct Chunk {
     scale: f32,
     grid0: vec4<u32>,
     grid1: vec4<u32>,
+    // How far the land lies in a hollow at the chunk's four corners, a byte each, x
+    // fastest (see hollow_light).
+    hollows: u32,
 };
 
 fn chunk(inst: u32) -> Chunk {
@@ -63,7 +66,17 @@ fn chunk(inst: u32) -> Chunk {
     c.band = vec2<f32>(bitcast<f32>(instances[b + 7u]), bitcast<f32>(instances[b + 8u]));
     c.grid0 = vec4<u32>(instances[b + 9u], instances[b + 10u], instances[b + 11u], instances[b + 12u]);
     c.grid1 = vec4<u32>(instances[b + 13u], instances[b + 14u], instances[b + 15u], instances[b + 16u]);
+    c.hollows = instances[b + 19u];
     return c;
+}
+
+// How far the land lies in a hollow at a point of a chunk, as the measure (see
+// hollow_light), blended between its corners, which its neighbours share. `t` is 0..1
+// across it.
+fn chunk_hollow(hollows: u32, t: vec2<f32>) -> f32 {
+    let f = clamp(t, vec2<f32>(0.0), vec2<f32>(1.0));
+    let c = vec4<f32>((vec4<u32>(hollows) >> vec4<u32>(0u, 8u, 16u, 24u)) & vec4<u32>(255u));
+    return hollow_measure(mix(mix(c.x, c.y, f.x), mix(c.z, c.w, f.x), f.y));
 }
 
 // The water's vertex output: everything a chunk's water needs, its current and falls too.
@@ -554,6 +567,12 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
     // And hills shade it at low sun, by their skylines, as they do the far view.
     let open = (in.flags & FLAG_SKY) != 0u;
     let beyond = select(0.3, 1.0, open) * skyline_side_light(grid_skyline(ch.grid1, in.local.xz / 32.0));
+    // Far off, valleys are lit less by the sky and the sun than ridges, as the far view's
+    // are, where the voxels' own corners are too small to shade them.
+    var fold = vec2<f32>(1.0);
+    if (far > 0.0) {
+        fold = mix(vec2<f32>(1.0), hollow_light(chunk_hollow(ch.hollows, in.local.xz / 32.0)), far);
+    }
     var direct = vec3<f32>(0.0);
     // The shadow maps are drawn with every leaf where it grows, not where the wind has
     // it: a leaf looked up where it sways to would slide in and out of its own shadow.
@@ -566,7 +585,8 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
         let through = max(sun_reaching(still + G.sun_dir.xyz * (1.1 * ch.scale), G.sun_dir.xyz, beyond), select(0.0, 0.3, open));
         direct = G.sun_color.rgb * vec3<f32>(0.85, 1.0, 0.45) * (0.45 * through * min(-facing * 2.0 + 0.35, 1.0));
     }
-    var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
+    let daylight = direct * fold.y + ambient(lit_n) * (ao * fold.x);
+    var light = daylight + local_lights(in.rel, n) * ao;
     if (!open) {
         // Under a canopy the shade is not grey: it is lit by sun that has been through
         // and bounced among the leaves overhead.
@@ -576,7 +596,12 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
         // Lanterns and embers: faint by day, bright enough to bloom after dark.
         light += vec3<f32>(mix(1.2, 14.0, darkness()));
     }
-    let color = apply_fog(base * light, in.rel);
+    // Far off, the air before land in shade is in that shade too, as before the far view.
+    var lit = 1.0;
+    if (far > 0.0) {
+        lit = mix(1.0, lit_beside_level(daylight), far);
+    }
+    let color = apply_fog_lit(base * light, in.rel, lit);
     return vec4<f32>(color, 1.0);
 }
 

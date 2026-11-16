@@ -373,9 +373,13 @@ struct Instance {
     /// Terrain: the lie of the land at its four corners (see `GpuChunk::slopes`), the
     /// normal's x of each in the first word and its z in the second, as signed bytes.
     slopes: [u32; 2],
+    /// Terrain: how far the land lies in a hollow or on a ridge at its four corners (see
+    /// `GpuChunk::hollows`), a byte each, x fastest; 128 for level. Read only by the
+    /// fragment shader, from the instances bound as storage.
+    hollows: u32,
 }
 // The terrain's fragment shader reads instances as words (INSTANCE_WORDS in terrain.wgsl).
-const _: () = assert!(size_of::<Instance>() == 19 * 4);
+const _: () = assert!(size_of::<Instance>() == 20 * 4);
 
 /// The camera's position for the far trees' whole-voxel placement.
 #[repr(C)]
@@ -2001,6 +2005,7 @@ impl Renderer {
                 band,
                 biomes,
                 slopes: [0, 1].map(|k| u32::from_le_bytes(chunk.slopes.map(|s| s[k] as u8))),
+                hollows: u32::from_le_bytes(chunk.hollows),
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
@@ -2057,6 +2062,7 @@ impl Renderer {
                 band: [0.0; 2],
                 biomes: [0; 8],
                 slopes: [0; 2],
+                hollows: 0x8080_8080,
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -2076,6 +2082,7 @@ impl Renderer {
             band: [0.0; 2],
             biomes: [0; 8],
                 slopes: [0; 2],
+            hollows: 0x8080_8080,
         });
         stats.far_tiles = far_tiles.len() as u32;
 
