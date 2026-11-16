@@ -685,16 +685,61 @@ fn cascade_light(c: i32, rel: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     // A wide filter on a face turned from the sun would reach under the face itself.
     let slope = sqrt(1.0 - ndl * ndl) / max(ndl, 0.25);
     let z = lp.z - (radius - 1.0) * texel * 0.5 * slope / span;
-    // Taps spread evenly over a disc, more of them where it is widest.
-    let taps = select(select(5, 8, c == 1), 12, c == 0);
+    // Taps spread evenly over a disc, more of them where it is widest. Each cascade has a
+    // loop of its own with a fixed count, so it unrolls and its offsets are constants.
+    let reach = radius / SHADOW_SIZE;
     var sum = 0.0;
-    for (var i = 0; i < taps; i++) {
-        let turn = f32(i) * 2.39996;
-        let out = sqrt((f32(i) + 0.5) / f32(taps)) * radius / SHADOW_SIZE;
-        sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + vec2<f32>(cos(turn), sin(turn)) * out, c, z);
+    var taps = 5.0;
+    if (c == 0) {
+        taps = 12.0;
+        for (var i = 0; i < 12; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_12[i] * reach, c, z);
+        }
+    } else if (c == 1) {
+        taps = 8.0;
+        for (var i = 0; i < 8; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_8[i] * reach, c, z);
+        }
+    } else {
+        for (var i = 0; i < 5; i++) {
+            sum += textureSampleCompareLevel(shadow_maps, shadow_sampler, uv + PCF_TAPS_5[i] * reach, c, z);
+        }
     }
-    return vec2<f32>(sum / f32(taps), 1.0);
+    return vec2<f32>(sum / taps, 1.0);
 }
+
+// The taps of cascade_light's filter over a disc of radius 1, for 12, 8 and 5 of them:
+// tap i of n at sqrt((i + 0.5) / n) from the middle, turned i * 2.39996 radians (the golden
+// angle), so they spread evenly whatever their number. Worked out once, in f32, rather
+// than with a cos, sin and sqrt for every tap of every pixel.
+const PCF_TAPS_12 = array<vec2<f32>, 12>(
+    vec2<f32>(0.204124153, 0.0),
+    vec2<f32>(-0.260698497, 0.238822713),
+    vec2<f32>(0.0399013013, -0.454688042),
+    vec2<f32>(0.328598619, 0.428590238),
+    vec2<f32>(-0.6030128, -0.106656536),
+    vec2<f32>(0.571219087, -0.363375992),
+    vec2<f32>(-0.191050008, 0.710750699),
+    vec2<f32>(-0.364394337, -0.701581657),
+    vec2<f32>(0.790564001, 0.288689852),
+    vec2<f32>(-0.822432637, 0.339516312),
+    vec2<f32>(0.396443814, -0.847249866),
+    vec2<f32>(0.293014765, 0.93406409));
+const PCF_TAPS_8 = array<vec2<f32>, 8>(
+    vec2<f32>(0.25, 0.0),
+    vec2<f32>(-0.319289148, 0.29249689),
+    vec2<f32>(0.0488689169, -0.556876838),
+    vec2<f32>(0.402449489, 0.524913669),
+    vec2<f32>(-0.738536775, -0.130627036),
+    vec2<f32>(0.699597657, -0.445042878),
+    vec2<f32>(-0.233987495, 0.870488286),
+    vec2<f32>(-0.446290076, -0.859258533));
+const PCF_TAPS_5 = array<vec2<f32>, 5>(
+    vec2<f32>(0.316227764, 0.0),
+    vec2<f32>(-0.403872401, 0.36998257),
+    vec2<f32>(0.0618148297, -0.704399705),
+    vec2<f32>(0.509062827, 0.663969159),
+    vec2<f32>(-0.9341833, -0.165231586));
 
 // Fraction of direct sunlight reaching a point: cascaded shadow maps, filtered wider
 // the further the shadow has fallen, then cloud shadow. `beyond` is what to take it as
