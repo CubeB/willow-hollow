@@ -14,7 +14,7 @@ use worldgen::scale::{VOXELS_PER_METRE, m64};
 
 use crate::{
     inventory::{self, Item, Shape, Stack},
-    particles::ParticleInstance,
+    particles::{ParticleInstance, dither_edge, dither_since},
 };
 
 /// The states of a fire: laid and never lit, burning, and burnt down to its ashes.
@@ -275,7 +275,10 @@ impl Placed {
                 break;
             }
             if thing.is_fire() || d <= m64(SMALL_SIGHT) {
+                let from = out.len();
                 draw_one(thing, cam, clock, out);
+                let sight = if thing.is_fire() { CAMP_SIGHT } else { SMALL_SIGHT };
+                dither_since(out, from, dither_edge(d, m64(sight), m64(sight * 0.12)));
             }
         }
     }
@@ -322,6 +325,7 @@ impl Brush<'_> {
             glow,
             color: [color[0], color[1], color[2], 1.0],
             tilt,
+            dissolve: 0.0,
         });
     }
 

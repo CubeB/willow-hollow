@@ -48,6 +48,9 @@ struct VOut {
     @location(9) wash: vec4<f32>,
     // How much of that shows under the forest, out beyond the tree models.
     @location(10) wash_far: f32,
+    // How far the land lies below the land around it, or above it if negative (see
+    // farview::hollow), as the measure (see hollow_light).
+    @location(11) hollow: f32,
 };
 
 // The colour of the wash numbered `code` this date, seen from too far to tell one plant
@@ -131,6 +134,7 @@ fn vs(in: VIn) -> VOut {
     out.skylines = vec2<f32>(in.place.zw) / 255.0;
     out.wash = vec4<f32>(0.0);
     out.wash_far = 0.0;
+    out.hollow = hollow_measure(f32(in.wash.w));
     if (in.wash.x != 0u && in.wash.y != 0u) {
         let amount = f32(in.wash.y) / 255.0;
         out.wash = vec4<f32>(far_wash(in.wash.x, G.season.x) * amount, amount);
@@ -162,6 +166,8 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     }
     let up = vec3<f32>(0.0, 1.0, 0.0);
     var color = vec3<f32>(0.0);
+    // How well lit the land is, for the air before it (see apply_fog_lit).
+    var lit = 1.0;
     if (in.kind > 0.42) {
         color = water_shade(in.color, in.rel, in.snow.y);
     } else if (lake >= 1.0) {
@@ -173,8 +179,16 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let side_n = normalize(vec3<f32>(-in.grad.x, 0.0, -in.grad.y) + vec3<f32>(1e-5, 0.0, 0.0));
         // The shadow maps end long before here: hills shade it by their skylines.
         let vis = skyline_light(in.skylines) * cloud_light(in.rel);
-        let top = G.sun_color.rgb * max(G.sun_dir.y, 0.0) * vis + ambient(up);
-        let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * vis + ambient(side_n) * 0.7;
+        // The tops are lit mostly as the slope they make up, as the far voxels are (see
+        // shade in terrain.wgsl): lit as level ground, a hillside turned from the sun was
+        // as bright as one facing it, and distant land was all one brightness.
+        let slope_n = normalize(vec3<f32>(-in.grad.x, 1.0, -in.grad.y));
+        let top_n = normalize(mix(up, slope_n, 0.7));
+        // Valleys darker and ridges lighter, as the far voxels are.
+        let fold = hollow_light(in.hollow);
+        let sun = vis * fold.y;
+        let top = G.sun_color.rgb * max(dot(top_n, G.sun_dir.xyz), 0.0) * sun + ambient(top_n) * fold.x;
+        let side = G.sun_color.rgb * max(dot(side_n, G.sun_dir.xyz), 0.0) * 0.8 * sun + ambient(side_n) * 0.7 * fold.x;
         // The season: a far forest turns and goes bare, grass dries, snow settles.
         let world = in.rel.xz + G.cam_wrapped.xz;
         // While the tree models stand on it, the ground is seen between them; out beyond,
@@ -197,12 +211,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
             base = mix(base, wooded, canopy);
         }
         base = ground_weather(base, up, in.rel, 0.5, false, false, false, 0.0, in.snow);
-        color = base * mix(top, side, clamp(steep * 0.5, 0.0, 0.6));
         // Stepped ground also carries the shadowed edges of all its steps.
-        color *= 1.0 - clamp(steep * 0.9, 0.0, 0.35);
+        let light = mix(top, side, clamp(steep * 0.5, 0.0, 0.6)) * (1.0 - clamp(steep * 0.9, 0.0, 0.35));
+        color = base * light;
+        lit = lit_beside_level(light);
         if (lake > 0.0) {
             color = mix(color, water_shade(srgb_to_linear(LAKE_WATER), in.rel, in.snow.y), lake);
         }
     }
-    return vec4<f32>(apply_fog(color, in.rel), 1.0);
+    return vec4<f32>(apply_fog_lit(color, in.rel, mix(lit, 1.0, lake)), 1.0);
 }

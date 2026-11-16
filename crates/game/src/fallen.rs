@@ -18,14 +18,19 @@ use worldgen::{
     world::GameWorld,
 };
 
-use crate::{inventory, particles::ParticleInstance, placed, player::WorldVoxels};
+use crate::{
+    inventory,
+    particles::{ParticleInstance, dither_edge, dither_since},
+    placed,
+    player::WorldVoxels,
+};
 
 /// How far from the camera sticks are looked for, and drawn, in metres.
 pub const REACH: f64 = 20.0;
 /// How far round a tree other trees are counted, to tell a wood from a lone tree.
 const WOOD: f64 = 12.0;
 /// The most boxes the sticks in view may come to.
-const MOST_BOXES: usize = 200;
+const MOST_BOXES: usize = 280;
 
 /// A few sticks lying together on the ground.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,12 +77,12 @@ pub fn under(seed: u32, trees: &[(IVec3, Species)], centre: DVec3, reach: f64, m
                 dx * dx + dz * dz <= wood * wood
             })
             .count();
-        let chance = (0.15 + 0.2 * others as f32).min(0.8);
+        let chance = (0.21 + 0.28 * others as f32).min(0.8);
         // The great trees stand on a wider trunk.
         let girth = if matches!(species, Species::Redwood | Species::ElderOak | Species::Baobab | Species::Kapok) { 1.2 } else { 0.0 };
         // The land the trunk stands on, looked for only once a stick is to lie by it.
         let mut base = None;
-        for k in 0..1 + others.min(2) as i32 {
+        for k in 0..1 + others.min(3) as i32 {
             let roll = |n: i32| unit(hash3(seed ^ 0x571c_c5, foot.x, k * 8 + n, foot.z));
             if roll(0) >= chance {
                 continue;
@@ -137,8 +142,11 @@ pub fn draw(sticks: &[Stick], pack: &inventory::Pack, cam: DVec3, out: &mut Vec<
         if out.len() >= limit {
             break;
         }
-        if !pack.gathered(s.spot().0, s.spot().1) && s.pos.distance(cam) <= m64(REACH) {
+        let d = s.pos.distance(cam);
+        if !pack.gathered(s.spot().0, s.spot().1) && d <= m64(REACH) {
+            let from = out.len();
             placed::draw_one(&placed::Thing::new(item.clone(), s.count, s.pos, s.yaw), cam, 0.0, out);
+            dither_since(out, from, dither_edge(d, m64(REACH), m64(4.0)));
         }
     }
 }

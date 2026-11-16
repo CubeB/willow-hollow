@@ -531,6 +531,29 @@ fn night_eye(c: vec3<f32>) -> vec3<f32> {
 }
 
 fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
+    return apply_fog_lit(surface, at, 1.0);
+}
+
+// How much the light the air adds before a far surface goes with how well lit the surface
+// is, by day (see apply_fog_lit).
+const AIR_SHADE: f32 = 0.4;
+
+// How well lit a surface is beside level open ground in full sun, for apply_fog_lit:
+// `light` is the light falling on it.
+fn lit_beside_level(light: vec3<f32>) -> f32 {
+    let level = G.sun_color.rgb * max(G.sun_dir.y, 0.0) + ambient(vec3<f32>(0.0, 1.0, 0.0));
+    let w = vec3<f32>(0.3, 0.59, 0.11);
+    return clamp(dot(light, w) / max(dot(level, w), 1e-4), 0.25, 1.4);
+}
+
+// apply_fog for a surface `lit` as well as level ground in the sun is (lit_beside_level).
+// The air just before a hillside in shade, or down in a valley, is in that shade too, so
+// it adds less light than the air before one in the sun: the shade on far hills shows
+// through the haze as a darker blue, where with the same veil over everything the
+// distance went one pale brightness. The sun's glow in the haze is from all along the
+// way and keeps its brightness. Through so much air that the land is all but gone the
+// veil is the sky's colour again, so the farthest hills still melt into it.
+fn apply_fog_lit(surface: vec3<f32>, at: vec3<f32>, lit: f32) -> vec3<f32> {
     var color = night_eye(surface);
     var rel = at;
     var dist = length(rel);
@@ -554,7 +577,9 @@ fn apply_fog(surface: vec3<f32>, at: vec3<f32>) -> vec3<f32> {
     // is haze, the sun's glow in it.
     let dir = normalize(vec3<f32>(rel.x, abs(rel.y) * 0.15 + dist * 0.02, rel.z));
     let glow = sun_haze(dot(rel, G.sun_dir.xyz) / max(dist, 1e-4)) * (1.0 - exp(-haze));
-    return color * through + (air_light(dir, through) + glow) * (1.0 - through);
+    let seen = dot(through, vec3<f32>(0.3, 0.59, 0.11));
+    let shade = mix(1.0, lit, AIR_SHADE * G.sun_color.w * smoothstep(0.02, 0.35, seen));
+    return color * through + (air_light(dir, through) * shade + glow) * (1.0 - through);
 }
 
 // The light the air between the eye and a far thing gives off toward the eye. While the
@@ -612,6 +637,28 @@ fn ambient(n: vec3<f32>) -> vec3<f32> {
     let bounce = G.sun_color.rgb * vec3<f32>(0.20, 0.17, 0.12) * (0.65 - 0.35 * n.y)
         * max(G.sun_dir.y, 0.0);
     return sky + bounce;
+}
+
+// A hollow byte (farview::hollow) per unit of its measure: the rise from a point to the
+// land round it, over the distance to that land (HOLLOW_SCALE in farview.rs).
+const HOLLOW_SCALE: f32 = 320.0;
+// How much less of the sky lights land per unit of that measure.
+const HOLLOW_SHADE: f32 = 3.5;
+
+// A hollow byte, 0..255, as its measure.
+fn hollow_measure(byte: f32) -> f32 {
+    return (byte - 128.0) / HOLLOW_SCALE;
+}
+
+// How much of the sky (x) and of the sun (y) reaches land lying `hollow` deep in a fold of
+// the hills, negative on a ridge, out where the shadow maps and the voxels' own corners no
+// longer shade it. Less of the sky reaches down into a valley than onto a ridge, and less
+// of the light bounced about; at a low sun a valley is half in the shade of its sides.
+// That is what shows the shape of distant hills, whichever way the sun is: without it a
+// far hillside was one brightness from its ridge to the stream at its foot.
+fn hollow_light(hollow: f32) -> vec2<f32> {
+    let sky = clamp(1.0 - hollow * HOLLOW_SHADE, 0.4, 1.3);
+    return vec2<f32>(sky, mix(1.0, sky, 0.6));
 }
 
 // How much sun the clouds let through to a point.

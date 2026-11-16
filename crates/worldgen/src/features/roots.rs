@@ -397,7 +397,7 @@ impl Roots {
                 let at = root.at(t) * CELLS as f32;
                 let (x, z) = (at.x.floor() as i32, at.y.floor() as i32);
                 let y = (base + root.ground_at(t) + 1) * CELLS;
-                let here = PlantBox { lo: [x, y, z], hi: [x + thick, y + thick, z + thick], voxel: wood, sway_lo: false, sway_hi: false, thin: 0, season: 0 };
+                let here = PlantBox { lo: [x, y, z], hi: [x + thick, y + thick, z + thick], voxel: wood, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
                 match prev {
                     // Running on along x or z at the same height: one longer box.
                     Some(ref mut b) if b.lo[1] == y && b.hi[1] == y + thick && b.lo[2] == z && b.hi[2] == z + thick && (b.hi[0] == x || b.lo[0] == x + thick || (b.lo[0]..b.hi[0]).contains(&x)) => {

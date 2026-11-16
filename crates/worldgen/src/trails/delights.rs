@@ -97,17 +97,125 @@ const BROW: usize = 60;
 const BROW_DROP: f32 = m(2.4);
 /// Trail steps of one country either side of the line where a trail passes into another.
 const EDGE: usize = 48;
-/// Height of a flag pole above the ground, in cells.
-const POLE: i32 = 28;
+/// Height of a flag pole above the ground, in cells: 3.2 m, so that the string over the
+/// trail, sagging, and the flags hung from it, still clear the head of anyone walking under.
+const POLE: i32 = 32;
+/// How far below the top of its pole a string over the trail is tied, in cells.
+const TIE: i32 = 2;
+/// A flag's width along its string, how far it hangs below it, and the gap to the next,
+/// in cells: 20 cm by 30 cm, a hand apart.
+const FLAG_WIDE: i32 = 2;
+const FLAG_DROP: i32 = 3;
+const FLAG_GAP: i32 = 1;
+/// How far out from its pole, away from the trail, the cairn stands that holds a pole's
+/// stay (a second string of flags run down from the pole to the ground), in voxels.
+const STAY: i32 = 5;
 
-/// Cloth of the five colours flags are strung in, in their order.
-const FLAG_COLOURS: [Voxel; 5] = [mat::CLOTH_BLUE, mat::CLOTH_PALE, mat::CLOTH_RED, mat::MOSS, mat::FLOWER_YELLOW];
+/// Cloth of the five colours flags are strung in, in their order from the first: blue
+/// for the sky, white for the air, red for fire, green for water and yellow for earth.
+const FLAG_COLOURS: [Voxel; 5] = [mat::CLOTH_BLUE, mat::CLOTH_PALE, mat::CLOTH_RED, mat::CLOTH_GREEN, mat::CLOTH_YELLOW];
+
+/// Strings a line of flags `len` cells long from cell `from` along `dir` (a level unit
+/// step), to end `rise` cells higher, sagging as a hanging cord does by `sag` cells in the
+/// middle. The cord goes a cell at a time, and runs of it at one height are one box; a
+/// flag hangs from it every hand's breadth wherever its foot clears `clear` cells above
+/// the model's ground, the colours in their order from blue. Everything on it moves with
+/// it in the wind, most in the middle of a long span and not at all where it is tied.
+fn string(k: &mut Model, from: IVec3, dir: IVec3, len: i32, rise: i32, sag: f32, clear: i32) {
+    // The shape of a hanging cord (a catenary), 0 at the ends and 1 in the middle.
+    const BOW: f32 = 1.2;
+    let hang = |t: f32| (BOW.cosh() - (BOW * (2.0 * t - 1.0)).cosh()) / (BOW.cosh() - 1.0);
+    let n = len.max(2);
+    let at = |i: i32| i as f32 / (n - 1) as f32;
+    let y: Vec<i32> = (0..n).map(|i| from.y + (rise as f32 * at(i) - sag * hang(at(i))).round() as i32).collect();
+    // A long span gives more than a short one.
+    let reach = (n as f32 / 48.0).min(1.0);
+    let give = |i: i32| 1 + (30.0 * reach * hang(at(i))).round() as u8;
+    // The cells of cord in each column: down to the next column's where the cord falls
+    // steeply, so that it stays whole, and up to it where it climbs.
+    let cord: Vec<(i32, i32)> = (0..n as usize)
+        .map(|i| {
+            let next = y.get(i + 1).copied().unwrap_or(y[i]);
+            (y[i].min(next + 1), (y[i] + 1).max(next))
+        })
+        .collect();
+    // A box over columns `a..b` (`a <= b`, along the string) and cells `lo..hi` high.
+    let span = |a: i32, b: i32, lo: i32, hi: i32| {
+        let (p, q) = (from + dir * a, from + dir * b);
+        (IVec3::new(p.x.min(q.x), lo, p.z.min(q.z)), IVec3::new(p.x.max(q.x) + 1, hi, p.z.max(q.z) + 1))
+    };
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && cord[j as usize + 1] == cord[i as usize] {
+            j += 1;
+        }
+        let (lo, hi) = span(i, j, cord[i as usize].0, cord[i as usize].1);
+        k.on_line(lo, hi, mat::ROPE, give((i + j) / 2), false);
+        i = j + 1;
+    }
+    let mut colour = 0;
+    let mut i = 1;
+    while i + FLAG_WIDE < n {
+        let top = (i..i + FLAG_WIDE).map(|c| cord[c as usize].0).min().unwrap_or(0);
+        if top - FLAG_DROP >= clear {
+            let (lo, hi) = span(i, i + FLAG_WIDE - 1, top - FLAG_DROP, top);
+            k.on_line(lo, hi, FLAG_COLOURS[colour % 5], give(i), true);
+            colour += 1;
+        }
+        i += FLAG_WIDE + FLAG_GAP;
+    }
+}
+
+/// A string of prayer flags across the trail on two poles, the near pole at the origin
+/// and the far one `span` voxels along +X, standing `rise` voxels higher. Each pole (the
+/// near first) may have a stay: a second string of flags run down from it, away from the
+/// trail, to a cairn STAY voxels out whose foot is the given number of voxels below the
+/// pole's (above it, if less than 0). It holds the pole up against the pull of the string
+/// over the trail.
+pub fn flags(p: &Palette, span: i32, rise: i32, stays: [Option<i32>; 2]) -> Model {
+    let mut k = Model::new();
+    let far = span * CELLS;
+    let dy = rise * CELLS;
+    for (n, (x, y)) in [(0, 0), (span, rise)].into_iter().enumerate() {
+        // The pole, sunk in the ground on a footing stone, with a cap where it was cut.
+        let (cx, cy) = (x * CELLS, y * CELLS);
+        k.vox(x, y - FOOTING, 0, p.stone);
+        k.b((cx + 1, cy - FOOTING * CELLS + CELLS, 1), (cx + 3, cy + POLE, 3), p.wood);
+        k.b((cx + 1, cy + POLE, 1), (cx + 3, cy + POLE + 1, 3), p.plank);
+        let Some(drop) = stays[n] else { continue };
+        // The stay runs from the pole a little below the string over the trail to the
+        // top of a cairn of two stones, sunk like the poles.
+        let out = if n == 0 { -1 } else { 1 };
+        let foot = y - drop;
+        k.vox(x + out * STAY, foot - FOOTING, 0, p.stone_dark);
+        for h in 1 - FOOTING..=0 {
+            k.vox(x + out * STAY, foot + h, 0, p.stone);
+        }
+        let (cap, base) = ((x + out * STAY) * CELLS, foot * CELLS);
+        k.b((cap + 1, base + 4, 1), (cap + 3, base + 6, 3), p.stone_dark);
+        let (start, end) = if out > 0 { (cx + 3, cap) } else { (cx, cap + 3) };
+        let top = cy + POLE - TIE - 3;
+        // Its flags keep knee height clear of the ground at either end.
+        string(&mut k, IVec3::new(start, top, 2), IVec3::new(out, 0, 0), (end - start).abs() + 1, base + 6 - top, 1.5, cy.max(base) + 6);
+    }
+    // The string over the trail, tied below the tops of the poles, and sagging a tenth
+    // of its length.
+    let len = far + 1 - 3;
+    let sag = (len as f32 * 0.1).clamp(2.0, 5.0);
+    string(&mut k, IVec3::new(3, POLE - TIE, 2), IVec3::X, len, dy, sag, i32::MIN);
+    k
+}
 
 /// Builds a delight from the palette of the place, varied by `seed`: its foot on layer 0
 /// and model +X toward the trail, except that a seat's front is model -Z and a string
 /// of flags runs along +X from the pole at the origin to one `span` voxels away standing
-/// `rise` voxels higher.
+/// `rise` voxels higher (see [`flags`]; here its poles have stays as `seed` falls).
 pub fn model(kind: Delight, p: &Palette, seed: u32, span: i32, rise: i32) -> Model {
+    if kind == Delight::Flags {
+        let stay = |n: u32| (seed >> n & 1 != 0).then_some((seed >> (n + 2) & 3) as i32 - 1);
+        return flags(p, span, rise, [stay(3), stay(4)]);
+    }
     let mut k = Model::new();
     let mut rng = Rng::new(seed ^ 0x0de1_1675 ^ (kind as u32).wrapping_mul(0x2c1b_3c6d));
     let hang = |k: &mut Model, lo, hi, v| k.part(lo, hi, v, true, false);
@@ -173,32 +281,7 @@ pub fn model(kind: Delight, p: &Palette, seed: u32, span: i32, rise: i32) -> Mod
             k.b((-1, 4, 0), (13, 5, 4), p.wood);
             k.b((-1, 5, 0), (13, 6, 4), p.plank);
         }
-        Delight::Flags => {
-            // Two poles, a cord between them that sags in the middle, and the flags
-            // hung from it a hand apart: five colours over and over.
-            let far = span * CELLS;
-            let dy = rise * CELLS;
-            k.vox(0, -FOOTING, 0, p.stone);
-            k.vox(span, rise - FOOTING, 0, p.stone);
-            k.b((1, -FOOTING * CELLS + CELLS, 1), (3, POLE, 3), p.wood);
-            k.b((far + 1, dy - FOOTING * CELLS + CELLS, 1), (far + 3, dy + POLE, 3), p.wood);
-            let (x0, x1) = (3, far + 1);
-            let len = (x1 - x0) as f32;
-            let sag = (len / 8.0).clamp(1.0, 3.0);
-            let mut colour = rng.int(0, 4) as usize;
-            let mut x = x0;
-            while x < x1 {
-                let w = 3.min(x1 - x);
-                let t = (x - x0) as f32 / len + 0.5 * w as f32 / len;
-                let y = POLE - 2 + (dy as f32 * t).round() as i32 - (sag * (1.0 - (2.0 * t - 1.0).powi(2))).round() as i32;
-                k.b((x, y, 2), (x + w, y + 1, 3), mat::ROPE);
-                if w == 3 {
-                    hang(&mut k, (x, y - 3, 2), (x + 2, y, 3), FLAG_COLOURS[colour % 5]);
-                    colour += 1;
-                }
-                x += w;
-            }
-        }
+        Delight::Flags => unreachable!(),
         Delight::BalancedStones => {
             // A flat stone, a small one on it, a wider one balanced on that, and so
             // on up to a pebble a metre from the ground; a second, shorter stack by it.
@@ -433,42 +516,109 @@ fn place(c: &Continent, seed: u32, t: &Trail, i: usize, kind: Delight, side: f32
             0
         };
         let palette = super::build::palette_at(c, seed, s.column(x, z).biome, x, g, z).varied(hash2(seed ^ 0x3a81, x >> 6, z >> 6));
-        let built = model(kind, &palette, pick, span, rise);
-        let origin = IVec3::new(x, g + 1, z);
-        let voxels: Vec<(IVec3, Voxel)> = built.voxels.iter().map(|&(p, v)| (origin + rotate(p, turns), v)).collect();
-        let fine = parts::place_fine(&built.fine, origin, turns);
-        // Where it stands: its voxels, and the parts that come down to the ground.
-        let mut blocks: Vec<IVec2> = voxels.iter().map(|(p, _)| IVec2::new(p.x, p.z)).collect();
-        blocks.sort_unstable_by_key(|c| (c.x, c.y));
-        blocks.dedup();
-        let mut footprint = blocks.clone();
-        for b in fine.iter().filter(|b| b.lo[1] <= origin.y * CELLS) {
-            let (lo, hi) = (IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)), (IVec3::from_array(b.hi) - 1).div_euclid(IVec3::splat(CELLS)));
-            for zz in lo.z..=hi.z {
-                for xx in lo.x..=hi.x {
-                    footprint.push(IVec2::new(xx, zz));
-                }
+        if kind != Delight::Flags {
+            let built = model(kind, &palette, pick, span, rise);
+            if let Some(placed) = stand(t, i, kind, q, IVec3::new(x, g + 1, z), turns, span, rise, &built, &ground, &[]) {
+                return Some(placed);
+            }
+            continue;
+        }
+        // Most strings of flags have a stay down to the ground from one pole or both,
+        // where its cairn finds room: dry ground off the way, not far above or below the
+        // pole's. Where there is none, the string over the trail stands alone.
+        let wanted = [0, 1, 2, 3, 3][(pick >> 4) as usize % 5];
+        let mut options: [Vec<Option<(i32, IVec2, i32)>>; 2] = [vec![None], vec![None]];
+        for (n, (px, base)) in [(-STAY, g), (span + STAY, g + rise)].into_iter().enumerate() {
+            let at = IVec3::new(x, 0, z) + rotate(IVec3::new(px, 0, 0), turns);
+            if let Some(y) = ground(at.x, at.z).filter(|&y| wanted >> n & 1 != 0 && (base - 3..=base + 2).contains(&y)) {
+                options[n].insert(0, Some((base - y, IVec2::new(at.x, at.z), y)));
             }
         }
-        footprint.sort_unstable_by_key(|c| (c.x, c.y));
-        footprint.dedup();
-        if t.on_way(&footprint, i) {
-            continue;
+        // Both stays if they can be had, then either one, then none.
+        let mut tries: Vec<[Option<(i32, IVec2, i32)>; 2]> = options[0].iter().flat_map(|&a| options[1].iter().map(move |&b| [a, b])).collect();
+        tries.sort_by_key(|t| t.iter().filter(|s| s.is_none()).count());
+        for stays in tries {
+            let built = flags(&palette, span, rise, stays.map(|s| s.map(|(drop, _, _)| drop)));
+            let cairns: Vec<(IVec2, i32)> = stays.iter().flatten().map(|&(_, at, y)| (at, y)).collect();
+            if let Some(placed) = stand(t, i, kind, q, IVec3::new(x, g + 1, z), turns, span, rise, &built, &ground, &cairns) {
+                return Some(placed);
+            }
         }
-        // Level ground under all of it, though a block with its sunk footing can stand
-        // where the ground is a voxel lower; the far pole of a string of flags stands
-        // on its own ground.
-        let far = rotate(IVec3::new(span, 0, 0), turns);
-        let level = footprint.iter().all(|c| {
-            let want = if kind == Delight::Flags && (c.x - x - far.x).abs() <= 1 && (c.y - z - far.z).abs() <= 1 { g + rise } else { g };
-            ground(c.x, c.y).is_some_and(|y| y == want || (y == want - 1 && kind != Delight::ViewBench && blocks.contains(c)))
-        });
-        if !level {
-            continue;
-        }
-        return Some(Placed { kind, at: q, origin, voxels, fine, footprint });
     }
     None
+}
+
+/// Sets a built delight down with model voxel 0 at `origin`, turned `turns`, if the ground
+/// will have it there: level under all of it (the far pole of a string of flags on its
+/// own ground, `rise` higher, and the cairn at the foot of a stay on the ground given
+/// for it in `cairns`), none of it on the way, and nothing under the flags that rises
+/// into them.
+#[allow(clippy::too_many_arguments)]
+fn stand(
+    t: &Trail,
+    i: usize,
+    kind: Delight,
+    q: Vec2,
+    origin: IVec3,
+    turns: u32,
+    span: i32,
+    rise: i32,
+    built: &Model,
+    ground: &dyn Fn(i32, i32) -> Option<i32>,
+    cairns: &[(IVec2, i32)],
+) -> Option<Placed> {
+    let (x, g, z) = (origin.x, origin.y - 1, origin.z);
+    let voxels: Vec<(IVec3, Voxel)> = built.voxels.iter().map(|&(p, v)| (origin + rotate(p, turns), v)).collect();
+    let fine = parts::place_fine(&built.fine, origin, turns);
+    // The columns a box covers.
+    let columns = |b: &voxel::mesh::PlantBox| {
+        let (lo, hi) = (IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)), (IVec3::from_array(b.hi) - 1).div_euclid(IVec3::splat(CELLS)));
+        (lo.z..=hi.z).flat_map(move |zz| (lo.x..=hi.x).map(move |xx| IVec2::new(xx, zz)))
+    };
+    // Where it stands: its voxels, and the parts that come down to the ground.
+    let mut blocks: Vec<IVec2> = voxels.iter().map(|(p, _)| IVec2::new(p.x, p.z)).collect();
+    blocks.sort_unstable_by_key(|c| (c.x, c.y));
+    blocks.dedup();
+    let mut footprint = blocks.clone();
+    footprint.extend(fine.iter().filter(|b| b.lo[1] <= origin.y * CELLS).flat_map(columns));
+    footprint.sort_unstable_by_key(|c| (c.x, c.y));
+    footprint.dedup();
+    // Under a pole's stay, where its flags come down low, off the trail.
+    let back = (4 - turns) % 4;
+    let mut under: Vec<IVec2> = Vec::new();
+    if kind == Delight::Flags {
+        let beside = |c: &IVec2| {
+            let m = rotate(IVec3::new(c.x - x, 0, c.y - z), back);
+            m.x <= 0 || m.x >= span
+        };
+        under.extend(fine.iter().flat_map(columns).filter(|c| beside(c) && !footprint.contains(c)));
+        under.sort_unstable_by_key(|c| (c.x, c.y));
+        under.dedup();
+    }
+    let all: Vec<IVec2> = footprint.iter().chain(&under).copied().collect();
+    if t.on_way(&all, i) {
+        return None;
+    }
+    // Level ground under all of it, though a block with its sunk footing can stand where
+    // the ground is a voxel lower; the far pole of a string of flags stands on its own
+    // ground, and a stay's cairn on its own.
+    let want = |c: &IVec2| {
+        let m = rotate(IVec3::new(c.x - x, 0, c.y - z), back);
+        if let Some(&(_, y)) = cairns.iter().find(|(at, _)| at == c) {
+            y
+        } else if kind == Delight::Flags && 2 * m.x > span {
+            g + rise
+        } else {
+            g
+        }
+    };
+    let level = footprint.iter().all(|c| ground(c.x, c.y).is_some_and(|y| y == want(c) || (y == want(c) - 1 && kind != Delight::ViewBench && blocks.contains(c))));
+    // Under a stay, the ground may rise toward a cairn that stands higher than its pole.
+    let highest = cairns.iter().map(|&(_, y)| y).max().unwrap_or(i32::MIN);
+    if !level || !under.iter().all(|c| ground(c.x, c.y).is_some_and(|y| y <= want(c).max(highest))) {
+        return None;
+    }
+    Some(Placed { kind, at: q, origin, voxels, fine, footprint })
 }
 
 #[cfg(test)]

@@ -340,6 +340,7 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f
                 glow: 0.0,
                 color: linear(*color),
                 tilt: [pitch, 0.0],
+                dissolve: 0.0,
             });
         }
     };
@@ -482,6 +483,7 @@ pub fn draw_lantern(feet: DVec3, facing: f32, pose: &Pose, lit: f32, cam: DVec3,
             glow,
             color: linear(color),
             tilt: [0.0; 2],
+            dissolve: 0.0,
         });
     }
     cam + world(hand + Vec3::new(0.0, -2.0, 0.0)).as_dvec3()

@@ -197,6 +197,7 @@ impl Insects {
                 glow: 0.0,
                 color: [colour[0], colour[1], colour[2], 1.0],
                 tilt: [0.0, 0.0],
+                dissolve: 0.0,
             });
             // The wings beat too fast to see: a pale blur over the back, shimmering.
             let shimmer = 0.25 + 0.15 * ((time * 60.0 + i.seed as f64).sin() as f32);
@@ -207,6 +208,7 @@ impl Insects {
                 glow: 0.0,
                 color: [0.85, 0.88, 0.9, shimmer],
                 tilt: [0.0, 0.0],
+                dissolve: 0.0,
             });
         }
     }

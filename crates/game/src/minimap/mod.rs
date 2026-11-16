@@ -12,9 +12,9 @@
 //! Text (names on the large map) goes through egui.
 //!
 //! Marks are hints, not objectives: no distances, no lines to them. A place not yet
-//! visited shows only as a soft glow, and only once the land around it has been seen;
-//! one still out of sight shows as a faint glow at the corner map's rim in its direction,
-//! for the nearest few. A visited place turns into its icon, or close in, where the
+//! visited has no mark on the land once that has been seen (a natural one has its
+//! name); one still out of sight shows as a faint glow at the corner map's rim in its
+//! direction, for the nearest few. A visited place turns into its icon, or close in, where the
 //! model has the place itself standing on it, is left to that.
 //!
 //! The large map is a model of the land seen so far ([`relief`]): a slab of blocks with
@@ -1160,8 +1160,8 @@ impl Minimap {
         self.gpu.pass(encoder, target, 1..out.len() as u32);
     }
 
-    /// The places on the map: icons for those visited, soft glows for those seen but
-    /// not visited, and at the rim, the nearest few still out of sight. `place` gives
+    /// The places on the map: icons for those visited, nothing for those seen but not
+    /// visited, and at the rim, the nearest few still out of sight. `place` gives
     /// where a point of the world falls on the screen, and whether the map shows it;
     /// `rim`, the ways east and north run across the screen, for the hints at the rim,
     /// or None for none.
@@ -1188,7 +1188,7 @@ impl Minimap {
         let span = (self.span / VOXELS_PER_METRE as f64) as f32;
         let me = xz(self.player);
         let me_px = place(me).map(|p| p.0);
-        let (icon, glow) = if self.open { (6.5 * f.s, 15.0 * f.s) } else { (4.5 * f.s, 9.0 * f.s) };
+        let icon = if self.open { 6.5 * f.s } else { 4.5 * f.s };
         let mut hints: Vec<(f64, DVec2)> = Vec::new();
         let mut icons = Vec::new();
         for key in self.known.keys() {
@@ -1236,16 +1236,10 @@ impl Minimap {
                     }
                 } else if !mark.hint {
                     // Left for the player to come on unawares.
-                } else if let Some((p, _)) = at
-                    && on_map
-                    && seen
-                {
-                    // A little block of the world's own kind, glowing, as the map is made
-                    // of blocks: water's blue, or a warm stone.
-                    let tint = if mark.kind.watery() { [0.56, 0.80, 0.97] } else { [0.97, 0.80, 0.50] };
-                    let phase = (mark.at.x * 0.013 + mark.at.y * 0.007) as f32;
-                    let breathe = 0.85 + 0.15 * (self.clock * 1.1 + phase).sin();
-                    out.push(Instance::new(gpu::UNFOUND, p.into(), glow, [tint[0], tint[1], tint[2], 0.95 * breathe]));
+                } else if on_map && seen {
+                    // Seen but not yet come to: nothing is laid over it, as the little
+                    // glowing blocks that stood here looked like toy cubes, not places
+                    // (#196). A natural place still has its name, above.
                 } else if !visited {
                     let d = mark.at.distance(me);
                     if d <= HINT {
@@ -1479,7 +1473,7 @@ mod tests {
         let named = s.marks.iter().filter(|m| m.name.is_some()).count();
         assert!(named > 0);
         assert!(s.marks.iter().any(|m| m.kind == Kind::Landmark));
-        assert!(s.marks.iter().any(|m| m.kind.watery()));
+        assert!(s.marks.iter().any(|m| matches!(m.kind, Kind::Falls | Kind::Lake | Kind::Spring | Kind::Mouth | Kind::Confluence)));
         // A bridge is walked over, not sought out: none has a mark of its own.
         let arches: Vec<DVec2> = c.trails.crossings.iter().filter(|x| x.kind == worldgen::trails::CrossingKind::Arch).map(|x| DVec2::new(x.x as f64 + 0.5, x.z as f64 + 0.5)).collect();
         for m in &s.marks {

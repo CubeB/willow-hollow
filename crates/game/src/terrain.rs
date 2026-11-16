@@ -43,6 +43,9 @@ pub struct GpuChunk {
     /// The lie of the land (`farview::slope_at`) at the same four corners, to light it by
     /// once its voxels are too small to tell apart.
     pub slopes: [[i8; 2]; 4],
+    /// How far the land lies in a hollow or on a ridge (`farview::hollow_at`) at the same
+    /// four corners, for the sky to light it less or more by once it is far off.
+    pub hollows: [u8; 4],
 }
 
 /// Levels of detail, the first being full-size voxels.
@@ -72,6 +75,7 @@ struct Marks {
     biomes: [u32; 8],
     skylines: [[u8; 2]; 4],
     slopes: [[i8; 2]; 4],
+    hollows: [u8; 4],
     /// The skylines of a continent under a corner were still being worked out: the
     /// column is built again once they are, rather than with the wrong ones for good.
     unready: bool,
@@ -94,6 +98,7 @@ impl Marks {
             biomes,
             skylines: skylines.map(|s| s.unwrap_or_default()),
             slopes: corners.map(|(dx, dz)| crate::farview::slope_at(world, x + dx, z + dz)),
+            hollows: corners.map(|(dx, dz)| crate::farview::hollow_at(world, x + dx, z + dz)),
             unready: skylines.iter().any(Option::is_none),
         }
     }
@@ -871,6 +876,7 @@ impl Streamer {
                 biomes: marks.biomes,
                 skylines: marks.skylines,
                 slopes: marks.slopes,
+                hollows: marks.hollows,
             })
             .collect();
         Some(chunks)

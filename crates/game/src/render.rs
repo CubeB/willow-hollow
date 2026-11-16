@@ -373,9 +373,13 @@ struct Instance {
     /// Terrain: the lie of the land at its four corners (see `GpuChunk::slopes`), the
     /// normal's x of each in the first word and its z in the second, as signed bytes.
     slopes: [u32; 2],
+    /// Terrain: how far the land lies in a hollow or on a ridge at its four corners (see
+    /// `GpuChunk::hollows`), a byte each, x fastest; 128 for level. Read only by the
+    /// fragment shader, from the instances bound as storage.
+    hollows: u32,
 }
 // The terrain's fragment shader reads instances as words (INSTANCE_WORDS in terrain.wgsl).
-const _: () = assert!(size_of::<Instance>() == 19 * 4);
+const _: () = assert!(size_of::<Instance>() == 20 * 4);
 
 /// The camera's position for the far trees' whole-voxel placement.
 #[repr(C)]
@@ -900,6 +904,8 @@ impl Renderer {
                     count: None,
                 },
                 texture_entry(2, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
+                // The scene's depth, for the tonemap to find pinholes (see post.wgsl).
+                texture_entry(3, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
             ],
         });
         let depth_bind = Self::depth_bind_group(device, &depth_layout, &depth.view);
@@ -1293,7 +1299,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
         let cube_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-        let particle_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 5 => Float32, 6 => Float32x4, 7 => Float32x2];
+        let particle_attrs = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32, 4 => Float32x3, 5 => Float32, 6 => Float32x4, 7 => Float32x2, 8 => Float32];
         let particles = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("particles"),
             layout: Some(&scene_layout),
@@ -1639,6 +1645,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(extra),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.depth.view),
                 },
             ],
         })
@@ -2001,6 +2011,7 @@ impl Renderer {
                 band,
                 biomes,
                 slopes: [0, 1].map(|k| u32::from_le_bytes(chunk.slopes.map(|s| s[k] as u8))),
+                hollows: u32::from_le_bytes(chunk.hollows),
             });
             if let Some(mesh) = &chunk.opaque {
                 max_quads = max_quads.max(mesh.quads);
@@ -2057,6 +2068,7 @@ impl Renderer {
                 band: [0.0; 2],
                 biomes: [0; 8],
                 slopes: [0; 2],
+                hollows: 0x8080_8080,
             });
             for tile in &cell.tiles {
                 if frustum.intersects_box(tile.lo + offset, tile.hi + offset) {
@@ -2076,6 +2088,7 @@ impl Renderer {
             band: [0.0; 2],
             biomes: [0; 8],
                 slopes: [0; 2],
+            hollows: 0x8080_8080,
         });
         stats.far_tiles = far_tiles.len() as u32;
 

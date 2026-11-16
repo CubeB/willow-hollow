@@ -18,7 +18,7 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 use worldgen::{noise, scale::VOXELS_PER_METRE};
 
-use crate::particles::ParticleInstance;
+use crate::particles::{ParticleInstance, dither_edge, dither_since};
 use model::{Legs, Pose, Wings};
 use sites::{Kind, Place, Sites};
 use survey::Lookout;
@@ -262,6 +262,30 @@ impl Crows {
     /// Crows on a map handed to them (see [`Crows::set_sites`]): for a screenshot, or a test.
     pub fn without_lookout() -> Self {
         Self { lookout: None, look_timer: 0.0, sites: None, groups: Vec::new(), rng: 0x6c0f_f1e5, spawn_timer: 0.0, started: false }
+    }
+
+    /// Calls a group in, as [`Crows::stage`] sets one out, but wild: they take fright and
+    /// leave in their own time, and the others still come and go about the player.
+    pub fn summon(&mut self, how: &str, ahead: DVec3, camera: DVec3) -> bool {
+        let (timer, started) = (self.spawn_timer, self.started);
+        if !self.stage(how, ahead, camera) {
+            return false;
+        }
+        (self.spawn_timer, self.started) = (timer, started);
+        if let Some(g) = self.groups.last_mut() {
+            g.tame = false;
+            // A minute and a half: longer than a group of their own choosing stays, to
+            // give time to watch them.
+            if g.kind != Kind::Roost {
+                g.stay = 90.0;
+            }
+        }
+        true
+    }
+
+    /// Whether they have a map of the country round the player yet, to find places on.
+    pub fn have_sites(&self) -> bool {
+        self.sites.is_some()
     }
 
     pub fn set_sites(&mut self, sites: Sites) {
@@ -573,14 +597,20 @@ impl Crows {
     pub fn draw(&self, cam: DVec3, out: &mut Vec<ParticleInstance>) {
         if let Some(sites) = &self.sites {
             for n in &sites.nests {
-                if n.pos.distance(cam) < v(NEST_SIGHT) as f64 {
+                let d = n.pos.distance(cam);
+                if d < v(NEST_SIGHT) as f64 {
+                    let from = out.len();
                     model::draw_nest(n, cam, out);
+                    dither_since(out, from, dither_edge(d, v(NEST_SIGHT) as f64, v(20.0) as f64));
                 }
             }
         }
         for c in self.groups.iter().flat_map(|g| &g.crows) {
-            if c.pos.distance(cam) < v(SIGHT) as f64 {
+            let d = c.pos.distance(cam);
+            if d < v(SIGHT) as f64 {
+                let from = out.len();
                 model::draw(&pose(c), cam, out);
+                dither_since(out, from, dither_edge(d, v(SIGHT) as f64, v(40.0) as f64));
             }
         }
     }

@@ -3,7 +3,7 @@
 //! with lakes, the sea, and rivers as ribbons.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -67,7 +67,8 @@ pub struct FarVertex {
     /// Land: the wash of the flowers or heather that lie over it (its number in the
     /// globals' tables, 0 for none), which the shader colours by the date as it does the
     /// nearer ground; how much of the ground's colour it takes the place of; and how much
-    /// of that is still seen under the land's forest, out beyond the tree models.
+    /// of that is still seen under the land's forest, out beyond the tree models. Last,
+    /// how far the land lies in a hollow or on a ridge (see [`hollow`]).
     pub wash: [u8; 4],
 }
 
@@ -341,11 +342,63 @@ pub struct FarView {
     staged: Option<Staged>,
     /// Buffers of continents no longer drawn, still to be freed.
     retired: Vec<wgpu::Buffer>,
-    pending: HashSet<(i32, i32)>,
+    /// The continents asked for and not yet arrived, each with the finest detail asked.
+    pending: HashMap<(i32, i32), usize>,
     requests: Sender<((i32, i32), usize)>,
-    results: Receiver<CellMesh>,
+    results: Receiver<Arrival>,
+    /// Where the camera is, for the far-view thread to choose what to make next by.
+    view: Arc<Mutex<DVec3>>,
     /// Index buffers for a tile grid at each stride: (stride, buffer, index count).
     grids: Vec<(usize, wgpu::Buffer, u32)>,
+}
+
+/// What the far-view thread sends back for a continent asked for.
+enum Arrival {
+    Built(CellMesh),
+    /// Not made, the camera having left it behind before it was started on.
+    Dropped((i32, i32), usize),
+}
+
+/// The continents asked of the far-view thread and not yet started on, each once, with
+/// the finest detail asked for it.
+#[derive(Default)]
+struct Asked(Vec<((i32, i32), usize)>);
+
+impl Asked {
+    fn add(&mut self, cell: (i32, i32), stride: usize) {
+        match self.0.iter_mut().find(|a| a.0 == cell) {
+            Some(a) => a.1 = a.1.min(stride),
+            None => self.0.push((cell, stride)),
+        }
+    }
+
+    /// Takes out what to make next, with the camera at `camera`: of the continents still
+    /// around it, the nearest of those already simulated (`ready`), or if none is, the
+    /// nearest. Those the camera has left behind are taken out too, and returned to be
+    /// told as dropped.
+    ///
+    /// Taken in the order asked, the land the camera wanted now waited behind the
+    /// simulation of every continent asked for before it, seconds each and far longer on
+    /// a busy machine, many of them left behind by then; and the far trees, made as soon
+    /// as their continent is, stood over nothing all that time.
+    fn next(&mut self, camera: DVec3, ready: impl Fn((i32, i32)) -> bool) -> (Vec<((i32, i32), usize)>, Option<((i32, i32), usize)>) {
+        let here = cell_of(camera);
+        let near = |c: (i32, i32)| (c.0 - here.0).abs() <= 1 && (c.1 - here.1).abs() <= 1;
+        let (kept, dropped): (Vec<_>, Vec<_>) = self.0.drain(..).partition(|a| near(a.0));
+        self.0 = kept;
+        // How far the camera is from a continent's square, in voxels: 0 on it.
+        let away = |c: (i32, i32)| {
+            let size = MACRO_SIZE as f64;
+            let gap = |p: f64, lo: f64| (lo - p).max(p - (lo + size)).max(0.0);
+            gap(camera.x, c.0 as f64 * size).hypot(gap(camera.z, c.1 as f64 * size))
+        };
+        let order = |a: &((i32, i32), usize), b: &((i32, i32), usize)| away(a.0).total_cmp(&away(b.0)).then(a.1.cmp(&b.1));
+        let best = (0..self.0.len())
+            .filter(|&i| ready(self.0[i].0))
+            .min_by(|&i, &j| order(&self.0[i], &self.0[j]))
+            .or_else(|| (0..self.0.len()).min_by(|&i, &j| order(&self.0[i], &self.0[j])));
+        (dropped, best.map(|i| self.0.remove(i)))
+    }
 }
 
 /// A continent's mesh on its way to the GPU, with the tiles uploaded so far.
@@ -370,6 +423,8 @@ impl FarView {
     pub fn new(gpu: &Gpu, world: Arc<GameWorld>) -> Self {
         let (requests, request_rx) = channel::<((i32, i32), usize)>();
         let (result_tx, results) = channel();
+        let view = Arc::new(Mutex::new(DVec3::ZERO));
+        let camera = view.clone();
         // Each continent's skylines are worked out by the thread that made it, as soon
         // as it has, so the workers building its columns seldom have to wait for them.
         world.after_made(Skylines::after_made);
@@ -380,9 +435,25 @@ impl FarView {
             .spawn(move || {
                 crate::threads::background();
                 let canopies = canopies(&world);
-                while let Ok((cell, stride)) = request_rx.recv() {
-                    let continent = world.continent(cell.0, cell.1);
-                    if result_tx.send(build_cell(&continent, world.materials(), &canopies, cell, stride)).is_err() {
+                let mut asked = Asked::default();
+                loop {
+                    // Every ask waiting is gathered first, so that the most pressing is
+                    // chosen from all of them; with none, the thread waits for one.
+                    if asked.0.is_empty() {
+                        let Ok((cell, stride)) = request_rx.recv() else { break };
+                        asked.add(cell, stride);
+                    }
+                    while let Ok((cell, stride)) = request_rx.try_recv() {
+                        asked.add(cell, stride);
+                    }
+                    let camera = *camera.lock().expect("far view camera poisoned");
+                    let (dropped, next) = asked.next(camera, |c| world.continent_if_ready(c.0, c.1).is_some());
+                    let mut sent = dropped.into_iter().all(|(cell, stride)| result_tx.send(Arrival::Dropped(cell, stride)).is_ok());
+                    if let Some((cell, stride)) = next {
+                        let continent = world.continent(cell.0, cell.1);
+                        sent &= result_tx.send(Arrival::Built(build_cell(&continent, world.materials(), &canopies, cell, stride))).is_ok();
+                    }
+                    if !sent {
                         break;
                     }
                 }
@@ -406,9 +477,10 @@ impl FarView {
             cells: HashMap::new(),
             staged: None,
             retired: Vec::new(),
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             requests,
             results,
+            view,
             grids,
         }
     }
@@ -426,6 +498,14 @@ impl FarView {
         (buffer, *count)
     }
 
+    /// A line on what the far view holds, for the log of a timed run.
+    pub fn progress(&self) -> String {
+        let mut drawn: Vec<String> = self.cells.values().map(|c| format!("{:?}/{}", c.cell, c.stride)).collect();
+        drawn.sort();
+        let staged = self.staged.as_ref().map(|s| format!("{:?}/{} {} of {}", s.mesh.cell, s.mesh.stride, s.done, s.mesh.tiles.len()));
+        format!("far view drew {}, staged {:?}, being made {:?}, {} buffers to free", drawn.join(" "), staged, self.pending, self.retired.len())
+    }
+
     /// True once the camera's own continent is ready to draw.
     pub fn ready(&self, camera: DVec3) -> bool {
         self.cells.contains_key(&cell_of(camera))
@@ -440,6 +520,7 @@ impl FarView {
     fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
         let here = cell_of(camera);
         Skylines::look_from(here);
+        *self.view.lock().expect("far view camera poisoned") = camera;
         // The camera's continent in full detail first, then the ring around it.
         let mut wanted = vec![(here, NEAR_STRIDE)];
         for dz in -1..=1 {
@@ -452,7 +533,12 @@ impl FarView {
         for &(cell, stride) in &wanted {
             // A continent already held in finer detail is kept as it is.
             let have = self.cells.get(&cell).is_some_and(|c| c.stride <= stride);
-            if !have && self.pending.insert(cell) {
+            // One asked for in coarser detail than now wanted (the camera has come onto
+            // it) is asked for again: the far-view thread makes the finer if it has not
+            // started on the coarser.
+            let asked = self.pending.get(&cell).is_some_and(|s| *s <= stride);
+            if !have && !asked {
+                self.pending.insert(cell, stride);
                 let _ = self.requests.send((cell, stride));
             }
         }
@@ -471,13 +557,22 @@ impl FarView {
             let staged = match &mut self.staged {
                 Some(staged) => staged,
                 None => {
-                    let Ok(mesh) = self.results.try_recv() else { break };
+                    let mesh = match self.results.try_recv() {
+                        Ok(Arrival::Built(mesh)) => mesh,
+                        Ok(Arrival::Dropped(cell, stride)) => {
+                            settle(&mut self.pending, cell, stride);
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
                     self.staged.insert(Staged { tiles: Vec::with_capacity(mesh.tiles.len()), mesh, done: 0 })
                 }
             };
-            // The camera has left it behind while it was being made or uploaded.
-            if !near(staged.mesh.cell) {
-                self.pending.remove(&staged.mesh.cell);
+            // The camera has left it behind while it was being made or uploaded, or it is
+            // drawn in finer detail already.
+            let finer = self.cells.get(&staged.mesh.cell).is_some_and(|c| c.stride < staged.mesh.stride);
+            if !near(staged.mesh.cell) || finer {
+                settle(&mut self.pending, staged.mesh.cell, staged.mesh.stride);
                 self.staged = None;
                 continue;
             }
@@ -498,7 +593,7 @@ impl FarView {
                 break;
             }
             let Some(Staged { mesh, tiles, .. }) = self.staged.take() else { break };
-            self.pending.remove(&mesh.cell);
+            settle(&mut self.pending, mesh.cell, mesh.stride);
             let rivers = if mesh.rivers.is_empty() {
                 None
             } else {
@@ -558,6 +653,14 @@ impl FarView {
             std::thread::sleep(Duration::from_millis(5));
         }
         log::info!("stage: far view ready after {:.2} s", began.elapsed().as_secs_f32());
+    }
+}
+
+/// Takes a continent out of those asked for once what has arrived of it, or been
+/// dropped, is the finest detail asked for: one asked for again in finer detail stays.
+fn settle(pending: &mut HashMap<(i32, i32), usize>, cell: (i32, i32), stride: usize) {
+    if pending.get(&cell) == Some(&stride) {
+        pending.remove(&cell);
     }
 }
 
@@ -883,6 +986,52 @@ fn far_surface_y(c: &Continent, stride: usize, lx: f32, lz: f32) -> f32 {
     }
 }
 
+/// Grid cells out to the two rings of land a point is compared with in [`hollow`]: about
+/// 75 and 150 m, the size of the folds of hills that the eye reads from far off.
+const HOLLOW_RINGS: [f32; 2] = [3.0, 6.0];
+/// What a hollow byte counts per unit of [`hollow`]'s measure (HOLLOW_SCALE in
+/// common.wgsl).
+const HOLLOW_SCALE: f32 = 320.0;
+
+/// How far the land at grid point `(gx, gz)` of `c` (cell centres at whole numbers) lies
+/// below the land around it, a hollow, over 128, or above it, a ridge, under 128: the
+/// rise from it to the mean of the land round it over the distance to that land, in
+/// [`HOLLOW_SCALE`]ths. Less of the sky reaches down into a valley than onto a ridge, and
+/// that, more than the sun, is what shows the shape of distant hills. It is the same
+/// whatever the detail of the mesh it is drawn on, so the far view at any stride and the
+/// voxel terrain (see [`hollow_at`]) agree where they meet. The sea counts as level.
+fn hollow(c: &Continent, gx: f32, gz: f32) -> u8 {
+    let size = c.size;
+    let at = |x: f32, z: f32| {
+        let (x, z) = (x.clamp(0.0, size as f32 - 1.001), z.clamp(0.0, size as f32 - 1.001));
+        let (i, j) = (x as usize, z as usize);
+        let (fx, fz) = (x - i as f32, z - j as f32);
+        let h = |i: usize, j: usize| (c.height[j * size + i] * OLD_VOXEL).max(0.0);
+        let row = |j: usize| h(i, j) * (1.0 - fx) + h(i + 1, j) * fx;
+        row(j) * (1.0 - fz) + row(j + 1) * fz
+    };
+    let here = at(gx, gz);
+    let mut sum = 0.0;
+    for r in HOLLOW_RINGS {
+        let around = [(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r), (r, r), (-r, r), (r, -r), (-r, -r)];
+        let mean = around.iter().map(|&(dx, dz)| at(gx + dx, gz + dz)).sum::<f32>() / 8.0;
+        sum += (mean - here) / (r * c.cell_size());
+    }
+    let k = sum / HOLLOW_RINGS.len() as f32;
+    (128.0 + k * HOLLOW_SCALE).round().clamp(1.0, 255.0) as u8
+}
+
+/// [`hollow`] at a world position, in voxels: 128, level, where the continent is not made
+/// yet.
+pub fn hollow_at(world: &GameWorld, x: i32, z: i32) -> u8 {
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_if_ready(mx, mz).map_or(128, |c| {
+        let cell = c.cell_size();
+        // The far view's vertices stand in the middle of their cells.
+        hollow(&c, (x - mx * MACRO_SIZE) as f32 / cell - 0.5, (z - mz * MACRO_SIZE) as f32 / cell - 0.5)
+    })
+}
+
 fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize) -> CellMesh {
     let cs = c.cell_size();
     let size = c.size;
@@ -913,6 +1062,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
                     let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
                     let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
+                    let hollow = hollow(c, x as f32, z as f32);
                     let pos = |y: f32| Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     let (level, depth) = wetness(c, x, z, stride);
                     let mut land = look(c, mats, canopies, idx, gx.hypot(gz));
@@ -969,7 +1119,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                         grad: [pack(gx), pack(gz)],
                         far: [far[0], far[1], far[2], wet],
                         place: [c.biome[idx], land.plant, skylines.angles[idx][0], skylines.angles[idx][1]],
-                        wash: [land.wash.0, (land.wash.1.clamp(0.0, 1.0) * 255.0).round() as u8, (land.wash.2.clamp(0.0, 1.0) * 255.0).round() as u8, 0],
+                        wash: [land.wash.0, (land.wash.1.clamp(0.0, 1.0) * 255.0).round() as u8, (land.wash.2.clamp(0.0, 1.0) * 255.0).round() as u8, hollow],
                     });
                 }
             }
@@ -1127,5 +1277,47 @@ mod tests {
         }
         Skylines::forget_one(&mut kept, None, now + 1);
         assert_eq!(kept.len(), SKYLINES_KEPT - 1);
+    }
+
+    /// Of the continents asked for, the camera's own comes first, then the nearest that
+    /// is ready, not the first asked; those left behind are dropped, and the finest
+    /// detail asked for a continent is the one made.
+    #[test]
+    fn the_far_view_makes_what_the_camera_needs_first() {
+        let size = MACRO_SIZE as f64;
+        // Near the east edge of continent (0, 0), as the camera was crossing to (1, 0).
+        let camera = DVec3::new(size * 0.97, 0.0, size * 0.5);
+        let mut asked = Asked::default();
+        // Asked for in the order the camera's earlier continent wanted them.
+        for (cell, stride) in [((-1, -1), 4), ((0, -1), 4), ((1, -1), 4), ((-1, 0), 4), ((1, 0), 4), ((0, 0), 4), ((0, 0), 1), ((-2, 0), 4)] {
+            asked.add(cell, stride);
+        }
+        let all = |_: (i32, i32)| true;
+        let (dropped, next) = asked.next(camera, all);
+        assert_eq!(dropped, vec![((-2, 0), 4)], "the continent left behind is dropped");
+        assert_eq!(next, Some(((0, 0), 1)), "the camera's own continent, in full detail");
+        let (_, next) = asked.next(camera, all);
+        assert_eq!(next, Some(((1, 0), 4)), "then the one it is heading into");
+        // A nearer continent not simulated yet waits for one that is.
+        let (_, next) = asked.next(camera, |c| c != (1, -1));
+        assert!(next.is_some_and(|n| n.0 != (1, -1)), "{next:?}");
+        // With none ready, the nearest is made all the same.
+        let (_, next) = asked.next(camera, |_| false);
+        assert_eq!(next, Some(((1, -1), 4)));
+        // Crossing into (1, 0): what is left around (0, 0) only is dropped.
+        let camera = DVec3::new(size * 1.02, 0.0, size * 0.5);
+        let (dropped, _) = asked.next(camera, all);
+        assert!(dropped.iter().all(|(c, _)| c.0 == -1), "{dropped:?}");
+    }
+
+    /// A continent stays asked for until what arrives of it is the finest asked for.
+    #[test]
+    fn a_continent_asked_for_in_finer_detail_stays_asked_for() {
+        let mut pending = HashMap::new();
+        pending.insert((1, 0), 1);
+        settle(&mut pending, (1, 0), 4);
+        assert_eq!(pending.get(&(1, 0)), Some(&1));
+        settle(&mut pending, (1, 0), 1);
+        assert!(pending.is_empty());
     }
 }

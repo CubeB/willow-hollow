@@ -155,6 +155,9 @@ pub struct Player {
     swell: f32,
     /// How much foliage the body is pushing through, smoothed, 0 to 1.
     thicket: f32,
+    /// How many times its usual speed the body walks, runs and swims at (the console's
+    /// `speed`).
+    pub pace: f32,
 }
 
 impl Player {
@@ -171,6 +174,7 @@ impl Player {
             heading: 0.0,
             swell: 0.0,
             thicket: 0.0,
+            pace: 1.0,
         }
     }
 
@@ -433,7 +437,8 @@ impl Player {
             SPRINT_SPEED
         } else {
             WALK_SPEED
-        } * (1.0 - THICKET_SLOW * (self.thicket / THICKET_FULL).min(1.0));
+        } * (1.0 - THICKET_SLOW * (self.thicket / THICKET_FULL).min(1.0))
+            * self.pace;
         // Quick to respond on the ground, slower in air and water.
         let response = if self.swimming {
             4.0

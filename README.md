@@ -71,7 +71,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 | Key | What it does |
 |---|---|
 | Mouse | Look around (**Tab** frees or recaptures the mouse) |
-| Esc | Settings, or close the map, the pack or the journal |
+| Esc | Settings, or close the map, the pack, the journal or the console |
 | W A S D | Walk |
 | Shift | Sprint |
 | Space | Jump, or swim up |
@@ -88,6 +88,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 | F | Toggle flying. Space and Ctrl go up and down, the wheel sets the speed |
 | F3 | Hide the debug panel |
 | F11 | Fullscreen |
+| `` ` `` or / | The console, for typed commands: `weather storm`, `time dusk`, `tp 42186 30679`, `spawn camp lit` and more. `help` lists them all; Esc closes it. See [the console](docs/DEVELOPMENT.md#the-console) |
 
 The settings menu covers field of view, mouse sensitivity, volume, how far terrain loads, the length of a day and of a year, window size, fullscreen, vsync, light shafts and the corner map. If you push the load radius further than your graphics card can hold, the game pulls it back in by itself.
 
