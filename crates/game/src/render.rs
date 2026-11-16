@@ -904,6 +904,8 @@ impl Renderer {
                     count: None,
                 },
                 texture_entry(2, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2),
+                // The scene's depth, for the tonemap to find pinholes (see post.wgsl).
+                texture_entry(3, wgpu::TextureSampleType::Depth, wgpu::TextureViewDimension::D2),
             ],
         });
         let depth_bind = Self::depth_bind_group(device, &depth_layout, &depth.view);
@@ -1643,6 +1645,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(extra),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.depth.view),
                 },
             ],
         })

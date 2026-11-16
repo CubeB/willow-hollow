@@ -4,6 +4,7 @@
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
 @group(0) @binding(2) var bloom: texture_2d<f32>;
+@group(0) @binding(3) var depth: texture_depth_2d;
 
 struct VOut {
     @builtin(position) clip: vec4<f32>,
@@ -53,9 +54,54 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
+// True if something was drawn at pixel `p` (the depth no longer as it was cleared), and
+// false for the sky and off the edge of the picture.
+fn land(p: vec2<i32>) -> bool {
+    let size = vec2<i32>(textureDimensions(depth));
+    return all(p >= vec2<i32>(0)) && all(p < size) && textureLoad(depth, p, 0) != 0.0;
+}
+
+// The scene at pixel `p`, with pinholes closed. A merged face of the voxel terrain runs
+// past the corners of the smaller faces beside it (a T-junction), and where their edges
+// meet the GPU rounds each corner on its own, so now and then a pixel's centre falls in
+// the hair's-breadth crack between them and the bright sky behind the hill shows through,
+// a speck that flickers white as the view turns. Such a speck is one pixel of sky, or two
+// side by side, with land on every side, which open sky never is (a notch in a hill's
+// outline is open to the sky beyond it); it takes the land around it instead. Everything
+// else is left exactly as it was drawn.
+fn scene(p: vec2<i32>) -> vec3<f32> {
+    let c = textureLoad(src, p, 0).rgb;
+    if (land(p)) {
+        return c;
+    }
+    var around = array<vec2<i32>, 4>(vec2<i32>(-1, 0), vec2<i32>(1, 0), vec2<i32>(0, -1), vec2<i32>(0, 1));
+    var sum = vec3<f32>(0.0);
+    var closed = 0;
+    var open = vec2<i32>(0);
+    for (var i = 0; i < 4; i++) {
+        let q = p + around[i];
+        if (land(q)) {
+            sum += textureLoad(src, q, 0).rgb;
+            closed += 1;
+        } else {
+            open = around[i];
+        }
+    }
+    if (closed == 4) {
+        return sum * 0.25;
+    }
+    // Open on one side only: the other pixel of a pair, if it is closed on its other three.
+    let q = p + open;
+    let side = open.yx;
+    if (closed == 3 && land(q + open) && land(q + side) && land(q - side)) {
+        return sum / 3.0;
+    }
+    return c;
+}
+
 @fragment
 fn fs_tonemap(in: VOut) -> @location(0) vec4<f32> {
-    let c = textureLoad(src, vec2<i32>(in.clip.xy), 0).rgb
+    let c = scene(vec2<i32>(in.clip.xy))
         + textureSample(bloom, src_sampler, in.uv).rgb * 0.35;
     // The grade: shade leans a little cool and bright light a little warm, which
     // gives depth between sunlit ground and what lies in shadow.
