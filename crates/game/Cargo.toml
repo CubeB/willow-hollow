@@ -21,5 +21,8 @@ wgpu = "30"
 winit = "0.30"
 worldgen = { version = "0.1.0", path = "../worldgen" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading"] }
+
 [lints]
 workspace = true

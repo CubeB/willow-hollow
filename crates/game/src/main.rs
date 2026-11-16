@@ -27,6 +27,7 @@ mod starlings;
 mod settings;
 mod weather;
 mod terrain;
+mod threads;
 mod vehicles;
 
 use std::{
@@ -732,6 +733,7 @@ impl Scanner {
         std::thread::Builder::new()
             .name("scanner".into())
             .spawn(move || {
+                crate::threads::background();
                 let mut voxels = WorldVoxels::new(world.clone());
                 // Ends when the game drops `ask`.
                 while let Ok((camera, salt, date)) = questions.recv() {

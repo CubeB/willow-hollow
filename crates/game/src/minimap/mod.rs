@@ -352,6 +352,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok((key, wait)) = sheets.recv() {
                     let c = if wait { Some(w.continent(key.0, key.1)) } else { w.continent_if_ready(key.0, key.1) };
                     let t = std::time::Instant::now();
@@ -370,6 +371,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map relief".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok(req) = reliefs.recv() {
                     let t = std::time::Instant::now();
                     let made = relief::build(&w, &req);
@@ -391,6 +393,7 @@ impl Minimap {
         std::thread::Builder::new()
             .name("map disk".into())
             .spawn(move || {
+                crate::threads::background();
                 while let Ok(job) = jobs.recv() {
                     match job {
                         Disk::Load(key, path) => {

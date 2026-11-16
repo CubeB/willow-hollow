@@ -154,6 +154,7 @@ impl Impostors {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .thread_name(|i| format!("impostors-{i}"))
+            .start_handler(|_| crate::threads::background())
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();

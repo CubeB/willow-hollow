@@ -358,6 +358,7 @@ impl Lookout {
         std::thread::Builder::new()
             .name("crows".into())
             .spawn(move || {
+                crate::threads::background();
                 let mut survey = Survey::new(world);
                 // Ends when the game drops `ask`.
                 while let Ok((mut camera, mut date)) = questions.recv() {

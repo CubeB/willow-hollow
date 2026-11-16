@@ -357,6 +357,7 @@ impl FarView {
         std::thread::Builder::new()
             .name("far-view".into())
             .spawn(move || {
+                crate::threads::background();
                 let canopies = canopies(&world);
                 while let Ok((cell, stride)) = request_rx.recv() {
                     let continent = world.continent(cell.0, cell.1);

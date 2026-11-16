@@ -288,6 +288,7 @@ impl Streamer {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|i| format!("chunk-{i}"))
+            .start_handler(|_| crate::threads::background())
             .build()
             .expect("thread pool");
         let (tx, rx) = channel();

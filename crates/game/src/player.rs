@@ -545,6 +545,7 @@ impl Loader {
         std::thread::Builder::new()
             .name("collision".into())
             .spawn(move || {
+                crate::threads::background();
                 // Ends when the game drops `ask`.
                 while let Ok(col) = questions.recv() {
                     if reply.send((col, world.generate_column_bare(col.0, col.1))).is_err() {
