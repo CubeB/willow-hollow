@@ -37,6 +37,9 @@ pub const REACH: f32 = worldgen::scale::m(2800.0);
 const UNLOAD_SLACK: i32 = 2;
 /// Squares being built at once.
 const MAX_IN_FLIGHT: usize = 6;
+/// How long a frame may spend uploading finished squares, in milliseconds. A burst of
+/// them arriving together once took nearly 8 ms in one frame.
+const UPLOAD_MS: f32 = 1.0;
 /// Frames between looking again at squares whose continent wasn't simulated yet.
 const RETRY_FRAMES: u32 = 120;
 
@@ -197,7 +200,13 @@ impl Impostors {
         dx * dx + dz * dz <= r * r
     }
 
+    /// Call once per frame. Uploads finished squares for about [`UPLOAD_MS`] at most; the
+    /// rest wait in the channel for the next frame.
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
+        self.update_within(gpu, camera, UPLOAD_MS);
+    }
+
+    fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
         let here = (
             (camera.x / TILE as f64).floor() as i32,
             (camera.z / TILE as f64).floor() as i32,
@@ -228,7 +237,12 @@ impl Impostors {
             });
         }
 
-        while let Ok(built) = self.rx.try_recv() {
+        // At least one square a frame, so that they always get there.
+        let began = Instant::now();
+        let mut first = true;
+        while first || began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
+            let Ok(built) = self.rx.try_recv() else { break };
+            first = false;
             self.pending.remove(&built.tile);
             // Sent back to wait for skylines is no sign of loading going on.
             if !matches!(built.boxes, Err(Wait::Skylines)) {
@@ -318,7 +332,7 @@ impl Impostors {
         self.progressed = began;
         log::info!("stage: waiting for the far trees");
         loop {
-            self.update(gpu, camera);
+            self.update_within(gpu, camera, f32::INFINITY);
             if self.wanted.is_empty() && self.pending.is_empty() && self.soon.is_empty() {
                 break;
             }
