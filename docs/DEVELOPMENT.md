@@ -28,7 +28,18 @@ cargo build --release -p game
 ```
 
 The first build downloads and compiles every dependency and takes several minutes.
-After that, a change to the game crate rebuilds in about three minutes with two jobs.
+After that, a change to the game crate rebuilds in about a minute on 12 threads.
+
+Day to day, build with the `fast` profile instead: the same optimisation, but
+incremental and without link-time optimisation, so a change rebuilds in about 7 s.
+Frames cost the same, because the GPU sets the pace, and world generation is about 1.5%
+slower. Its first build takes a few minutes and it keeps its own `target/fast`. Bench,
+take screenshots for a comparison, and ship with `--release`.
+
+```sh
+cargo build --profile fast -p game
+./target/fast/game.exe
+```
 
 If `cargo` is not found in Git Bash on Windows, add it to the path for that shell:
 
@@ -38,8 +49,10 @@ export PATH="$USERPROFILE/.cargo/bin:$PATH"
 
 ### On a machine short of memory or cores
 
-The release build uses thin link-time optimisation and can take a lot of memory. To
-keep the machine usable while it builds, limit the number of jobs:
+The release build uses thin link-time optimisation and can take a lot of memory. Cargo
+uses every core by default, which is fastest (a rebuild takes about 1 minute on 12
+threads, against nearly 3 with two jobs). To keep the machine usable while it builds, or
+when several builds run at once, limit the number of jobs:
 
 ```sh
 cargo build --release -p game -j 2
@@ -49,7 +62,7 @@ cargo test --release -p game -j 2 -- --test-threads=2
 ### Debug builds
 
 World generation and meshing are far too slow unoptimised, so the workspace optimises
-even `dev` builds (see the profiles in `Cargo.toml`). Day to day, use `--release`.
+even `dev` builds (see the profiles in `Cargo.toml`). Day to day, use `--profile fast`.
 
 ## Running it
 
