@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{DVec3, Mat4, Vec2, Vec3, Vec4};
+use glam::{DVec3, IVec3, Mat4, Vec2, Vec3, Vec4};
 use voxel::{CHUNK, mesh::Vertex};
 use worldgen::scale::{VOXELS_PER_METRE, m};
 use wgpu::util::DeviceExt;
@@ -19,7 +19,7 @@ use crate::{
     gfx::{DEPTH_FORMAT, Gpu, create_depth},
     impostors::{self, BoxInstance, Impostors},
     profile::GpuTimer,
-    terrain::{GpuChunk, LEVELS, PLANT_REACH, Streamer},
+    terrain::{LEVELS, PLANT_REACH, Streamer},
 };
 
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -422,6 +422,33 @@ pub struct DrawStats {
     pub shadow_draws: [u32; CASCADES],
 }
 
+/// A frame's lists of what to draw, kept from one frame to the next so that they are
+/// not grown afresh each time.
+#[derive(Default)]
+struct DrawLists {
+    instances: Vec<Instance>,
+    opaque: Vec<ChunkDraw>,
+    opaque_edge: Vec<ChunkDraw>,
+    casters: [Vec<ChunkDraw>; CASCADES],
+    /// With each its distance from the camera, squared, for sorting.
+    water: Vec<(ChunkDraw, f32)>,
+    impostors: Vec<ChunkDraw>,
+    /// All of them together, as the indirect buffer holds them.
+    draws: Vec<ChunkDraw>,
+}
+
+impl DrawLists {
+    fn clear(&mut self) {
+        self.instances.clear();
+        self.opaque.clear();
+        self.opaque_edge.clear();
+        self.casters.iter_mut().for_each(Vec::clear);
+        self.water.clear();
+        self.impostors.clear();
+        self.draws.clear();
+    }
+}
+
 /// One corner of a far-tree box as drawn (see the impostor pipeline): its corner and
 /// outward normal on one side, the same on the opposite side, and the bare crown's colour.
 #[repr(C)]
@@ -589,6 +616,7 @@ pub struct Renderer {
     /// How much of their loaded reach the rings of voxel terrain are drawn out to, less
     /// the higher the camera is over the ground (see `band_scale`), eased toward that.
     band_scale: f32,
+    lists: DrawLists,
     frame: u64,
     pub timer: Option<GpuTimer>,
     pub stats: DrawStats,
@@ -1558,6 +1586,7 @@ impl Renderer {
             shadow_sun: Vec3::ZERO,
             shadow_ground: None,
             band_scale: 1.0,
+            lists: DrawLists::default(),
             frame: 0,
             timer: GpuTimer::new(gpu),
             stats: DrawStats::default(),
@@ -1737,7 +1766,7 @@ impl Renderer {
         let device = &gpu.device;
         // Horizontal distances out to which each ring of voxel terrain is drawn: as far as
         // it is fully loaded, or less from high over the land.
-        let target = band_scale(scene.terrain.chunks(), camera.pos);
+        let target = band_scale(scene.terrain, camera.pos);
         // A screenshot is one frame, so it takes the reach at once.
         self.band_scale = if self.clock.is_some() { target } else { self.band_scale + (target - self.band_scale) * 0.05 };
         let bands = scene.terrain.bands().map(|b| b * self.band_scale);
@@ -1883,17 +1912,44 @@ impl Renderer {
         // How far a shadow can reach across the ground, for finding what can cast into view.
         let sweep = -env.sun_dir * (m(120.0) / env.sun_dir.y.clamp(0.15, 1.0));
         let chunk_size = CHUNK as f32;
-        let mut instances: Vec<Instance> = Vec::new();
+        // Last frame's lists, emptied, so that they keep the room they grew to.
+        let mut lists = std::mem::take(&mut self.lists);
+        lists.clear();
+        let DrawLists { instances, opaque, opaque_edge, casters, water, impostors: impostor_draws, draws } = &mut lists;
         // Which of a chunk's skylines the sun (or moon) is on the side of: toward
         // sunrise, or toward sunset (as skyline_light in common.wgsl chooses).
         let sun_side = if scene.env.sun_dir.x > 0.0 { 0 } else { 1 };
-        let mut opaque: Vec<ChunkDraw> = Vec::new();
-        let mut opaque_edge: Vec<ChunkDraw> = Vec::new();
-        let mut casters: [Vec<ChunkDraw>; CASCADES] = Default::default();
-        let mut water: Vec<(ChunkDraw, f32)> = Vec::new();
         let mut stats = DrawStats::default();
         let mut max_quads = 0;
-        for chunk in scene.terrain.chunks() {
+        let lit = env.sun_color.max_element() > MIN_SHADOW_LIGHT;
+        // A column is first tested whole, as one box from its lowest chunk to its highest:
+        // if that is outside its ring, or neither seen nor casting a shadow into view,
+        // then so is every chunk in it, each test below failing for the whole column's box
+        // as it would for a box inside it.
+        let mut columns_culled = 0;
+        let columns = scene.terrain.columns().filter(|column| {
+            let Some(first) = column.first() else { return false };
+            let (low, high) = column.iter().fold((i32::MAX, i32::MIN), |(l, h), c| (l.min(c.pos.y), h.max(c.pos.y)));
+            let scale = 1 << first.level;
+            let band = [if first.level == 0 { 0.0 } else { bands[first.level as usize - 1] }, bands[first.level as usize]];
+            let size = chunk_size * scale as f32;
+            // Worked out as for the chunks themselves, so the box holds each of theirs.
+            let offset_of = |y: i32| ((IVec3::new(first.pos.x, y, first.pos.z) * CHUNK * scale).as_dvec3() - camera.pos).as_vec3();
+            let offset = offset_of(low);
+            let far_corner = offset_of(high) + Vec3::splat(size);
+            let nearest = Vec2::new(offset.x.max(-far_corner.x).max(0.0), offset.z.max(-far_corner.z).max(0.0)).length();
+            let reach = Vec2::new(offset.x.abs().max(far_corner.x.abs()), offset.z.abs().max(far_corner.z.abs())).length();
+            let shown = !(band[0] >= band[1] || reach < band[0] || nearest >= band[1])
+                && (frustum.intersects_box(offset, far_corner)
+                    || (lit
+                        && frustum.intersects_swept_box(offset, far_corner, sweep)
+                        && (0..CASCADES).any(|i| fresh[i] && light[i].intersects_box(offset, far_corner))));
+            if !shown {
+                columns_culled += column.len() as u32;
+            }
+            shown
+        });
+        for chunk in columns.flatten() {
             let scale = 1 << chunk.level;
             let band = [if chunk.level == 0 { 0.0 } else { bands[chunk.level as usize - 1] }, bands[chunk.level as usize]];
             let size = chunk_size * scale as f32;
@@ -1918,7 +1974,6 @@ impl Renderer {
             // (drawn into the maps as props) still cast theirs. Only in the moment either
             // side of the change from sun to moon, when neither gives any light, is there
             // nothing for a shadow to take away.
-            let lit = env.sun_color.max_element() > MIN_SHADOW_LIGHT;
             let reaches_view = lit && frustum.intersects_swept_box(offset, far_corner, sweep);
             let casts: [bool; CASCADES] = std::array::from_fn(|i| fresh[i] && reaches_view && light[i].intersects_box(offset, far_corner));
             // Directions whose faces could be seen from the camera. Foliage sways, so
@@ -1969,7 +2024,7 @@ impl Renderer {
                 if visible {
                     // Chunks entirely inside their ring never need trimming to it.
                     let inside = reach + m(1.0) < band[1] && nearest >= band[0];
-                    let list = if inside { &mut opaque } else { &mut opaque_edge };
+                    let list: &mut Vec<ChunkDraw> = if inside { opaque } else { opaque_edge };
                     push_faces(list, mesh, terrain, seen, index);
                     if near {
                         push_faces(list, mesh, plants, seen, plant_index);
@@ -1985,6 +2040,8 @@ impl Renderer {
                 }
             }
         }
+
+        stats.chunks_culled += columns_culled;
 
         // Far view: one instance per continent (plus one for the sea), tiles culled
         // against the frustum.
@@ -2023,7 +2080,6 @@ impl Renderer {
         stats.far_tiles = far_tiles.len() as u32;
 
         // Far trees, a square of them at a time.
-        let mut impostor_draws: Vec<ChunkDraw> = Vec::new();
         for tile in scene.impostors.tiles() {
             let lo = (tile.lo.as_dvec3() - camera.pos).as_vec3();
             let hi = (tile.hi.as_dvec3() - camera.pos).as_vec3();
@@ -2038,7 +2094,7 @@ impl Renderer {
         // Translucent water blends correctly only when drawn far to near.
         water.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         stats.shadow_draws = std::array::from_fn(|i| casters[i].len() as u32);
-        stats.quads_drawn += opaque.iter().chain(&opaque_edge).map(|d| d[0] as u64 / 6).sum::<u64>();
+        stats.quads_drawn += opaque.iter().chain(opaque_edge.iter()).map(|d| d[0] as u64 / 6).sum::<u64>();
         // Nearest first, so that hidden surfaces are rejected instead of shaded.
         let distance_of = |d: &ChunkDraw| {
             let [x, y, z] = instances[d[4] as usize].offset;
@@ -2048,7 +2104,7 @@ impl Renderer {
         self.stats = stats;
 
         // All of this frame's chunk draws, in one buffer the passes take slices of.
-        let mut draws: Vec<ChunkDraw> = Vec::with_capacity(opaque.len() + opaque_edge.len() + water.len() + casters.iter().map(Vec::len).sum::<usize>());
+        draws.reserve(opaque.len() + opaque_edge.len() + water.len() + impostor_draws.len() + casters.iter().map(Vec::len).sum::<usize>());
         let mut append = |list: &mut dyn Iterator<Item = ChunkDraw>| {
             let start = draws.len();
             draws.extend(list);
@@ -2063,7 +2119,7 @@ impl Renderer {
             self.indirect_capacity = draws.len().next_power_of_two();
             self.indirect = indirect_buffer(device, self.indirect_capacity);
         }
-        gpu.queue.write_buffer(&self.indirect, 0, bytemuck::cast_slice(&draws));
+        gpu.queue.write_buffer(&self.indirect, 0, bytemuck::cast_slice(&draws[..]));
         let indirect = self.multi_draw.then_some(&self.indirect);
         let chunk_vertices = scene.terrain.vertices();
 
@@ -2076,7 +2132,7 @@ impl Renderer {
             self.quad_capacity = max_quads.next_power_of_two();
             self.quad_indices = quad_index_buffer(device, self.quad_capacity);
         }
-        gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        gpu.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances[..]));
         let whole = camera.pos.floor();
         let (voxel, frac) = (whole.as_ivec3(), (camera.pos - whole).as_vec3());
         gpu.queue.write_buffer(
@@ -2338,6 +2394,7 @@ impl Renderer {
         if let Some(t) = &self.timer {
             t.mark(encoder, 12);
         }
+        self.lists = lists;
     }
 
     /// Writes the tonemapped image of what [`Renderer::draw`] drew to `target`.
@@ -2360,11 +2417,31 @@ impl Renderer {
 /// land cost near twice what it did on the ground; from up there the far view's slopes
 /// look the same. How high is over the tallest chunk with anything in it around the
 /// camera's column, so a cliff top close by keeps the full reach.
-fn band_scale<'a>(chunks: impl Iterator<Item = &'a GpuChunk>, camera: DVec3) -> f32 {
-    let around = m(24.0) as f64;
+fn band_scale(terrain: &Streamer, camera: DVec3) -> f32 {
+    let chunks = columns_around(camera).filter_map(|(x, z)| terrain.column(0, x, z)).flatten();
+    band_scale_over(chunks.filter(|c| c.level == 0 && c.opaque.is_some()).map(|c| c.pos), camera)
+}
+
+/// How far around the camera's column [`band_scale`] looks for the ground, in voxels.
+const GROUND_AROUND: f64 = m(24.0) as f64;
+
+/// The full-size columns, as `(x, z)` in columns, that [`band_scale_over`] can find the
+/// ground in: a few, rather than every chunk loaded.
+fn columns_around(camera: DVec3) -> impl Iterator<Item = (i32, i32)> {
+    let size = CHUNK as f64;
+    // A column counts if the camera is within GROUND_AROUND of it, so its low corner
+    // lies from a column and that much below the camera to that much above it.
+    let span = |c: f64| ((c - size - GROUND_AROUND) / size).floor() as i32..=((c + GROUND_AROUND) / size).floor() as i32;
+    let xs = span(camera.x);
+    span(camera.z).flat_map(move |z| xs.clone().map(move |x| (x, z)))
+}
+
+/// [`band_scale`] over the full-size chunks with anything in them at `chunks`, in chunks.
+fn band_scale_over(chunks: impl Iterator<Item = IVec3>, camera: DVec3) -> f32 {
+    let around = GROUND_AROUND;
     let mut ground = None::<f64>;
-    for chunk in chunks.filter(|c| c.level == 0 && c.opaque.is_some()) {
-        let origin = (chunk.pos * CHUNK).as_dvec3();
+    for pos in chunks {
+        let origin = (pos * CHUNK).as_dvec3();
         let size = CHUNK as f64;
         if origin.x - around <= camera.x && camera.x <= origin.x + size + around && origin.z - around <= camera.z && camera.z <= origin.z + size + around {
             ground = Some(ground.map_or(origin.y + size, |g: f64| g.max(origin.y + size)));
@@ -2641,6 +2718,37 @@ pub fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Looking for the ground only in the columns around the camera finds what walking
+    /// every loaded chunk found, wherever in its column the camera is.
+    #[test]
+    fn band_scale_finds_the_ground_in_the_columns_around_the_camera() {
+        // A rough patch of land, chunk tops from 0 to 7 chunks up, some columns empty.
+        let mut columns = std::collections::HashMap::new();
+        for x in -6i32..6 {
+            for z in -6..6 {
+                let h = (x * 7 + z * 13).rem_euclid(9);
+                if h < 8 {
+                    columns.insert((x, z), (0..=h).map(|y| IVec3::new(x, y, z)).collect::<Vec<_>>());
+                }
+            }
+        }
+        let size = CHUNK as f64;
+        let mut tried = 0;
+        for i in 0..400 {
+            // Across columns and on and near their edges, at heights either side of the reach.
+            let f = |k: i32| (k as f64 * 0.37).rem_euclid(1.0);
+            let x = (i % 20 - 10) as f64 * size * 0.25 + [0.0, 0.5, size - 0.5, f(i)][i as usize % 4];
+            let z = (i / 20 - 10) as f64 * size * 0.25 + [0.0, size - 0.5, 0.5, f(i * 3)][(i / 4) as usize % 4];
+            let y = 8.0 * size + m(40.0 + (i % 7) as f32 * 30.0) as f64;
+            let camera = DVec3::new(x, y, z);
+            let all = band_scale_over(columns.values().flatten().copied(), camera);
+            let near = band_scale_over(columns_around(camera).filter_map(|c| columns.get(&c)).flatten().copied(), camera);
+            assert_eq!(all, near, "camera at {camera}");
+            tried += (all < 1.0) as u32;
+        }
+        assert!(tried > 50, "only {tried} cameras high enough to matter");
+    }
 
     #[test]
     fn the_snow_floor_is_below_every_snowline_and_gone_once_snow_lies() {

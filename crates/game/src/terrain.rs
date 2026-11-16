@@ -497,8 +497,14 @@ impl Streamer {
         Some(format!("nothing loaded for {:.1} s; {}; {}", idle.as_secs_f32(), self.progress(), lines.join("; ")))
     }
 
-    pub fn chunks(&self) -> impl Iterator<Item = &GpuChunk> {
-        self.columns.values().flatten()
+    /// The loaded columns, each its chunks.
+    pub fn columns(&self) -> impl Iterator<Item = &[GpuChunk]> {
+        self.columns.values().map(Vec::as_slice)
+    }
+
+    /// The chunks of one loaded column of `level`, at `(x, z)` in columns of that level.
+    pub fn column(&self, level: u8, x: i32, z: i32) -> Option<&[GpuChunk]> {
+        self.columns.get(&(level, x, z)).map(Vec::as_slice)
     }
 
     /// The buffer every chunk's vertices live in.
