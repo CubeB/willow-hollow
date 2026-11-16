@@ -131,8 +131,15 @@ while IFS='|' read -r name kind args; do
     WH_FRAME_CSV="$OUT/${name}_r$k.csv" run_game "$OUT/${name}_r$k.log" --seed 1 --no-audio --no-vsync --size "$SIZE" \
       --day-minutes 0 --frames "$n" $args ${EXTRA:-}
     rc=$?
-    # What started while the game ran spoiled it too.
+    # What started while the game ran spoiled it too. The CPU can stay busy for a few
+    # seconds after the game quits (its threads winding down, a virus scan of the files it
+    # wrote), so only load that is still there after three looks 5 s apart counts.
     load="$(busy)"
+    for _ in 1 2; do
+      [ -z "$load" ] && break
+      sleep 5
+      load="$(busy)"
+    done
     echo "$name r$k after: ${load:-none}" >> "$OUT/load.txt"
     echo "rc=$rc"
     if [ -n "$load" ] && [ "$FORCE" != 1 ]; then
