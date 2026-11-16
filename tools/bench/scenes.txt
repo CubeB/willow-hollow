@@ -11,6 +11,11 @@ aurora|S|--over 36700,35450,4 --look 270,25 --time 23 --season winter --aurora -
 murmuration|S|--over 14720,40960,4 --look 0,5 --time 17 --date october --murmuration --weather clear
 drift_low|D|--over 42186,30679,20 --look 0,-10 --drift 25 --time 12 --weather clear
 drift_fast|D|--over 30000,30000,60 --look 0,-10 --drift 60 --time 12 --weather clear
-# A full cloud deck: the meadow from the ground, and the cloud scene's view from among the clouds.
+# A full cloud deck: the meadow from the ground, then the cloud scene's land from under the
+# deck and from above it (from inside it, at 1000, a shot is plain grey).
 overcast|S|--over 14720,40960,4 --look 0,-3 --time 12 --weather overcast
-overcast_high|S|--over 42186,30679,1000 --look 0,-8 --time 12 --weather overcast
+overcast_high|S|--over 42186,30679,600 --look 0,-8 --time 12 --weather overcast
+overcast_above|S|--over 42186,30679,1600 --look 0,-8 --time 12 --weather overcast
+# A fast drift south over the sea from the first continent's cell into the next one's, a
+# continent (0,-1): arriving where a new continent has to be made ready.
+border|D|--over 36000,2500,60 --look 270,-10 --drift 60 --time 12 --weather clear

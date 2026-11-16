@@ -12,7 +12,10 @@
 #   SIZE     window size (default 1920x1080; 960x540 with LAPTOP=1)
 #   EXTRA    extra game arguments for every run (e.g. "--radius 16")
 #   LAPTOP   1 = the laptop proxy: the game held to 8 logical CPUs (AFFINITY=0xFF) at
-#            960x540, so that the run is bound by the CPU rather than the GPU
+#            960x540, so that the run is bound by the CPU rather than the GPU. The game
+#            still sizes its chunk pool from all the machine's CPUs (Rust's
+#            available_parallelism ignores the mask on Windows), so it runs more workers
+#            on those 8 than an 8-CPU laptop would.
 #   AFFINITY a hex mask of the logical CPUs the game may run on (default: all)
 #   WAIT     how many seconds to wait for other load to go before giving up (default 600)
 #   MAXCPU   the machine's CPU use, in percent, that counts as other load (default 15)
@@ -47,7 +50,8 @@ WAIT="${WAIT:-600}"
 MAXCPU="${MAXCPU:-15}"
 FORCE="${FORCE:-0}"
 PY="${PY:-python}"
-command -v "$PY" >/dev/null 2>&1 || PY=/d/tools/python312/python
+# The Windows Store alias answers to "python" without being one, so try it.
+"$PY" -c "" >/dev/null 2>&1 < /dev/null || PY=/d/tools/python312/python
 mkdir -p "$OUT"
 
 busy() {
