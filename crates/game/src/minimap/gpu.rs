@@ -15,8 +15,6 @@ pub const RING: u32 = 7;
 pub const LINE: u32 = 9;
 /// The map's own shape, filled with one colour: what the corner map's model lies on.
 pub const PANEL: u32 = 10;
-/// A place not yet come to: a small glowing block, its faces laid in voxels.
-pub const UNFOUND: u32 = 11;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]

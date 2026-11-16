@@ -1,6 +1,6 @@
 //! Places worth walking to, found in a continent: waterfalls, lakes, peaks, tors, springs,
-//! river mouths and confluences, and landmarks. The map shows each as a soft unlabelled
-//! mark until it has been visited, then by its icon and name. Bridges are not among
+//! river mouths and confluences, and landmarks. The map shows each by its icon and name
+//! once it has been visited. Bridges are not among
 //! them: trails cross so many rivers that a bridge is something walked over on the way
 //! to somewhere, not a place to go and find.
 //!
@@ -28,13 +28,6 @@ pub enum Kind {
     Mouth,
     Confluence,
     Landmark,
-}
-
-impl Kind {
-    /// Whether it is a thing of water, which its unvisited mark is tinted toward.
-    pub fn watery(self) -> bool {
-        matches!(self, Kind::Falls | Kind::Lake | Kind::Spring | Kind::Mouth | Kind::Confluence)
-    }
 }
 
 #[derive(Clone, Debug)]
