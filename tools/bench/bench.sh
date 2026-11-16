@@ -116,6 +116,7 @@ want=" $* "
 } | tee "$OUT/meta.txt"
 : > "$OUT/load.txt"
 while IFS='|' read -r name kind args; do
+  args="${args%$'\r'}"  # a checkout may have given the list CRLF line endings
   case "$name" in ''|'#'*) continue ;; esac
   if [ "$#" -gt 0 ] && [[ "$want" != *" $name "* ]]; then continue; fi
   n=$FRAMES; [ "$kind" = D ] && n=$DFRAMES
