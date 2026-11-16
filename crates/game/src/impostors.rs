@@ -13,7 +13,6 @@ use std::{
 
 use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, IVec3};
-use voxel::plant;
 use worldgen::{
     World,
     features::{self, shape::rotate, trees::{self, Species}},
@@ -54,7 +53,7 @@ pub struct BoxInstance {
     pub biome: u8,
     pub color: [u8; 3],
     /// The box's plant kind (voxel::plant), so its leaves turn and fall with the near
-    /// tree's, plus [`BARE`] for the bare crown shown once they have.
+    /// tree's. A broadleaf's crown shows [`BARE_CROWN`] once they have.
     pub plant: u8,
     /// The tree's tag (features::tree_tag) in the first byte, so it turns and drops on
     /// the near tree's date; then the skylines where it stands (farview::Skylines), so a
@@ -62,10 +61,9 @@ pub struct BoxInstance {
     pub tree: [u8; 4],
 }
 
-/// Marks the box standing for a broadleaf's bare crown in winter, in place of its leaves.
-const BARE: u8 = 8;
-/// The colour of a crown of bare twigs from afar, as the far view's bare forest.
-const BARE_CROWN: [u8; 3] = [92, 80, 72];
+/// The colour of a crown of bare twigs from afar, as the far view's bare forest: what a
+/// broadleaf's crown box shows once its leaves are down (see impostor.wgsl).
+pub const BARE_CROWN: [u8; 3] = [92, 80, 72];
 
 /// The boxes of a model, turned, relative to where it stands: low corner, size, colour, plant kind.
 type ModelBoxes = Arc<Vec<(IVec3, [u8; 3], [u8; 3], u8)>>;
@@ -91,11 +89,6 @@ impl Models {
             let size = [size.x as u8, size.y as u8, size.z as u8];
             let m = mats.get(b.voxel);
             boxes.push((lo, size, m.color, m.plant));
-            // A broadleaf's crown has a twin in the grey-brown of bare twigs, drawn in its
-            // place once its leaves are down.
-            if m.plant == plant::DECIDUOUS || m.plant == plant::AUTUMN {
-                boxes.push((lo, size, BARE_CROWN, m.plant | BARE));
-            }
         }
         let model: ModelBoxes = Arc::new(boxes);
         self.cache.lock().expect("model cache poisoned").insert(key, model.clone());

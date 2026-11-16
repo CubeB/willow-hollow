@@ -422,6 +422,21 @@ pub struct DrawStats {
     pub shadow_draws: [u32; CASCADES],
 }
 
+/// One corner of a far-tree box as drawn (see the impostor pipeline): its corner and
+/// outward normal on one side, the same on the opposite side, and the bare crown's colour.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BoxCorner {
+    corner: [f32; 3],
+    normal: [f32; 3],
+    opposite: [f32; 3],
+    opposite_normal: [f32; 3],
+    bare: [u8; 4],
+}
+
+/// Sides drawn of each far-tree box: one of each opposite pair, the one facing the camera.
+const BOX_SIDES: u32 = 3;
+
 /// A chunk draw as the GPU reads it from the indirect buffer: index count, instance
 /// count, first index, base vertex, first instance.
 type ChunkDraw = [u32; 5];
@@ -1139,7 +1154,7 @@ impl Renderer {
             immediate_size: 0,
         });
         let impostor_module = shader(device, "impostor", format!("{common}\n{}\n{}\n{}", include_str!("shaders/season.wgsl"), include_str!("shaders/ground.wgsl"), include_str!("shaders/impostor.wgsl")));
-        let impostor_box_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        let impostor_box_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 6 => Float32x3, 7 => Float32x3, 8 => Unorm8x4];
         let impostor_instance_attrs = wgpu::vertex_attr_array![2 => Sint32x3, 3 => Uint8x4, 4 => Unorm8x4, 5 => Uint8x4];
         let impostor = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("impostor"),
@@ -1150,7 +1165,7 @@ impl Renderer {
                 compilation_options: Default::default(),
                 buffers: &[
                     Some(wgpu::VertexBufferLayout {
-                        array_stride: 24,
+                        array_stride: size_of::<BoxCorner>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &impostor_box_attrs,
                     }),
@@ -1184,11 +1199,25 @@ impl Renderer {
             (Vec3::Z, Vec3::X, Vec3::Y),
             (Vec3::NEG_Z, Vec3::Y, Vec3::X),
         ];
-        let mut box_corners: Vec<[f32; 6]> = Vec::with_capacity(24);
-        for (n, u, v) in sides {
+        // Of each pair of opposite sides only the one facing the camera can be seen, so a
+        // box is drawn as three sides, each vertex carrying its corner of both sides of the
+        // pair and the shader taking one (impostor.wgsl). The corners are those of the six
+        // sides as they were, in the same order, so each side's two triangles are too.
+        // The bare crown's colour rides along as bytes, read as the box colours are.
+        let [r, g, b] = impostors::BARE_CROWN;
+        let mut box_corners: Vec<BoxCorner> = Vec::with_capacity(12);
+        for pair in sides.chunks(2) {
+            let corner = |(n, u, v): (Vec3, Vec3, Vec3), su: f32, sv: f32| (Vec3::splat(0.5) + (n + u * su + v * sv) * 0.5, n);
             for (su, sv) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                let p = Vec3::splat(0.5) + (n + u * su + v * sv) * 0.5;
-                box_corners.push([p.x, p.y, p.z, n.x, n.y, n.z]);
+                let (p, n) = corner(pair[0], su, sv);
+                let (q, m) = corner(pair[1], su, sv);
+                box_corners.push(BoxCorner {
+                    corner: p.to_array(),
+                    normal: n.to_array(),
+                    opposite: q.to_array(),
+                    opposite_normal: m.to_array(),
+                    bare: [r, g, b, 255],
+                });
             }
         }
         let impostor_cube = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2001,7 +2030,7 @@ impl Renderer {
             let reach = Vec2::new(lo.x.abs().max(hi.x.abs()), lo.z.abs().max(hi.z.abs())).length();
             // Squares wholly inside the voxel terrain are left to it.
             if reach + m(40.0) >= voxel_radius && frustum.intersects_box(lo, hi) {
-                impostor_draws.push([36, tile.span.quads, 0, 0, tile.span.first()]);
+                impostor_draws.push([BOX_SIDES * 6, tile.span.quads, 0, 0, tile.span.first()]);
                 stats.impostor_boxes += tile.span.quads;
             }
         }
