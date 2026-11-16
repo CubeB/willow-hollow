@@ -135,6 +135,9 @@ after: `OUT=before bash tools/bench/bench.sh` (it stops if anything else is runn
 `imgdiff.py` checks that the picture has not changed). A screenshot is drawn at however
 long its loading took, which moves the leaves and water; `VOXEL_CLOCK=S` draws it at S
 seconds instead, so that two shots of the same build match exactly (take.sh sets it).
+Every loading wait gives up after 90 s without progress, prints what each worker is doing
+and exits with code 3; `WILLOW_WAIT_LIMIT=S` changes the limit. What was made faster, the
+numbers, and the changes still waiting for a yes are in [PERFORMANCE.md](PERFORMANCE.md).
 
 **The in-game map.** A screenshot can have the corner map or the large map drawn on it,
 as the player would have it after walking to where the camera is. `--minimap` draws the
