@@ -295,7 +295,7 @@ const SNOW_COUNT: f32 = 1500.0;
 /// How far off a fire's smoke is still seen, in metres: a column of it is how a camp
 /// is told from across a valley.
 pub const SMOKE_SIGHT: f64 = 600.0;
-/// How far off its sparks are, in metres, and the finer puffs low down.
+/// How far off its sparks are, in metres, and the most puffs of its smoke.
 const SPARK_SIGHT: f64 = 90.0;
 /// Puffs of smoke in the air at once, at most, so that a row of fires leaves room for
 /// the rain and the leaves.
@@ -537,7 +537,7 @@ impl Particles {
 
         // Fires: sparks that fly up and wink out, and smoke that leans with the wind and
         // goes up a long way, so that a fire is seen from far off by its column of smoke.
-        // Beyond where the sparks show, fewer and bigger puffs make the same column.
+        // Beyond where the sparks show, fewer puffs make the same column.
         let mut smoke = if s.fires.is_empty() { 0 } else { self.count(PKind::Smoke) };
         for &(fire, strength) in s.fires {
             let metres = (fire - s.camera).length() / VOXELS_PER_METRE as f64;
@@ -561,21 +561,26 @@ impl Particles {
                 };
                 self.spawn(particle);
             }
-            let rate = if near { 8.0 } else { 4.0 } * strength;
+            // Fewer puffs than there are wisps in real smoke, but each lives long, so the
+            // column goes up high enough to be seen over the trees from a long way off.
+            let rate = if near { 6.0 } else { 3.0 } * strength;
             if smoke < MAX_SMOKE && self.unit() < dt * rate {
                 smoke += 1;
-                let shade = self.range(0.16, 0.3);
+                let shade = self.range(0.85, 1.1);
                 // Smoke from a fire gone out is thin, and soon gone.
-                let life = self.range(24.0, 34.0) * (0.3 + 0.65 * strength.min(1.0));
-                let size = if near { self.range(0.12, 0.2) } else { self.range(0.6, 0.9) };
+                let life = self.range(34.0, 46.0) * (0.3 + 0.65 * strength.min(1.0));
+                // Small wisps, near or far: far off, they are drawn no smaller than a
+                // pixel or two (see below), so the column stays one line.
+                let size = self.range(0.08, 0.14);
                 let particle = Particle {
                     kind: PKind::Smoke,
-                    pos: fire + (Vec3::new(self.range(-0.1, 0.1), self.range(0.3, 0.5), self.range(-0.1, 0.1)) * U).as_dvec3(),
+                    pos: fire + (Vec3::new(self.range(-0.08, 0.08), self.range(0.3, 0.5), self.range(-0.08, 0.08)) * U).as_dvec3(),
                     vel: Vec3::new(self.range(-0.1, 0.1), self.range(1.4, 2.0), self.range(-0.1, 0.1)),
                     age: 0.0,
                     life,
                     size: Vec3::splat(size),
-                    color: [shade, shade, shade * 1.05],
+                    // A soft blue-grey, as wood smoke is against the trees.
+                    color: [0.5 * shade, 0.54 * shade, 0.62 * shade],
                     phase: self.range(0.0, std::f32::consts::TAU),
                     settled: false,
                     rot: Vec3::ZERO,
@@ -754,12 +759,15 @@ impl Particles {
                     p.pos += (p.vel * U * dt).as_dvec3();
                 }
                 PKind::Smoke => {
-                    // It rises fast off the fire, slows to a steady climb, and goes the
-                    // way the wind does, spreading as it goes up.
-                    let curl = Vec3::new((p.age * 1.3 + p.phase).sin(), 0.0, (p.age * 1.1 + p.phase * 2.0).cos()) * 0.25;
-                    p.vel += (Vec3::new(wind.x * 0.45, 1.5, wind.z * 0.45) + curl - p.vel) * (0.6 * dt);
+                    // It rises fast off the fire, slows to a steady climb, and goes more
+                    // and more the way the wind does as it gets up out of the shelter of
+                    // the ground, wandering apart into wisps and spreading slowly.
+                    let up = (p.age / 12.0).min(1.0);
+                    let curl = Vec3::new((p.age * 0.9 + p.phase).sin(), 0.0, (p.age * 0.7 + p.phase * 2.0).cos()) * (0.15 + 0.35 * up);
+                    let drift = 0.3 + 0.4 * up;
+                    p.vel += (Vec3::new(wind.x * drift, 1.4, wind.z * drift) + curl - p.vel) * (0.6 * dt);
                     p.pos += (p.vel * U * dt).as_dvec3();
-                    p.size += Vec3::splat(0.28 * dt);
+                    p.size += Vec3::splat(0.09 * dt);
                 }
                 PKind::Mist => {
                     p.vel += (wind * 0.3 - p.vel * 0.5) * dt;
@@ -980,17 +988,23 @@ impl Particles {
             let mut alpha = fade_in * fade_out;
             let mut glow = 0.0;
             let mut color = p.color;
+            let mut draw_size = p.size;
             match p.kind {
                 PKind::Mist => alpha *= 0.16,
                 // Smoke thins all the way up; a spark burns out.
                 PKind::Smoke => {
-                    alpha = fade_in * 0.32 * (1.0 - p.age / p.life).powf(0.9);
+                    // Thin by the fire, where it is seen through, and thinning as it climbs.
+                    alpha = fade_in * 0.13 * (1.0 - p.age / p.life).powf(0.5);
                     // Far off, the haze takes the edge off thin smoke and fewer puffs
-                    // make the column: each is thicker, so the column still shows.
+                    // make the column: each is drawn thicker, and never thinner than a
+                    // pixel or two, so the column still shows as a line over the land.
                     let metres = (p.pos - s.camera).length() as f32 / VOXELS_PER_METRE;
-                    alpha = (alpha * (1.0 + ((metres - 40.0) / 70.0).clamp(0.0, 3.0))).min(0.9);
-                    // Seen by the day's light, and low down by the fire's own.
-                    glow = 0.06 + 0.9 * s.sun_elevation.clamp(0.0, 1.0) + 0.5 * (1.0 - p.age / 1.6).max(0.0);
+                    alpha = (alpha * (1.0 + ((metres - 30.0) / 45.0).clamp(0.0, 5.0))).min(0.6);
+                    draw_size = p.size.max(Vec3::splat(metres * 0.0045));
+                    // Seen by the day's light, and the sky's after sunset, so it is grey
+                    // rather than black at dusk; low down by the fire's own.
+                    let day = ((s.sun_elevation + 0.12) / 0.45).clamp(0.0, 1.0);
+                    glow = 0.1 + 0.7 * day * day * (3.0 - 2.0 * day) + 0.4 * (1.0 - p.age / 1.6).max(0.0);
                 }
                 PKind::Spark => {
                     glow = 5.5 * (1.0 - p.age / p.life).sqrt();
@@ -1071,7 +1085,7 @@ impl Particles {
             self.instances.push(ParticleInstance {
                 pos: (p.pos - s.camera).as_vec3().to_array(),
                 yaw,
-                size: (p.size * U).to_array(),
+                size: (draw_size * U).to_array(),
                 glow,
                 color: [color[0], color[1], color[2], alpha],
                 tilt,

@@ -333,7 +333,7 @@ cargo run --release -p bench -- --seed 1
 `--hotbar` the hotbar. `--camp lit` (or `laid`, `out`, `burnt`) makes camp a few steps
 ahead of the camera: a fire in that state (`out` is put out a moment ago, and still
 smoulders) and a few things set down. `--camp-ahead M` makes it M metres ahead instead,
-to see its smoke from far off; give it `--ambient 40` or so for the column to rise. Add `--rest` for the
+to see its smoke from far off; give it `--ambient 60` or so for the column to rise. Add `--rest` for the
 view of someone lying by the fire, facing it, as high as `--look` says. (There were
 tents once; a save from then still loads, without them.)
 
