@@ -100,14 +100,15 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
         });
     };
 
-    // The body, deep in the chest, and the neck into the head.
-    part(Vec3::ZERO, Vec3::new(0.115, 0.115, 0.24), [0.0; 3], FEATHER, SHEEN);
+    // The body, deep in the chest, and the neck into the head: stocky, a few big blocks
+    // with a short thick neck, as the world's plants and props are blocky (#197).
+    part(Vec3::ZERO, Vec3::new(0.14, 0.135, 0.235), [0.0; 3], FEATHER, SHEEN);
     if near {
-        part(Vec3::new(0.0, -0.042, 0.06), Vec3::new(0.098, 0.06, 0.11), [0.0; 3], FEATHER, SHEEN * 0.6);
-        part(Vec3::new(0.0, 0.03, 0.1), Vec3::new(0.072, 0.075, 0.07), [0.0; 3], FEATHER, SHEEN);
+        part(Vec3::new(0.0, -0.047, 0.055), Vec3::new(0.12, 0.07, 0.11), [0.0; 3], FEATHER, SHEEN * 0.6);
+        part(Vec3::new(0.0, 0.03, 0.09), Vec3::new(0.096, 0.088, 0.06), [0.0; 3], FEATHER, SHEEN);
     }
     // The head, turned and bent about the top of the neck, and the heavy beak.
-    let neck = Vec3::new(0.0, 0.035, 0.1);
+    let neck = Vec3::new(0.0, 0.035, 0.085);
     let (ht, hd) = (pose.head_turn, pose.head_dip);
     let about_neck = |v: Vec3| {
         let (sd, cd) = hd.sin_cos();
@@ -115,11 +116,11 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
         let (st, ct) = ht.sin_cos();
         neck + Vec3::new(a.x * ct + a.z * st, a.y, -a.x * st + a.z * ct)
     };
-    part(about_neck(Vec3::new(0.0, 0.022, 0.055)), Vec3::new(0.084, 0.08, 0.1), [-ht, hd, 0.0], FEATHER, SHEEN);
+    part(about_neck(Vec3::new(0.0, 0.024, 0.055)), Vec3::new(0.1, 0.094, 0.1), [-ht, hd, 0.0], FEATHER, SHEEN);
     if mid {
-        part(about_neck(Vec3::new(0.0, 0.016, 0.135)), Vec3::new(0.03, 0.024, 0.07), [-ht, hd + 0.16, 0.0], BEAK, 0.0);
+        part(about_neck(Vec3::new(0.0, 0.016, 0.135)), Vec3::new(0.036, 0.03, 0.07), [-ht, hd + 0.16, 0.0], BEAK, 0.0);
         if near {
-            part(about_neck(Vec3::new(0.0, 0.0, 0.125)), Vec3::new(0.024, 0.012, 0.058), [-ht, hd + 0.16 + pose.beak, 0.0], BEAK, 0.0);
+            part(about_neck(Vec3::new(0.0, -0.002, 0.125)), Vec3::new(0.028, 0.014, 0.058), [-ht, hd + 0.16 + pose.beak, 0.0], BEAK, 0.0);
         }
     }
     // The tail, hinged at the rump, rounder when it is spread.
@@ -131,7 +132,7 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
     match pose.wings {
         Wings::Folded => {
             for side in [1.0f32, -1.0] {
-                part(Vec3::new(side * 0.06, 0.014, -0.05), Vec3::new(0.035, 0.085, 0.28), [0.0, -0.06, side * 0.12], WING, SHEEN);
+                part(Vec3::new(side * 0.072, 0.014, -0.05), Vec3::new(0.04, 0.095, 0.28), [0.0, -0.06, side * 0.12], WING, SHEEN);
             }
         }
         Wings::Open { raise, hand, sweep } => {
@@ -171,8 +172,8 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
         Legs::Standing => {
             for side in [1.0f32, -1.0] {
                 // From the hip straight down to the foot on the branch or the ground.
-                let hip = turn(Vec3::new(side * 0.028, -0.045, 0.0) * s, yaw, pitch, bank);
-                let foot = turn(Vec3::new(side * 0.028, 0.0, 0.0) * s, yaw, 0.0, 0.0) - Vec3::Y * STANDING * s;
+                let hip = turn(Vec3::new(side * 0.034, -0.045, 0.0) * s, yaw, pitch, bank);
+                let foot = turn(Vec3::new(side * 0.034, 0.0, 0.0) * s, yaw, 0.0, 0.0) - Vec3::Y * STANDING * s;
                 let leg = hip - foot;
                 let len = leg.length();
                 let fwd = Vec3::new(-yaw.sin(), 0.0, yaw.cos());
@@ -180,7 +181,7 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
                 out.push(ParticleInstance {
                     pos: (centre + (hip + foot) * 0.5).to_array(),
                     yaw,
-                    size: [0.016 * s, len, 0.016 * s],
+                    size: [0.02 * s, len, 0.02 * s],
                     glow: 0.0,
                     color: [LEG[0], LEG[1], LEG[2], 1.0],
                     tilt: [lean, 0.0],

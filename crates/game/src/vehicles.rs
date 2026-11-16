@@ -162,9 +162,12 @@ const WIRE: [f32; 3] = [0.55, 0.54, 0.52];
 
 /// The wing's shape, in the model's frame (old voxels, from the eye): a swept delta, its
 /// nose ahead of the hands and its tips back and a little up, the way a hang glider's
-/// is. It is laid out in strips across the span, each a rib's width.
+/// is. It is laid out in strips across the span, each a rib's width: few and thick,
+/// so its blocks are of a size with the plants' and the props' (#197).
 const HALF_SPAN: f32 = 3.8;
-const STRIPS: usize = 8;
+const STRIPS: usize = 6;
+/// How thick the cloth is.
+const CLOTH: f32 = 0.08;
 /// Where the wing hangs from, over the hands: it banks and pitches about this, so the
 /// frame the hands hold stays where the hands are.
 const HANG: [f32; 3] = [0.4, 1.0, 0.0];
@@ -282,7 +285,7 @@ impl Kit {
 /// Draws the wing above someone gliding, with feet at `pos`: `open` of the way unfolded,
 /// from a rod lying fore and aft along its keel (where the figure swings it up to from
 /// its back, see character::draw) to its full span, with the frame the hands hold and
-/// the wires that brace it.
+/// the wires under it that brace it.
 ///
 /// Unfolding, the wing sweeps out from the keel and lengthens at once, overshooting its
 /// span a little and settling, as cloth does when it fills. In the air it banks into
@@ -333,37 +336,27 @@ pub fn draw_glider(pos: DVec3, heading: f32, open: f32, flight: Flight, cam: DVe
                 // The sail billows up between the tubes, most at the middle of the chord.
                 let billow = 0.05 * (std::f32::consts::PI * (from + to) * 0.5).sin() * (1.0 - out_along * 0.6) * smooth;
                 let mid = Vec3::new((front + back) * 0.5, y + billow + flutter, at_z);
-                kit.bx(place(mid), [(front - back).abs() + 0.02, 0.04, across], color, tilt);
+                kit.bx(place(mid), [(front - back).abs() + 0.02, CLOTH, across], color, tilt);
             }
         }
         // Tip: a short upturned batten closing the wing.
         let tip = HALF_SPAN * span;
         let (le, te) = (fold(leading(HALF_SPAN)), fold(trailing(HALF_SPAN)));
-        kit.bx(place(Vec3::new((le + te) * 0.5, hang.y + 0.05 * HALF_SPAN + 0.04 + bob, side * tip)), [(le - te).abs() + 0.06, 0.08, 0.05], CANOPY_DEEP, tilt);
+        kit.bx(place(Vec3::new((le + te) * 0.5, hang.y + 0.05 * HALF_SPAN + 0.06 + bob, side * tip)), [(le - te).abs() + 0.06, 0.12, 0.08], CANOPY_DEEP, tilt);
         // The leading-edge tube, swept back in one piece from the nose to the tip.
-        let nose_at = Vec3::new(fold(leading(0.0)), hang.y + 0.03 + bob, 0.0);
-        let tip_at = Vec3::new(le + 0.02, hang.y + 0.05 * HALF_SPAN + 0.03 + bob, side * tip);
-        kit.tube(place(nose_at), place(tip_at), 0.08, TUBE);
+        let nose_at = Vec3::new(fold(leading(0.0)), hang.y + 0.05 + bob, 0.0);
+        let tip_at = Vec3::new(le + 0.02, hang.y + 0.05 * HALF_SPAN + 0.05 + bob, side * tip);
+        kit.tube(place(nose_at), place(tip_at), 0.11, TUBE);
     }
-    // The keel, nose to tail, and a cap on the nose.
+    // The keel under the cloth, nose to tail, and a cap on the nose.
     let (nose, tail) = (fold(leading(0.0) + 0.1), fold(trailing(0.0) - 0.1));
-    kit.bx(place(Vec3::new((nose + tail) * 0.5, hang.y + 0.01 + bob, 0.0)), [nose - tail, 0.08, 0.09], TUBE, tilt);
+    kit.bx(place(Vec3::new((nose + tail) * 0.5, hang.y - 0.03 + bob, 0.0)), [nose - tail, 0.1, 0.11], TUBE, tilt);
     kit.bx(place(Vec3::new(nose, hang.y + 0.02 + bob, 0.0)), [0.22, 0.13, 0.26], FRAME, tilt);
 
     if smooth > 0.3 {
-        // The king post over the hang point, and wires from its top to the nose, the
-        // tail and out along each leading edge.
-        let post = place(Vec3::new(hang.x, hang.y + 0.75 + bob, 0.0));
-        kit.tube(place(hang + Vec3::Y * bob), post, 0.06, FRAME);
+        // No king post over the wing, nor wires from it: thin lines across the top of
+        // a wing made of blocks looked out of place (#197).
         let mid_z = HALF_SPAN * 0.62;
-        for end in [
-            Vec3::new(nose, hang.y + bob, 0.0),
-            Vec3::new(tail, hang.y + bob, 0.0),
-            Vec3::new(fold(leading(mid_z)), hang.y + 0.05 * mid_z + bob, mid_z * span),
-            Vec3::new(fold(leading(mid_z)), hang.y + 0.05 * mid_z + bob, -mid_z * span),
-        ] {
-            kit.tube(post, place(end), 0.025, WIRE);
-        }
         // The control frame: two downtubes from the hang point to the ends of the bar
         // the hands hold (character::grip). It does not bank with the wing, so the bar
         // stays in the hands as the wing tips over it.

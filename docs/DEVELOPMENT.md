@@ -301,6 +301,10 @@ murmuration gathers at dusk (`crates/game/src/starlings.rs`). `--murmuration` pu
 ahead of the camera whatever the date, hour and country; give it `--ambient 20` or more
 to see the cloud a while after it has gathered.
 
+**Butterflies** rise from flowers in bloom near the player (`particles.rs`), now and then,
+so a still seldom has one close. `--butterflies M` sets out one of each colour M metres
+ahead of the camera; `--ambient 0.3` keeps them there.
+
 **The northern lights** come out on some nights in the cold country: the cold biomes, and
 the cold north of a continent or its high ground (`crates/game/src/aurora.rs`; drawn in
 `sky.wgsl` from a uniform of their own). `--aurora` has them out tonight wherever the

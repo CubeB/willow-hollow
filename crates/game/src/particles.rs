@@ -283,6 +283,10 @@ const BUTTERFLY_COLOURS: [[f32; 3]; 7] = [
     [0.98, 0.98, 0.98],
 ];
 
+/// A butterfly's wing, across, thick and fore and aft: chunky, so that a butterfly is of
+/// a piece with the blocky plants it flies over (#197).
+const BUTTERFLY_SIZE: Vec3 = Vec3::new(0.19, 0.05, 0.22);
+
 /// How far off (voxels) a raindrop's splash is still drawn.
 const SPLASH_REACH: f64 = 11.0 * VOXELS_PER_METRE as f64;
 /// Rain and snow alive at once at full strength.
@@ -645,7 +649,7 @@ impl Particles {
                 vel: Vec3::ZERO,
                 age: 0.0,
                 life: self.range(18.0, 30.0),
-                size: Vec3::new(0.17, 0.02, 0.2),
+                size: BUTTERFLY_SIZE,
                 color,
                 phase: self.range(0.0, std::f32::consts::TAU),
                 settled: false,
@@ -1048,7 +1052,7 @@ impl Particles {
                     self.instances.push(ParticleInstance {
                         pos: rel.to_array(),
                         yaw: p.rot.x,
-                        size: [0.03 * U, 0.03 * U, p.size.z * U],
+                        size: [0.055 * U, 0.055 * U, p.size.z * U],
                         glow,
                         color: [0.03, 0.025, 0.02, alpha],
                         tilt: [0.0, 0.0],
@@ -1083,6 +1087,28 @@ impl Particles {
     /// Where each flock in the sky is, its birds' middle, and how many birds it has.
     pub fn flocks(&self) -> Vec<(DVec3, usize)> {
         self.flocks.iter().map(|f| (f.birds.iter().map(|b| b.pos).sum::<DVec3>() / f.birds.len().max(1) as f64, f.birds.len())).collect()
+    }
+
+    /// Sets out one butterfly of each colour about `at`, for a still of them close to.
+    pub fn set_out_butterflies(&mut self, at: DVec3) {
+        for (k, color) in BUTTERFLY_COLOURS.into_iter().enumerate() {
+            let a = k as f32 * 2.4;
+            let off = DVec3::new(a.cos() as f64, (k % 3) as f64 * 0.4 - 0.4, a.sin() as f64) * (0.6 * U) as f64;
+            let particle = Particle {
+                kind: PKind::Butterfly,
+                pos: at + off,
+                vel: Vec3::ZERO,
+                age: 0.0,
+                life: 30.0,
+                size: BUTTERFLY_SIZE,
+                color,
+                phase: a,
+                settled: false,
+                rot: Vec3::new(a, 0.0, 0.0),
+                spin: Vec4::ZERO,
+            };
+            self.spawn(particle);
+        }
     }
 
     pub fn instances(&self) -> &[ParticleInstance] {

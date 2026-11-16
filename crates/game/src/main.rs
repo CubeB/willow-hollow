@@ -104,6 +104,8 @@ struct Options {
     fresh: bool,
     /// A murmuration of starlings ahead, whatever the date, hour and country.
     murmuration: bool,
+    /// Butterflies set out this many metres ahead of a screenshot's camera.
+    shot_butterflies: Option<f64>,
     /// The northern lights out every night, wherever.
     aurora: bool,
     /// Render one frame to this PNG without opening a window, then exit.
@@ -178,6 +180,7 @@ impl Default for Options {
             weather: None,
             fresh: false,
             murmuration: false,
+            shot_butterflies: None,
             aurora: false,
             screenshot: None,
             map: None,
@@ -262,6 +265,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         to the start
   --ambient S           seconds of ambient life before a screenshot (default 8)
   --murmuration         starlings gathering ahead of the camera, whatever the date and hour
+  --butterflies M       on a screenshot, a few butterflies M metres ahead of the camera
   --aurora              the northern lights out tonight, wherever the camera is
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
@@ -305,6 +309,7 @@ fn parse_args() -> Result<Options> {
             "--seed" => o.overrides.seed = Some(value()?.parse()?),
             "--fresh" => o.fresh = true,
             "--murmuration" => o.murmuration = true,
+            "--butterflies" => o.shot_butterflies = Some(value()?.parse::<f64>()?.clamp(0.5, 50.0)),
             "--aurora" => o.aurora = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
@@ -2541,6 +2546,9 @@ fn main() -> Result<()> {
         let mut particles = Particles::new();
         if opts.murmuration {
             particles.starlings.forced = Some(camera.forward());
+        }
+        if let Some(ahead) = opts.shot_butterflies {
+            particles.set_out_butterflies(camera.pos + camera.forward().as_dvec3() * m64(ahead));
         }
         for step in 0..(opts.ambient * 60.0) as u32 {
             let surroundings = Surroundings {
