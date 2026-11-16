@@ -835,12 +835,7 @@ impl Streamer {
         // sooner still, so that they keep well ahead of the camera rather than waiting
         // for the finest to finish: at speed it never does, and they would never start.
         // Columns only wanted again for their plants come after everything missing.
-        let columns = &self.columns;
-        self.wanted.sort_unstable_by_key(|c| {
-            let replant = if columns.contains_key(c) { 1 << 40 } else { 0 };
-            let lead = step(c.0) * COARSE_LEAD.powi(c.0 as i32);
-            std::cmp::Reverse((focus.distance(*c) / lead * 16.0) as i64 + replant)
-        });
+        sort_wanted(&mut self.wanted, &self.columns, &focus);
     }
 
     /// Uploads a whole column, or nothing at all if the GPU cannot hold it. The column
@@ -976,6 +971,25 @@ fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Mat
         }
     }
     out
+}
+
+/// The order columns are asked for in, the most pressing last (see `rebuild_wanted`).
+fn wanted_key(c: &Col, columns: &HashMap<Col, Vec<GpuChunk>>, focus: &Focus) -> std::cmp::Reverse<i64> {
+    let replant = if columns.contains_key(c) { 1 << 40 } else { 0 };
+    let lead = step(c.0) * COARSE_LEAD.powi(c.0 as i32);
+    std::cmp::Reverse((focus.distance(*c) / lead * 16.0) as i64 + replant)
+}
+
+/// Sorts `wanted` by [`wanted_key`]. Up to 3 x 51 x 51 columns are sorted each time the
+/// camera crosses into another column, and the key, with its square root and its hash
+/// lookup, worked out on every comparison took 6-8 ms. So each key is worked out once.
+/// The pairs are sorted by the same unstable sort on the same keys, which moves them
+/// exactly as it moved the columns, so equal keys come out in the order they did.
+fn sort_wanted(wanted: &mut Vec<Col>, columns: &HashMap<Col, Vec<GpuChunk>>, focus: &Focus) {
+    let mut keyed: Vec<(std::cmp::Reverse<i64>, Col)> = wanted.iter().map(|c| (wanted_key(c, columns, focus), *c)).collect();
+    keyed.sort_unstable_by_key(|k| k.0);
+    wanted.clear();
+    wanted.extend(keyed.into_iter().map(|k| k.1));
 }
 
 fn in_plant_range(col: Col, center: (i32, i32), columns: i32) -> bool {
@@ -1190,6 +1204,45 @@ mod tests {
             .filter(|&i| !c.ocean[i] && c.height[i] > 4.0)
             .map(|i| (((i % c.size) as i32 * cs).div_euclid(CHUNK), ((i / c.size) as i32 * cs).div_euclid(CHUNK)))
             .collect()
+    }
+
+    /// The columns wanted come out of the sort with each key worked out once in exactly
+    /// the order sorting with the key worked out on every comparison gave them, equal
+    /// keys and all.
+    #[test]
+    fn wanted_columns_sort_into_the_same_order_as_they_did() {
+        for (radius, (cx, cz)) in [(24, (0, 0)), (25, (1000, -37)), (12, (-5, 3)), (40, (77, 77))] {
+            let focus = Focus { cx: AtomicI32::new(cx), cz: AtomicI32::new(cz), radius: AtomicI32::new(radius) };
+            let mut wanted = Vec::new();
+            let mut columns = HashMap::new();
+            for level in 0..LEVELS as u8 {
+                let s = step(level) as i32;
+                let span = (reach(level, radius) / step(level)).ceil() as i32 + 1;
+                for dx in -span..=span {
+                    for dz in -span..=span {
+                        let col = (level, cx.div_euclid(s) + dx, cz.div_euclid(s) + dz);
+                        if !focus.in_range(col, 0) {
+                            continue;
+                        }
+                        // Some loaded already, being wanted again for their plants.
+                        if (dx * 7 + dz * 3).rem_euclid(5) == 0 {
+                            columns.insert(col, Vec::new());
+                        }
+                        wanted.push(col);
+                    }
+                }
+            }
+            let mut before = wanted.clone();
+            let t = Instant::now();
+            before.sort_unstable_by_key(|c| wanted_key(c, &columns, &focus));
+            let old_ms = t.elapsed().as_secs_f32() * 1000.0;
+            let t = Instant::now();
+            sort_wanted(&mut wanted, &columns, &focus);
+            let new_ms = t.elapsed().as_secs_f32() * 1000.0;
+            println!("radius {radius}: {} columns sorted in {old_ms:.2} ms before, {new_ms:.2} ms now", wanted.len());
+            assert!(wanted.len() > 1000);
+            assert_eq!(wanted, before, "radius {radius} at {cx},{cz}");
+        }
     }
 
     /// The quick way of finding a coarse column's trees gives the very same meshes as
