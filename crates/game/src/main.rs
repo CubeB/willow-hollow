@@ -897,6 +897,10 @@ struct Running {
     sub: profile::SubTimer,
     last_dt_ms: f32,
     csv: Option<std::io::BufWriter<std::fs::File>>,
+    /// Columns the main thread generated itself for a lookup, and the milliseconds that
+    /// took: in the last frame, and in all frames (see `player::take_sync_loads`).
+    sync_frame: (u32, f32),
+    sync_total: (u32, f32),
     drift: Option<f32>,
     circle: Option<f32>,
     map: Minimap,
@@ -1109,6 +1113,8 @@ impl Running {
             sub: profile::SubTimer::new(),
             last_dt_ms: 0.0,
             csv: open_csv(),
+            sync_frame: (0, 0.0),
+            sync_total: (0, 0.0),
             drift: opts.drift,
             circle: opts.circle,
             gpu,
@@ -2125,6 +2131,10 @@ impl Running {
         }
         self.cpu.lap(6);
         self.sub.lap(19);
+        // Columns the main thread had to generate itself this frame, for the log.
+        self.sync_frame = player::take_sync_loads();
+        self.sync_total.0 += self.sync_frame.0;
+        self.sync_total.1 += self.sync_frame.1;
         self.write_csv_row();
         self.frame += 1;
     }
@@ -2371,6 +2381,7 @@ impl ApplicationHandler for App {
                         let n = *n as f32;
                         log::info!("level {level}: {n} columns built, {:.2} ms to generate and {:.2} ms to mesh each", generate / n, mesh / n);
                     }
+                    log::info!("main thread generated {} columns itself, in {:.1} ms", r.sync_total.0, r.sync_total.1);
                     log::info!(
                         "after {} frames: {:.1} ms/frame ({:.0} fps), {} chunks, {:.2} M quads drawn, {} far tiles, {} far tree boxes, arena {} MiB",
                         r.frame,
@@ -2741,7 +2752,7 @@ fn open_csv() -> Option<std::io::BufWriter<std::fs::File>> {
     head.extend(profile::SUB_SPANS.iter().map(|n| format!("sub_{n}")));
     head.push("gpu_fresh".into());
     head.extend(profile::GPU_SPANS.iter().map(|n| format!("gpu_{}", n.replace(' ', ""))));
-    for n in ["queued", "in_flight", "rebuild_ms", "upload_ms", "received", "upload_bytes", "grown_bytes", "columns", "chunks_drawn", "quads_drawn", "shadow1_draws", "shadow2_draws", "shadow3_draws", "far_tiles", "impostor_boxes", "particles", "props", "shades", "x", "y", "z"] {
+    for n in ["queued", "in_flight", "rebuild_ms", "upload_ms", "received", "upload_bytes", "grown_bytes", "columns", "chunks_drawn", "quads_drawn", "shadow1_draws", "shadow2_draws", "shadow3_draws", "far_tiles", "impostor_boxes", "particles", "props", "shades", "x", "y", "z", "sync_cols", "sync_ms"] {
         head.push(n.into());
     }
     let _ = writeln!(w, "{}", head.join(","));
@@ -2788,6 +2799,8 @@ impl Running {
             format!("{:.1}", self.camera.pos.x),
             format!("{:.1}", self.camera.pos.y),
             format!("{:.1}", self.camera.pos.z),
+            self.sync_frame.0.to_string(),
+            format!("{:.3}", self.sync_frame.1),
         ]);
         let _ = writeln!(w, "{}", row.join(","));
     }

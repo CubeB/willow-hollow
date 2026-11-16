@@ -558,6 +558,20 @@ impl Loader {
     }
 }
 
+thread_local! {
+    /// The columns this thread has generated for itself in [`load`], and the
+    /// milliseconds that took, since [`take_sync_loads`] last read them. Per thread, so
+    /// that the main thread's count leaves out the scanner's and the crows' lookups.
+    static SYNC: std::cell::Cell<(u32, f32)> = const { std::cell::Cell::new((0, 0.0)) };
+}
+
+/// How many columns the calling thread has had to generate there and then for a
+/// lookup, and the milliseconds that took, since the last call. On the main thread this
+/// is how long frames waited on world generation for collision and the like.
+pub fn take_sync_loads() -> (u32, f32) {
+    SYNC.with(|s| s.replace((0, 0.0)))
+}
+
 /// The chunks of column `col`, generating it if it is not held yet.
 fn load<'a>(
     world: &GameWorld,
@@ -567,7 +581,12 @@ fn load<'a>(
     col: (i32, i32),
 ) -> &'a [(i32, PaddedChunk)] {
     columns.entry(col).or_insert_with(|| {
+        let start = std::time::Instant::now();
         let out = world.generate_column_bare(col.0, col.1);
+        SYNC.with(|s| {
+            let (n, ms) = s.get();
+            s.set((n + 1, ms + start.elapsed().as_secs_f32() * 1000.0));
+        });
         currents.insert(col, out.currents);
         trees.insert(col, out.trees);
         out.chunks
@@ -1150,5 +1169,21 @@ mod tests {
         run(&mut p, &mut world, forward(), 6.0);
         assert!(p.pos.x > 13.0, "stuck in the water at x = {}", p.pos.x);
         assert!(!p.swimming && (p.pos.y - 10.0).abs() < 1e-2);
+    }
+
+    /// The count of columns generated there and then sees each one once, and never a
+    /// lazy lookup, which leaves the work to the loader thread.
+    #[test]
+    fn only_lookups_that_generate_are_counted() {
+        let mut voxels = WorldVoxels::new(Arc::new(GameWorld::new(1)));
+        take_sync_loads();
+        let _ = voxels.lazily().kind(5, 40, 5);
+        assert_eq!(take_sync_loads().0, 0);
+        let _ = voxels.kind(5, 40, 5);
+        let _ = voxels.kind(6, 41, 7);
+        let (n, ms) = take_sync_loads();
+        assert_eq!(n, 1);
+        assert!(ms > 0.0);
+        assert_eq!(take_sync_loads(), (0, 0.0));
     }
 }
