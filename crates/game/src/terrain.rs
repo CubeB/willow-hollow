@@ -111,6 +111,32 @@ struct ColumnResult {
     mesh_ms: f32,
 }
 
+impl ColumnResult {
+    /// A result with only these set, and nothing found in the column. Every result is
+    /// made from this, with whatever else its job found written over it, so that a
+    /// field added later needs a value here and nowhere else.
+    fn new(col: Col, marks: Marks, chunks: Option<Vec<(i32, ChunkMesh)>>, planted: bool) -> Self {
+        Self {
+            col,
+            marks,
+            chunks,
+            planted,
+            cascades: Vec::new(),
+            springs: Vec::new(),
+            surf: Vec::new(),
+            lamps: Vec::new(),
+            growing: Vec::new(),
+            gen_ms: 0.0,
+            mesh_ms: 0.0,
+        }
+    }
+
+    /// A job skipped because the camera had moved away.
+    fn skipped(col: Col) -> Self {
+        Self::new(col, Marks::default(), None, false)
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
     pub columns: usize,
@@ -771,19 +797,7 @@ fn roofs(chunks: &[(i32, voxel::PaddedChunk)], mats: &voxel::Materials) -> Vec<V
 
 fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col, plants: bool) -> ColumnResult {
     if !focus.in_range(col, UNLOAD_SLACK) {
-        return ColumnResult {
-            col,
-            marks: Marks::default(),
-            chunks: None,
-            planted: false,
-            cascades: Vec::new(),
-            springs: Vec::new(),
-            surf: Vec::new(),
-            lamps: Vec::new(),
-            growing: Vec::new(),
-            gen_ms: 0.0,
-            mesh_ms: 0.0,
-        };
+        return ColumnResult::skipped(col);
     }
     if col.0 > 0 {
         return build_coarse_column(world, models, col);
@@ -826,10 +840,6 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
     let lamps = lamp_voxels(&output.chunks, col, world.materials());
     let growing = gatherable(&output.plants);
     ColumnResult {
-        col,
-        marks: Marks::of(world, col),
-        chunks: Some(chunks),
-        planted: plants,
         cascades: output.cascades,
         springs: output.springs,
         surf: output.surf,
@@ -837,6 +847,7 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
         growing,
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+        ..ColumnResult::new(col, Marks::of(world, col), Some(chunks), plants)
     }
 }
 
@@ -871,18 +882,10 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
     meshes.reverse();
     let t2 = Instant::now();
     ColumnResult {
-        col,
-        marks: Marks::of(world, col),
-        chunks: Some(meshes),
-        // Coarse columns never need building again with plants.
-        planted: true,
-        cascades: Vec::new(),
-        springs: Vec::new(),
-        surf: Vec::new(),
-        lamps: Vec::new(),
-        growing: Vec::new(),
         gen_ms: (t1 - t0).as_secs_f32() * 1000.0,
         mesh_ms: (t2 - t1).as_secs_f32() * 1000.0,
+        // Coarse columns never need building again with plants.
+        ..ColumnResult::new(col, Marks::of(world, col), Some(meshes), true)
     }
 }
 
