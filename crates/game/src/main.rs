@@ -2503,7 +2503,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 if self.opts.frames.is_some() && r.frame % 120 == 0 {
-                    log::info!("frame {}: {}; {}", r.frame, r.streamer.progress(), r.impostors.progress());
+                    log::info!("frame {}: {}; {}; {}", r.frame, r.streamer.progress(), r.impostors.progress(), r.far.progress());
                     // A timed run whose terrain has stopped loading fails, rather than
                     // timing a world that is not there.
                     if r.streamer.stalled().is_some() {
