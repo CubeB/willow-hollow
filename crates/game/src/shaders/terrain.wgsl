@@ -327,6 +327,38 @@ fn leaf_sway(origin: vec3<i32>, local: vec3<f32>, scale: f32) -> vec3<f32> {
         + vec3<f32>(0.0, wave * strength * 0.4 * VOXELS_PER_METRE, 0.0);
 }
 
+// How far the wind has moved a point of a line strung between two posts, or of the cloth
+// hung on it: a string of prayer flags. `code` is voxel's flap_code: in its low five bits
+// how far the line gives here, 1 where it is tied to 31 in the middle of a long span, and
+// bit 5 on a flag's free lower edge. The line swings slowly downwind and back as a whole
+// and lifts a little. A flag's free edge is blown out downwind on the 0.3 m it hangs,
+// further the harder it blows, and flutters quickly; its phase runs on along the string
+// faster than a flag is wide, so that no two flags beside each other move together, and
+// one flag's two corners are a little apart, which twists it as cloth twists. All of it
+// is a smooth function of where the point is, so the pieces of a flag cut at the edges
+// of voxels move as one and stay joined to the line.
+fn flap_motion(origin: vec3<i32>, local: vec3<f32>, scale: f32, code: u32) -> vec3<f32> {
+    let world = (vec3<f32>(origin) + local * scale) / VOXELS_PER_METRE;
+    let t = G.sun_dir.w;
+    let wind = length(G.wind.xz);
+    // Metres a second, and never quite still: the air always moves a little on a pass.
+    let blow = min(wind / VOXELS_PER_METRE, 10.0) + 0.4;
+    let dir = select(vec2<f32>(0.6, 0.8), G.wind.xz / max(wind, 1e-4), wind > 1e-3);
+    let give = f32((code & 31u) - 1u) / 30.0;
+    let swing = 0.55 + 0.45 * sin(t * 1.1 + dot(world.xz, vec2<f32>(0.23, 0.31)));
+    let bob = sin(t * 1.7 + dot(world.xz, vec2<f32>(0.4, -0.3)) + 1.3);
+    var d = give * blow * (vec3<f32>(dir.x, 0.0, dir.y) * swing * 0.025 + vec3<f32>(0.0, bob * 0.008, 0.0));
+    if ((code & 32u) != 0u) {
+        let phase = dot(world, vec3<f32>(6.3, 2.1, 5.7));
+        let flutter = sin(t * (6.0 + 0.5 * blow) + phase) + 0.45 * sin(t * 13.1 + phase * 1.7 + 2.0);
+        // How far the flag stands out from hanging straight down, in radians.
+        let angle = clamp(0.11 * blow + (0.12 + 0.03 * blow) * flutter, -0.4, 1.35);
+        let drop = 0.3;
+        d += drop * vec3<f32>(dir.x * sin(angle), 1.0 - cos(angle), dir.y * sin(angle));
+    }
+    return d * VOXELS_PER_METRE;
+}
+
 @vertex
 fn vs(in: VIn) -> VOut {
     var out: VOut;
@@ -347,7 +379,13 @@ fn vs(in: VIn) -> VOut {
     var rel = local * scale + in.offset;
     out.still = rel;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
-        rel += leaf_sway(in.origin, local, scale);
+        // What sways with no plant kind and a code in its tag is on a line (voxel's
+        // flap_code); anything else sways as a leaf.
+        if ((in.b >> 29u) == 0u && tag != 0u) {
+            rel += flap_motion(in.origin, local, scale, tag);
+        } else {
+            rel += leaf_sway(in.origin, local, scale);
+        }
     }
     out.rel = rel;
     out.clip = G.view_proj * vec4<f32>(rel, 1.0);

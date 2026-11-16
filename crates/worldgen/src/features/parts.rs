@@ -127,7 +127,7 @@ impl Fine<'_> {
         let at = self.at * CELLS;
         debug_assert!(lo.cmplt(hi).all(), "empty fine part");
         // Fixed to the lantern, never swaying.
-        self.s.add_fine(PlantBox { lo: (lo + at).to_array(), hi: (hi + at).to_array(), voxel: v, sway_lo: false, sway_hi: false, thin: 0, season: 0 });
+        self.s.add_fine(PlantBox { lo: (lo + at).to_array(), hi: (hi + at).to_array(), voxel: v, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 });
     }
 
     /// Thin frames round the lit voxel `l`, so it reads as four panes of glass: a rail

@@ -380,6 +380,7 @@ impl Design {
                 sway_hi: f.sway_hi,
                 thin: f.thin,
                 season: f.season,
+                flap: 0,
             });
         }
         for &(lo, hi) in &self.clear {

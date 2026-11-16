@@ -288,6 +288,12 @@ be a surprise, so add to the chances with care. Nothing makes a sound yet:
 `GameWorld::delights_near(x, z, reach)` lists the ones about a place, which is where
 the wind chimes' sound should start from when there are recordings.
 
+A string of prayer flags is a line on two poles (`delights::flags`), often with a stay
+run down from a pole to a cairn. Every box on a line carries how far the line gives
+there (`PlantBox::flap`), and `flap_motion` in terrain.wgsl swings the line and
+flutters each flag's free edge in the wind, each at its own phase. Motion does not show
+in one shot: take two with different `VOXEL_CLOCK` values and compare them.
+
 **Bees' and wasps' nests** (`crates/worldgen/src/features/nests.rs`) belong to the trees
 and boulders they are in, chosen by a hash of where each stands: a colony of bees in a
 hollow of an old tree or a crevice in a boulder, a wasps' globe under a branch.

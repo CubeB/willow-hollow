@@ -312,6 +312,10 @@ palette! {
     HONEYCOMB         = (204, 150,  52), Solid, 2;
     WASP_PAPER        = (156, 152, 142), Solid, 3;
     WASP_PAPER_DARK   = (118, 114, 106), Solid, 2;
+    // The green and the yellow of prayer flags, to go with CLOTH_BLUE, CLOTH_PALE and
+    // CLOTH_RED: a dyed cloth's colours, where moss and a yellow bloom stood in before.
+    CLOTH_GREEN       = ( 58, 132,  72), Solid, 1;
+    CLOTH_YELLOW      = (228, 190,  52), Solid, 1;
 }
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.

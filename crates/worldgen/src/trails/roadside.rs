@@ -65,7 +65,15 @@ impl Model {
     /// A box whose bottom (`sway_lo`) or top (`sway_hi`) moves in the wind.
     pub(super) fn part(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel, sway_lo: bool, sway_hi: bool) {
         debug_assert!(lo.0 < hi.0 && lo.1 < hi.1 && lo.2 < hi.2, "empty marker part");
-        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo, sway_hi, thin: 0, season: 0 });
+        self.fine.push(PlantBox { lo: [lo.0, lo.1, lo.2], hi: [hi.0, hi.1, hi.2], voxel: v, sway_lo, sway_hi, thin: 0, season: 0, flap: 0 });
+    }
+
+    /// A box on a line strung between posts, moving with the line in the wind as much as
+    /// it gives there (`give`, see [`PlantBox::flap`]); one that `hangs` from the line,
+    /// as a flag does, flaps at its free bottom edge.
+    pub(super) fn on_line(&mut self, lo: IVec3, hi: IVec3, v: Voxel, give: u8, hangs: bool) {
+        debug_assert!(lo.cmplt(hi).all(), "empty part on a line");
+        self.fine.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel: v, sway_lo: hangs, sway_hi: false, thin: 0, season: 0, flap: give.max(1) });
     }
 
     pub(super) fn vox(&mut self, x: i32, y: i32, z: i32, v: Voxel) {

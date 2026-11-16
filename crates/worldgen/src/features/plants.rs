@@ -977,6 +977,7 @@ impl<'a> Plot<'a> {
             sway_hi: sway.1,
             thin: 0,
             season: self.season(voxel),
+            flap: 0,
         });
     }
 
