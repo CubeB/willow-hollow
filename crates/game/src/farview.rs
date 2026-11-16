@@ -334,12 +334,31 @@ impl FarCell {
 
 pub struct FarView {
     cells: HashMap<(i32, i32), FarCell>,
+    /// A continent that has arrived and is partly on the GPU. Its tiles go up a frame's
+    /// budget at a time, and it replaces what is drawn of it only once all of them are
+    /// there, so it never shows in pieces. Whatever was drawn of it before stays until
+    /// then.
+    staged: Option<Staged>,
     pending: HashSet<(i32, i32)>,
     requests: Sender<((i32, i32), usize)>,
     results: Receiver<CellMesh>,
     /// Index buffers for a tile grid at each stride: (stride, buffer, index count).
     grids: Vec<(usize, wgpu::Buffer, u32)>,
 }
+
+/// A continent's mesh on its way to the GPU, with the tiles uploaded so far.
+struct Staged {
+    mesh: CellMesh,
+    tiles: Vec<FarTile>,
+    /// How many tiles of `mesh` have been dealt with: uploaded, or left out for lack of
+    /// room on the GPU.
+    done: usize,
+}
+
+/// How long a frame may spend uploading far tiles, in milliseconds. At least one tile
+/// goes up each frame whatever the budget, so a continent always gets there. A whole
+/// continent at full detail measured up to 7 ms of uploads, so it takes a few frames.
+const UPLOAD_MS: f32 = 1.0;
 
 /// Detail for the continent the camera is on, and for its neighbours.
 const NEAR_STRIDE: usize = 1;
@@ -383,6 +402,7 @@ impl FarView {
             .collect();
         Self {
             cells: HashMap::new(),
+            staged: None,
             pending: HashSet::new(),
             requests,
             results,
@@ -408,7 +428,13 @@ impl FarView {
         self.cells.contains_key(&cell_of(camera))
     }
 
+    /// Call once per frame. Asks for the continents around the camera, and uploads those
+    /// that have arrived for about [`UPLOAD_MS`] at most.
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
+        self.update_within(gpu, camera, UPLOAD_MS);
+    }
+
+    fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
         let here = cell_of(camera);
         Skylines::look_from(here);
         // The camera's continent in full detail first, then the ring around it.
@@ -430,21 +456,38 @@ impl FarView {
         self.cells
             .retain(|c, _| (c.0 - here.0).abs() <= 1 && (c.1 - here.1).abs() <= 1);
 
-        while let Ok(mesh) = self.results.try_recv() {
+        let near = |cell: (i32, i32)| (cell.0 - here.0).abs() <= 1 && (cell.1 - here.1).abs() <= 1;
+        // A tile the GPU has no room for is simply not drawn.
+        let upload = |verts: &[FarVertex], label| gpu.try_vertex_buffer(label, bytemuck::cast_slice(verts));
+        let began = Instant::now();
+        let mut first = true;
+        loop {
+            let staged = match &mut self.staged {
+                Some(staged) => staged,
+                None => {
+                    let Ok(mesh) = self.results.try_recv() else { break };
+                    self.staged.insert(Staged { tiles: Vec::with_capacity(mesh.tiles.len()), mesh, done: 0 })
+                }
+            };
+            // The camera has left it behind while it was being made or uploaded.
+            if !near(staged.mesh.cell) {
+                self.pending.remove(&staged.mesh.cell);
+                self.staged = None;
+                continue;
+            }
+            while staged.done < staged.mesh.tiles.len() && (first || began.elapsed().as_secs_f32() * 1000.0 < upload_ms) {
+                first = false;
+                let t = &staged.mesh.tiles[staged.done];
+                staged.done += 1;
+                if let Some(buffer) = upload(&t.verts, "far tile") {
+                    staged.tiles.push(FarTile { buffer, lo: t.lo, hi: t.hi });
+                }
+            }
+            if staged.done < staged.mesh.tiles.len() {
+                break;
+            }
+            let Some(Staged { mesh, tiles, .. }) = self.staged.take() else { break };
             self.pending.remove(&mesh.cell);
-            // A tile the GPU has no room for is simply not drawn.
-            let upload = |verts: &[FarVertex], label| gpu.try_vertex_buffer(label, bytemuck::cast_slice(verts));
-            let tiles = mesh
-                .tiles
-                .iter()
-                .filter_map(|t| {
-                    Some(FarTile {
-                        buffer: upload(&t.verts, "far tile")?,
-                        lo: t.lo,
-                        hi: t.hi,
-                    })
-                })
-                .collect();
             let rivers = if mesh.rivers.is_empty() {
                 None
             } else {
