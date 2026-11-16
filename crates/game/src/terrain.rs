@@ -986,8 +986,13 @@ fn build_column(world: &GameWorld, models: &lod::Models, focus: &Focus, col: Col
 
 /// A column of one of the coarse rings: no plants, cascades or spray this far out.
 fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> ColumnResult {
+    build_coarse_column_with(world, models, col, false)
+}
+
+/// [`build_coarse_column`], finding the features as `lod::generate_with` is told to.
+fn build_coarse_column_with(world: &GameWorld, models: &lod::Models, col: Col, every_feature: bool) -> ColumnResult {
     let t0 = Instant::now();
-    let (chunks, trees, wash) = lod::generate(world, models, col.0, col.1, col.2);
+    let (chunks, trees, wash) = lod::generate_with(world, models, col.0, col.1, col.2, every_feature);
     let t1 = Instant::now();
     // Trunks in coarse cells, for giving each tree's leaves its own date: here simply the
     // nearest tree's, as coarse cells are too big to say exactly.
@@ -1111,6 +1116,33 @@ mod tests {
             .filter(|&i| !c.ocean[i] && c.height[i] > 4.0)
             .map(|i| (((i % c.size) as i32 * cs).div_euclid(CHUNK), ((i / c.size) as i32 * cs).div_euclid(CHUNK)))
             .collect()
+    }
+
+    /// The quick way of finding a coarse column's trees gives the very same meshes as
+    /// finding every feature and keeping the tall ones, on land of every kind.
+    #[test]
+    fn coarse_columns_mesh_the_same_found_the_quick_way() {
+        let world = GameWorld::with_config(3, SimConfig { size: 256 });
+        let models = lod::Models::default();
+        let (mut columns, mut quads, mut trees) = (0, 0, 0);
+        for (i, (cx, cz)) in land(&world).into_iter().enumerate().step_by(3) {
+            let level = 1 + (i % 2) as u8;
+            let col = (level, cx >> level, cz >> level);
+            let mesh = |every| {
+                let r = build_coarse_column_with(&world, &models, col, every);
+                r.chunks.expect("built").into_iter().map(|(cy, m)| (cy, bytemuck::cast_slice::<Vertex, u8>(&m.opaque).to_vec(), bytemuck::cast_slice::<Vertex, u8>(&m.water).to_vec(), m.faces)).collect::<Vec<_>>()
+            };
+            let (quick, every) = (mesh(false), mesh(true));
+            assert!(quick == every, "column {col:?} meshes differently found the quick way");
+            columns += 1;
+            quads += quick.iter().map(|c| c.1.len() / (4 * size_of::<Vertex>())).sum::<usize>();
+            trees += lod::generate(&world, &models, col.0, col.1, col.2).1.len();
+            if columns >= 40 {
+                break;
+            }
+        }
+        assert!(columns >= 20 && quads > 0, "only {columns} columns, {quads} quads compared");
+        assert!(trees > 0, "no trees in the columns compared");
     }
 
     #[test]
