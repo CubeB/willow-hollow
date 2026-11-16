@@ -169,6 +169,9 @@ impl Starlings {
             let rel = (b.pos - camera).as_vec3();
             let metres = rel.length() / vpm;
             let alpha = fading * (1.0 - ((metres - (SIGHT - 120.0)) / 120.0).clamp(0.0, 1.0));
+            // Each bird dithers out rather than turning glassy: the cloud thins bird by
+            // bird and pixel by pixel, never to a grey ghost of itself.
+            let dissolve = 1.0 - alpha;
             if alpha <= 0.0 {
                 continue;
             }
@@ -184,8 +187,9 @@ impl Starlings {
                 yaw: (-b.vel.x).atan2(b.vel.z),
                 size: [span * grow, 0.05 * grow, 0.2 * grow],
                 glow: 0.0,
-                color: [0.025, 0.024, 0.028, alpha],
+                color: [0.025, 0.024, 0.028, 1.0],
                 tilt: [pitch, 0.0],
+                dissolve,
             });
         }
     }

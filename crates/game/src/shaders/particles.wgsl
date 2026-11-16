@@ -12,6 +12,8 @@ struct VIn {
     @location(6) color: vec4<f32>,
     // Pitch about the cube's own x, then roll about its own z, before the yaw.
     @location(7) tilt: vec2<f32>,
+    // How far it has dithered out: 0 whole, 1 gone.
+    @location(8) dissolve: f32,
 };
 
 struct VOut {
@@ -20,6 +22,7 @@ struct VOut {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) glow: f32,
+    @location(4) @interpolate(flat) dissolve: f32,
 };
 
 // Roll about z, then pitch about x, then yaw about the vertical.
@@ -45,11 +48,21 @@ fn vs(in: VIn) -> VOut {
     out.normal = n;
     out.color = in.color;
     out.glow = in.glow;
+    out.dissolve = in.dissolve;
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    // Something going breaks up in an ordered 4x4 pattern of pixels, as an old screen
+    // dithered: no pop, and no glassy half-way.
+    if (in.dissolve > 0.0) {
+        let p = vec2<u32>(in.clip.xy) & vec2<u32>(3u);
+        var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+        if ((bayer[p.y * 4u + p.x] + 0.5) / 16.0 < in.dissolve) {
+            discard;
+        }
+    }
     var color: vec3<f32>;
     if (in.glow > 0.0) {
         color = in.color.rgb * in.glow;

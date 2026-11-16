@@ -97,6 +97,7 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
             glow: sheen,
             color: [color[0], color[1], color[2], 1.0],
             tilt: [pitch + turned[1], bank + turned[2]],
+            dissolve: 0.0,
         });
     };
 
@@ -185,6 +186,7 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
                     glow: 0.0,
                     color: [LEG[0], LEG[1], LEG[2], 1.0],
                     tilt: [lean, 0.0],
+                    dissolve: 0.0,
                 });
                 if near {
                     out.push(ParticleInstance {
@@ -194,6 +196,7 @@ pub fn draw(pose: &Pose, cam: DVec3, out: &mut Vec<ParticleInstance>) {
                         glow: 0.0,
                         color: [LEG[0], LEG[1], LEG[2], 1.0],
                         tilt: [0.0, 0.0],
+                        dissolve: 0.0,
                     });
                 }
             }
@@ -224,6 +227,7 @@ pub fn draw_nest(nest: &Nest, cam: DVec3, out: &mut Vec<ParticleInstance>) {
         glow: 0.0,
         color: [0.04, 0.032, 0.025, 1.0],
         tilt: [0.0, 0.0],
+        dissolve: 0.0,
     });
     let roll = |k: u32| worldgen::noise::unit(worldgen::noise::hash2(nest.salt, k as i32, 7));
     for k in 0..7u32 {
@@ -238,6 +242,7 @@ pub fn draw_nest(nest: &Nest, cam: DVec3, out: &mut Vec<ParticleInstance>) {
             glow: 0.0,
             color: [c[0], c[1], c[2], 1.0],
             tilt: [(roll(k + 80) - 0.5) * 0.7, 0.0],
+            dissolve: 0.0,
         });
     }
 }

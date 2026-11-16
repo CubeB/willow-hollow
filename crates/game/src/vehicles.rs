@@ -192,6 +192,7 @@ fn push_parts(parts: &[Part], origin: DVec3, heading: f32, cam: DVec3, out: &mut
             glow: 0.0,
             color: [color[0], color[1], color[2], 1.0],
             tilt: [0.0; 2],
+            dissolve: 0.0,
         });
     }
 }
@@ -277,6 +278,7 @@ impl Kit {
                 glow: 0.0,
                 color: [color[0], color[1], color[2], 1.0],
                 tilt: *tilt,
+                dissolve: 0.0,
             });
         }
     }

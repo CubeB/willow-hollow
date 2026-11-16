@@ -18,7 +18,12 @@ use worldgen::{
     world::GameWorld,
 };
 
-use crate::{inventory, particles::ParticleInstance, placed, player::WorldVoxels};
+use crate::{
+    inventory,
+    particles::{ParticleInstance, dither_edge, dither_since},
+    placed,
+    player::WorldVoxels,
+};
 
 /// How far from the camera sticks are looked for, and drawn, in metres.
 pub const REACH: f64 = 20.0;
@@ -137,8 +142,11 @@ pub fn draw(sticks: &[Stick], pack: &inventory::Pack, cam: DVec3, out: &mut Vec<
         if out.len() >= limit {
             break;
         }
-        if !pack.gathered(s.spot().0, s.spot().1) && s.pos.distance(cam) <= m64(REACH) {
+        let d = s.pos.distance(cam);
+        if !pack.gathered(s.spot().0, s.spot().1) && d <= m64(REACH) {
+            let from = out.len();
             placed::draw_one(&placed::Thing::new(item.clone(), s.count, s.pos, s.yaw), cam, 0.0, out);
+            dither_since(out, from, dither_edge(d, m64(REACH), m64(4.0)));
         }
     }
 }

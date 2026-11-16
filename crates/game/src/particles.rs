@@ -30,6 +30,26 @@ pub struct ParticleInstance {
     /// Pitch (about the cube's own x) and roll (about its own z), radians, turned
     /// before the yaw: a leaf tumbling, a wing beating.
     pub tilt: [f32; 2],
+    /// How far it has broken up as it goes: 0 whole, 1 gone. It goes a pixel at a time in
+    /// a fixed pattern rather than turning glassy, so a thing leaving the world dithers
+    /// out as the rest of it is drawn, in blocks.
+    pub dissolve: f32,
+}
+
+/// How far a thing `d` from the eye has dithered out, when it is not drawn past `limit`:
+/// it breaks up over the last `band` before it, so nothing blinks out at the edge.
+pub fn dither_edge(d: f64, limit: f64, band: f64) -> f32 {
+    ((d - (limit - band)) / band).clamp(0.0, 1.0) as f32
+}
+
+/// Dithers out by `by` every box drawn since `from`: a thing made of several boxes goes
+/// as one.
+pub fn dither_since(out: &mut [ParticleInstance], from: usize, by: f32) {
+    if by > 0.0 {
+        for b in &mut out[from..] {
+            b.dissolve = b.dissolve.max(by);
+        }
+    }
 }
 
 /// Prevailing wind: a slowly wandering vector, as in nature never quite steady.
@@ -568,7 +588,7 @@ impl Particles {
                 smoke += 1;
                 let shade = self.range(0.85, 1.1);
                 // Smoke from a fire gone out is thin, and soon gone.
-                let life = self.range(34.0, 46.0) * (0.3 + 0.65 * strength.min(1.0));
+                let life = self.range(42.0, 58.0) * (0.3 + 0.65 * strength.min(1.0));
                 // Small wisps, near or far: far off, they are drawn no smaller than a
                 // pixel or two (see below), so the column stays one line.
                 let size = self.range(0.08, 0.14);
@@ -984,8 +1004,9 @@ impl Particles {
         self.instances.clear();
         for p in &self.particles {
             let fade_in = (p.age / 0.2).min(1.0);
-            let fade_out = ((p.life - p.age) / 0.8).clamp(0.0, 1.0);
-            let mut alpha = fade_in * fade_out;
+            // Coming, it thickens; going, it dithers out rather than turning glassy.
+            let mut dissolve = 1.0 - ((p.life - p.age) / 0.8).clamp(0.0, 1.0);
+            let mut alpha = fade_in;
             let mut glow = 0.0;
             let mut color = p.color;
             let mut draw_size = p.size;
@@ -993,13 +1014,18 @@ impl Particles {
                 PKind::Mist => alpha *= 0.16,
                 // Smoke thins all the way up; a spark burns out.
                 PKind::Smoke => {
-                    // Thin by the fire, where it is seen through, and thinning as it climbs.
-                    alpha = fade_in * 0.13 * (1.0 - p.age / p.life).powf(0.5);
-                    // Far off, the haze takes the edge off thin smoke and fewer puffs
-                    // make the column: each is drawn thicker, and never thinner than a
-                    // pixel or two, so the column still shows as a line over the land.
+                    // Thin by the fire, where it is seen through. Far off, the haze takes
+                    // the edge off thin smoke and fewer puffs make the column: each is
+                    // drawn thicker, and never thinner than a pixel or two, so the column
+                    // still shows as a line over the land.
                     let metres = (p.pos - s.camera).length() as f32 / VOXELS_PER_METRE;
-                    alpha = (alpha * (1.0 + ((metres - 30.0) / 45.0).clamp(0.0, 5.0))).min(0.6);
+                    alpha = (fade_in * 0.13 * (1.0 + ((metres - 30.0) / 45.0).clamp(0.0, 5.0))).min(0.6);
+                    // It thins slowly all the way up, so the top of the column is a long
+                    // tail going to nothing rather than an edge where the puffs stop; the
+                    // last of each puff dithers away.
+                    let gone = p.age / p.life;
+                    alpha *= (1.0 - 0.4 * gone) * (1.0 - smooth(0.35, 1.0, gone));
+                    dissolve = ((gone - 0.7) / 0.3).clamp(0.0, 1.0);
                     draw_size = p.size.max(Vec3::splat(metres * 0.0045));
                     // Seen by the day's light, and the sky's after sunset, so it is grey
                     // rather than black at dusk; low down by the fire's own.
@@ -1060,6 +1086,7 @@ impl Particles {
                             glow,
                             color: [color[0], color[1], color[2], alpha],
                             tilt: [0.0, roll],
+                            dissolve,
                         });
                     }
                     // A dark body between them.
@@ -1070,13 +1097,14 @@ impl Particles {
                         glow,
                         color: [0.03, 0.025, 0.02, alpha],
                         tilt: [0.0, 0.0],
+                        dissolve,
                     });
                     continue;
                 }
                 PKind::Leaf => {
-                    // Fading slowly where it lies.
+                    // Breaking up slowly where it lies.
                     if p.settled {
-                        alpha = fade_in * ((p.life - p.age) / 3.0).clamp(0.0, 1.0);
+                        dissolve = 1.0 - ((p.life - p.age) / 3.0).clamp(0.0, 1.0);
                     }
                     (p.rot.x, [p.rot.y, p.rot.z])
                 }
@@ -1089,6 +1117,7 @@ impl Particles {
                 glow,
                 color: [color[0], color[1], color[2], alpha],
                 tilt,
+                dissolve,
             });
         }
         for flock in &self.flocks {
@@ -1422,8 +1451,8 @@ impl Flock {
         for b in &self.birds {
             let rel = (b.pos - camera).as_vec3();
             let metres = rel.length() / vpm;
-            let alpha = 1.0 - smooth(FLOCK_REACH - 60.0, FLOCK_REACH, metres);
-            if alpha <= 0.0 {
+            let dissolve = smooth(FLOCK_REACH - 60.0, FLOCK_REACH, metres);
+            if dissolve >= 1.0 {
                 continue;
             }
             // Far off a bird is drawn a little bigger than life, so it still reads as a
@@ -1438,8 +1467,9 @@ impl Flock {
                 yaw: b.yaw,
                 size: [body * 0.24, body * 0.2, body],
                 glow: 0.0,
-                color: [self.body_color[0], self.body_color[1], self.body_color[2], alpha],
+                color: [self.body_color[0], self.body_color[1], self.body_color[2], 1.0],
                 tilt: [pitch, b.bank],
+                dissolve,
             });
             for side in [1.0f32, -1.0] {
                 // Each wing hinges at the body, raised by `wing` above the lean.
@@ -1452,8 +1482,9 @@ impl Flock {
                     yaw: b.yaw,
                     size: [span, body * 0.05, body * 0.38],
                     glow: 0.0,
-                    color: [self.wing_color[0], self.wing_color[1], self.wing_color[2], alpha],
+                    color: [self.wing_color[0], self.wing_color[1], self.wing_color[2], 1.0],
                     tilt: [pitch, roll],
+                    dissolve,
                 });
             }
         }
