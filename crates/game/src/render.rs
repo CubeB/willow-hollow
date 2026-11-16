@@ -371,8 +371,9 @@ struct ImpostorCamera {
     frac: [f32; 4],
 }
 
-/// Most cubes of solid moving models drawn in one frame.
-const PROP_CAPACITY: usize = 1024;
+/// Most cubes of solid moving models drawn in one frame: room for the crows and their
+/// nests as well as the boats, the figure and what is set down.
+const PROP_CAPACITY: usize = 2048;
 
 /// Everything one frame draws.
 pub struct Scene<'a> {

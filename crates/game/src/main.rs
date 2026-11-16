@@ -4,6 +4,7 @@ mod aurora;
 mod camera;
 mod camp;
 mod character;
+mod crows;
 mod editor;
 mod env;
 mod fallen;
@@ -140,6 +141,11 @@ struct Options {
     rest: bool,
     /// Hold a lit lantern on a screenshot.
     shot_lantern: bool,
+    /// Set crows out on a screenshot: feeding on the ground, perched, flying, landing
+    /// or at the rookery, at the place of that sort nearest to a point ahead.
+    shot_crows: Option<String>,
+    /// How far ahead that point is, in metres.
+    crows_ahead: f64,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -190,6 +196,8 @@ impl Default for Options {
             camp_ahead: 4.2,
             rest: false,
             shot_lantern: false,
+            shot_crows: None,
+            crows_ahead: 12.0,
             picked: None,
             shot_journal: None,
             journal_fill: 16,
@@ -237,6 +245,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
+  --crows HOW           set crows out on a screenshot near a point ahead: ground, perch,
+                        tree, rock, fly, land, roost or any (they never take fright)
+  --crows-ahead M       that point M metres ahead (default 12)
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -347,6 +358,14 @@ fn parse_args() -> Result<Options> {
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
             "--lantern" => o.shot_lantern = true,
+            "--crows" => {
+                let how = value()?;
+                if !["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"].contains(&how.as_str()) {
+                    bail!("unknown crows '{how}': ground, perch, tree, rock, fly, land, roost or any");
+                }
+                o.shot_crows = Some(how);
+            }
+            "--crows-ahead" => o.crows_ahead = value()?.parse::<f64>()?.clamp(0.0, 500.0),
             "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
             "--camp" => {
                 o.shot_camp = Some(match value()?.as_str() {
@@ -751,6 +770,8 @@ struct Running {
     impostors: Impostors,
     env: Environment,
     particles: Particles,
+    /// The crows about the player, and their nests.
+    crows: crows::Crows,
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
@@ -1012,6 +1033,7 @@ impl Running {
                 }
                 p
             },
+            crows: crows::Crows::new(world.clone()),
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
@@ -1820,6 +1842,15 @@ impl Running {
         // Leaves and rain can wait a frame for ground that is not generated yet.
         self.voxels.trim(self.camera.pos);
         self.particles.update(dt, &surroundings, &mut self.voxels.lazily());
+        let around = crows::Around {
+            camera: self.camera.pos,
+            sun_elevation: self.env.sun_elevation,
+            hour: self.env.time,
+            date: self.env.date,
+            rain: self.weather.now.rain,
+            land: &|x, z| particles::land_under(&self.world, x, z),
+        };
+        self.crows.update(dt, &around);
         self.update_footsteps(dt);
 
         let clock = self.last_frame.duration_since(self.start).as_secs_f32();
@@ -1831,6 +1862,7 @@ impl Running {
         self.placed.draw(self.camera.pos, clock, &mut self.props);
         let mut held_light = None;
         fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
+        self.crows.draw(self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2475,6 +2507,27 @@ fn main() -> Result<()> {
             particles.update(1.0 / 60.0, &surroundings, &mut voxels);
         }
         log::info!("season {:.2} ({}), biome {biome:?}, ground {:?}", env.date, season::month_name(env.date), weather.ground(env.date, warmth));
+        // Crows on a map made at once, and any set out as --crows says, given the same
+        // seconds of life as the rest.
+        let mut crows = crows::Crows::without_lookout();
+        crows.set_sites(crows::survey::Survey::new(world.clone()).look(camera.pos, env.date));
+        if let Some(how) = &opts.shot_crows {
+            let ahead = camera.pos + camera.forward().as_dvec3().with_y(0.0).normalize_or(DVec3::X) * m64(opts.crows_ahead);
+            crows.stage(how, ahead, camera.pos);
+        }
+        for _ in 0..(opts.ambient * 60.0) as u32 {
+            let around = crows::Around {
+                camera: camera.pos,
+                sun_elevation: env.sun_elevation,
+                hour: env.time,
+                date: env.date,
+                rain: weather.now.rain,
+                land: &|x, z| particles::land_under(&world, x, z),
+            };
+            crows.update(1.0 / 60.0, &around);
+        }
+        crows.report(camera.pos);
+        crows.draw(camera.pos, &mut props);
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);

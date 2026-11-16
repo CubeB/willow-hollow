@@ -701,6 +701,13 @@ impl WorldVoxels {
         load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
         self.trees.get(&col).map_or(&[], Vec::as_slice)
     }
+
+    /// The height from which chunk column `col` holds only air, generating it if it is
+    /// not held yet: where a look down for the top of whatever stands there can start.
+    pub fn ceiling(&mut self, col: (i32, i32)) -> i32 {
+        let chunks = load(&self.world, &mut self.columns, &mut self.currents, &mut self.trees, col);
+        chunks.iter().map(|(cy, _)| (cy + 1) * CHUNK).max().unwrap_or(0)
+    }
 }
 
 impl Voxels for WorldVoxels {
