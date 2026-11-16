@@ -14,9 +14,60 @@ struct VIn {
     // Per chunk: the lie of the land at its four corners, x fastest (terrain::GpuChunk::
     // slopes): the x of each normal in the first word, the z in the second, signed bytes.
     @location(8) slopes: vec2<u32>,
+    @builtin(instance_index) inst: u32,
 };
 
+// The opaque terrain's vertex output. What is the same all over a chunk (its origin, ring,
+// scale and grid of biomes) is not handed down per vertex: the fragment shader reads it
+// from the chunk's instance (`chunk`), found by its index, as nearly every pixel of a
+// draw reads the same one. A smaller output is less work per triangle, and many of the
+// triangles drawn are a pixel or smaller.
 struct VOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) rel: vec3<f32>,
+    @location(1) local: vec3<f32>,
+    @location(2) color: vec3<f32>,
+    @location(3) ao: f32,
+    @location(4) @interpolate(flat) face: u32,
+    @location(5) @interpolate(flat) flags: u32,
+    // Where this point is with no wind: see `still` in WOut.
+    @location(6) still: vec3<f32>,
+    // The x and z of the normal of the land this point is part of (see chunk_slope).
+    @location(7) slope: vec2<f32>,
+    // The chunk's instance.
+    @location(8) @interpolate(flat) inst: u32,
+};
+
+// The chunks' instances (render::Instance), as words: offset 3, origin 3, scale, band 2,
+// biomes 8, slopes 2.
+@group(1) @binding(1) var<storage, read> instances: array<u32>;
+const INSTANCE_WORDS: u32 = 19u;
+
+// What the fragment shader needs of a chunk's instance, as the vertex shader hands it on.
+struct Chunk {
+    // In cells of its mesh, for hashing per cell.
+    origin: vec3<i32>,
+    band: vec2<f32>,
+    // Voxels per cell, never negative.
+    scale: f32,
+    grid0: vec4<u32>,
+    grid1: vec4<u32>,
+};
+
+fn chunk(inst: u32) -> Chunk {
+    let b = inst * INSTANCE_WORDS;
+    var c: Chunk;
+    c.scale = abs(bitcast<f32>(instances[b + 6u]));
+    let origin = vec3<i32>(bitcast<i32>(instances[b + 3u]), bitcast<i32>(instances[b + 4u]), bitcast<i32>(instances[b + 5u]));
+    c.origin = origin / i32(c.scale);
+    c.band = vec2<f32>(bitcast<f32>(instances[b + 7u]), bitcast<f32>(instances[b + 8u]));
+    c.grid0 = vec4<u32>(instances[b + 9u], instances[b + 10u], instances[b + 11u], instances[b + 12u]);
+    c.grid1 = vec4<u32>(instances[b + 13u], instances[b + 14u], instances[b + 15u], instances[b + 16u]);
+    return c;
+}
+
+// The water's vertex output: everything a chunk's water needs, its current and falls too.
+struct WOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) rel: vec3<f32>,
     @location(1) local: vec3<f32>,
@@ -291,12 +342,8 @@ fn vs(in: VIn) -> VOut {
     }
     let scale = abs(in.scale);
     out.local = local;
-    out.band = in.band;
-    out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
-    out.grid0 = in.grid0;
-    out.grid1 = in.grid1;
+    out.inst = in.inst;
     out.slope = chunk_slope(in.slopes, local.xz / 32.0);
-    out.scale = scale;
     var rel = local * scale + in.offset;
     out.still = rel;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
@@ -347,24 +394,23 @@ fn vs(in: VIn) -> VOut {
     }
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
-    // Hashed per cell, so a coarse chunk counts its cells from its own corner.
-    out.origin = in.origin / i32(scale);
     return out;
 }
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
-    if (outside_band(in.rel, in.band)) {
+    let ch = chunk(in.inst);
+    if (outside_band(in.rel, ch.band)) {
         discard;
     }
-    return shade(in);
+    return shade(in, ch);
 }
 
 // For chunks wholly inside their ring. Without a discard the GPU can settle depth
 // before running the shader, so hidden surfaces cost nothing.
 @fragment
 fn fs_inside(in: VOut) -> @location(0) vec4<f32> {
-    return shade(in);
+    return shade(in, chunk(in.inst));
 }
 
 // How far a voxel has shrunk toward a pixel, 0 while it is a few pixels across, 1 once it
@@ -378,15 +424,15 @@ fn distant(rel: vec3<f32>, scale: f32) -> f32 {
     return 1.0 - smoothstep(1.2, 4.0, scale / max(pixel, 1e-6));
 }
 
-fn shade(in: VOut) -> vec4<f32> {
+fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
     let n = face_normal(in.face);
-    let far = distant(in.rel, in.scale);
+    let far = distant(in.rel, ch.scale);
     // The voxel this fragment belongs to: a step inward from the face. A short one: the
     // faces of small plants stand at eighths of a voxel, and half a voxel in from one in
     // the middle of its voxel is the very edge of the next, where rounding would give
     // each pixel one voxel or the other and the face would be speckled with both.
     let cell = floor(in.local - n * INWARD);
-    let voxel = vec3<i32>(cell) + in.origin;
+    let voxel = vec3<i32>(cell) + ch.origin;
     let kind = (in.flags >> 5u) & 7u;
     let tag = (in.flags >> 8u) & 63u;
     let grass = kind == PLANT_GRASS || kind == PLANT_GROUND;
@@ -408,23 +454,23 @@ fn shade(in: VOut) -> vec4<f32> {
         base = season_apply(base, voxel, kind, G.season.x, tag);
     }
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
-    let centre = in.rel + (cell + 0.5 - in.local) * in.scale;
+    let centre = in.rel + (cell + 0.5 - in.local) * ch.scale;
     let washed = (in.flags >> 16u) & 511u;
     if (washed != 0u) {
-        base = wash(base, washed, voxel, centre, in.scale);
+        base = wash(base, washed, voxel, centre, ch.scale);
     }
     if (grass) {
-        let world_m = (vec2<f32>(voxel.xz) + 0.5) * (in.scale / VOXELS_PER_METRE);
+        let world_m = (vec2<f32>(voxel.xz) + 0.5) * (ch.scale / VOXELS_PER_METRE);
         let alt_m = (G.cam_wrapped.y + centre.y) / VOXELS_PER_METRE;
         base = sward(base, tag, world_m, in.slope, alt_m, (in.flags & FLAG_SKY) != 0u, 1.0 - far);
     }
     // The pattern on a grass block's faces, near enough for its texels to be seen. How
     // big a texel is on screen is taken across its narrower way, as a face seen edge on
     // foreshortens it, so the pattern fades before it can shimmer.
-    if (kind == PLANT_GROUND && in.scale < 1.5) {
+    if (kind == PLANT_GROUND && ch.scale < 1.5) {
         let pixel = length(in.rel) * G.cam_up.w;
         let facing = max(abs(dot(n, normalize(in.rel))), 0.15);
-        let texel = in.scale / GRASS_TEXELS * facing / max(pixel, 1e-6);
+        let texel = ch.scale / GRASS_TEXELS * facing / max(pixel, 1e-6);
         let fine = smoothstep(1.2, 3.0, texel);
         let coarse = smoothstep(0.5, 1.2, texel);
         if (coarse > 0.0) {
@@ -438,7 +484,7 @@ fn shade(in: VOut) -> vec4<f32> {
     if ((G.cam_wrapped.y + centre.y) / VOXELS_PER_METRE <= G.cam_fwd.w) {
         base *= 1.0 - 0.3 * G.weather.x;
     } else {
-        let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
+        let snow = voxel_snow(ch.grid0, ch.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
         base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
     }
 
@@ -469,7 +515,7 @@ fn shade(in: VOut) -> vec4<f32> {
     // shade, so a far forest does not light up where the maps end.
     // And hills shade it at low sun, by their skylines, as they do the far view.
     let open = (in.flags & FLAG_SKY) != 0u;
-    let beyond = select(0.3, 1.0, open) * skyline_side_light(grid_skyline(in.grid1, in.local.xz / 32.0));
+    let beyond = select(0.3, 1.0, open) * skyline_side_light(grid_skyline(ch.grid1, in.local.xz / 32.0));
     var direct = vec3<f32>(0.0);
     // The shadow maps are drawn with every leaf where it grows, not where the wind has
     // it: a leaf looked up where it sways to would slide in and out of its own shadow.
@@ -479,7 +525,7 @@ fn shade(in: VOut) -> vec4<f32> {
     } else if (foliage && G.sun_color.w > 0.5) {
         // A leaf with the sun behind it glows with the light that comes through, if
         // the sun reaches the other side: thin crowns and the edges of thick ones.
-        let through = max(sun_reaching(still + G.sun_dir.xyz * (1.1 * in.scale), G.sun_dir.xyz, beyond), select(0.0, 0.3, open));
+        let through = max(sun_reaching(still + G.sun_dir.xyz * (1.1 * ch.scale), G.sun_dir.xyz, beyond), select(0.0, 0.3, open));
         direct = G.sun_color.rgb * vec3<f32>(0.85, 1.0, 0.45) * (0.45 * through * min(-facing * 2.0 + 0.35, 1.0));
     }
     var light = direct + ambient(lit_n) * ao + local_lights(in.rel, n) * ao;
@@ -549,8 +595,8 @@ fn spill_reach(s: f32) -> f32 {
 // faces keep AO; the sheets of falling water (face 6) have a layout of their own (see
 // spill_vertex in mesh.rs). Water never sways or goes with the season.
 @vertex
-fn vs_water(in: VIn) -> VOut {
-    var out: VOut;
+fn vs_water(in: VIn) -> WOut {
+    var out: WOut;
     var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
     out.face = (in.a >> 18u) & 7u;
     out.ao = 1.0;
@@ -675,7 +721,7 @@ fn foam_streaks(world_xz: vec2<f32>, flow: vec2<f32>, t: f32) -> f32 {
 }
 
 @fragment
-fn fs_water(in: VOut) -> @location(0) vec4<f32> {
+fn fs_water(in: WOut) -> @location(0) vec4<f32> {
     if (outside_band(in.rel, in.band)) {
         discard;
     }

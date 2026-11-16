@@ -374,6 +374,8 @@ struct Instance {
     /// normal's x of each in the first word and its z in the second, as signed bytes.
     slopes: [u32; 2],
 }
+// The terrain's fragment shader reads instances as words (INSTANCE_WORDS in terrain.wgsl).
+const _: () = assert!(size_of::<Instance>() == 19 * 4);
 
 /// The camera's position for the far trees' whole-voxel placement.
 #[repr(C)]
@@ -555,6 +557,8 @@ pub struct Renderer {
     sea: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_capacity: usize,
+    chunks_layout: wgpu::BindGroupLayout,
+    chunks_bind: wgpu::BindGroup,
     quad_indices: wgpu::Buffer,
     quad_capacity: u32,
     indirect: wgpu::Buffer,
@@ -602,8 +606,18 @@ fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("instances"),
         size: (capacity * size_of::<Instance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        // Storage too: the terrain's fragment shader reads a chunk's instance by its index.
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+/// The terrain's own bind group: the chunks' instances, which its fragment shader reads.
+fn chunks_bind_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, instances: &wgpu::Buffer) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("chunks"),
+        layout,
+        entries: &[wgpu::BindGroupEntry { binding: 1, resource: instances.as_entire_binding() }],
     })
 }
 
@@ -943,9 +957,29 @@ impl Renderer {
                 attributes: &instance_attrs,
             }),
         ];
+        // The opaque terrain reads what is the same all over a chunk from its instance,
+        // rather than having it handed down from every vertex (VOut in terrain.wgsl).
+        let chunks_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunks"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let terrain_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain"),
+            bind_group_layouts: &[Some(&scene_layout_bg), Some(&chunks_layout)],
+            immediate_size: 0,
+        });
         let opaque = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("opaque"),
-            layout: Some(&scene_layout),
+            layout: Some(&terrain_layout),
             vertex: wgpu::VertexState {
                 module: &terrain_module,
                 entry_point: Some("vs"),
@@ -969,7 +1003,7 @@ impl Renderer {
         });
         let opaque_inside = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("opaque inside"),
-            layout: Some(&scene_layout),
+            layout: Some(&terrain_layout),
             vertex: wgpu::VertexState {
                 module: &terrain_module,
                 entry_point: Some("vs"),
@@ -1431,6 +1465,8 @@ impl Renderer {
         );
 
         let instance_capacity = 4096;
+        let instances = instance_buffer(device, instance_capacity);
+        let chunks_bind = chunks_bind_group(device, &chunks_layout, &instances);
         let quad_capacity = 16384;
         Self {
             width,
@@ -1480,8 +1516,10 @@ impl Renderer {
             particle_instances,
             particle_capacity,
             sea,
-            instances: instance_buffer(device, instance_capacity),
+            instances,
             instance_capacity,
+            chunks_layout,
+            chunks_bind,
             quad_indices: quad_index_buffer(device, quad_capacity),
             quad_capacity,
             indirect: indirect_buffer(device, 4096),
@@ -2003,6 +2041,7 @@ impl Renderer {
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
             self.instances = instance_buffer(device, self.instance_capacity);
+            self.chunks_bind = chunks_bind_group(device, &self.chunks_layout, &self.instances);
         }
         if max_quads > self.quad_capacity {
             self.quad_capacity = max_quads.next_power_of_two();
@@ -2146,6 +2185,7 @@ impl Renderer {
             }
 
             pass.set_pipeline(&self.opaque_inside);
+            pass.set_bind_group(1, &self.chunks_bind, &[]);
             pass.set_vertex_buffer(0, chunk_vertices.slice(..));
             draw_chunks(&mut pass, indirect, &draws, opaque_list);
             pass.set_pipeline(&self.opaque);
