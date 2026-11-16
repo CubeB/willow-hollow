@@ -87,27 +87,15 @@ fn fs_lay(in: VOut) -> @location(0) vec4<f32> {
     let size = vec2<i32>(textureDimensions(marched));
     let at = in.clip.xy / 4.0 - 0.5;
     let near = vec2<i32>(round(at));
-    let last = size - 1;
-    // The weight for distance falls off as a Gaussian, which splits into one along x and
-    // one along y: five of each, where a weight per tap took twenty-five exps.
-    let first = vec2<f32>(near) - at;
-    var across: array<f32, 5>;
-    var down: array<f32, 5>;
-    for (var k = 0; k < 5; k++) {
-        let off = first + f32(k - 2);
-        across[k] = exp(-off.x * off.x * 0.22);
-        down[k] = exp(-off.y * off.y * 0.22);
-    }
-    // How near in depth a tap must be is the same for all of them.
-    let tolerance = 1.0 / (depth * 0.12 + 1.0);
     var sum = 0.0;
     var weight = 0.0;
     // Wide enough to smooth away the grain of so few steps along each ray.
-    for (var j = 0; j < 5; j++) {
-        for (var i = 0; i < 5; i++) {
-            let q = near + vec2<i32>(i - 2, j - 2);
-            let m = textureLoad(marched, clamp(q, vec2<i32>(0), last), 0);
-            let w = across[i] * down[j] * (max(1.0 - abs(m.y - depth) * tolerance, 0.0) + 0.002);
+    for (var j = -2; j <= 2; j++) {
+        for (var i = -2; i <= 2; i++) {
+            let q = near + vec2<i32>(i, j);
+            let m = textureLoad(marched, clamp(q, vec2<i32>(0), size - 1), 0);
+            let off = vec2<f32>(q) - at;
+            let w = exp(-dot(off, off) * 0.22) * (max(1.0 - abs(m.y - depth) / (depth * 0.12 + 1.0), 0.0) + 0.002);
             sum += m.x * w;
             weight += w;
         }
