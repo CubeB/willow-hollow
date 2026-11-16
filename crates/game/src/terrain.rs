@@ -109,11 +109,44 @@ fn ready_to_build(world: &GameWorld, col: Col) -> bool {
         && [(0, 0), (size, 0), (0, size), (size, size)].iter().all(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz).is_some())
 }
 
+/// A column's meshes as they go to the GPU: all their vertices in one run, so that the
+/// column takes one span of the arena and one write.
+struct ColumnMesh {
+    /// Each chunk's opaque vertices then its water, chunk after chunk from the bottom.
+    verts: Vec<Vertex>,
+    chunks: Vec<ChunkPart>,
+}
+
+/// One chunk of a [`ColumnMesh`]: its height in chunks, how many quads of opaque and
+/// of water it has, and where each face direction starts within the opaque ones.
+struct ChunkPart {
+    cy: i32,
+    opaque: u32,
+    water: u32,
+    faces: [u32; 13],
+}
+
+impl ColumnMesh {
+    /// Packs the chunk meshes of a column, in order of height, into one.
+    fn pack(meshes: Vec<(i32, ChunkMesh)>) -> Self {
+        let total = meshes.iter().map(|(_, m)| m.opaque.len() + m.water.len()).sum();
+        let mut verts = Vec::with_capacity(total);
+        let mut chunks = Vec::with_capacity(meshes.len());
+        for (cy, mesh) in meshes {
+            verts.extend_from_slice(&mesh.opaque);
+            verts.extend_from_slice(&mesh.water);
+            let quads = |v: &[Vertex]| (v.len() / 4) as u32;
+            chunks.push(ChunkPart { cy, opaque: quads(&mesh.opaque), water: quads(&mesh.water), faces: mesh.faces });
+        }
+        Self { verts, chunks }
+    }
+}
+
 struct ColumnResult {
     col: Col,
     marks: Marks,
     /// None if the job was skipped because the camera had moved away.
-    chunks: Option<Vec<(i32, ChunkMesh)>>,
+    chunks: Option<ColumnMesh>,
     /// Whether the small plants are in these meshes.
     planted: bool,
     cascades: Vec<Cascade>,
@@ -135,7 +168,8 @@ impl ColumnResult {
         Self {
             col,
             marks,
-            chunks,
+            // Packed here, on the worker, so the main thread only has to copy it once.
+            chunks: chunks.map(ColumnMesh::pack),
             planted,
             cascades: Vec::new(),
             springs: Vec::new(),
@@ -750,55 +784,36 @@ impl Streamer {
         });
     }
 
-    /// Uploads a whole column, or nothing at all if the GPU cannot hold it.
-    fn upload_column(&mut self, gpu: &Gpu, col: Col, meshes: Vec<(i32, ChunkMesh)>, marks: Marks) -> Option<Vec<GpuChunk>> {
-        let mut chunks = Vec::with_capacity(meshes.len());
-        for (cy, mesh) in meshes {
-            let Some(mut chunk) = self.upload(gpu, col.0, IVec3::new(col.1, cy, col.2), mesh) else {
-                release(&mut self.arena, &chunks);
-                self.recount();
-                return None;
-            };
-            chunk.biomes = marks.biomes;
-            chunk.skylines = marks.skylines;
-            chunk.slopes = marks.slopes;
-            chunks.push(chunk);
-        }
-        Some(chunks)
-    }
-
-    /// Stores one chunk's meshes, or None if the GPU has no room for them.
-    fn upload(&mut self, gpu: &Gpu, level: u8, pos: IVec3, mesh: ChunkMesh) -> Option<GpuChunk> {
-        let opaque = self.store(gpu, &mesh.opaque)?;
-        let Some(water) = self.store(gpu, &mesh.water) else {
-            if let Some(span) = opaque {
-                self.arena.remove(span);
-            }
-            return None;
+    /// Uploads a whole column, or nothing at all if the GPU cannot hold it. The column
+    /// goes up as one span of the arena and one write, which each chunk's meshes are
+    /// parts of: a write each made a column cost up to a dozen, every one with a
+    /// staging buffer of its own and a walk of the arena's free list.
+    fn upload_column(&mut self, gpu: &Gpu, col: Col, mesh: ColumnMesh, marks: Marks) -> Option<Vec<GpuChunk>> {
+        let span = if mesh.verts.is_empty() { None } else { Some(self.arena.add(gpu, &mesh.verts)?) };
+        self.stats.quads += span.map_or(0, |s| s.quads as u64);
+        self.stats.mesh_bytes += size_of_val(mesh.verts.as_slice()) as u64;
+        self.stats.chunks += mesh.chunks.len();
+        let mut offset = 0;
+        let mut part = |quads: u32| {
+            let at = offset;
+            offset += quads;
+            (quads > 0).then(|| span.expect("vertices to be part of").part(at, quads))
         };
-        self.stats.chunks += 1;
-        Some(GpuChunk {
-            level,
-            pos,
-            opaque,
-            water,
-            faces: mesh.faces,
-            biomes: [0; 8],
-            skylines: [[0; 2]; 4],
-            slopes: [[0; 2]; 4],
-        })
-    }
-
-    /// Puts vertices in the arena. The outer None means the GPU has no room; the inner
-    /// one that there was nothing to store.
-    fn store(&mut self, gpu: &Gpu, verts: &[Vertex]) -> Option<Option<MeshSpan>> {
-        if verts.is_empty() {
-            return Some(None);
-        }
-        let span = self.arena.add(gpu, verts)?;
-        self.stats.quads += span.quads as u64;
-        self.stats.mesh_bytes += size_of_val(verts) as u64;
-        Some(Some(span))
+        let chunks = mesh
+            .chunks
+            .iter()
+            .map(|c| GpuChunk {
+                level: col.0,
+                pos: IVec3::new(col.1, c.cy, col.2),
+                opaque: part(c.opaque),
+                water: part(c.water),
+                faces: c.faces,
+                biomes: marks.biomes,
+                skylines: marks.skylines,
+                slopes: marks.slopes,
+            })
+            .collect();
+        Some(chunks)
     }
 
     /// Pulls the view in after running out of GPU memory, which unloads the outer
@@ -1130,12 +1145,14 @@ mod tests {
             let col = (level, cx >> level, cz >> level);
             let mesh = |every| {
                 let r = build_coarse_column_with(&world, &models, col, every);
-                r.chunks.expect("built").into_iter().map(|(cy, m)| (cy, bytemuck::cast_slice::<Vertex, u8>(&m.opaque).to_vec(), bytemuck::cast_slice::<Vertex, u8>(&m.water).to_vec(), m.faces)).collect::<Vec<_>>()
+                let m = r.chunks.expect("built");
+                let parts: Vec<_> = m.chunks.iter().map(|c| (c.cy, c.opaque, c.water, c.faces)).collect();
+                (bytemuck::cast_slice::<Vertex, u8>(&m.verts).to_vec(), parts)
             };
             let (quick, every) = (mesh(false), mesh(true));
             assert!(quick == every, "column {col:?} meshes differently found the quick way");
             columns += 1;
-            quads += quick.iter().map(|c| c.1.len() / (4 * size_of::<Vertex>())).sum::<usize>();
+            quads += quick.0.len() / (4 * size_of::<Vertex>());
             trees += lod::generate(&world, &models, col.0, col.1, col.2).1.len();
             if columns >= 40 {
                 break;
