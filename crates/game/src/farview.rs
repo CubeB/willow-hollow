@@ -339,6 +339,8 @@ pub struct FarView {
     /// there, so it never shows in pieces. Whatever was drawn of it before stays until
     /// then.
     staged: Option<Staged>,
+    /// Buffers of continents no longer drawn, still to be freed.
+    retired: Vec<wgpu::Buffer>,
     pending: HashSet<(i32, i32)>,
     requests: Sender<((i32, i32), usize)>,
     results: Receiver<CellMesh>,
@@ -403,6 +405,7 @@ impl FarView {
         Self {
             cells: HashMap::new(),
             staged: None,
+            retired: Vec::new(),
             pending: HashSet::new(),
             requests,
             results,
@@ -453,8 +456,11 @@ impl FarView {
                 let _ = self.requests.send((cell, stride));
             }
         }
-        self.cells
-            .retain(|c, _| (c.0 - here.0).abs() <= 1 && (c.1 - here.1).abs() <= 1);
+        let gone: Vec<(i32, i32)> = self.cells.keys().filter(|c| (c.0 - here.0).abs() > 1 || (c.1 - here.1).abs() > 1).copied().collect();
+        for c in gone {
+            let old = self.cells.remove(&c);
+            self.retire(old);
+        }
 
         let near = |cell: (i32, i32)| (cell.0 - here.0).abs() <= 1 && (cell.1 - here.1).abs() <= 1;
         // A tile the GPU has no room for is simply not drawn.
@@ -477,9 +483,14 @@ impl FarView {
             }
             while staged.done < staged.mesh.tiles.len() && (first || began.elapsed().as_secs_f32() * 1000.0 < upload_ms) {
                 first = false;
-                let t = &staged.mesh.tiles[staged.done];
+                let t = &mut staged.mesh.tiles[staged.done];
                 staged.done += 1;
-                if let Some(buffer) = upload(&t.verts, "far tile") {
+                // Each tile's vertices are freed as it goes up, within the budget: a
+                // whole continent's freed at once took a few milliseconds.
+                let verts = std::mem::take(&mut t.verts);
+                let up = upload(&verts, "far tile");
+                drop(verts);
+                if let Some(buffer) = up {
                     staged.tiles.push(FarTile { buffer, lo: t.lo, hi: t.hi });
                 }
             }
@@ -493,7 +504,7 @@ impl FarView {
             } else {
                 upload(&mesh.rivers, "far rivers").map(|b| (b, mesh.rivers.len() as u32 / 4))
             };
-            self.cells.insert(
+            let old = self.cells.insert(
                 mesh.cell,
                 FarCell {
                     cell: mesh.cell,
@@ -502,6 +513,22 @@ impl FarView {
                     rivers,
                 },
             );
+            self.retire(old);
+        }
+        // The hundreds of buffers of a continent replaced or left behind are let go a
+        // frame's budget at a time too, rather than all in the frame it goes.
+        while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
+            let Some(buffer) = self.retired.pop() else { break };
+            drop(buffer);
+        }
+    }
+
+    /// Puts the buffers of a continent no longer drawn aside, to be freed a few at a
+    /// time.
+    fn retire(&mut self, cell: Option<FarCell>) {
+        if let Some(cell) = cell {
+            self.retired.extend(cell.tiles.into_iter().map(|t| t.buffer));
+            self.retired.extend(cell.rivers.map(|r| r.0));
         }
     }
 
@@ -513,7 +540,7 @@ impl FarView {
         let mut progress = (Instant::now(), self.cells.len());
         log::info!("stage: waiting for the far view of continent {:?}", cell_of(camera));
         while !self.ready(camera) {
-            self.update(gpu, camera);
+            self.update_within(gpu, camera, f32::INFINITY);
             if self.cells.len() != progress.1 {
                 progress = (Instant::now(), self.cells.len());
             }
