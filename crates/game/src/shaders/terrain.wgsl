@@ -432,8 +432,15 @@ fn shade(in: VOut) -> vec4<f32> {
             base *= grass_face(voxel * i32(GRASS_TEXELS) + vec3<i32>(within), n, fine, coarse);
         }
     }
-    let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
-    base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
+    // Below the lowest ground any snow could lie on this frame (G.cam_fwd.w, see the
+    // globals), block_weather would only darken it for the wet, so the biome this voxel
+    // takes its snow from, two noises to work out, is not looked for.
+    if ((G.cam_wrapped.y + centre.y) / VOXELS_PER_METRE <= G.cam_fwd.w) {
+        base *= 1.0 - 0.3 * G.weather.x;
+    } else {
+        let snow = voxel_snow(in.grid0, in.grid1, (cell.xz + 0.5) / 32.0, centre.xz + G.cam_wrapped.xz, vec2<f32>(h2, fract(h * 7.31)));
+        base = block_weather(base, n, in.rel, centre, fract(in.local.xz), h, h2, (in.flags & FLAG_FOLIAGE) != 0u, (in.flags & FLAG_EMISSIVE) != 0u, ((in.flags >> 5u) & 7u) == 6u, (in.flags & FLAG_SKY) != 0u, fract(in.local.y), snow, far);
+    }
 
     let ao = mix(in.ao * in.ao * 0.75 + 0.25, 0.85, far);
     // Far off, where tops and sides are too small to tell apart, the ground is lit as
@@ -506,6 +513,12 @@ fn water_current(a: u32) -> vec3<f32> {
     let step = f32((a >> 28u) & 7u) / 7.0;
     let speed = MAX_CURRENT * step * sqrt(step);
     return vec3<f32>(cos(angle) * speed, sin(angle) * speed, f32(a >> 31u));
+}
+
+// x to the fifth, for the fresnel term: by squaring, where pow takes a log and an exp.
+fn pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    return x2 * x2 * x;
 }
 
 // How far a water surface is drawn down at the lip of a fall, where the sheet of falling
@@ -695,7 +708,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
             lie = normalize(slope * sign(slope.y));
         }
         let n = normalize(mix(ripple_normal(world_xz, flow, t), up, calm) + lie - up);
-        let fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, n), 0.0, 1.0), 5.0);
+        let fresnel = 0.03 + 0.97 * pow5(1.0 - clamp(dot(-view, n), 0.0, 1.0));
         let reflected = sky_color(reflect(view, n));
         // Clear and bright-bedded in the shallows, deep blue-green further out.
         let shallow = in.color * 1.35;
@@ -725,7 +738,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         // Further out, water looks the way the far view paints it: opaque, with no bed
         // showing through to mark the rings.
         let far = smoothstep(150.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
-        let far_fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, up), 0.0, 1.0), 5.0);
+        let far_fresnel = 0.03 + 0.97 * pow5(1.0 - clamp(dot(-view, up), 0.0, 1.0));
         let far_body = in.color * (G.sun_color.rgb * max(G.sun_dir.y, 0.0) * 0.5 + ambient(up));
         color = mix(color, mix(far_body, sky_color(reflect(view, up)), far_fresnel), far);
         alpha = mix(alpha, 1.0, far);
@@ -751,7 +764,7 @@ fn fs_water(in: VOut) -> @location(0) vec4<f32> {
         if (dot(n, view) > 0.0) {
             n = -n;
         }
-        let fresnel = 0.03 + 0.97 * pow(1.0 - clamp(dot(-view, n), 0.0, 1.0), 5.0);
+        let fresnel = 0.03 + 0.97 * pow5(1.0 - clamp(dot(-view, n), 0.0, 1.0));
         let body = in.color * 1.2 * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(up));
         color = mix(body, sky_color(reflect(view, n)), fresnel);
         alpha = mix(0.3, 1.0, fresnel);

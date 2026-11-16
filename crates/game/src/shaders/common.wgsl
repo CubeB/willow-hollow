@@ -6,6 +6,8 @@ struct Globals {
     cam_right: vec4<f32>,
     // w: how tall a pixel is at one voxel of distance, for a screen 1080 lines high.
     cam_up: vec4<f32>,
+    // w: the height in metres up to which no ground holds snow this frame, in any biome
+    // (see snow_depth in ground.wgsl), or far below the world where some may lie anywhere.
     cam_fwd: vec4<f32>,
     // xyz: direction toward the sun (or moon at night). w: time in seconds.
     sun_dir: vec4<f32>,

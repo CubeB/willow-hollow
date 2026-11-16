@@ -319,6 +319,18 @@ fn nearest_lamps(lamps: &[(DVec3, f32)], camera: DVec3) -> [[f32; 4]; 4] {
     best.map(|b| b.0)
 }
 
+/// The height in metres up to which no ground holds any snow, in any row of the globals'
+/// snow table (x snow, z hill snow, w snowline: see snow_depth in ground.wgsl), so that the
+/// terrain shader can skip looking for a voxel's biome there. With snow or hill snow in any
+/// row, some may lie at any height, and it is far below the world.
+fn snow_floor(snow: &[[f32; 4]]) -> f32 {
+    if snow.iter().all(|row| row[0] <= 0.0 && row[2] <= 0.0 && !row[3].is_nan()) {
+        snow.iter().map(|row| row[3]).fold(f32::INFINITY, f32::min)
+    } else {
+        -1.0e30
+    }
+}
+
 /// The few brightest-and-nearest glowing particles, which light the ground around them.
 fn nearest_glows(particles: &[ParticleInstance]) -> [[f32; 4]; 4] {
     let mut best = [([0.0f32; 4], f32::MAX); 4];
@@ -1741,7 +1753,7 @@ impl Renderer {
         let cloud_at = glam::DVec2::new(camera.pos.x + drift, camera.pos.z + drift * 0.35)
             .rem_euclid(glam::DVec2::splat(CLOUD_CELL as f64 * CLOUD_PERIOD as f64))
             .as_vec2();
-        let globals = Globals {
+        let mut globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_right: v4(right * tan * aspect, 0.0),
             // w: how tall a pixel is per voxel of distance, taking the screen as 1080 lines
@@ -1781,6 +1793,7 @@ impl Renderer {
             wash_bloom: self.wash.1,
             flowering: self.flowering,
         };
+        globals.cam_fwd[3] = snow_floor(&globals.snow);
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         // The lights: drawn by the sky alone (see aurora.rs). Their curtains change
         // shape with the time, so they need no other number.
@@ -2559,6 +2572,26 @@ pub fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_snow_floor_is_below_every_snowline_and_gone_once_snow_lies() {
+        // snow_depth in ground.wgsl, which the terrain shader skips below the floor.
+        let depth = |alt: f32, row: [f32; 4]| {
+            let lowland = 0.34 + (1.0 - 0.34) * ((alt - 35.0) / 75.0).clamp(0.0, 1.0);
+            row[0] * (1.0 + alt.max(0.0) * 0.01) * lowland + row[2] * (alt - 25.0).max(0.0) * 0.003 + (alt - row[3]).max(0.0) * 0.008
+        };
+        let summer = [[0.0, 0.0, 0.0, 900.0], [0.0, 0.2, 0.0, 640.0], [0.0, 0.0, 0.0, 2000.0]];
+        let floor = snow_floor(&summer);
+        assert_eq!(floor, 640.0);
+        for alt in [-50.0, 0.0, 300.0, 639.9, 640.0] {
+            assert!(summer.iter().all(|&row| depth(alt, row) <= 0.0), "snow at {alt} m below the floor");
+        }
+        assert!(depth(641.0, summer[1]) > 0.0);
+        // Any snow lying, low or on the hills, and it can be anywhere.
+        for row in [[0.1, 0.0, 0.0, 900.0], [0.0, 0.0, 0.3, 900.0]] {
+            assert!(snow_floor(&[summer[0], row]) < -1.0e29);
+        }
+    }
 
     #[test]
     fn the_cloud_field_gives_each_cover_its_share_of_the_sky() {
