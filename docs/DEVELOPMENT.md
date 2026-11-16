@@ -127,6 +127,13 @@ and on the GPU pass by pass. Compare the numbers before and after a change.
 ./target/release/game.exe --seed 1 --frames 2500 --over 42186,30679,60 --look 0,-15 --drift 25 --no-vsync --no-audio --size 1920x1080
 ```
 
+`WH_FRAME_CSV=frames.csv` adds a line per frame: every CPU lap, every GPU pass and what
+the streamer did. For a real comparison, run the whole suite of scenes in
+`tools/bench/scenes.txt` on an otherwise idle machine, once before a change and once
+after: `OUT=before bash tools/bench/bench.sh` (it stops if anything else is running;
+`LAPTOP=1` holds the game to 8 CPUs at 960x540, and `tools/bench/take.sh` with
+`imgdiff.py` checks that the picture has not changed).
+
 **The in-game map.** A screenshot can have the corner map or the large map drawn on it,
 as the player would have it after walking to where the camera is. `--minimap` draws the
 corner map; `--bigmap KM` opens the large map, KM kilometres across (0.16 to 26), with
