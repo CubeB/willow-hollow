@@ -2379,6 +2379,10 @@ pub fn screenshot(
     let env = &aged;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = Renderer::new(gpu, format, width, height);
+    // VOXEL_CLOCK=S draws the shot as at S seconds on the renderer's clock. Otherwise it
+    // is however long loading took, which sways the leaves and moves the water by a
+    // different amount each run; two shots to compare need the same S.
+    renderer.clock = std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse::<f32>().ok());
     streamer.wait_idle(gpu, camera.pos);
     far.wait_ready(gpu, camera.pos);
     impostors.wait_idle(gpu, camera.pos);
@@ -2476,7 +2480,7 @@ pub fn screenshot(
     if let Some(n) = std::env::var("VOXEL_SEQUENCE").ok().and_then(|s| s.parse::<usize>().ok()) {
         let moves = std::env::var("VOXEL_SEQUENCE_MOVES").unwrap_or_default();
         let has = |what: &str| moves.split(',').any(|m| m == what);
-        let clock = renderer.start.elapsed().as_secs_f32();
+        let clock = renderer.clock.unwrap_or_else(|| renderer.start.elapsed().as_secs_f32());
         renderer.clock = Some(clock);
         let ahead = (camera.forward() * Vec3::new(1.0, 0.0, 1.0)).normalize_or_zero();
         for k in 1..=n {

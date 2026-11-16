@@ -132,7 +132,9 @@ the streamer did. For a real comparison, run the whole suite of scenes in
 `tools/bench/scenes.txt` on an otherwise idle machine, once before a change and once
 after: `OUT=before bash tools/bench/bench.sh` (it stops if anything else is running;
 `LAPTOP=1` holds the game to 8 CPUs at 960x540, and `tools/bench/take.sh` with
-`imgdiff.py` checks that the picture has not changed).
+`imgdiff.py` checks that the picture has not changed). A screenshot is drawn at however
+long its loading took, which moves the leaves and water; `VOXEL_CLOCK=S` draws it at S
+seconds instead, so that two shots of the same build match exactly (take.sh sets it).
 
 **The in-game map.** A screenshot can have the corner map or the large map drawn on it,
 as the player would have it after walking to where the camera is. `--minimap` draws the
