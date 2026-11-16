@@ -2342,6 +2342,12 @@ impl ApplicationHandler for App {
                 }
                 if self.opts.frames.is_some() && r.frame % 120 == 0 {
                     log::info!("frame {}: {}; {}", r.frame, r.streamer.progress(), r.impostors.progress());
+                    // A timed run whose terrain has stopped loading fails, rather than
+                    // timing a world that is not there.
+                    if r.streamer.stalled().is_some() {
+                        log::error!("timed run hung: the terrain stopped loading (see above)");
+                        std::process::exit(3);
+                    }
                 }
                 if self.opts.frames.is_some_and(|n| r.frame >= n) {
                     let (s, d) = (r.streamer.stats, r.renderer.stats);

@@ -5,9 +5,11 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
+    time::{Duration, Instant},
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -108,6 +110,38 @@ const SKYLINE_REACH: [f32; 22] = [
     120.0,
 ];
 
+/// A continent's skylines, worked out once by whoever asks first, and kept.
+#[derive(Default)]
+struct SkySlot {
+    done: OnceLock<Arc<Skylines>>,
+    /// Whether someone has started on them, so no one else need.
+    claimed: AtomicBool,
+    /// When they were last asked for (see `now_ms`), to forget the longest unused.
+    used: AtomicU64,
+}
+
+/// The skylines kept, by world seed and continent. The lock is only ever held to find or
+/// add a slot, never while skylines are worked out: they are worked out in the slot.
+static KEPT: Mutex<Vec<((u32, i32, i32), Arc<SkySlot>)>> = Mutex::new(Vec::new());
+/// The continent the camera is on (see [`Skylines::look_from`]): its skylines and those
+/// of the continents around it are never forgotten.
+static VIEW: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+/// How many continents' skylines are kept: more only while all are in view or in use.
+const SKYLINES_KEPT: usize = 12;
+/// Skylines asked for this lately, in ms, are in use, and kept.
+const SKYLINES_IN_USE: u64 = 10_000;
+
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+// Skylines are worked out by whoever asks first, so that none waits for a thread that may
+// never ask. That is only safe because the work is done in a plain loop: nothing in it
+// calls rayon (a parallel iterator, `join`, `scope` or `install` from a pool worker lets
+// the worker run other queued jobs while it waits, and one of them may want these same
+// skylines on the same thread), and nothing in it asks for skylines. Keep it so. Pool
+// jobs never wait for them at all: they ask with `soon`, and come back later.
 impl Skylines {
     fn pack(tangent: f32) -> u8 {
         // More steps for the low angles, where the sun spends dawn and dusk.
@@ -115,7 +149,6 @@ impl Skylines {
     }
 
     fn of(c: &Continent) -> Self {
-        use rayon::prelude::*;
         let size = c.size;
         let cell = c.cell_size();
         // Ground or sea, in voxels.
@@ -127,8 +160,8 @@ impl Skylines {
             let row = |j: usize| ground[j * size + i] * (1.0 - fx) + ground[j * size + i + 1] * fx;
             row(j) * (1.0 - fz) + row(j + 1) * fz
         };
+        // Serially, on purpose: see above.
         let angles = (0..size * size)
-            .into_par_iter()
             .map(|idx| {
                 let (x, z) = ((idx % size) as f32, (idx / size) as f32);
                 let here = ground[idx];
@@ -145,21 +178,94 @@ impl Skylines {
         Self { size, cell, angles }
     }
 
-    /// The skylines of a continent, worked out once and kept while it is in view.
-    pub fn get(c: &Continent) -> Arc<Skylines> {
-        static KEPT: std::sync::Mutex<Vec<((u32, i32, i32), Arc<Skylines>)>> = std::sync::Mutex::new(Vec::new());
+    #[cfg(test)]
+    fn forget_all() {
+        KEPT.lock().unwrap().clear();
+    }
+
+    /// The slot for a continent's skylines, made if there is none.
+    fn slot(c: &Continent) -> Arc<SkySlot> {
         let key = (c.desc.world_seed, c.desc.mx, c.desc.mz);
         let mut kept = KEPT.lock().unwrap();
-        if let Some((_, s)) = kept.iter().find(|(k, _)| *k == key) {
-            return s.clone();
+        let slot = match kept.iter().find(|(k, _)| *k == key) {
+            Some((_, s)) => s.clone(),
+            None => {
+                if kept.len() >= SKYLINES_KEPT {
+                    let view = *VIEW.lock().unwrap();
+                    Self::forget_one(&mut kept, view, now_ms());
+                }
+                let s = Arc::new(SkySlot::default());
+                kept.push((key, s.clone()));
+                s
+            }
+        };
+        slot.used.store(now_ms(), Ordering::Relaxed);
+        slot
+    }
+
+    /// Forgets the skylines asked for longest ago, of those worked out, not in view and
+    /// not in use, with the camera on continent `view` and the time `now`. If every one
+    /// is, none is forgotten for now.
+    fn forget_one(kept: &mut Vec<((u32, i32, i32), Arc<SkySlot>)>, view: Option<(i32, i32)>, now: u64) {
+        let spare = kept
+            .iter()
+            .enumerate()
+            .filter(|(_, ((_, mx, mz), s))| {
+                let in_view = view.is_some_and(|(vx, vz)| (mx - vx).abs() <= 1 && (mz - vz).abs() <= 1);
+                let used = s.used.load(Ordering::Relaxed);
+                s.done.get().is_some() && !in_view && now.saturating_sub(used) > SKYLINES_IN_USE
+            })
+            .min_by_key(|(_, (_, s))| s.used.load(Ordering::Relaxed))
+            .map(|(i, _)| i);
+        if let Some(i) = spare {
+            kept.remove(i);
         }
-        // The continent in view and its neighbours, and no more.
-        if kept.len() >= 12 {
-            kept.remove(0);
+    }
+
+    /// Tells the skylines which continent the camera is on, so that it and the ones
+    /// around it are kept.
+    pub fn look_from(cell: (i32, i32)) {
+        *VIEW.lock().unwrap() = Some(cell);
+    }
+
+    /// The skylines of a continent, worked out on this thread if no one has yet, or
+    /// waiting for whoever is. For the far-view thread and the thread that made the
+    /// continent; pool jobs ask with [`Skylines::soon`].
+    pub fn get(c: &Continent) -> Arc<Skylines> {
+        let slot = Self::slot(c);
+        slot.claimed.store(true, Ordering::Relaxed);
+        slot.done.get_or_init(|| Arc::new(Self::of(c))).clone()
+    }
+
+    /// The skylines of a continent if they are ready. If not, None at once, and they are
+    /// worked out on a thread of their own if no one has started on them.
+    pub fn soon(c: &Arc<Continent>) -> Option<Arc<Skylines>> {
+        let slot = Self::slot(c);
+        if let Some(s) = slot.done.get() {
+            return Some(s.clone());
         }
-        let made = Arc::new(Self::of(c));
-        kept.push((key, made.clone()));
-        made
+        if !slot.claimed.swap(true, Ordering::Relaxed) {
+            let (c, s) = (c.clone(), slot.clone());
+            let started = std::thread::Builder::new().name("skylines".into()).spawn(move || {
+                s.done.get_or_init(|| Arc::new(Self::of(&c)));
+            });
+            if started.is_err() {
+                // Whoever asks next tries again.
+                slot.claimed.store(false, Ordering::Relaxed);
+            }
+        }
+        None
+    }
+
+    /// For [`GameWorld::after_made`]: works out a continent's skylines straight after it
+    /// is made, on the thread that made it, which holds nothing then. Except on the main
+    /// thread, which must not stop for them, and hands them to a thread of their own.
+    fn after_made(c: &Arc<Continent>) {
+        if std::thread::current().name() == Some("main") {
+            Self::soon(c);
+        } else {
+            Self::get(c);
+        }
     }
 
     /// The skylines at a place on the continent, blended between the grid's points.
@@ -243,6 +349,9 @@ impl FarView {
     pub fn new(gpu: &Gpu, world: Arc<GameWorld>) -> Self {
         let (requests, request_rx) = channel::<((i32, i32), usize)>();
         let (result_tx, results) = channel();
+        // Each continent's skylines are worked out by the thread that made it, as soon
+        // as it has, so the workers building its columns seldom have to wait for them.
+        world.after_made(Skylines::after_made);
         // One background thread: simulating a continent takes seconds and must never
         // stall rendering or compete with chunk generation for every core.
         std::thread::Builder::new()
@@ -300,6 +409,7 @@ impl FarView {
 
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
         let here = cell_of(camera);
+        Skylines::look_from(here);
         // The camera's continent in full detail first, then the ring around it.
         let mut wanted = vec![(here, NEAR_STRIDE)];
         for dz in -1..=1 {
@@ -351,12 +461,32 @@ impl FarView {
         }
     }
 
-    /// Blocks until the camera's continent is drawable (for screenshots).
+    /// Blocks until the camera's continent is drawable (for screenshots). If nothing
+    /// arrives for [`crate::terrain::wait_limit`], says what was still being made and
+    /// exits the process with a failure, rather than hang.
     pub fn wait_ready(&mut self, gpu: &Gpu, camera: DVec3) {
+        let (began, limit) = (Instant::now(), crate::terrain::wait_limit());
+        let mut progress = (Instant::now(), self.cells.len());
+        log::info!("stage: waiting for the far view of continent {:?}", cell_of(camera));
         while !self.ready(camera) {
             self.update(gpu, camera);
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            if self.cells.len() != progress.1 {
+                progress = (Instant::now(), self.cells.len());
+            }
+            if progress.0.elapsed() > limit {
+                log::error!(
+                    "hung: the far view of continent {:?} not ready after {:.0} s with nothing arriving for {:.0} s; {} continents drawn, still being made: {:?}",
+                    cell_of(camera),
+                    began.elapsed().as_secs_f32(),
+                    progress.0.elapsed().as_secs_f32(),
+                    self.cells.len(),
+                    self.pending
+                );
+                std::process::exit(3);
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
+        log::info!("stage: far view ready after {:.2} s", began.elapsed().as_secs_f32());
     }
 }
 
@@ -567,12 +697,12 @@ pub fn biome_in(c: &Continent, lx: f32, lz: f32) -> u8 {
 /// it, or `Biome::Ocean`, which stands for wherever the camera is, while its continent
 /// has not been simulated. Never blocks.
 /// The skylines toward sunrise and sunset at a world position, in voxels; level where
-/// the continent is not made yet.
-pub fn skylines_at(world: &GameWorld, x: i32, z: i32) -> [u8; 2] {
+/// the continent is not made yet. None while it is made but its skylines are still being
+/// worked out (they are then started on if no one has): ask again later. Never blocks.
+pub fn skylines_at(world: &GameWorld, x: i32, z: i32) -> Option<[u8; 2]> {
     let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
-    world.continent_if_ready(mx, mz).map_or([0; 2], |c| {
-        Skylines::get(&c).blended((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32)
-    })
+    let Some(c) = world.continent_if_ready(mx, mz) else { return Some([0; 2]) };
+    Some(Skylines::soon(&c)?.blended((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32))
 }
 
 /// The lie of the land at a world position, in voxels: the x and z of the unit normal of
@@ -831,5 +961,100 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
         stride,
         tiles,
         rivers,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+    use worldgen::continent::SimConfig;
+
+    /// Pool jobs asking for a continent's skylines, queued beside more jobs than there
+    /// are threads, half of which do nothing and so leave their threads free to steal,
+    /// all come back. If the first asker split the work among its pool, it would wait for
+    /// the part another thread took by running a queued job, and one that asked for the
+    /// skylines again would wait on the asker itself: on the same thread, for ever.
+    #[test]
+    fn skylines_asked_for_by_pool_jobs_beside_idle_ones_always_come_back() {
+        let world = GameWorld::with_config(3, SimConfig { size: 256 });
+        let c = world.continent(0, 0);
+        let (finished, all_done) = mpsc::channel();
+        std::thread::spawn(move || {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+            for _ in 0..40 {
+                Skylines::forget_all();
+                let (done, back) = mpsc::channel();
+                const JOBS: usize = 64;
+                for k in 0..JOBS {
+                    let (c, done) = (c.clone(), done.clone());
+                    pool.spawn(move || {
+                        if k % 2 == 0 {
+                            Skylines::get(&c);
+                        }
+                        let _ = done.send(());
+                    });
+                }
+                for _ in 0..JOBS {
+                    back.recv().unwrap();
+                }
+            }
+            let _ = finished.send(());
+        });
+        all_done.recv_timeout(Duration::from_secs(120)).expect("pool jobs asking for skylines never came back: deadlocked");
+    }
+
+    /// Asked for with `soon`, skylines not ready come back as None at once, are worked
+    /// out elsewhere, and come back the same as asked for outright.
+    #[test]
+    fn skylines_asked_for_soon_never_wait_and_come_out_the_same() {
+        let world = GameWorld::with_config(4, SimConfig { size: 256 });
+        let c = world.continent(0, 0);
+        Skylines::forget_all();
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let began = Instant::now();
+        let soon = loop {
+            let (c2, (tx, rx)) = (c.clone(), mpsc::channel());
+            pool.spawn(move || {
+                let t = Instant::now();
+                let s = Skylines::soon(&c2);
+                let _ = tx.send((s, t.elapsed()));
+            });
+            let (s, took) = rx.recv_timeout(Duration::from_secs(60)).expect("asking soon never came back");
+            assert!(took < Duration::from_millis(50), "asking soon took {took:?}");
+            if let Some(s) = s {
+                break s;
+            }
+            assert!(began.elapsed() < Duration::from_secs(60), "the skylines never came");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        Skylines::forget_all();
+        assert_eq!(soon.angles, Skylines::get(&c).angles);
+    }
+
+    /// The skylines forgotten are those of continents asked for longest ago, never of one
+    /// in view or around it.
+    #[test]
+    fn the_skylines_kept_are_those_in_view_and_lately_used() {
+        let mut kept = Vec::new();
+        let now = 1_000_000u64;
+        for k in 0..SKYLINES_KEPT as i32 {
+            let s = Arc::new(SkySlot::default());
+            let _ = s.done.set(Arc::new(Skylines { size: 1, cell: 1.0, angles: vec![[0; 2]] }));
+            // All asked for long ago, the first longest ago.
+            s.used.store(now.saturating_sub(SKYLINES_IN_USE + 1000 - k as u64), Ordering::Relaxed);
+            kept.push(((99, k, 0), s));
+        }
+        // The two asked for longest ago are in view, and the next is in use.
+        kept[2].1.used.store(now, Ordering::Relaxed);
+        Skylines::forget_one(&mut kept, Some((0, 0)), now);
+        let left: Vec<i32> = kept.iter().map(|((_, mx, _), _)| *mx).collect();
+        assert!(!left.contains(&3) && left.len() == SKYLINES_KEPT - 1, "{left:?}");
+        // None is forgotten while all are in use.
+        for (_, s) in &kept {
+            s.used.store(now, Ordering::Relaxed);
+        }
+        Skylines::forget_one(&mut kept, None, now + 1);
+        assert_eq!(kept.len(), SKYLINES_KEPT - 1);
     }
 }

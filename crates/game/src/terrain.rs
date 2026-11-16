@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicU64, Ordering},
         mpsc::{Receiver, Sender, channel},
     },
     time::Instant,
@@ -72,10 +72,14 @@ struct Marks {
     biomes: [u32; 8],
     skylines: [[u8; 2]; 4],
     slopes: [[i8; 2]; 4],
+    /// The skylines of a continent under a corner were still being worked out: the
+    /// column is built again once they are, rather than with the wrong ones for good.
+    unready: bool,
 }
 
 impl Marks {
     fn of(world: &GameWorld, col: Col) -> Self {
+        CHUNK_WATCH.set(col, watch::MARKS);
         // A grid of points in world voxels, whose edges neighbouring columns share.
         let size = CHUNK << col.0;
         let (x, z) = (col.1 * size, col.2 * size);
@@ -85,12 +89,24 @@ impl Marks {
             biomes[k / 4] |= (crate::farview::biome_at(world, x + dx, z + dz) as u32) << (8 * (k % 4));
         }
         let corners = [(0, 0), (size, 0), (0, size), (size, size)];
+        let skylines = corners.map(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz));
         Self {
             biomes,
-            skylines: corners.map(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz)),
+            skylines: skylines.map(|s| s.unwrap_or_default()),
             slopes: corners.map(|(dx, dz)| crate::farview::slope_at(world, x + dx, z + dz)),
+            unready: skylines.iter().any(Option::is_none),
         }
     }
+}
+
+/// Whether a column can be built now without waiting on anything: its continent made
+/// and the skylines at its corners worked out. Whatever is not ready is started on.
+fn ready_to_build(world: &GameWorld, col: Col) -> bool {
+    let size = CHUNK << col.0;
+    let (x, z) = (col.1 * size, col.2 * size);
+    let (mx, mz) = worldgen::macro_layout::cell_of(x, z);
+    world.continent_soon(mx, mz).is_some()
+        && [(0, 0), (size, 0), (0, size), (size, size)].iter().all(|(dx, dz)| crate::farview::skylines_at(world, x + dx, z + dz).is_some())
 }
 
 struct ColumnResult {
@@ -208,6 +224,16 @@ pub struct Streamer {
     pending: HashSet<Col>,
     /// Columns still to request, the most pressing last (so it is popped first).
     wanted: Vec<Col>,
+    /// Columns whose continent or skylines were not ready when they came to be built,
+    /// sent back by the workers rather than kept waiting, and asked for again once ready.
+    waiting: Vec<Col>,
+    waits: (Sender<Col>, Receiver<Col>),
+    /// When `waiting` was last looked through.
+    retried: Instant,
+    /// When a column last arrived, or there was nothing to wait for: how a hang is told.
+    progressed: Instant,
+    /// Whether the hang has been reported, so it is reported once.
+    hung: bool,
     /// How far out each level is drawn (see `bands`), following what is loaded.
     shown: [f32; LEVELS],
     last_update: Option<Instant>,
@@ -236,6 +262,9 @@ const BAND_EASE: f32 = 0.2;
 const COARSE_LEAD: f32 = 1.5;
 /// Seconds between steps back out of a view that was pulled in for lack of GPU memory.
 const REGROW_SECONDS: f32 = 4.0;
+/// How far beyond the coarsest level continents are simulated ahead of being needed, in
+/// voxels: a few seconds of flying fast.
+const PREFETCH: f32 = m(2000.0);
 /// How far from the camera small plants are drawn.
 pub const PLANT_REACH: f32 = m(100.0);
 /// Columns within this many columns of the camera carry their small plants: the reach
@@ -279,6 +308,11 @@ impl Streamer {
             growing: HashMap::new(),
             pending: HashSet::new(),
             wanted: Vec::new(),
+            waiting: Vec::new(),
+            waits: channel(),
+            retried: Instant::now(),
+            progressed: Instant::now(),
+            hung: false,
             shown: [0.0; LEVELS],
             last_update: None,
             center: None,
@@ -334,6 +368,7 @@ impl Streamer {
                 .pending
                 .iter()
                 .chain(&self.wanted)
+                .chain(&self.waiting)
                 .filter(|c| c.0 == level && !self.columns.contains_key(*c))
                 .map(|c| self.focus.distance(*c))
                 .filter(|d| (*d + s) * CHUNK as f32 >= inside)
@@ -367,11 +402,27 @@ impl Streamer {
             .map(|l| format!("{}+{}q+{}p", count(l, &mut self.columns.keys()), count(l, &mut self.wanted.iter()), count(l, &mut self.pending.iter())))
             .collect();
         let bands = self.bands().map(|b| (b / CHUNK as f32).round());
-        format!("radius {}, columns loaded+queued+building by level {}, bands {bands:?} columns, meshes {} of {} MiB", self.radius(), levels.join(" "), self.stats.mesh_bytes >> 20, self.arena.capacity_bytes() >> 20)
+        format!("radius {}, columns loaded+queued+building by level {}, bands {bands:?} columns, meshes {} of {} MiB, {} waiting for a continent", self.radius(), levels.join(" "), self.stats.mesh_bytes >> 20, self.arena.capacity_bytes() >> 20, self.waiting.len())
     }
 
     pub fn is_idle(&self) -> bool {
-        self.wanted.is_empty() && self.pending.is_empty()
+        self.wanted.is_empty() && self.pending.is_empty() && self.waiting.is_empty()
+    }
+
+    /// If loading has stopped, a report of where: nothing has arrived for
+    /// [`wait_limit`] while there were columns to build. Then each column being built
+    /// with the phase it is in, and those queued or waiting.
+    pub fn stalled(&self) -> Option<String> {
+        let idle = self.progressed.elapsed();
+        if self.is_idle() || idle < wait_limit() {
+            return None;
+        }
+        let busy = CHUNK_WATCH.busy();
+        let mut lines: Vec<String> = busy.iter().map(|(t, col, phase, secs)| format!("chunk-{t}: column {col:?} in {phase} for {secs:.1} s")).collect();
+        let queued: Vec<&Col> = self.pending.iter().filter(|c| !busy.iter().any(|b| b.1 == **c)).collect();
+        lines.push(format!("{} more sent to the pool and not started: {:?}", queued.len(), queued.iter().take(16).collect::<Vec<_>>()));
+        lines.push(format!("{} waiting for a continent or its skylines: {:?}", self.waiting.len(), self.waiting.iter().take(16).collect::<Vec<_>>()));
+        Some(format!("nothing loaded for {:.1} s; {}; {}", idle.as_secs_f32(), self.progress(), lines.join("; ")))
     }
 
     pub fn chunks(&self) -> impl Iterator<Item = &GpuChunk> {
@@ -462,23 +513,47 @@ impl Streamer {
             self.focus.cz.store(center.1, Ordering::Relaxed);
             self.rebuild_wanted(center);
             self.stats.f_rebuild_ms = t.elapsed().as_secs_f32() * 1000.0;
+            self.prefetch(cam);
         }
+        self.requeue();
 
         while self.pending.len() < self.max_in_flight {
             let Some(col) = self.wanted.pop() else { break };
             self.pending.insert(col);
             let plants = col.0 == 0 && in_plant_range(col, center, PLANT_COLUMNS + 1);
             let (world, models, tx, focus) = (self.world.clone(), self.models.clone(), self.tx.clone(), self.focus.clone());
+            let waits = self.waits.0.clone();
             self.pool.spawn(move || {
+                // A job never waits on a continent or its skylines: it hands the column
+                // back to be asked for again once they are ready. Waiting would hold up
+                // the worker, and could leave it waiting on work it was itself to do.
+                CHUNK_WATCH.set(col, watch::CHECK);
+                if focus.in_range(col, UNLOAD_SLACK) && !ready_to_build(&world, col) {
+                    let _ = waits.send(col);
+                    CHUNK_WATCH.idle();
+                    return;
+                }
+                CHUNK_WATCH.set(col, watch::BUILD);
                 let result = build_column(&world, &models, &focus, col, plants);
-                let _ = tx.send(result);
+                CHUNK_WATCH.set(col, watch::SEND);
+                if result.marks.unready {
+                    let _ = waits.send(col);
+                } else {
+                    let _ = tx.send(result);
+                }
+                CHUNK_WATCH.idle();
             });
         }
 
+        while let Ok(col) = self.waits.1.try_recv() {
+            self.pending.remove(&col);
+            self.waiting.push(col);
+        }
         let began = Instant::now();
         while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
             let Ok(result) = self.rx.try_recv() else { break };
             self.stats.f_received += 1;
+            self.progressed = Instant::now();
             self.pending.remove(&result.col);
             let in_range = self.focus.in_range(result.col, UNLOAD_SLACK);
             match result.chunks {
@@ -530,6 +605,12 @@ impl Streamer {
         self.stats.f_upload_ms = began.elapsed().as_secs_f32() * 1000.0;
         self.stats.f_bytes = self.stats.mesh_bytes.saturating_sub(bytes_before);
         self.stats.f_grown = self.arena.capacity_bytes().saturating_sub(capacity_before);
+        if self.is_idle() {
+            (self.progressed, self.hung) = (Instant::now(), false);
+        } else if !self.hung && let Some(report) = self.stalled() {
+            log::error!("terrain loading hung: {report}");
+            self.hung = true;
+        }
         self.regrow_view();
         let now = Instant::now();
         let dt = self.last_update.map_or(f32::INFINITY, |t| (now - t).as_secs_f32());
@@ -551,15 +632,64 @@ impl Streamer {
         }
     }
 
-    /// Blocks until everything in range is loaded (used for screenshots).
+    /// Blocks until everything in range is loaded (used for screenshots). If loading
+    /// stops (see [`Streamer::stalled`]), says where and exits the process with a
+    /// failure, rather than hang.
     pub fn wait_idle(&mut self, gpu: &Gpu, cam: DVec3) {
+        let began = Instant::now();
+        log::info!("stage: waiting for the terrain around {:.0} {:.0}", cam.x, cam.z);
         loop {
             self.update(gpu, cam, f32::INFINITY);
             if self.is_idle() {
                 self.follow_bands(f32::INFINITY);
                 break;
             }
+            // `update` has said where.
+            if self.hung {
+                log::error!("hung waiting for the terrain: giving up");
+                std::process::exit(3);
+            }
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        log::info!("stage: terrain loaded after {:.2} s, {} columns", began.elapsed().as_secs_f32(), self.columns.len());
+    }
+
+    /// Asks again for the columns handed back to wait whose continent and skylines are
+    /// ready now, a few times a second.
+    fn requeue(&mut self) {
+        if self.waiting.is_empty() || self.retried.elapsed().as_secs_f32() < 0.1 {
+            return;
+        }
+        self.retried = Instant::now();
+        let (world, focus) = (&self.world, &self.focus);
+        let mut ready = Vec::new();
+        self.waiting.retain(|&col| {
+            if !focus.in_range(col, 0) {
+                return false;
+            }
+            let now = ready_to_build(world, col);
+            if now {
+                ready.push(col);
+            }
+            !now
+        });
+        self.wanted.extend(ready);
+    }
+
+    /// Has the continents within reach of the coarsest level, and a margin beyond,
+    /// simulated ahead of being needed, on a thread of their own (see
+    /// `GameWorld::continent_soon`).
+    fn prefetch(&self, cam: DVec3) {
+        let r = (reach(LEVELS as u8 - 1, self.radius()) * CHUNK as f32 + PREFETCH) as i32;
+        let (x, z) = (cam.x.floor() as i32, cam.z.floor() as i32);
+        let here = worldgen::macro_layout::cell_of(x, z);
+        let (lo, hi) = (worldgen::macro_layout::cell_of(x - r, z - r), worldgen::macro_layout::cell_of(x + r, z + r));
+        // The camera's own first: they are made in the order asked.
+        self.world.continent_soon(here.0, here.1);
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                self.world.continent_soon(mx, mz);
+            }
         }
     }
 
@@ -585,6 +715,8 @@ impl Streamer {
             self.recount();
         }
 
+        // Those waiting are wanted again below if they still are, and wait again if so.
+        self.waiting.clear();
         self.wanted.clear();
         for level in 0..LEVELS as u8 {
             let s = step(level) as i32;
@@ -887,6 +1019,80 @@ fn build_coarse_column(world: &GameWorld, models: &lod::Models, col: Col) -> Col
         // Coarse columns never need building again with plants.
         ..ColumnResult::new(col, Marks::of(world, col), Some(meshes), true)
     }
+}
+
+/// The phases a chunk job goes through, as [`CHUNK_WATCH`] names them.
+mod watch {
+    pub const CHECK: u64 = 1;
+    pub const BUILD: u64 = 2;
+    pub const MARKS: u64 = 3;
+    pub const SEND: u64 = 4;
+}
+
+/// What each chunk worker is doing.
+static CHUNK_WATCH: Watch = Watch::new(&["idle", "checking its continent is ready", "generating and meshing", "marks", "sending"]);
+
+/// What each worker of a pool is doing, so that a load that stops can say where: for
+/// each thread, the column (or square) it is on, and the phase it is in and since when.
+/// Two relaxed stores a phase; read only to report.
+pub(crate) struct Watch {
+    names: &'static [&'static str],
+    at: [AtomicU64; WATCHED],
+    phase: [AtomicU64; WATCHED],
+}
+
+const WATCHED: usize = 64;
+
+impl Watch {
+    /// `names` names the phases, the first being idle.
+    pub(crate) const fn new(names: &'static [&'static str]) -> Self {
+        Self { names, at: [const { AtomicU64::new(0) }; WATCHED], phase: [const { AtomicU64::new(0) }; WATCHED] }
+    }
+
+    /// The calling pool worker is now in `phase` on `(level, x, z)`.
+    pub(crate) fn set(&self, (level, x, z): (u8, i32, i32), phase: u64) {
+        let Some(i) = rayon::current_thread_index().filter(|&i| i < WATCHED) else { return };
+        self.at[i].store(((x as u32 as u64) << 32) | z as u32 as u64, Ordering::Relaxed);
+        self.phase[i].store(((level as u64) << 60) | (phase << 52) | (watch_ms() & ((1 << 52) - 1)), Ordering::Relaxed);
+    }
+
+    /// The calling pool worker is done with its job.
+    pub(crate) fn idle(&self) {
+        if let Some(i) = rayon::current_thread_index().filter(|&i| i < WATCHED) {
+            self.phase[i].store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Where each busy worker is: its thread, its column, the phase's name, and the
+    /// seconds it has been in it.
+    pub(crate) fn busy(&self) -> Vec<(usize, (u8, i32, i32), &'static str, f32)> {
+        let now = watch_ms();
+        (0..WATCHED)
+            .filter_map(|i| {
+                let p = self.phase[i].load(Ordering::Relaxed);
+                let phase = ((p >> 52) & 0xff) as usize;
+                if phase == 0 {
+                    return None;
+                }
+                let at = self.at[i].load(Ordering::Relaxed);
+                let col = ((p >> 60) as u8, (at >> 32) as u32 as i32, at as u32 as i32);
+                let secs = now.saturating_sub(p & ((1 << 52) - 1)) as f32 / 1000.0;
+                Some((i, col, self.names.get(phase).copied().unwrap_or("?"), secs))
+            })
+            .collect()
+    }
+}
+
+fn watch_ms() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// How long a wait for loading may go with nothing arriving before it is taken for hung:
+/// `WILLOW_WAIT_LIMIT` seconds, or 90.
+pub(crate) fn wait_limit() -> std::time::Duration {
+    let secs = std::env::var("WILLOW_WAIT_LIMIT").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(90.0);
+    std::time::Duration::from_secs_f32(secs.max(0.1))
 }
 
 #[cfg(test)]
