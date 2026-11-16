@@ -212,6 +212,36 @@ pub struct Stats {
     pub f_grown: u64,
 }
 
+/// How long uploading a column takes, as running averages of the time a column took
+/// and of its size: a column is expected to take that time in proportion to its size.
+struct UploadCost {
+    ms: f32,
+    bytes: f32,
+}
+
+impl Default for UploadCost {
+    /// About what a column measured, until there are columns to go by.
+    fn default() -> Self {
+        Self { ms: 0.1, bytes: 128.0 * 1024.0 }
+    }
+}
+
+impl UploadCost {
+    fn predict(&self, bytes: f32) -> f32 {
+        self.ms * bytes / self.bytes.max(1.0)
+    }
+
+    /// Takes in a column of `bytes` that took `ms`. A column held up far longer than
+    /// the budget, by the thread being pre-empted say, counts as just over it, so that
+    /// one such stall does not hold back the columns after it for long.
+    fn learn(&mut self, bytes: f32, ms: f32, budget: f32) {
+        if bytes > 0.0 && budget.is_finite() {
+            self.ms += (ms.min(budget) - self.ms) * 0.05;
+            self.bytes += (bytes - self.bytes) * 0.05;
+        }
+    }
+}
+
 /// Camera column and load radius, shared with workers so stale jobs can bail out.
 struct Focus {
     cx: AtomicI32,
@@ -264,6 +294,11 @@ pub struct Streamer {
     waits: (Sender<Col>, Receiver<Col>),
     /// When `waiting` was last looked through.
     retried: Instant,
+    /// A finished column taken from the workers that would have run past the frame's
+    /// upload budget: the first to go up next frame. Still counted as pending.
+    held: Option<ColumnResult>,
+    /// What uploading a column has been taking, to tell whether the next fits.
+    upload_cost: UploadCost,
     /// When a column last arrived, or there was nothing to wait for: how a hang is told.
     progressed: Instant,
     /// Whether the hang has been reported, so it is reported once.
@@ -346,6 +381,8 @@ impl Streamer {
             waiting: Vec::new(),
             waits: channel(),
             retried: Instant::now(),
+            held: None,
+            upload_cost: UploadCost::default(),
             progressed: Instant::now(),
             hung: false,
             shown: [0.0; LEVELS],
@@ -585,8 +622,29 @@ impl Streamer {
             self.waiting.push(col);
         }
         let began = Instant::now();
-        while began.elapsed().as_secs_f32() * 1000.0 < upload_ms {
-            let Ok(result) = self.rx.try_recv() else { break };
+        let mut uploaded = 0;
+        loop {
+            let spent = began.elapsed().as_secs_f32() * 1000.0;
+            if spent >= upload_ms {
+                break;
+            }
+            let result = match self.held.take() {
+                Some(result) => result,
+                None => match self.rx.try_recv() {
+                    Ok(result) => result,
+                    Err(_) => break,
+                },
+            };
+            // The budget is checked against what the column will take too, not only
+            // between columns: one that would run past it waits for the next frame,
+            // unless nothing has gone up this frame yet, so that loading always moves.
+            let bytes = result.chunks.as_ref().map_or(0, |m| size_of_val(m.verts.as_slice())) as f32;
+            if uploaded > 0 && spent + self.upload_cost.predict(bytes) > upload_ms {
+                self.held = Some(result);
+                break;
+            }
+            uploaded += 1;
+            let t = Instant::now();
             self.stats.f_received += 1;
             self.progressed = Instant::now();
             self.pending.remove(&result.col);
@@ -636,6 +694,7 @@ impl Streamer {
                 None if self.focus.in_range(result.col, 0) => self.wanted.push(result.col),
                 _ => {}
             }
+            self.upload_cost.learn(bytes, t.elapsed().as_secs_f32() * 1000.0, upload_ms);
         }
         self.stats.f_upload_ms = began.elapsed().as_secs_f32() * 1000.0;
         self.stats.f_bytes = self.stats.mesh_bytes.saturating_sub(bytes_before);
