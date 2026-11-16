@@ -872,17 +872,46 @@ impl Minimap {
     }
 
     /// Waits until everything the map needs around `eye` has arrived, for screenshots.
+    /// If nothing arrives for [`crate::terrain::wait_limit`], says what it was waiting
+    /// for and exits the process with a failure, rather than hang or go on without it.
     pub fn settle(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3) {
+        let (began, limit) = (std::time::Instant::now(), crate::terrain::wait_limit());
+        let mut progressed = began;
+        let mut was = None;
+        log::info!("stage: waiting for the map");
         loop {
             self.update(gpu, eye, forward, false, 0.0);
             if self.pending.is_empty() && self.loading.is_empty() && !self.relief_pending && !self.small_pending {
                 break;
             }
-            match self.answers.recv_timeout(std::time::Duration::from_secs(120)) {
-                Ok(a) => self.take(gpu, a),
-                Err(_) => break,
+            // `update` takes what has come in too: anything changing is progress.
+            let now = Some((self.pending.len(), self.loading.len(), self.relief_pending, self.small_pending, self.version));
+            if now != was {
+                (was, progressed) = (now, std::time::Instant::now());
             }
+            match self.answers.recv_timeout(std::time::Duration::from_millis(250)) {
+                Ok(a) => {
+                    self.take(gpu, a);
+                    progressed = std::time::Instant::now();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if progressed.elapsed() <= limit => {}
+                Err(e) => {
+                    log::error!(
+                        "hung waiting for the map ({e:?}) after {:.0} s: sheets {:?}, masks loading {:?}, relief {}, corner relief {}",
+                        began.elapsed().as_secs_f32(),
+                        self.pending,
+                        self.loading.keys().collect::<Vec<_>>(),
+                        self.relief_pending,
+                        self.small_pending
+                    );
+                    std::process::exit(3);
+                }
+            }
+            // Whatever comes in is taken by `update` too, so a pause keeps this from
+            // spinning should answers keep coming and never finish it.
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
+        log::info!("stage: map ready after {:.2} s", began.elapsed().as_secs_f32());
         self.last_seen = None;
         self.update(gpu, eye, forward, false, 0.0);
     }
