@@ -71,6 +71,14 @@ impl Starlings {
         Self { show: None, tonight: None, rng: 0x3c6e_f372, forced: None }
     }
 
+    /// A murmuration gathering now ahead along `dir`, as `forced` has one, in place of
+    /// any already up or any the evening has decided against.
+    pub fn summon(&mut self, dir: Vec3) {
+        self.forced = Some(dir);
+        self.show = None;
+        self.tonight = None;
+    }
+
     fn unit(&mut self) -> f32 {
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 17;

@@ -31,6 +31,22 @@ pub enum Forced {
 }
 
 impl Forced {
+    /// Every weather that can be asked for, by the name `named` reads.
+    pub const NAMES: &[&str] = &["clear", "fair", "broken", "overcast", "rain", "snow", "storm", "fog"];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Fair => "fair",
+            Self::Broken => "broken",
+            Self::Overcast => "overcast",
+            Self::Rain => "rain",
+            Self::Snow => "snow",
+            Self::Storm => "storm",
+            Self::Fog => "fog",
+        }
+    }
+
     pub fn named(name: &str) -> Option<Self> {
         Some(match name {
             "clear" => Self::Clear,
@@ -279,6 +295,22 @@ impl Weather {
             w.snowpack = w.now.snow;
         }
         w
+    }
+
+    /// The weather being held, if one is.
+    pub fn forced(&self) -> Option<Forced> {
+        self.forced
+    }
+
+    /// Holds `forced` from now on, or with None lets the weather go its own way again.
+    /// A weather asked for is there at once, sky and all; going back to the natural
+    /// weather eases into it as any change of weather does.
+    pub fn force(&mut self, forced: Option<Forced>) {
+        self.forced = forced;
+        if let Some(f) = forced {
+            self.now = forced_sky(f);
+            self.wet = self.wet.max(self.now.rain.min(1.0));
+        }
     }
 
     /// The snow and ice the season has left lying (see `lying`), worked out again only when

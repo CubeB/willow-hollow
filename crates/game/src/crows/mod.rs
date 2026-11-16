@@ -264,6 +264,30 @@ impl Crows {
         Self { lookout: None, look_timer: 0.0, sites: None, groups: Vec::new(), rng: 0x6c0f_f1e5, spawn_timer: 0.0, started: false }
     }
 
+    /// Calls a group in, as [`Crows::stage`] sets one out, but wild: they take fright and
+    /// leave in their own time, and the others still come and go about the player.
+    pub fn summon(&mut self, how: &str, ahead: DVec3, camera: DVec3) -> bool {
+        let (timer, started) = (self.spawn_timer, self.started);
+        if !self.stage(how, ahead, camera) {
+            return false;
+        }
+        (self.spawn_timer, self.started) = (timer, started);
+        if let Some(g) = self.groups.last_mut() {
+            g.tame = false;
+            // A minute and a half: longer than a group of their own choosing stays, to
+            // give time to watch them.
+            if g.kind != Kind::Roost {
+                g.stay = 90.0;
+            }
+        }
+        true
+    }
+
+    /// Whether they have a map of the country round the player yet, to find places on.
+    pub fn have_sites(&self) -> bool {
+        self.sites.is_some()
+    }
+
     pub fn set_sites(&mut self, sites: Sites) {
         self.sites = Some(Arc::new(sites));
     }

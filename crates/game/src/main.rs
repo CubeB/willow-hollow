@@ -4,6 +4,7 @@ mod aurora;
 mod camera;
 mod camp;
 mod character;
+mod commands;
 mod crows;
 mod editor;
 mod env;
@@ -106,8 +107,15 @@ struct Options {
     murmuration: bool,
     /// Butterflies set out this many metres ahead of a screenshot's camera.
     shot_butterflies: Option<f64>,
-    /// The northern lights out every night, wherever.
-    aurora: bool,
+    /// The northern lights out every night, wherever, or never; as the night has them
+    /// when not given.
+    aurora: Option<bool>,
+    /// Console commands to run at the start, in order.
+    commands: Vec<String>,
+    /// Show the console on a screenshot, with what those commands said; in a run, open it.
+    shot_console: bool,
+    /// Boats left afloat on a screenshot (by `spawn boat`), and their headings.
+    shot_boats: Vec<(DVec3, f32)>,
     /// Render one frame to this PNG without opening a window, then exit.
     screenshot: Option<PathBuf>,
     /// Write the map of the continent around the start to this PNG, then exit.
@@ -181,7 +189,10 @@ impl Default for Options {
             fresh: false,
             murmuration: false,
             shot_butterflies: None,
-            aurora: false,
+            aurora: None,
+            commands: Vec::new(),
+            shot_console: false,
+            shot_boats: Vec::new(),
             screenshot: None,
             map: None,
             audio: true,
@@ -197,7 +208,7 @@ impl Default for Options {
             shot_hotbar: false,
             shot_prompt: None,
             shot_camp: None,
-            camp_ahead: 4.2,
+            camp_ahead: CAMP_AHEAD,
             rest: false,
             shot_lantern: false,
             shot_crows: None,
@@ -267,6 +278,12 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --murmuration         starlings gathering ahead of the camera, whatever the date and hour
   --butterflies M       on a screenshot, a few butterflies M metres ahead of the camera
   --aurora              the northern lights out tonight, wherever the camera is
+  --command LINE        run a console command at the start (` or / opens the console in
+                        game; 'help' lists the commands); give it as often as you like.
+                        On a screenshot: weather, time, date, season, tp, spawn camp,
+                        murmuration, crows and boat, and aurora
+  --console             show the console on a screenshot, with what --command said; in
+                        a run, start with it open
   --size WxH            screenshot size, or window size with --frames (default 1280x720)
   --day-minutes M       real minutes per day, 0 to freeze time
   --frames N            exit after N frames, logging where the time went (with --bigmap,
@@ -310,7 +327,9 @@ fn parse_args() -> Result<Options> {
             "--fresh" => o.fresh = true,
             "--murmuration" => o.murmuration = true,
             "--butterflies" => o.shot_butterflies = Some(value()?.parse::<f64>()?.clamp(0.5, 50.0)),
-            "--aurora" => o.aurora = true,
+            "--aurora" => o.aurora = Some(true),
+            "--command" => o.commands.push(value()?),
+            "--console" => o.shot_console = true,
             "--pos" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.pos = DVec3::new(v[0], v[1], v[2]);
@@ -366,7 +385,7 @@ fn parse_args() -> Result<Options> {
             "--lantern" => o.shot_lantern = true,
             "--crows" => {
                 let how = value()?;
-                if !["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"].contains(&how.as_str()) {
+                if !commands::CROWS.contains(&how.as_str()) {
                     bail!("unknown crows '{how}': ground, perch, tree, rock, fly, land, roost or any");
                 }
                 o.shot_crows = Some(how);
@@ -374,13 +393,8 @@ fn parse_args() -> Result<Options> {
             "--crows-ahead" => o.crows_ahead = value()?.parse::<f64>()?.clamp(0.0, 500.0),
             "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
             "--camp" => {
-                o.shot_camp = Some(match value()?.as_str() {
-                    "laid" => placed::LAID,
-                    "lit" => placed::BURNING,
-                    "out" => placed::OUT,
-                    "burnt" => placed::BURNT,
-                    other => bail!("unknown fire '{other}': laid, lit, out or burnt"),
-                });
+                let word = value()?;
+                o.shot_camp = Some(commands::fire_state(&word).ok_or_else(|| anyhow::anyhow!("unknown fire '{word}': laid, lit, out or burnt"))?);
             }
             "--picked" => o.picked = Some(value()?.parse()?),
             "--journal" => {
@@ -503,6 +517,8 @@ const PLACE_REACH: f64 = m64(3.0);
 const FIRE_BURNS: f32 = 14.0 / 24.0;
 /// How long a fire smoulders once it has gone out, in days.
 const SMOULDERS: f32 = 1.5 / 24.0;
+/// How far ahead a camp asked for (`--camp`, `spawn camp`) is made, in metres: a few steps.
+const CAMP_AHEAD: f64 = 4.2;
 /// How long the name of what has come to hand stays up, in seconds.
 const HAND_WORD: f32 = 2.6;
 
@@ -558,8 +574,8 @@ fn by_the_fire(voxels: &mut WorldVoxels, fire: &placed::Thing, from: DVec3) -> D
 /// Makes camp `far` metres ahead of someone whose eye is at `eye`, looking along `yaw`:
 /// a fire in `state` and a few things set down about it. Behind them or to one side
 /// instead, if there is water or a cliff ahead. For showing a camp without having made
-/// one.
-fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8, far: f64) {
+/// one. False if there was no ground about to make it on.
+fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, yaw: f32, state: u8, far: f64) -> bool {
     use worldgen::features::plants::Flower;
     let foot = eye.y - player::EYE_HEIGHT;
     for turned in [0.0, std::f32::consts::PI, std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2] {
@@ -593,9 +609,43 @@ fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, 
                 camp.put(placed::Thing::new(item, count, at, yaw + turn));
             }
         }
-        return;
+        return true;
     }
     log::warn!("there is no ground here to make camp on");
+    false
+}
+
+/// The nearest water ahead of `eye` along `yaw`, within 80 m, deep enough to float a
+/// boat on: where on its surface.
+fn water_ahead(world: &GameWorld, eye: DVec3, yaw: f32) -> Option<DVec3> {
+    let ahead = DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64);
+    let afloat = |metres: f64| {
+        let p = eye + ahead * m64(metres);
+        let (x, z) = (p.x.floor() as i32, p.z.floor() as i32);
+        let col = world.column(x, z);
+        let surface = col.water_surface().filter(|w| w - col.top() >= 2)?;
+        Some(DVec3::new(x as f64 + 0.5, surface as f64, z as f64 + 0.5))
+    };
+    let shore = (2..80).find(|&metres| afloat(metres as f64).is_some())? as f64;
+    // Out from the edge, clear of the reeds, as far as the water goes.
+    (0..4).rev().find_map(|out| afloat(shore + out as f64))
+}
+
+/// The named places on the continent under `at`, nearest first: those whose names have
+/// every word of `query` in them, or all of them for an empty one; at most `n`.
+fn named_places(world: &GameWorld, at: DVec3, query: &str, n: usize) -> Vec<commands::Named> {
+    let Some((c, local)) = journal::continent_at(world, at, true) else { return Vec::new() };
+    let origin = glam::DVec2::new(at.x - local.x as f64, at.z - local.y as f64);
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let mut found: Vec<&worldgen::names::Place> = c.trails.names.places.iter().filter(|p| {
+        let name = p.name.to_lowercase();
+        words.iter().all(|w| name.contains(w.as_str()))
+    }).collect();
+    // A name given in full goes before those it is only part of.
+    let whole = query.trim().to_lowercase();
+    found.sort_by(|a, b| (a.name.to_lowercase() != whole).cmp(&(b.name.to_lowercase() != whole)).then(a.at.distance(local).total_cmp(&b.at.distance(local))));
+    found.truncate(n);
+    found.into_iter().map(|p| commands::Named { name: p.name.clone(), kind: p.kind.key(), x: origin.x + p.at.x as f64, z: origin.y + p.at.y as f64 }).collect()
 }
 
 /// Voxel positions with their linear colours.
@@ -793,8 +843,15 @@ struct Running {
     warmth: f32,
     /// The haze of the air here (season::humidity), eased as the biome changes.
     humidity: f32,
-    /// Northern lights every night, wherever (`--aurora`).
-    aurora_forced: bool,
+    /// Northern lights every night, wherever, or never (`--aurora`, the console's
+    /// `aurora`); as the night has them when None.
+    aurora_forced: Option<bool>,
+    /// The console, its scrollback and what was typed into it.
+    console: commands::Console,
+    /// How many times faster than usual the player goes on foot (`speed`).
+    pace: f32,
+    /// Where the eye was before the last `tp`, for `back`.
+    before_tp: Option<DVec3>,
     /// The low ground mist lies on near the camera, eased toward the last scan's answer.
     /// None until the first scan is in.
     mist_floor: Option<f32>,
@@ -1058,6 +1115,9 @@ impl Running {
             warmth: season::warmth(worldgen::biome::Biome::Grassland),
             humidity: season::humidity(worldgen::biome::Biome::Grassland),
             aurora_forced: opts.aurora,
+            console: commands::Console::default(),
+            pace: 1.0,
+            before_tp: None,
             mist_floor: None,
             mist_target: 0.0,
             weather: weather::Weather::new(opts.weather),
@@ -1174,6 +1234,59 @@ impl Running {
         self.journal_open = open;
         self.want_grab = !open;
         self.set_grab(!open);
+    }
+
+    /// Opens or closes the console. While it is open the keyboard is its own: letting go
+    /// of the mouse lets go of every key held, so nothing typed moves the player.
+    fn set_console(&mut self, open: bool) {
+        self.console.set_open(open);
+        self.want_grab = !open;
+        self.set_grab(!open);
+    }
+
+    /// Runs a console command, as if typed, logging what it said.
+    fn command(&mut self, line: &str) -> commands::Reply {
+        let mut console = std::mem::take(&mut self.console);
+        let reply = console.run(line, self);
+        self.console = console;
+        Self::log_reply(line, &reply);
+        reply
+    }
+
+    /// Runs what is typed in the console (Enter).
+    fn submit_command(&mut self) {
+        let mut console = std::mem::take(&mut self.console);
+        let reply = console.submit(self);
+        self.console = console;
+        if let Some(reply) = reply {
+            Self::log_reply("console", &reply);
+        }
+    }
+
+    fn log_reply(line: &str, reply: &commands::Reply) {
+        match reply {
+            Ok(said) => log::info!("{line}: {}", said.replace('\n', "; ")),
+            Err(wrong) => log::warn!("{line}: {wrong}"),
+        }
+    }
+
+    /// Puts the eye at `eye`, on foot or flying as the player is: out of any boat and
+    /// up from any rest. Remembers where it was, for `back`.
+    fn go_to(&mut self, eye: DVec3) {
+        let was = if self.walking { self.player.eye() } else { self.camera.pos };
+        if self.walking && self.player.mode == Mode::Boat {
+            let (pos, heading) = self.player.leave_boat(&mut self.voxels);
+            self.fleet.leave(pos, heading);
+        }
+        self.wake();
+        if self.walking {
+            self.player = Player::new(eye - DVec3::new(0.0, player::EYE_HEIGHT, 0.0));
+        }
+        self.camera.pos = eye;
+        self.before_tp = Some(was);
+        // What was within reach there is not here.
+        self.reach_timer = 0.0;
+        self.scan_timer = 0.0;
     }
 
     /// Writes up the journal: the time gone by (`days`, of the game's), the way gone,
@@ -1696,6 +1809,7 @@ impl Running {
                 look: self.camera.forward(),
                 turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
+            self.player.pace = self.pace;
             self.player.update(&mut self.voxels, controls, dt);
             self.camera.pos = self.player.eye();
             // Lying down to rest, and getting up again, the eye sinks and rises.
@@ -1953,10 +2067,9 @@ impl Running {
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         // The northern lights, on the nights they are out where the camera is.
-        let lights = if self.aurora_forced {
-            1.0
-        } else {
-            aurora::cold(self.warmth, aurora::climate_at(&self.world, self.camera.pos.x, self.camera.pos.z)) * aurora::activity(self.env.date, self.settings.year_days, self.settings.seed)
+        let lights = match self.aurora_forced {
+            Some(out) => out as u8 as f32,
+            None => aurora::cold(self.warmth, aurora::climate_at(&self.world, self.camera.pos.x, self.camera.pos.z)) * aurora::activity(self.env.date, self.settings.year_days, self.settings.seed),
         };
         aurora::light(&mut lit, lights);
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
@@ -2040,6 +2153,7 @@ impl Running {
         let held = Some(self.streamer.radius()).filter(|r| *r < settings.radius);
         let (show_debug, show_menu, grabbed) = (settings.show_debug, self.show_settings, self.grabbed);
         let (labels, map_open) = (self.map.labels(), self.map.open);
+        let console = &mut self.console;
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
                 overlay::map_labels(ctx, labels);
@@ -2049,6 +2163,8 @@ impl Running {
                     let_go = inventory::show(ctx, pack, pack_view);
                 } else if journal_open {
                     journal::show(ctx, journal, journal_view);
+                } else if console.open {
+                    console.show(ctx);
                 } else if !grabbed && !map_open {
                     overlay::bottom_line(ctx, "hint", "Click the view (or press Tab) to look around", 150.0, egui::Color32::from_gray(220));
                 }
@@ -2105,6 +2221,7 @@ impl Running {
                         ui.label("G in the air, or Space when high up = glider. E = board or leave a boat at a landing");
                         ui.label("M = the map (wheel zooms, drag moves it). N = show or hide the corner map");
                         ui.label("I = the pack. J = the journal. 1-7 or the wheel = what is held. Right click = set it down, left click = pick it up");
+                        ui.label("` or / = the console (type help)");
                     });
             });
         if time != self.env.time || date != self.env.date {
@@ -2151,7 +2268,15 @@ impl ApplicationHandler for App {
             return;
         }
         match Running::new(el, &self.opts) {
-            Ok(r) => self.run = Some(r),
+            Ok(mut r) => {
+                for line in &self.opts.commands {
+                    let _ = r.command(line);
+                }
+                if self.opts.shot_console {
+                    r.set_console(true);
+                }
+                self.run = Some(r);
+            }
             Err(e) => {
                 log::error!("startup failed: {e:#}");
                 el.exit();
@@ -2167,7 +2292,9 @@ impl ApplicationHandler for App {
             && !key.repeat
             && key.physical_key == PhysicalKey::Code(KeyCode::Escape)
         {
-            if r.map.open {
+            if r.console.open {
+                r.set_console(false);
+            } else if r.map.open {
                 r.set_map(false);
             } else if r.pack_open {
                 r.set_pack(false);
@@ -2175,6 +2302,22 @@ impl ApplicationHandler for App {
                 r.set_journal(false);
             } else {
                 r.set_menu(!r.show_settings);
+            }
+            return;
+        }
+        // While the console is open every key is its own, and none reaches the game. It
+        // runs, completes and goes through its history itself; the rest is typing.
+        if r.console.open
+            && let WindowEvent::KeyboardInput { event: key, .. } = &event
+        {
+            let pressed = key.state == ElementState::Pressed;
+            match key.physical_key {
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter) if pressed => r.submit_command(),
+                PhysicalKey::Code(KeyCode::Tab) if pressed => r.console.complete(),
+                PhysicalKey::Code(KeyCode::ArrowUp) if pressed => r.console.older(),
+                PhysicalKey::Code(KeyCode::ArrowDown) if pressed => r.console.newer(),
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Tab | KeyCode::ArrowUp | KeyCode::ArrowDown) => {}
+                _ => drop(r.overlay.on_event(&r.window, &event)),
             }
             return;
         }
@@ -2239,7 +2382,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !r.grabbed && !r.show_settings && !r.pack_open && !r.journal_open => {
+            } if !r.grabbed && !r.show_settings && !r.pack_open && !r.journal_open && !r.console.open => {
                 r.want_grab = true;
                 r.set_grab(true);
             }
@@ -2290,6 +2433,8 @@ impl ApplicationHandler for App {
                             r.set_journal(!r.journal_open);
                         } else if r.journal_open {
                             // Or the journal.
+                        } else if matches!(code, KeyCode::Backquote | KeyCode::Slash) && !event.repeat {
+                            r.set_console(true);
                         } else if r.rest.is_some() && !event.repeat && matches!(code, KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD | KeyCode::Space | KeyCode::KeyE | KeyCode::KeyF) {
                             // Any step gets the player up from a rest.
                             r.wake();
@@ -2437,7 +2582,7 @@ fn main() -> Result<()> {
         .filter_module("wgpu_hal::vulkan::instance", log::LevelFilter::Off)
         .filter_module("naga", log::LevelFilter::Warn)
         .init();
-    let opts = parse_args()?;
+    let mut opts = parse_args()?;
 
     if let Some(mut structures) = opts.structures.clone() {
         structures.screenshot = opts.screenshot.clone();
@@ -2454,11 +2599,24 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(path) = &opts.screenshot {
+    if let Some(path) = opts.screenshot.clone() {
+        let path = &path;
         // Screenshots neither read nor write anything saved, so they are repeatable.
         let settings = opts.overrides.applied_to(Settings::default());
         let gpu = Gpu::headless()?;
         let world = Arc::new(GameWorld::new(settings.seed));
+        // The console's commands set the shot up as the flags would, before anything is
+        // made of them. One that fails stops the shot: it would not show what was asked.
+        let mut console = commands::Console::default();
+        for line in std::mem::take(&mut opts.commands) {
+            let reply = console.run(&line, &mut Shot { opts: &mut opts, world: &world, seed: settings.seed });
+            Running::log_reply(&line, &reply);
+            if let Err(wrong) = reply {
+                bail!("--command '{line}': {wrong}");
+            }
+        }
+        console.open = opts.shot_console;
+        let opts = opts;
         let mut camera = make_camera(&opts, &world, None);
         // The figure stands where the camera was, mid stride, and the camera steps back.
         let figure = opts.third.map(|turned| {
@@ -2499,7 +2657,7 @@ fn main() -> Result<()> {
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
         // The northern lights, if they are out tonight here (or asked for).
-        let lights = if opts.aurora { 1.0 } else { aurora::cold(warmth, aurora::climate_at(&world, camera.pos.x, camera.pos.z)) * aurora::activity(env.date, settings.year_days, settings.seed) };
+        let lights = if let Some(out) = opts.aurora { out as u8 as f32 } else { aurora::cold(warmth, aurora::climate_at(&world, camera.pos.x, camera.pos.z)) * aurora::activity(env.date, settings.year_days, settings.seed) };
         aurora::light(&mut env, lights);
         log::info!("northern lights {:.2}", env.aurora);
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
@@ -2510,6 +2668,9 @@ fn main() -> Result<()> {
         let surf: Vec<_> = streamer.surf_near(camera.pos, m(60.0)).copied().collect();
         let mut fleet = Fleet::new(world.clone());
         fleet.refresh(camera.pos);
+        for &(at, heading) in &opts.shot_boats {
+            fleet.leave(at, heading);
+        }
         let mut props = Vec::new();
         for boat in fleet.boats() {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
@@ -2704,6 +2865,9 @@ fn main() -> Result<()> {
             if text && let Some(line) = &opts.shot_prompt {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
+            if text && console.open {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| console.show(ctx));
+            }
             let Some(map) = &mut map else { return };
             map.hour = env.time;
             map.update(&gpu, camera.pos, camera.forward(), true, 0.0);
@@ -2811,5 +2975,269 @@ impl Running {
             format!("{:.3}", self.sync_frame.1),
         ]);
         let _ = writeln!(w, "{}", row.join(","));
+    }
+}
+
+/// Where world `(x, z)` given to `tp` is: the middle of the voxel for a whole number.
+fn centred(v: f64) -> f64 {
+    if v.fract() == 0.0 { v + 0.5 } else { v }
+}
+
+/// How a `tp` reads back.
+fn arrived(eye: DVec3, ground: f64) -> String {
+    format!("at {:.0}, {:.0}, the eye {:.1} m over the ground", eye.x.floor(), eye.z.floor(), (eye.y - ground) / worldgen::scale::VOXELS_PER_METRE as f64)
+}
+
+/// The weather, in words: held at a kind, or going its own way, and what it is doing.
+fn weather_words(w: &weather::Weather) -> String {
+    let s = w.now;
+    let doing = format!("rain {:.0}%, snow {:.0}%, storm {:.0}%, cloud {:.0}%, overcast {:.0}%, fog {:.0}%", s.rain * 100.0, s.snow * 100.0, s.storm * 100.0, s.cloud * 100.0, s.overcast * 100.0, s.fog * 100.0);
+    match w.forced() {
+        Some(f) => format!("the weather is held at {} ({doing})", f.name()),
+        None => format!("the weather is going its own way ({doing})"),
+    }
+}
+
+impl commands::Game for Running {
+    fn seed(&self) -> u32 {
+        self.settings.seed
+    }
+
+    fn here(&self) -> commands::Here {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        commands::Here { eye, ground: surface_height(&self.world, eye.x.floor() as i32, eye.z.floor() as i32), yaw: self.camera.yaw.to_degrees(), pitch: self.camera.pitch.to_degrees(), flying: !self.walking }
+    }
+
+    fn clock(&self) -> (f32, f32) {
+        (self.env.time, self.env.date)
+    }
+
+    fn set_clock(&mut self, hour: f32, date: f32) {
+        self.env = Environment::at(hour, date);
+    }
+
+    fn weather(&self) -> String {
+        weather_words(&self.weather)
+    }
+
+    fn set_weather(&mut self, weather: Option<weather::Forced>) -> commands::Reply {
+        self.weather.force(weather);
+        Ok(match weather {
+            Some(f) => format!("the weather is held at {} ('weather auto' lets it go)", f.name()),
+            None => "the weather goes its own way again".into(),
+        })
+    }
+
+    fn teleport(&mut self, x: f64, z: f64, h: Option<f64>) -> commands::Reply {
+        let (x, z) = (centred(x), centred(z));
+        // Finding the ground can mean making that part of the world first, which takes a
+        // moment far from here.
+        let ground = surface_height(&self.world, x.floor() as i32, z.floor() as i32);
+        let eye = DVec3::new(x, ground + h.unwrap_or(player::EYE_HEIGHT).max(0.0), z);
+        self.go_to(eye);
+        Ok(arrived(eye, ground))
+    }
+
+    fn home(&self) -> (f64, f64) {
+        let spawn = self.world.spawn_point();
+        (spawn.x as f64 + 0.5, spawn.z as f64 + 0.5)
+    }
+
+    fn back(&mut self) -> commands::Reply {
+        let eye = self.before_tp.ok_or("there is nowhere to go back to: no tp yet")?;
+        self.go_to(eye);
+        Ok(format!("back {}", arrived(eye, surface_height(&self.world, eye.x.floor() as i32, eye.z.floor() as i32))))
+    }
+
+    fn places(&self, query: &str, n: usize) -> Vec<commands::Named> {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        named_places(&self.world, eye, query, n)
+    }
+
+    fn fly(&mut self, on: Option<bool>) -> commands::Reply {
+        if on.is_none_or(|on| on == self.walking) {
+            if self.walking && self.player.mode == Mode::Boat {
+                return Err("go ashore first (E)".into());
+            }
+            self.wake();
+            self.toggle_flying();
+        }
+        Ok(if self.walking { "on foot".into() } else { "flying: WASD, Space and Ctrl, the wheel for speed (F lands)".into() })
+    }
+
+    fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {
+        use commands::Spawn;
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        match what {
+            Spawn::Camp(state) => {
+                if !sample_camp(&mut self.placed, &mut self.voxels, eye, self.camera.yaw, state, CAMP_AHEAD) {
+                    return Err("there is no ground near here to make camp on".into());
+                }
+                self.map.camps = self.placed.camps();
+                self.thing_near = None;
+                self.reach_timer = 0.0;
+                Ok(format!("camp made a few steps ahead, its fire {}", commands::fire_word(state)))
+            }
+            Spawn::Murmuration => {
+                self.particles.starlings.summon(self.camera.forward());
+                Ok("starlings gathering ahead, a couple of hundred metres off".into())
+            }
+            Spawn::Crows(how) => {
+                if !self.crows.have_sites() {
+                    return Err("the crows have not looked over the country here yet: try again in a moment".into());
+                }
+                let ahead = self.camera.pos + self.camera.forward().as_dvec3().with_y(0.0).normalize_or(DVec3::X) * m64(12.0);
+                if !self.crows.summon(&how, ahead, self.camera.pos) {
+                    return Err(format!("there is nowhere near for crows to {how}"));
+                }
+                Ok(format!("crows called in to {how}"))
+            }
+            Spawn::Boat => {
+                let at = water_ahead(&self.world, eye, self.camera.yaw).ok_or("there is no water ahead to put a boat on (look toward it)")?;
+                self.fleet.leave(at, self.camera.yaw);
+                Ok(format!("a boat afloat {:.0} m ahead (E by it to board)", at.with_y(eye.y).distance(eye) / m64(1.0)))
+            }
+            Spawn::Thing(name, n) => {
+                let item = commands::item_named(&name, self.world.materials()).ok_or_else(|| format!("there is no thing called '{name}' (Tab lists them)"))?;
+                if !self.walking || self.player.mode != Mode::Walk {
+                    return Err("things are set down on foot: 'fly off' first".into());
+                }
+                let word = format!("{} \u{d7} {} set down", item.name, n.min(inventory::STACK));
+                self.set_down(inventory::Stack { item, count: n.min(inventory::STACK) });
+                self.thing_near = None;
+                self.reach_timer = 0.0;
+                Ok(word)
+            }
+        }
+    }
+
+    fn aurora(&mut self, on: Option<bool>) -> commands::Reply {
+        self.aurora_forced = on;
+        Ok(match on {
+            Some(true) => "the northern lights are out every night (they show only in the dark)".into(),
+            Some(false) => "no northern lights".into(),
+            None => "the northern lights come out as the night has them".into(),
+        })
+    }
+
+    fn give(&mut self, name: &str, n: u32) -> commands::Reply {
+        let item = commands::item_named(name, self.world.materials()).ok_or_else(|| format!("there is no thing called '{name}' (Tab lists them)"))?;
+        let left = self.pack.add_many(&item, n);
+        if left == n {
+            return Err("the pack is full".into());
+        }
+        let short = if left > 0 { format!(" (no room for {left} more)") } else { String::new() };
+        Ok(format!("{} \u{d7} {} in the pack{short}", item.name, self.pack.count(&item.id)))
+    }
+
+    fn pace(&mut self, times: Option<f32>) -> commands::Reply {
+        if let Some(t) = times {
+            self.pace = t;
+        }
+        Ok(format!("walking at {} times the usual speed", self.pace))
+    }
+
+    fn third(&mut self) -> commands::Reply {
+        self.third = !self.third;
+        Ok(if self.third { "the view from behind".into() } else { "the view through the eyes".into() })
+    }
+}
+
+/// A screenshot being set up, for the console's commands: each sets what its flag would.
+struct Shot<'a> {
+    opts: &'a mut Options,
+    world: &'a GameWorld,
+    seed: u32,
+}
+
+impl Shot<'_> {
+    fn eye(&self) -> DVec3 {
+        match self.opts.over {
+            Some((x, z, h)) => DVec3::new(x as f64 + 0.5, surface_height(self.world, x, z) + h, z as f64 + 0.5),
+            None => self.opts.pos,
+        }
+    }
+}
+
+impl commands::Game for Shot<'_> {
+    fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    fn here(&self) -> commands::Here {
+        let eye = self.eye();
+        commands::Here { eye, ground: surface_height(self.world, eye.x.floor() as i32, eye.z.floor() as i32), yaw: self.opts.look.0, pitch: self.opts.look.1, flying: true }
+    }
+
+    fn clock(&self) -> (f32, f32) {
+        (self.opts.time.unwrap_or(10.0), self.opts.date.unwrap_or(season::DEFAULT_DATE))
+    }
+
+    fn set_clock(&mut self, hour: f32, date: f32) {
+        (self.opts.time, self.opts.date) = (Some(hour), Some(date));
+    }
+
+    fn weather(&self) -> String {
+        match self.opts.weather {
+            Some(f) => format!("the weather is held at {}", f.name()),
+            None => "the weather is a screenshot's own: fair".into(),
+        }
+    }
+
+    fn set_weather(&mut self, weather: Option<weather::Forced>) -> commands::Reply {
+        self.opts.weather = weather;
+        Ok(format!("the weather is {}", weather.map_or("a screenshot's own, fair", |f| f.name())))
+    }
+
+    fn teleport(&mut self, x: f64, z: f64, h: Option<f64>) -> commands::Reply {
+        let h = h.unwrap_or(player::EYE_HEIGHT).max(0.0);
+        self.opts.over = Some((x.floor() as i32, z.floor() as i32, h));
+        self.opts.fly = true;
+        let eye = self.eye();
+        Ok(arrived(eye, eye.y - h))
+    }
+
+    fn home(&self) -> (f64, f64) {
+        let spawn = self.world.spawn_point();
+        (spawn.x as f64 + 0.5, spawn.z as f64 + 0.5)
+    }
+
+    fn places(&self, query: &str, n: usize) -> Vec<commands::Named> {
+        named_places(self.world, self.eye(), query, n)
+    }
+
+    fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {
+        use commands::Spawn;
+        Ok(match what {
+            Spawn::Camp(state) => {
+                self.opts.shot_camp = Some(state);
+                format!("camp made a few steps ahead, its fire {}", commands::fire_word(state))
+            }
+            Spawn::Murmuration => {
+                self.opts.murmuration = true;
+                "starlings gathering ahead, a couple of hundred metres off".into()
+            }
+            Spawn::Crows(how) => {
+                let said = format!("crows called in to {how}");
+                self.opts.shot_crows = Some(how);
+                said
+            }
+            Spawn::Boat => {
+                let (eye, yaw) = (self.eye(), self.opts.look.0.to_radians());
+                let at = water_ahead(self.world, eye, yaw).ok_or("there is no water ahead to put a boat on (look toward it)")?;
+                self.opts.shot_boats.push((at, yaw));
+                format!("a boat afloat {:.0} m ahead", at.with_y(eye.y).distance(eye) / m64(1.0))
+            }
+            Spawn::Thing(..) => return Err("things can't be set down on a screenshot: spawn camp sets a few down".into()),
+        })
+    }
+
+    fn aurora(&mut self, on: Option<bool>) -> commands::Reply {
+        self.opts.aurora = on;
+        Ok(match on {
+            Some(true) => "the northern lights are out tonight".into(),
+            Some(false) => "no northern lights".into(),
+            None => "the northern lights come out as the night has them".into(),
+        })
     }
 }

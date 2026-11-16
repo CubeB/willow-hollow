@@ -369,6 +369,61 @@ VOXEL_CLOUD_AGE=4 ./target/release/game.exe --seed 1 --screenshot clouds.png --o
 Stills cannot show flicker, shimmer or popping. Anything that moves (shadows, wind,
 light shafts, streaming) also needs a look in a live window.
 
+## The console
+
+`` ` `` or `/` opens the console in a running game: a line to type commands into, with what
+they said above it. Enter runs a line, Tab fills out a command's name or its first word
+(listing the choices when there are several), Up and Down go back through what was run,
+and Esc closes it. While it is open the keyboard is its own and the mouse is free, so
+nothing typed moves the player. A leading `/` is allowed and ignored. A command that
+cannot be done says why and how it is used.
+
+| Command | What it does |
+|---|---|
+| `help [command]` | List every command with how it is used, or say more of one |
+| `clear` | Empty the console |
+| `weather [kind\|auto]` | Hold a weather: `clear`, `fair`, `broken`, `overcast`, `rain`, `snow`, `storm` or `fog`, there at once; `auto` lets it go its own way again, easing into it. Alone, says what the weather is doing |
+| `time [hour\|+h\|-h]` | Set the hour (`18`, `18:30`, or a word: `dawn`, `noon`, `dusk`, `midnight`...), or move it on or back (`+3`, `-1.5`). Alone, says the time |
+| `date [month\|0-1]` | Set the time of year: a month (`may`, `oct`) or a fraction of the year from the spring equinox, as `--date` takes |
+| `season <name>` | The middle of `spring`, `summer`, `autumn` or `winter` |
+| `tp <x> <z> [h]` | Go to voxel x, z, the eye h voxels above the ground or water there (eye height when not given). Also `tp x,z,h`, as `pos` prints it |
+| `tp <place>` | Go to the named place on this continent whose name has these words in it, nearest first (`tp hollin tarn`) |
+| `tp home`, `tp back`, `back` | Go to the world's start; go back to where the last tp left from |
+| `pos` | Say where you are, as `x,z,h` for `tp` and as `--over` and `--look` for a screenshot |
+| `places [name]` | The ten named places nearest, or those with this in their name, with how far, which way and the `tp` to each |
+| `fly [on\|off]` | Fly free of the ground, or walk again (F) |
+| `view` | Through the eyes, or from behind the figure (V) |
+| `spawn camp [laid\|lit\|out\|burnt]` | Make camp a few steps ahead, as `--camp` does: a fire (lit if not said) and a few things set down |
+| `spawn murmuration` | Starlings gathering ahead, whatever the date, the hour and the country |
+| `spawn crows [how]` | Crows near a point ahead: `ground`, `perch`, `tree`, `rock`, `fly`, `land`, `roost` or `any`. They are wild: they take fright, and leave after a minute or two. In a run, the crows need a few seconds after the start (or a long tp) to look over the country first |
+| `spawn boat` | A boat afloat on the nearest water ahead, within 80 m; E by it to board |
+| `spawn <thing> [n]` | Set down n of a thing at your feet (three sticks if not said): `sticks`, a flower or mushroom by its id or name (`poppy`, `water lily`, `penny_bun`), `holly-berries`, `reed-mace`... Tab lists them |
+| `aurora [on\|off\|auto]` | The northern lights out every night wherever you are, never, or as the night and the country have them. They show only in the dark |
+| `give <thing> [n]` | Put n of a thing in the pack (the same things as `spawn`, and the `lantern`) |
+| `speed [times]` | Walk, run and swim this many times faster than usual, 0.1 to 20. Alone, says the speed |
+| `seed` | Say which world this is |
+
+`--command "LINE"` runs a line at the start, as if typed, and can be given as often as
+needed; what each says goes in the log and in the console. On a screenshot the commands
+set the shot up as their flags would: `weather`, `time`, `date`, `season`, `tp` (as
+`--over`), `pos`, `places`, `spawn camp`, `spawn murmuration`, `spawn crows`,
+`spawn boat` and `aurora`; any other, or one that fails, stops the shot with what was
+wrong. `--console` draws the console open on a screenshot, with what the commands said,
+and in a run starts with it open.
+
+```sh
+./target/release/game.exe --seed 1 --screenshot storm.png --command "tp 42186,30679,5" --command "weather storm" --command "time 15" --look 180,-5 --no-audio
+./target/release/game.exe --seed 1 --screenshot camp.png --over 42186,30679,5 --look 180,-14 --command "time 22" --command "spawn camp lit" --console --no-audio
+```
+
+The commands are the table `COMMANDS` in `crates/game/src/commands.rs`: a name, other
+names it answers to, how it is used, a line for `help`, the words Tab offers for its
+first argument, and a function from its words to what it does to a `Game`. The game in
+a window is one `Game`, and a screenshot being set up another (both in `main.rs`); a
+`Game` that cannot do something says so by leaving that method as it is. A new command
+is one entry in the table, and a method on `Game` if it needs the game to do something
+it cannot yet. The parsing and the console's history and completion have tests there.
+
 ## House rules
 
 - **Do not run `cargo fmt`.** The code is formatted by hand in a style rustfmt's
