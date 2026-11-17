@@ -90,10 +90,9 @@ pub struct FarBox {
 /// The boxes of one stamp, whose continent's origin corner is at world voxel `origin`:
 /// its solid cells merged into boxes, then a glow point for each cell anything glows in.
 ///
-/// Each cell is what the coarse ring makes it (see `lod::generate_with`): the last of the
-/// stamp's voxels written into it, unless a flame was, and empty if that was air or
-/// water. Fine parts are left out of the shape, as there, but a flame among them still
-/// glows.
+/// Each cell is what the coarse ring makes it ([`crate::lod::built_cells`]), and empty if
+/// that is air or water. Fine parts are left out of the shape, as there, but a flame
+/// among them still glows.
 pub fn stamp_boxes(stamp: &Stamp, origin: IVec3, mats: &Materials, out: &mut Vec<FarBox>) {
     let cell_of = |p: IVec3| (p + origin).div_euclid(IVec3::splat(CELL));
     let (lo, hi) = (cell_of(stamp.lo), cell_of(stamp.hi));
@@ -104,14 +103,9 @@ pub fn stamp_boxes(stamp: &Stamp, origin: IVec3, mats: &Materials, out: &mut Vec
     };
     let mut grid = vec![AIR; (dims.x * dims.y * dims.z) as usize];
     let mut glows: Vec<(IVec3, Voxel)> = Vec::new();
-    for &(p, v) in &stamp.voxels {
-        let c = cell_of(p);
-        let cell = &mut grid[index(c)];
-        // A flame keeps its cell, as in the coarse ring.
-        if !mats.get(*cell).emissive || mats.get(v).emissive {
-            *cell = v;
-        }
-        if mats.get(v).emissive && !glows.iter().any(|g| g.0 == c) {
+    for (c, v) in crate::lod::built_cells(&stamp.voxels, origin, CELL, mats) {
+        grid[index(c)] = v;
+        if mats.get(v).emissive {
             glows.push((c, v));
         }
     }
@@ -472,13 +466,7 @@ mod tests {
         let (mut stamps, mut cell_count, mut boxes_made, mut glows) = (0, 0, 0, 0);
         let mut by_square: HashMap<(i32, i32), usize> = HashMap::new();
         for stamp in continent.trails.stamps() {
-            let mut cells: HashMap<IVec3, Voxel> = HashMap::new();
-            for &(p, v) in &stamp.voxels {
-                let old = cells.entry((p + origin).div_euclid(IVec3::splat(CELL))).or_insert(v);
-                if !mats.get(*old).emissive || mats.get(v).emissive {
-                    *old = v;
-                }
-            }
+            let mut cells: HashMap<IVec3, Voxel> = crate::lod::built_cells(&stamp.voxels, origin, CELL, mats).into_iter().collect();
             cells.retain(|_, v| mats.get(*v).kind.is_opaque());
             let mut boxes = Vec::new();
             stamp_boxes(stamp, origin, mats, &mut boxes);
