@@ -171,6 +171,9 @@ struct Options {
     journal_fill: usize,
     /// Where the player is taken to have walked before a screenshot, world x and z.
     walked: Vec<glam::DVec2>,
+    /// Dress the village tree for a village at the start as one this old (0 to 1) would,
+    /// to see one before villages place their own.
+    dress_tree: Option<f32>,
     /// Open the structure editor instead of the game, starting as these say.
     structures: Option<editor::Options>,
 }
@@ -225,6 +228,7 @@ impl Default for Options {
             shot_journal: None,
             journal_fill: 16,
             walked: Vec::new(),
+            dress_tree: None,
             structures: None,
         }
     }
@@ -282,6 +286,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         tree, rock, fly, land, roost or any (they never take fright)
   --crows-ahead M       that point M metres ahead (default 12)
   --picked M            pick every flower within M metres before a screenshot
+  --dress-giant [AGE]   dress the village tree for a village at the start (the nearest giant
+                        within 400 m) as one AGE old would, 0-1 (default 1): offerings at its
+                        roots, ribbons in its branches and a path worn round it
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
   --journal-fill N      with --journal, a walk to the N nearest places (default 16; 0 for
@@ -433,6 +440,14 @@ fn parse_args() -> Result<Options> {
                 o.shot_camp = Some(commands::fire_state(&word).ok_or_else(|| anyhow::anyhow!("unknown fire '{word}': laid, lit, out or burnt"))?);
             }
             "--picked" => o.picked = Some(value()?.parse()?),
+            "--dress-giant" => {
+                // The age is optional: without one, as old as a village gets.
+                let age = args.next_if(|v| !v.starts_with("--"));
+                o.dress_tree = Some(match age {
+                    Some(v) => v.parse::<f32>().map_err(|_| anyhow::anyhow!("--dress-giant takes an age from 0 to 1, not {v}"))?.clamp(0.0, 1.0),
+                    None => 1.0,
+                });
+            }
             "--journal" => {
                 // The page is optional: without one the journal opens at its first.
                 let page = args.next_if(|v| !v.starts_with("--"));
@@ -500,6 +515,23 @@ fn parse_args() -> Result<Options> {
         o.fresh = true;
     }
     Ok(o)
+}
+
+/// Dresses the village tree for a village at world `(x, z)` as one `age` old would (see
+/// `--dress-giant`), before any of it is drawn, and says where the tree stands.
+fn dress_tree(world: &GameWorld, x: f64, z: f64, age: f32) {
+    match world.dress_tree_near(x.floor() as i32, z.floor() as i32, age) {
+        Some(p) => log::info!(
+            "dressed the {:?} at {},{},{} as a village {age} old would; to see it, --over {},{},6 --look 270,-8",
+            p.species,
+            p.pos.x,
+            p.pos.y,
+            p.pos.z,
+            p.pos.x,
+            p.pos.z + 45
+        ),
+        None => log::warn!("no tree within 400 m of {x:.0},{z:.0} to dress"),
+    }
 }
 
 /// Height of the walkable or swimmable surface at a column.
@@ -1072,6 +1104,12 @@ impl Running {
             world.pick(x, z);
         }
         let first_column = opts.over.map(|(x, z, _)| (x, z)).or(progress.map(|p| (p.pos.x.floor() as i32, p.pos.z.floor() as i32)));
+        if let Some(age) = opts.dress_tree {
+            match first_column {
+                Some((x, z)) => dress_tree(&world, x as f64, z as f64, age),
+                None => log::warn!("--dress-giant needs a place to start from: give --over"),
+            }
+        }
         let warming = world.clone();
         std::thread::spawn(move || {
             match first_column {
@@ -2680,6 +2718,9 @@ fn main() -> Result<()> {
         console.open = opts.shot_console;
         let opts = opts;
         let mut camera = make_camera(&opts, &world, None);
+        if let Some(age) = opts.dress_tree {
+            dress_tree(&world, camera.pos.x, camera.pos.z, age);
+        }
         // The figure stands where the camera was, mid stride, and the camera steps back.
         let figure = opts.third.map(|turned| {
             let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);

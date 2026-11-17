@@ -167,7 +167,8 @@ fn rooted(species: Species) -> bool {
     )
 }
 
-fn is_bark(v: Voxel) -> bool {
+/// Whether a voxel of a tree's model is its bark, the wood of its trunk and limbs.
+pub fn is_bark(v: Voxel) -> bool {
     matches!(
         v,
         mat::BARK_OAK
@@ -184,16 +185,10 @@ fn is_bark(v: Voxel) -> bool {
     )
 }
 
-/// Works out the roots of a tree standing at `pos` (its origin, on the first voxel above
-/// the ground). `ground` gives the top of the ground at a world column, or None over
-/// water. `room` is how far from `pos` the roots of a big tree may spread: as far as the
-/// chunks around look for the trees that reach into them. None where the ground is too
-/// level for any to show.
-pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IVec3, seed: u32, room: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<Roots> {
-    if !rooted(species) {
-        return None;
-    }
-    // The foot of the trunk: where it stands and how thick it is.
+/// The foot of a tree's trunk, from its model turned by `turns`: the middle of the bark
+/// at the ground, against the model's origin; how far round it is, in voxels; and the bark.
+/// None for a model with no bark there.
+pub fn foot(lib: &Library, species: Species, variant: usize, turns: u32) -> Option<(Vec2, f32, Voxel)> {
     let t = lib.get(species, variant);
     let row = t.voxels.partition_point(|(p, _)| p.y < 0);
     let (mut sum, mut n, mut bark) = (Vec2::ZERO, 0, None);
@@ -205,10 +200,23 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
             bark = bark.or(Some(v));
         }
     }
-    // Roots wear the trunk's own bark, so a birch's are pale like its trunk.
     let bark = bark?;
-    let centre = Vec2::new(pos.x as f32, pos.z as f32) + sum / n as f32;
-    let radius = (n as f32 / std::f32::consts::PI).sqrt();
+    Some((sum / n as f32, (n as f32 / std::f32::consts::PI).sqrt(), bark))
+}
+
+/// Works out the roots of a tree standing at `pos` (its origin, on the first voxel above
+/// the ground). `ground` gives the top of the ground at a world column, or None over
+/// water. `room` is how far from `pos` the roots of a big tree may spread: as far as the
+/// chunks around look for the trees that reach into them. None where the ground is too
+/// level for any to show.
+pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IVec3, seed: u32, room: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<Roots> {
+    if !rooted(species) {
+        return None;
+    }
+    // The foot of the trunk: where it stands and how thick it is. Roots wear the trunk's
+    // own bark, so a birch's are pale like its trunk.
+    let (offset, radius, bark) = foot(lib, species, variant, turns)?;
+    let centre = Vec2::new(pos.x as f32, pos.z as f32) + offset;
     let base = pos.y - 1;
     let ground_at = |p: Vec2| ground(p.x.floor() as i32, p.y.floor() as i32).map(|g| g - base);
     if radius >= BUTTRESSED {
@@ -253,7 +261,7 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
         let mut len = 0;
         let mut last = 0;
         // Within the model's reach, or a chunk the root runs into would not know of it.
-        let most = ((t.reach as f32 - radius - 2.0).max(0.0) as usize).min(SLOPE_STEPS);
+        let most = ((lib.get(species, variant).reach as f32 - radius - 2.0).max(0.0) as usize).min(SLOPE_STEPS);
         for k in 0..=most {
             let Some(g) = ground_at(root.at(k as f32)) else { break };
             // A root follows the ground down, but stops at a rise, a sheer drop or water.
@@ -488,6 +496,12 @@ impl Roots {
     /// few short flaring roots.
     pub fn flared(&self) -> bool {
         self.collar.is_some()
+    }
+
+    /// A flaring foot's collar: the middle of the trunk, in world voxels across the ground,
+    /// and how far out from it the collar comes.
+    pub fn collar(&self) -> Option<(Vec2, f32)> {
+        self.collar.map(|c| (c.centre, c.radius + c.swell))
     }
 
     /// The wooden voxels of the roots, in world positions.

@@ -288,6 +288,21 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
     }
     let r = rng.range(7.0, 9.0);
     s.blob(top + Vec3::Y * (h * 0.3), Vec3::new(r, r * 0.7, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
+    // Two or three low limbs, heavy and reaching out level a few metres up before they turn
+    // up into leaf, as an oak grown old in the open keeps them: what people sit under, and
+    // tie ribbons to. Last, so the rest of the tree is as it was.
+    for _ in 0..rng.int(2, 3) {
+        let (out, _) = rng.heading();
+        let start = Vec3::new(0.5, rng.range(5.0, 7.0), 0.5);
+        let mid = start + out * rng.range(5.0, 7.0) + Vec3::Y * rng.range(0.0, 1.0);
+        let end = mid + out * rng.range(3.5, 5.0) + Vec3::Y * rng.range(2.0, 3.5);
+        s.limb(start, mid, 1.1, 0.75, mat::BARK_OAK);
+        s.limb(mid, end, 0.75, 0.45, mat::BARK_OAK);
+        let fork = rng.range(2.0, 3.0);
+        forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
+        let r = rng.range(4.0, 5.5);
+        s.blob(end + Vec3::Y, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
+    }
 }
 
 fn birch(s: &mut Shape, rng: &mut Rng) {

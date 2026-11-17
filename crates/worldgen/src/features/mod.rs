@@ -589,6 +589,13 @@ pub fn place_trees(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, 
     place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES], false, None)
 }
 
+/// The giants of [`place`] alone, each where it stands in the world and of the same
+/// species, variant and turn, without their roots: quick enough to look for the big old
+/// trees over a square hundreds of metres across (a village's tree).
+pub fn place_giants(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS], false, None)
+}
+
 /// The features of [`place`] whose species `keep` says yes to, in the same order, each
 /// where it stands in the world and of the same species, variant, turn and lie, but
 /// without the roots bared on a slope. A feature left out is dropped as soon as its

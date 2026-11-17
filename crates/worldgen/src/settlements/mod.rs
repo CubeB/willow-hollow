@@ -7,6 +7,7 @@
 pub mod furnish;
 pub mod kit;
 pub mod place;
+pub mod tree;
 
 use glam::Vec2;
 
