@@ -1250,7 +1250,7 @@ impl<'a> Town<'a> {
         let mut fine = parts::place_fine(&b.fine, origin, t);
         fine.extend(parts::place_fine(&inside.fine, origin, t));
         net.add_stamp_with(voxels, fine);
-        if household.lived_in && b.inside.hearth.is_some() {
+        if inside.fire.is_some() {
             let q = origin + rotate(b.smoke, t);
             net.chimneys.push(Vec3::new(q.x as f32 + 0.5, q.y as f32, q.z as f32 + 0.5));
         }
