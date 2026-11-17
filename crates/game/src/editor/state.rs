@@ -12,6 +12,7 @@ use worldgen::{
     biome::Biome,
     features::{
         designs::{self, Cell, Design, Role},
+        fittings::{self, Group},
         landmarks::{self, Landmark, Palette},
         parts::{self, LampStyle},
     },
@@ -30,6 +31,15 @@ fn lamp_name(style: LampStyle) -> String {
         style => format!("Lamp post: {style:?}"),
     }
 }
+
+/// The galleries of the props settlements are furnished and dressed with: every one, or
+/// a group of them. The word is the one `--structure props/WORD` takes.
+const PROP_GALLERIES: [(&str, &str, Option<Group>); 4] = [
+    ("Every prop", "all", None),
+    ("Furniture", "furniture", Some(Group::Furniture)),
+    ("Trades", "trades", Some(Group::Trade)),
+    ("Yard and lane", "yard", Some(Group::Yard)),
+];
 
 /// Places to see a structure in: the palette of each, as a site there would have it.
 pub const PLACES: [(&str, Biome, Voxel); 9] = [
@@ -77,6 +87,8 @@ pub enum Showing {
     Landing,
     Lantern(usize),
     Signpost,
+    /// A gallery of settlement props (an index into [`PROP_GALLERIES`]).
+    Props(usize),
 }
 
 type Edit = Vec<(IVec3, Option<Cell>, Option<Cell>)>;
@@ -257,6 +269,7 @@ impl Editor {
         match head {
             "landing" => self.select(Showing::Landing),
             "signpost" => self.select(Showing::Signpost),
+            "props" => self.select(Showing::Props(tail.and_then(|t| PROP_GALLERIES.iter().position(|g| g.1 == t)).unwrap_or(0))),
             "lantern" | "lanterns" => self.select(Showing::Lantern(tail.and_then(|t| t.parse().ok()).unwrap_or(0).min(LAMPS.len() - 1))),
             _ => {
                 let Some(k) = designs::KINDS.iter().position(|&kind| designs::kind_word(kind) == head) else {
@@ -317,6 +330,7 @@ impl Editor {
             Showing::Landing => format!("Landing, variant {}", self.variant),
             Showing::Lantern(s) => format!("{}, variant {}", lamp_name(LAMPS[s]), self.variant),
             Showing::Signpost => "Signpost".into(),
+            Showing::Props(g) => format!("Settlement props: {}, variant {}", PROP_GALLERIES[g].0.to_lowercase(), self.variant),
         }
     }
 
@@ -353,6 +367,7 @@ impl Editor {
     fn rebuild(&mut self) -> (Vec<Vertex>, Vec<Vertex>) {
         let local = self.palette();
         let seed = self.variant;
+        let mut spaces = Vec::new();
         let (mut voxels, mut fine, props) = match self.showing {
             Showing::Generator(k) => landmarks::build_site(designs::KINDS[k], &local, seed, 0),
             Showing::Saved(k, i) => {
@@ -366,6 +381,11 @@ impl Editor {
                 (v, f, Vec::new())
             }
             Showing::Signpost => (landmarks::signpost(&local.varied(seed), &[0.4, 2.3, 4.4]), Vec::new(), Vec::new()),
+            Showing::Props(g) => {
+                let gallery = fittings::gallery(&local.varied(seed), seed, PROP_GALLERIES[g].2);
+                spaces = gallery.spaces;
+                (gallery.voxels, gallery.fine, Vec::new())
+            }
         };
         // Only the structure itself can be picked and drawn over; props are laid round
         // it by the game, whatever it is.
@@ -387,6 +407,11 @@ impl Editor {
             lo = lo.min(*q);
             hi = hi.max(*q);
         }
+        // Most of a prop is finer than voxels, so a gallery is framed by the room each takes.
+        for &(a, b, ..) in &spaces {
+            lo = lo.min(a);
+            hi = hi.max(b - IVec3::ONE);
+        }
         self.model = Model {
             at: voxels.iter().copied().collect(),
             pick: Some(Grid::new(pickable.iter().copied())),
@@ -404,6 +429,10 @@ impl Editor {
             view::plane(&mut opaque, -0.003, reach, GROUND, 1.0, view::FACE);
         }
         let mut glass = Vec::new();
+        // The room each prop takes, faintly on the ground: what a plan must leave for it.
+        for &(a, b, ..) in &spaces {
+            view::cuboid(&mut glass, Vec3::new(a.x as f32, 0.0, a.z as f32), Vec3::new(b.x as f32, 0.02, b.z as f32), [235, 225, 190], 0.07, view::OUTLINE, false);
+        }
         if self.show_air {
             for q in air {
                 let lo = q.as_vec3() + Vec3::splat(0.08);
@@ -924,6 +953,14 @@ impl Editor {
         if ui.selectable_label(self.showing == Showing::Signpost, "Signpost").clicked() {
             chosen = Some(Showing::Signpost);
         }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Props").strong());
+        ui.small("What settlements are furnished and dressed with, each intact and decayed.");
+        for (g, (name, ..)) in PROP_GALLERIES.iter().enumerate() {
+            if ui.selectable_label(self.showing == Showing::Props(g), *name).clicked() {
+                chosen = Some(Showing::Props(g));
+            }
+        }
         if !self.problems.is_empty() {
             ui.add_space(8.0);
             ui.label(egui::RichText::new("Files that could not be read").strong().color(egui::Color32::from_rgb(230, 110, 90)));
@@ -945,6 +982,11 @@ impl Editor {
         match self.showing {
             Showing::Generator(k) => self.generator_tools(ui, k),
             Showing::Saved(..) => self.design_tools(ui),
+            Showing::Props(g) => {
+                ui.label("Only to look at: settlements will be furnished with these.");
+                self.preview(ui);
+                prop_key(ui, PROP_GALLERIES[g].2);
+            }
             _ => {
                 ui.label("Only to look at: the game builds these to fit the shore or the trail.");
                 self.preview(ui);
@@ -1234,6 +1276,27 @@ fn cell_label(c: Cell) -> String {
 fn short(path: &Path) -> String {
     let parts: Vec<String> = path.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
+/// What is in a gallery of props and in what order, as it is laid out from the front row
+/// back.
+fn prop_key(ui: &mut egui::Ui, group: Option<Group>) {
+    egui::CollapsingHeader::new("In this gallery").default_open(true).show(ui, |ui| {
+        ui.small("Left to right along each row, from the front row back. Each stands intact, with its decayed form to its right; the faint outline is the room it takes.");
+        for g in [Group::Furniture, Group::Trade, Group::Yard] {
+            if group.is_some_and(|only| only != g) {
+                continue;
+            }
+            let names: Vec<&str> = fittings::Fitting::ALL.iter().filter(|f| f.group() == g).map(|f| f.name()).collect();
+            let heading = match g {
+                Group::Furniture => "Furniture",
+                Group::Trade => "Trades",
+                Group::Yard => "Yard and lane",
+            };
+            ui.label(egui::RichText::new(heading).strong());
+            ui.small(names.join(", "));
+        }
+    });
 }
 
 /// The repository's structures folder, where the game this was built from reads them.

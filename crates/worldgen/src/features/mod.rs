@@ -12,6 +12,7 @@ pub mod cave;
 pub mod climber;
 pub mod cloth;
 pub mod designs;
+pub mod fittings;
 pub mod landmarks;
 pub mod moorstones;
 pub mod moss;

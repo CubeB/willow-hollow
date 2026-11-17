@@ -300,7 +300,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
 The structure editor, for looking at the landmarks and drawing your own:
   --structures          open it instead of the game
   --structure WHAT      start at a kind (shrine), a saved one (shrine/high-gate), landing,
-                        lantern/N or signpost
+                        lantern/N, signpost, or props (props/furniture, props/trades,
+                        props/yard)
   --variant N           the generator's variant N
   --place N             seen in place N of its list (0 to 8)
   --layer L             cut away everything above layer L

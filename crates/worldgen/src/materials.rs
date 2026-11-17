@@ -316,6 +316,30 @@ palette! {
     // CLOTH_RED: a dyed cloth's colours, where moss and a yellow bloom stood in before.
     CLOTH_GREEN       = ( 58, 132,  72), Solid, 1;
     CLOTH_YELLOW      = (228, 190,  52), Solid, 1;
+    // What settlements are furnished with (features::fittings), added last so existing ids
+    // keep their numbers: hay new and rotten, willow rods cut and woven, hide and leather,
+    // antler, fish fresh and dried, a tarred net, and water standing dark in a well or a
+    // trough. Then flowers and herbs hung to dry: never classed as plants, so they keep
+    // their colour the year round, as no growing flower does.
+    HAY               = (190, 176,  98), Solid, 3;
+    HAY_ROTTEN        = (128, 114,  82), Solid, 3;
+    WITHY             = (124,  74,  52), Solid, 2;
+    WICKER            = (176, 140,  90), Solid, 2;
+    HIDE              = (206, 186, 150), Solid, 2;
+    LEATHER           = (108,  72,  48), Solid, 1;
+    ANTLER            = (214, 200, 168), Solid, 1;
+    FISH              = (150, 160, 162), Solid, 1;
+    FISH_DRIED        = (154, 120,  78), Solid, 2;
+    NET               = ( 92,  80,  64), Solid, 2;
+    WATER_STILL       = ( 44,  70,  84), Solid, 0;
+    DRIED_RED         = (170,  72,  60), Solid, 2;
+    DRIED_GOLD        = (206, 168,  72), Solid, 2;
+    DRIED_WHITE       = (222, 214, 190), Solid, 2;
+    DRIED_PURPLE      = (138,  96, 140), Solid, 2;
+    DRIED_BLUE        = (102, 114, 170), Solid, 2;
+    DRIED_PINK        = (200, 142, 158), Solid, 2;
+    DRIED_HERB        = (110, 122,  80), Solid, 2;
+    DRIED_BROWN       = (124,  94,  66), Solid, 2;
 }
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.
