@@ -307,6 +307,65 @@ fn draw_trails(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
         dot(x, z, 4, [20, 20, 20], img);
         dot(x, z, 3, s.kind.map_color(), img);
     }
+    draw_settlements(c, view, scale, img);
+}
+
+/// Settlements as squares sized and coloured by kind (a hamlet a small pale dot, a great
+/// town a large crimson square with a ring), each hamlet joined to the village or town it
+/// grew from by a pale line, and river partners by a dashed blue one.
+fn draw_settlements(c: &Continent, view: View, scale: f32, img: &mut RgbImage) {
+    use worldgen::settlements::Kind;
+    let cell = c.cell_size();
+    let px = img.width() as i32;
+    let to_px = |x: f32, z: f32| (((x / cell - view.x0) / scale) as i32, ((z / cell - view.z0) / scale) as i32);
+    let mut put = |x: i32, z: i32, color: [u8; 3], img: &mut RgbImage| {
+        if x >= 0 && z >= 0 && x < px && z < px {
+            img.put_pixel(x as u32, z as u32, Rgb(color));
+        }
+    };
+    let line = |a: (i32, i32), b: (i32, i32), color: [u8; 3], dash: bool, img: &mut RgbImage, put: &mut dyn FnMut(i32, i32, [u8; 3], &mut RgbImage)| {
+        let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).max(1);
+        for s in 0..=steps {
+            if dash && (s / 4) % 2 == 1 {
+                continue;
+            }
+            let t = s as f32 / steps as f32;
+            put(a.0 + ((b.0 - a.0) as f32 * t).round() as i32, a.1 + ((b.1 - a.1) as f32 * t).round() as i32, color, img);
+        }
+    };
+    let list = &c.trails.settlements;
+    for s in list {
+        let a = to_px(s.x as f32, s.z as f32);
+        if let Some(p) = s.parent {
+            line(a, to_px(list[p].x as f32, list[p].z as f32), [245, 240, 225], false, img, &mut put);
+        }
+        for &p in &s.partners {
+            line(a, to_px(list[p].x as f32, list[p].z as f32), [20, 70, 230], true, img, &mut put);
+        }
+    }
+    for s in list {
+        let (x, z) = to_px(s.x as f32, s.z as f32);
+        let half: i32 = match s.kind {
+            Kind::Hamlet => 2,
+            Kind::Village => 3,
+            Kind::LargeVillage => 4,
+            Kind::Town => 5,
+            Kind::GreatTown => 6,
+        };
+        for dz in -half - 1..=half + 1 {
+            for dx in -half - 1..=half + 1 {
+                let edge = dx.abs() > half || dz.abs() > half;
+                put(x + dx, z + dz, if edge { [15, 15, 15] } else { s.kind.map_color() }, img);
+            }
+        }
+        if s.kind == Kind::GreatTown {
+            let r = half + 4;
+            for k in 0..64 {
+                let a = k as f32 / 64.0 * std::f32::consts::TAU;
+                put(x + (a.cos() * r as f32).round() as i32, z + (a.sin() * r as f32).round() as i32, [15, 15, 15], img);
+            }
+        }
+    }
 }
 
 /// Length of trail in each traffic class, and crossings by kind.
@@ -330,6 +389,22 @@ fn print_trail_stats(c: &Continent) {
         *markers.entry(format!("{kind:?}")).or_insert(0) += 1;
     }
     println!("  beside the trails: {markers:?}, lanterns {}", c.trails.lanterns.len());
+}
+
+/// How many settlements of each kind, with their people, wells and partners.
+fn print_settlement_stats(c: &Continent) {
+    use worldgen::settlements::Kind;
+    let list = &c.trails.settlements;
+    let count = |k: Kind| list.iter().filter(|s| s.kind == k).count();
+    let kinds: Vec<String> = Kind::ALL.iter().map(|&k| format!("{} {}", count(k), k.word())).collect();
+    let people: u32 = list.iter().map(|s| s.people as u32).sum();
+    let wells: u32 = list.iter().map(|s| s.wells as u32).sum();
+    let partners = list.iter().map(|s| s.partners.len()).sum::<usize>() / 2;
+    let absorbed = list.iter().filter(|s| s.port.is_some()).count() + list.iter().filter(|s| s.shrine.is_some()).count();
+    println!(
+        "  settlements: {}; {people} people, {wells} wells, {partners} river pairs, {absorbed} landmarks taken in",
+        kinds.join(", ")
+    );
 }
 
 /// Smallest discharge drawn as a stream.
@@ -514,6 +589,39 @@ fn print_poi(c: &Continent) {
         let (x, z) = local(s.x, s.z);
         let name = c.trails.names.site(k).map_or("", |p| p.name.as_str());
         println!("  poi site       {x},{z}  {:?}, ground {}, for {:?}  \"{name}\"", s.kind, s.y, s.reason);
+    }
+    // Settlements, the greatest first, with their facts: what they are, why they stand
+    // there, and who they trade with.
+    let list = &c.trails.settlements;
+    let mut order: Vec<usize> = (0..list.len()).collect();
+    order.sort_by(|&a, &b| list[b].kind.cmp(&list[a].kind).then(a.cmp(&b)));
+    for k in order {
+        let s = &list[k];
+        let (x, z) = local(s.x, s.z);
+        let name = |k: usize| c.trails.names.settlement(k).map_or("?".to_string(), |p| p.name.clone());
+        let mut also = Vec::new();
+        if let Some(p) = s.parent {
+            also.push(format!("near {}", name(p)));
+        }
+        if !s.partners.is_empty() {
+            also.push(format!("trades by boat with {}", s.partners.iter().map(|&p| name(p)).collect::<Vec<_>>().join(", ")));
+        }
+        if let Some(port) = s.port {
+            also.push(format!("its port {}", c.trails.names.site(port).map_or("", |p| p.name.as_str())));
+        }
+        if let Some(shrine) = s.shrine {
+            also.push(format!("its shrine {}", c.trails.names.site(shrine).map_or("", |p| p.name.as_str())));
+        }
+        println!(
+            "  poi settlement {} {x},{z}  \"{}\"  for {:?}, ground {}{}; {}{}",
+            s.kind.key(),
+            name(k),
+            s.reason,
+            s.y,
+            if s.coast { ", on the coast" } else { "" },
+            s.summary(),
+            if also.is_empty() { String::new() } else { format!("; {}", also.join("; ")) }
+        );
     }
     // Every named place, with the tongue spoken there.
     for p in &c.trails.names.places {
@@ -761,10 +869,12 @@ fn main() -> Result<()> {
     println!("  simulated {0}x{0} in {1:.2} s", o.size, t.elapsed().as_secs_f32());
     let t = Instant::now();
     c.trails = worldgen::trails::build(&c, o.seed);
+    let built = t.elapsed().as_secs_f32();
     c.trails.names = worldgen::names::survey(&c, o.seed);
     println!(
-        "  {} landmarks, {} trails, {} crossings, {} structures, {} links unrouted, in {:.2} s",
+        "  {} landmarks, {} settlements, {} trails, {} crossings, {} structures, {} links unrouted, in {:.2} s ({built:.2} s building, the rest naming)",
         c.trails.sites.len(),
+        c.trails.settlements.len(),
         c.trails.lines.len(),
         c.trails.crossings.len(),
         c.trails.stamp_count(),
@@ -772,6 +882,7 @@ fn main() -> Result<()> {
         t.elapsed().as_secs_f32()
     );
     print_trail_stats(&c);
+    print_settlement_stats(&c);
     print_stats(&c);
     if o.poi {
         print_poi(&c);

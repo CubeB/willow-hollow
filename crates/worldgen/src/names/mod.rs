@@ -79,12 +79,14 @@ pub enum PlaceKind {
     Peak,
     Falls,
     Landmark(Landmark),
-    /// Settlements, once there are any; nothing places them yet.
+    /// Settlements (see [`crate::settlements`]). A large village is named as a village.
     /// (Appended after them: a tor on the moor, see `features::tor`.)
     Hamlet,
     Town,
     /// A tor on the moor (see [`crate::features::tor`]).
     Tor,
+    Village,
+    GreatTown,
 }
 
 impl PlaceKind {
@@ -116,12 +118,19 @@ impl PlaceKind {
             PlaceKind::Hamlet => "hamlet",
             PlaceKind::Town => "town",
             PlaceKind::Tor => "tor",
+            PlaceKind::Village => "village",
+            PlaceKind::GreatTown => "greattown",
         }
     }
 
     /// Land and water, rather than anything people built.
     pub fn is_natural(self) -> bool {
-        !matches!(self, PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town)
+        !matches!(self, PlaceKind::Landmark(_)) && !self.is_settlement()
+    }
+
+    /// A hamlet, village or town.
+    pub fn is_settlement(self) -> bool {
+        matches!(self, PlaceKind::Hamlet | PlaceKind::Village | PlaceKind::Town | PlaceKind::GreatTown)
     }
 
     /// Whether things built beside it can take its name ("Greymere Landing").
@@ -136,20 +145,17 @@ impl PlaceKind {
                 | PlaceKind::Peak
                 | PlaceKind::Falls
                 | PlaceKind::Tor
-        )
+        ) || self.is_settlement()
     }
 
     /// Whether it can take the name of something beside it.
     fn borrows_name(self) -> bool {
-        matches!(self, PlaceKind::Falls | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town)
+        matches!(self, PlaceKind::Falls | PlaceKind::Landmark(_)) || self.is_settlement()
     }
 
     /// Whether people keep it, so it can be named after one of them ("Marren's Hut").
     fn kept(self) -> bool {
-        matches!(
-            self,
-            PlaceKind::Landmark(Landmark::Hut | Landmark::Camp | Landmark::Landing) | PlaceKind::Hamlet | PlaceKind::Town
-        )
+        matches!(self, PlaceKind::Landmark(Landmark::Hut | Landmark::Camp | Landmark::Landing)) || self.is_settlement()
     }
 
     /// Whether the place spans several macro-cells, so every one of them must give it
@@ -177,6 +183,8 @@ pub struct Place {
     pub importance: f32,
     /// Index in `Network::sites`, for a landmark.
     pub site: Option<usize>,
+    /// Index in `Network::settlements`, for a hamlet, village or town.
+    pub settlement: Option<usize>,
     /// The part of the name that can be lent to things beside it.
     core: Option<String>,
 }
@@ -247,6 +255,8 @@ pub struct Gazetteer {
     regions: Vec<Region>,
     /// Place of each trail site, by site index.
     sites: Vec<Option<usize>>,
+    /// Place of each settlement, by its index in `Network::settlements`.
+    settlements: Vec<Option<usize>>,
     /// Words already in names, and where, so neighbours don't lean on the same one.
     used: Vec<(String, Vec2)>,
 }
@@ -317,6 +327,7 @@ impl Gazetteer {
             line: req.line,
             importance: req.importance,
             site: None,
+            settlement: None,
             core,
         });
         self.places.len() - 1
@@ -331,6 +342,40 @@ impl Gazetteer {
         }
         self.sites[site] = Some(i);
         i
+    }
+
+    /// The place of a settlement, by its index in `Network::settlements`.
+    pub fn settlement(&self, k: usize) -> Option<&Place> {
+        self.places.get((*self.settlements.get(k)?)?)
+    }
+
+    /// [`Self::add`] for the settlement at `k` in `Network::settlements`.
+    pub(crate) fn add_settlement(&mut self, k: usize, req: Request) -> usize {
+        let i = self.add(req);
+        self.places[i].settlement = Some(k);
+        if self.settlements.len() <= k {
+            self.settlements.resize(k + 1, None);
+        }
+        self.settlements[k] = Some(i);
+        i
+    }
+
+    /// `n` given names of the tongue spoken at continent-local `at`, chosen by `salt`:
+    /// the people of a place, for naming it after one of them.
+    pub fn given_names(&self, at: Vec2, salt: u32, n: usize) -> Vec<String> {
+        let tongue = &words().tongues[self.tongue_index(at)];
+        let mut out: Vec<String> = Vec::new();
+        for k in 0..n as i32 * 4 {
+            if out.len() >= n {
+                break;
+            }
+            if let Some(name) = pick(&tongue.given, hash2(salt ^ self.seed, k, 0x9e)).map(String::from)
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out
     }
 
     /// The name of the nearest natural feature close enough to lend it.

@@ -165,8 +165,10 @@ fn stone_bridges_are_rarest() {
     // unrouted, in 325 km of trail. A stone bridge was then any span over 13 m, so a
     // trail took one wherever a stream was a little wide. Now a stone bridge is worth
     // kilometres of walking round, and stands only over a big river or a span timber
-    // will not reach: 6 stone to 45 wooden.
-    assert!(stone * 2 <= 17, "{stone} stone bridges, no fewer than before");
+    // will not reach: 6 stone to 45 wooden. Settlements (#201) added half as much trail
+    // again, and the roads to towns by big rivers cross them in stone: 10 stone to 56
+    // wooden in 481 km. Still under half as many to the kilometre as before #177.
+    assert!(stone as f32 * 2.0 <= 17.0 * km / 325.0, "{stone} stone bridges in {km:.0} km, no fewer than before");
     assert!(stone * 5 <= wooden, "{stone} stone bridges to {wooden} wooden");
     // The network holds together as well as it did: no more links go unmade.
     assert!(unlinked <= 9, "{unlinked} links unrouted");
@@ -419,13 +421,11 @@ fn lanterns_gather_at_places_and_thin_out_between() {
             }
         }
     }
-    // Landmarks are still approached by lantern light.
-    let near_site = lanterns
-        .iter()
-        .filter(|l| net.sites.iter().any(|s| l.at.distance(glam::vec2(s.x as f32, s.z as f32)) < crate::scale::m(240.0)))
-        .count();
+    // Landmarks, and now villages and towns, are still approached by lantern light.
+    let places: Vec<glam::Vec2> = net.sites.iter().map(|s| glam::vec2(s.x as f32, s.z as f32)).chain(net.settlements.iter().map(|s| s.at())).collect();
+    let near_site = lanterns.iter().filter(|l| places.iter().any(|p| l.at.distance(*p) < crate::scale::m(240.0))).count();
     assert!(near_site > 0, "no lantern near any landmark");
-    assert!(near_site * 4 >= lanterns.len(), "only {near_site} of {} lanterns near landmarks", lanterns.len());
+    assert!(near_site * 4 >= lanterns.len(), "only {near_site} of {} lanterns near landmarks and settlements", lanterns.len());
     // Most stand cold; those that are lit are lit more often on the way in to a place.
     let share = |f: &dyn Fn(&&crate::trails::TrailLantern) -> bool| {
         let of: Vec<_> = lanterns.iter().filter(f).collect();

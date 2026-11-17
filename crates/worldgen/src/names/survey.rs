@@ -30,6 +30,9 @@ pub fn survey(c: &Continent, world_seed: u32) -> Gazetteer {
     s.peaks(&mut g);
     s.tors(&mut g);
     s.bays(&mut g);
+    // Settlements before landmarks, so a landing that became a town's port can take
+    // the town's name.
+    s.settlements(&mut g);
     s.landmarks(&mut g);
     g
 }
@@ -743,6 +746,32 @@ impl<'a> Survey<'a> {
                 facts: &facts,
                 salt: 0x0ba7 ^ i as u32,
             });
+        }
+    }
+
+    /// Every hamlet, village and town, the greatest first so they have the pick of the
+    /// names. Each has a few of its people named, and may be named after one of them.
+    fn settlements(&self, g: &mut Gazetteer) {
+        let list = &self.c.trails.settlements;
+        let mut order: Vec<usize> = (0..list.len()).collect();
+        order.sort_by(|&a, &b| list[b].kind.cmp(&list[a].kind).then(a.cmp(&b)));
+        for k in order {
+            let s = &list[k];
+            let at = s.at();
+            let mut facts = self.facts(self.index(at), &[]);
+            facts.residents = g.given_names(at, s.seed, 3);
+            g.add_settlement(
+                k,
+                Request {
+                    kind: s.kind.place_kind(),
+                    at,
+                    radius: s.radius,
+                    line: Vec::new(),
+                    importance: s.kind.importance(),
+                    facts: &facts,
+                    salt: hash2(0x5e77, s.x, s.z),
+                },
+            );
         }
     }
 

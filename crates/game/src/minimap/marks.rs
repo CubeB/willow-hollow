@@ -28,6 +28,8 @@ pub enum Kind {
     Mouth,
     Confluence,
     Landmark,
+    /// A hamlet, village or town.
+    Settlement,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +96,12 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         // Continent-local, so a site's luck does not change with where its continent lies.
         let hint = !surprise(world_seed, s.x, s.z);
         marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name, hint });
+    }
+    // Settlements are visited by walking onto their green, and never kept quiet about:
+    // everyone in the country knows where the villages are.
+    for (k, s) in c.trails.settlements.iter().enumerate() {
+        let name = c.trails.names.settlement(k).map(|p| p.name.clone());
+        marks.push(Mark { kind: Kind::Settlement, at: world(s.at()), reach: s.radius.max(NEAR), name, hint: true });
     }
 
     let land: Vec<usize> = (0..n * n).filter(|&i| !c.ocean[i]).collect();

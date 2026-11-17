@@ -326,6 +326,12 @@ fn nothing_small_grows_up_through_a_bridge() {
             if lo.y != ground + 1 || w.materials().get(b.voxel).kind != voxel::Kind::Foliage || !voxels.has_height(hi.y) {
                 continue;
             }
+            // Nor a climber, which clings to what it climbs: the ivy up a willow by the
+            // bank where a road crosses touches its bark by design.
+            use crate::features::climber::{FLOWERING_VINE, IVY, LIANA, TRAILING_CREEPER, VIRGINIA_CREEPER};
+            if [IVY, VIRGINIA_CREEPER, FLOWERING_VINE, LIANA, TRAILING_CREEPER].iter().any(|c| c.leaves.contains(&b.voxel)) {
+                continue;
+            }
             looked += 1;
             if let Some(y) = (lo.y..=hi.y).find(|&y| w.materials().get(voxels.voxel(IVec3::new(lo.x, y, lo.z))).kind == voxel::Kind::Solid) {
                 under += 1;

@@ -33,6 +33,10 @@ bay = {stem}fjord | {root} Bay
 inlet = {stem}fjord | {root} Sound
 falls = {stem}foss | {root} Falls
 range = The {root} Fells | The {root} Mountains
+hamlet = {stem}gard | {stem}sel
+village = {stem}by | {stem}stad
+town = {stem}vik | {stem}heim
+greattown = {stem}borg
 
 [tongue vale]
 first = Llan Pen Caer Aber Bryn Glyn Tre Dol Maen Rhos Cor Hen Mor Tal Nant Gwen Car Lys
@@ -46,6 +50,10 @@ island = Ynys {root} | {root} Isle
 bay = {root} Bay | Porth {root}
 falls = {root} Falls
 range = The {root} Hills | The {root} Mountains
+hamlet = Bryn {root} | {root}
+village = Llan{low} | Tre{low}
+town = Caer{low}
+greattown = Caer {root}
 
 [tongue old]
 first = Ash Brad Ald Wen Hal Stan Thorn Wil Lang Mar Ed Brom Hart Elm Bur Wych Hen Ren
@@ -59,6 +67,10 @@ island = {root} Isle | {root} Holm
 bay = {root} Bay
 falls = {root} Force | {root} Falls
 range = The {root} Hills | The {root} Edge
+hamlet = {stem}cot | {stem}thorpe
+village = {root} | {stem}ham
+town = {stem}bury | {stem}bridge
+greattown = {stem}minster | {stem}chester
 
 [tongue sun]
 first = Sol Val Mir Cal Ser Ar Lun Cor Tal Ven Ros Alb Lor Mon Pal Sar
@@ -72,6 +84,10 @@ island = Isla {root} | {root} Isle
 bay = Cala {root} | {root} Bay
 falls = Salto {root} | {root} Falls
 range = Sierra {root} | The {root} Mountains
+hamlet = Casa {root}
+village = San {root} | Villa {root}
+town = Porto {root} | {root}
+greattown = Ciudad {root}
 
 [tongue isle]
 first = Ka Moa Lei Ho Mau Ki Wai Ana Ta Ma Ri Ola Nai Ke Pua Tua
@@ -85,6 +101,7 @@ island = {root} | Motu {root} | {root} Isle
 bay = {root} Lagoon | {root} Bay
 falls = {root} Falls
 range = The {root} Heights | The {root} Mountains
+village = Kai{low} | {root}
 
 [tongue dune]
 first = Zar Kef Sab Tam Ir Dah Mer Kal Nef Qar Sal Tir Hab Sur Mez Yar
@@ -98,6 +115,10 @@ island = {root} Isle
 bay = {root} Bay
 falls = {root} Falls
 range = The {root} Heights | The {root} Mountains
+hamlet = Bir {root}
+village = Ksar {root} | {root}
+town = Qasr {root}
+greattown = Medina {root}
 
 # --- Words for the surroundings ---------------------------------------------------------
 # Keyed by what the place is near or stands in: its forest, ground, water and landform.
@@ -243,12 +264,24 @@ type = Landing | Quay | Haven | Jetty
 role = haven
 pattern = {near} {type} | {word} {type} | {root} {type} | {owner}'s {type} | {word}{role}
 
-# Settlements, once there are any: a hamlet about as much a draw as the busiest
-# landmark twice over, a town much more.
+# Settlements (see settlements/place.rs). A hamlet is often named for the family that
+# farms it; villages of either size share their words; a great town has grander ones
+# than a town.
 [kind hamlet]
-role = ford ton by stead wick ley
-pattern = {root} | {word}{role} | {stem}{role} | {near}{role}
+type = End | Green | Farm | Cot | Steading
+role = ford ton by stead wick ley cot
+pattern = {root} | {word}{role} | {stem}{role} | {near}{role} | {owner}'s {type} | {word} {type} | {owner}'s {type}
+
+[kind village]
+type = Green | Cross | Bridge | Well | Hill
+role = ton by ham ford wick ley stead well
+pattern = {root} | {root} | {stem}{role} | {word}{role} | {near}{role} | {word} {type} | {stem}{role}
 
 [kind town]
 role = ford ton bury bridge port
 pattern = {root} | {root} | {word}{role} | {stem}{role}
+
+[kind greattown]
+role = bury minster chester caster borough
+adj = Great | High | Old
+pattern = {root} | {root} | {stem}{role} | {word}{role} | {adj} {root}

@@ -36,6 +36,17 @@ pub struct Named {
     pub z: f64,
 }
 
+/// A hamlet, village or town, found for `settlements` and `tp village`.
+pub struct Settlement {
+    pub name: String,
+    /// What it is, in words: hamlet, village, large village, town or great town.
+    pub kind: &'static str,
+    /// Its people, age, water and trades, in a line.
+    pub facts: String,
+    pub x: f64,
+    pub z: f64,
+}
+
 /// Something `spawn` can bring.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Spawn {
@@ -80,6 +91,10 @@ pub trait Game {
     /// The named places nearest, those whose names have all of `query`'s words in them
     /// (all of them when it is empty), at most `n`.
     fn places(&self, _query: &str, _n: usize) -> Vec<Named> {
+        Vec::new()
+    }
+    /// The settlements nearest, only those of `kind` when given, at most `n`.
+    fn settlements(&self, _kind: Option<worldgen::settlements::Kind>, _n: usize) -> Vec<Settlement> {
         Vec::new()
     }
     /// Flies, or walks, or with None turns from one to the other.
@@ -135,10 +150,11 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "date", also: &[], usage: "date [month|0-1]", about: "set the time of year: a month, or a fraction of the year from the spring equinox", words: month_words, run: date },
     Spec { name: "season", also: &[], usage: "season <spring|summer|autumn|winter>", about: "set the time of year to the middle of a season", words: season_words, run: set_season },
     Spec { name: "year", also: &[], usage: "year [n|+n|-n]", about: "say which year of the world it is (its first is 0), or set it", words: none, run: year },
-    Spec { name: "tp", also: &["teleport", "go"], usage: "tp <x> <z> [h] | tp x,z[,h] | tp <place> | tp home | tp back", about: "go to voxel x, z (h above the ground), to a named place, to the world's start, or back", words: tp_words, run: tp },
+    Spec { name: "tp", also: &["teleport", "go"], usage: "tp <x> <z> [h] | tp x,z[,h] | tp <place> | tp <hamlet|village|town|...> | tp home | tp back", about: "go to voxel x, z (h above the ground), to a named place, to the nearest settlement of a kind, to the world's start, or back", words: tp_words, run: tp },
     Spec { name: "back", also: &[], usage: "back", about: "go back to where the last tp left from", words: none, run: |_, game| game.back() },
     Spec { name: "pos", also: &["where"], usage: "pos", about: "say where you are, ready for tp and for --over and --look", words: none, run: pos },
     Spec { name: "places", also: &[], usage: "places [name]", about: "the named places nearest, or those with this in their name", words: none, run: places },
+    Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
     Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, or set things down", words: spawn_words, run: spawn },
@@ -339,6 +355,8 @@ pub enum Goto {
     Home,
     Back,
     Place(String),
+    /// The nearest settlement of a kind.
+    Nearest(worldgen::settlements::Kind),
 }
 
 /// Reads `tp`'s words: two or three numbers, apart or joined by commas as `pos` and
@@ -350,7 +368,10 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
         [] => Err("where to? tp x z, tp x,z,h, tp home, or the name of a place".into()),
         ["home"] => Ok(Goto::Home),
         ["back"] => Ok(Goto::Back),
-        [x, ..] if x.parse::<f64>().is_err() =>Ok(Goto::Place(joined.trim().to_string())),
+        [x, ..] if x.parse::<f64>().is_err() => Ok(match worldgen::settlements::Kind::named(&joined) {
+            Some(kind) => Goto::Nearest(kind),
+            None => Goto::Place(joined.trim().to_string()),
+        }),
         [x, z] => Ok(Goto::At(number(x, "x")?, number(z, "z")?, None)),
         [x, z, h] => Ok(Goto::At(number(x, "x")?, number(z, "z")?, Some(number(h, "the height above the ground")?))),
         _ => Err(format!("'{joined}': tp takes x and z, and a height if you like")),
@@ -358,7 +379,13 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
 }
 
 fn tp_words() -> Vec<&'static str> {
-    vec!["home", "back"]
+    let mut words = vec!["home", "back"];
+    words.extend(kind_words());
+    words
+}
+
+fn kind_words() -> Vec<&'static str> {
+    worldgen::settlements::Kind::ALL.iter().map(|k| k.key()).collect()
 }
 
 fn tp(args: &[&str], game: &mut dyn Game) -> Reply {
@@ -375,7 +402,37 @@ fn tp(args: &[&str], game: &mut dyn Game) -> Reply {
             let (x, z, said) = (p.x, p.z, format!("{} ({})", p.name, p.kind));
             game.teleport(x, z, None).map(|line| format!("{said}: {line}"))
         }
+        Goto::Nearest(kind) => {
+            let found = game.settlements(Some(kind), 1);
+            let s = found.first().ok_or_else(|| format!("no {} in this part of the world", kind.word()))?;
+            let (x, z, said) = (s.x, s.z, format!("{} ({})", s.name, s.kind));
+            game.teleport(x, z, None).map(|line| format!("{said}: {line}"))
+        }
     }
+}
+
+fn settlements(args: &[&str], game: &mut dyn Game) -> Reply {
+    let words = args.join(" ");
+    let kind = match words.trim() {
+        "" => None,
+        w => Some(worldgen::settlements::Kind::named(w).ok_or_else(|| format!("'{w}' is not a kind of settlement: {}", kind_words().join(", ")))?),
+    };
+    let found = game.settlements(kind, 6);
+    if found.is_empty() {
+        return Err("no settlements in this part of the world".into());
+    }
+    let here = game.here().eye;
+    let mut out = String::new();
+    for s in found {
+        let (dx, dz) = (s.x - here.x, s.z - here.z);
+        let metres = dx.hypot(dz) / worldgen::scale::VOXELS_PER_METRE as f64;
+        let far = if metres >= 1000.0 { format!("{:.1} km", metres / 1000.0) } else { format!("{metres:.0} m") };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out += &format!("{} ({}), {far} {}   tp {:.0},{:.0}\n  {}", s.name, s.kind, compass(dx, dz), s.x, s.z, s.facts);
+    }
+    Ok(out)
 }
 
 fn pos(_: &[&str], game: &mut dyn Game) -> Reply {
@@ -828,6 +885,15 @@ mod tests {
             let all = [("Hollin Tarn", "lake", 10.0, 20.0), ("Old Hollin Cairn", "cairn", 30.0, 40.0)];
             all.iter().filter(|p| p.0.to_lowercase().contains(&query.to_lowercase())).map(|p| Named { name: p.0.into(), kind: p.1, x: p.2, z: p.3 }).collect()
         }
+        fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<Settlement> {
+            use worldgen::settlements::Kind;
+            let all = [("Ashcot", Kind::Hamlet, 50.0, 60.0), ("Brynell", Kind::GreatTown, 900.0, 80.0), ("Elmley", Kind::Village, 300.0, 400.0)];
+            all.iter()
+                .filter(|s| kind.is_none_or(|k| k == s.1))
+                .take(n)
+                .map(|s| Settlement { name: s.0.into(), kind: s.1.word(), facts: "9 people".into(), x: s.2, z: s.3 })
+                .collect()
+        }
         fn spawn(&mut self, what: Spawn) -> Reply {
             self.spawned.push(what);
             Ok(String::new())
@@ -892,6 +958,9 @@ mod tests {
         assert_eq!(goto(&["home"]), Ok(Goto::Home));
         assert_eq!(goto(&["back"]), Ok(Goto::Back));
         assert_eq!(goto(&["Hollin", "Tarn"]), Ok(Goto::Place("Hollin Tarn".into())));
+        assert_eq!(goto(&["village"]), Ok(Goto::Nearest(worldgen::settlements::Kind::Village)));
+        assert_eq!(goto(&["great", "town"]), Ok(Goto::Nearest(worldgen::settlements::Kind::GreatTown)));
+        assert_eq!(goto(&["greattown"]), Ok(Goto::Nearest(worldgen::settlements::Kind::GreatTown)));
         assert!(goto(&[]).is_err());
         assert!(goto(&["1", "2", "3", "4"]).is_err());
         assert!(goto(&["1", "x"]).is_err());
@@ -918,6 +987,13 @@ mod tests {
         assert!(run("tp hollin tarn", &mut g).unwrap().starts_with("Hollin Tarn (lake)"));
         assert_eq!(g.went, Some((10.0, 20.0, None)));
         assert!(run("tp nowhere at all", &mut g).is_err());
+        assert!(run("tp greattown", &mut g).unwrap().starts_with("Brynell (great town)"));
+        assert_eq!(g.went, Some((900.0, 80.0, None)));
+        assert!(run("tp town", &mut g).is_err(), "there is no plain town here");
+        let listed = run("settlements", &mut g).unwrap();
+        assert!(listed.contains("Ashcot (hamlet)") && listed.contains("tp 300,400") && listed.contains("9 people"), "{listed}");
+        assert!(!run("villages village", &mut g).unwrap().contains("Ashcot"));
+        assert!(run("settlements city", &mut g).unwrap_err().contains("greattown"));
         run("spawn camp", &mut g).unwrap();
         run("spawn camp out", &mut g).unwrap();
         run("spawn crows perch", &mut g).unwrap();

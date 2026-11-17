@@ -404,7 +404,8 @@ impl Journal {
                 PlaceKind::Lake => (d <= LAKE_REACH + p.radius * 0.1, true),
                 PlaceKind::River => (d <= RIVER_REACH, true),
                 PlaceKind::Peak => (afoot && (d <= 0.0 || centre <= NEAR), true),
-                PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town => (afoot && d <= NEAR, true),
+                PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_) => (afoot && d <= NEAR, true),
+                PlaceKind::Hamlet | PlaceKind::Village | PlaceKind::Town | PlaceKind::GreatTown => (afoot && d <= NEAR, true),
             };
             if landmark && d <= BESIDE && beside.is_none_or(|b| d < b.0) {
                 beside = Some((d, &p.name));

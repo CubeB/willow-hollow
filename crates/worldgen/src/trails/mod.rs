@@ -289,6 +289,10 @@ pub struct Network {
     pub delights: Vec<delights::Standing>,
     /// Delights chosen but not yet built, held like the markers.
     held_delights: Vec<delights::Placed>,
+    /// Every hamlet, village and town, placed before the landmarks: towns first, then
+    /// villages, then hamlets. Each stands about a green, a pad after the landmarks' own
+    /// (so [`Self::gather`] finds it), and is a node of the trails as a landmark is.
+    pub settlements: Vec<crate::settlements::Settlement>,
 }
 
 impl Network {

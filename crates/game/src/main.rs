@@ -654,6 +654,24 @@ fn named_places(world: &GameWorld, at: DVec3, query: &str, n: usize) -> Vec<comm
     found.into_iter().map(|p| commands::Named { name: p.name.clone(), kind: p.kind.key(), x: origin.x + p.at.x as f64, z: origin.y + p.at.y as f64 }).collect()
 }
 
+/// The settlements of the continent under `at` nearest it, of `kind` if given, at most
+/// `n`, for `settlements` and `tp village`.
+fn nearest_settlements(world: &GameWorld, at: DVec3, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+    let Some((c, local)) = journal::continent_at(world, at, true) else { return Vec::new() };
+    let origin = glam::DVec2::new(at.x - local.x as f64, at.z - local.y as f64);
+    let mut found: Vec<usize> = (0..c.trails.settlements.len()).filter(|&k| kind.is_none_or(|kind| c.trails.settlements[k].kind == kind)).collect();
+    found.sort_by(|&a, &b| c.trails.settlements[a].at().distance(local).total_cmp(&c.trails.settlements[b].at().distance(local)));
+    found.truncate(n);
+    found
+        .into_iter()
+        .map(|k| {
+            let s = &c.trails.settlements[k];
+            let name = c.trails.names.settlement(k).map_or_else(|| "a settlement with no name".to_string(), |p| p.name.clone());
+            commands::Settlement { name, kind: s.kind.word(), facts: s.summary(), x: origin.x + s.x as f64 + 0.5, z: origin.y + s.z as f64 + 0.5 }
+        })
+        .collect()
+}
+
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
 type Leaves = Vec<particles::LeafSite>;
@@ -3073,6 +3091,11 @@ impl commands::Game for Running {
         named_places(&self.world, eye, query, n)
     }
 
+    fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        nearest_settlements(&self.world, eye, kind, n)
+    }
+
     fn fly(&mut self, on: Option<bool>) -> commands::Reply {
         if on.is_none_or(|on| on == self.walking) {
             if self.walking && self.player.mode == Mode::Boat {
@@ -3232,6 +3255,10 @@ impl commands::Game for Shot<'_> {
 
     fn places(&self, query: &str, n: usize) -> Vec<commands::Named> {
         named_places(self.world, self.eye(), query, n)
+    }
+
+    fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+        nearest_settlements(self.world, self.eye(), kind, n)
     }
 
     fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {

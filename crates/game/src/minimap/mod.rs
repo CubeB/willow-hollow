@@ -748,13 +748,14 @@ impl Minimap {
             let at = (xz(eye) - origin(here)).as_vec2();
             self.region = names.region_at(at).and_then(|i| names.places.get(i)).map(|p| p.name.clone());
             // The place stood at: the smallest that reaches here, a thing people built
-            // only once it has been visited. Islands and ranges are too large to stand at.
+            // only once it has been visited (but a village's name is known to all). Islands
+            // and ranges are too large to stand at.
             let visited = |name: &str| k.sheet.marks.iter().zip(&k.visited).any(|(m, &v)| v && m.name.as_deref() == Some(name));
             self.near = names
                 .places
                 .iter()
-                .filter(|p| matches!(p.kind, PlaceKind::Lake | PlaceKind::River | PlaceKind::Peak | PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_)))
-                .filter(|p| p.distance(at) <= NAMED && (p.kind.is_natural() || visited(&p.name)))
+                .filter(|p| matches!(p.kind, PlaceKind::Lake | PlaceKind::River | PlaceKind::Peak | PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_)) || p.kind.is_settlement())
+                .filter(|p| p.distance(at) <= NAMED && (p.kind.is_natural() || p.kind.is_settlement() || visited(&p.name)))
                 .min_by(|a, b| a.radius.total_cmp(&b.radius))
                 .map(|p| p.name.clone());
             self.region_timer = 1.0;
@@ -1206,7 +1207,7 @@ impl Minimap {
                     && (visited || seen)
                     && let Some(named) = named.as_deref_mut()
                     && let (Some(name), Some((kind, importance))) = (&mark.name, known)
-                    && (visited || kind.is_natural())
+                    && (visited || kind.is_natural() || kind.is_settlement())
                 {
                     let rank = names::rank(*kind);
                     let fade = names::fade(rank, *importance, span);
@@ -1346,6 +1347,8 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         // Granite grey, and smaller than a peak.
         Kind::Tor => (gpu::TRIANGLE, [0.50, 0.50, 0.48, 1.0], 0.85),
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
+        // Brick red, as the map in the shops would show one.
+        Kind::Settlement => (gpu::CIRCLE, [0.66, 0.30, 0.22, 1.0], 1.2),
     };
     Instance::new(kind, p.into(), size * scale, color)
 }
