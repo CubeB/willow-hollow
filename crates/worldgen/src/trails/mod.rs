@@ -308,7 +308,12 @@ impl Network {
     }
 
     /// A stamp with fine parts, in continent-local cells.
-    fn add_stamp_with(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
+    fn add_stamp_with(&mut self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
+        // Models are built in hash maps, so their voxels come in a different order each
+        // run. The coarse rings and the far boxes keep whichever voxel of a cell comes
+        // last, so put them in one order; a stable sort leaves any voxel written twice at
+        // one place in the order its builder meant.
+        voxels.sort_by_key(|&(p, _)| (p.y, p.z, p.x));
         // Bounds from the voxels, or for a model of fine parts alone, from those.
         let first = match (voxels.first(), fine.first()) {
             (Some(&(p, _)), _) => p,
