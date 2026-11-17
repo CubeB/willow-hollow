@@ -330,6 +330,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
         chunks.push((cy, chunk));
     }
 
+    let mats = world.materials();
     let mut put = |q: IVec3, v: Voxel, force: bool| {
         let (px, pz) = (q.x - (cx * CHUNK - 1), q.z - (cz * CHUNK - 1));
         let py = q.y - cy_min * CHUNK;
@@ -339,10 +340,15 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
         let (ci, ly) = ((py / CHUNK) as usize, py.rem_euclid(CHUNK) as usize);
         let (ux, uz) = (px as usize, pz as usize);
         let mut write = |index: usize, padded: usize| {
-            if let Some((_, chunk)) = chunks.get_mut(index)
-                && (force || chunk.get(ux, padded, uz) == AIR)
-            {
-                chunk.set(ux, padded, uz, v);
+            if let Some((_, chunk)) = chunks.get_mut(index) {
+                let old = chunk.get(ux, padded, uz);
+                // A flame keeps its cell from the lamp round it, so that a lit lantern
+                // glows from here at night as it does beyond, where the far boxes of
+                // what is built take over (farbuilt.rs).
+                let flame = mats.get(old).emissive && !mats.get(v).emissive;
+                if (force && !flame) || old == AIR {
+                    chunk.set(ux, padded, uz, v);
+                }
             }
         };
         write(ci, ly + 1);
@@ -353,7 +359,6 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             write(ci + 1, 0);
         }
     };
-    let mats = world.materials();
     for p in &placements {
         let at = IVec3::new(p.pos.x.div_euclid(step), p.pos.y.div_euclid(step), p.pos.z.div_euclid(step));
         // A cell floods if water reaches any of its corners, so a tree on the shore can

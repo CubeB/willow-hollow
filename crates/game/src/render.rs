@@ -381,7 +381,8 @@ struct Instance {
 // The terrain's fragment shader reads instances as words (INSTANCE_WORDS in terrain.wgsl).
 const _: () = assert!(size_of::<Instance>() == 20 * 4);
 
-/// The camera's position for the far trees' whole-voxel placement.
+/// The camera's position for the far trees' whole-voxel placement; in the last of
+/// `frac`, how far built things are seen (farbuilt::SIGHT).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ImpostorCamera {
@@ -423,6 +424,8 @@ pub struct DrawStats {
     pub quads_drawn: u64,
     pub far_tiles: u32,
     pub impostor_boxes: u32,
+    /// Boxes of what people have built sent to be drawn beyond the voxel rings.
+    pub built_boxes: u32,
     pub shadow_draws: [u32; CASCADES],
 }
 
@@ -437,6 +440,8 @@ struct DrawLists {
     /// With each its distance from the camera, squared, for sorting.
     water: Vec<(ChunkDraw, f32)>,
     impostors: Vec<ChunkDraw>,
+    /// What people have built, a continent's squares after another's.
+    built: Vec<ChunkDraw>,
     /// All of them together, as the indirect buffer holds them.
     draws: Vec<ChunkDraw>,
 }
@@ -449,6 +454,7 @@ impl DrawLists {
         self.casters.iter_mut().for_each(Vec::clear);
         self.water.clear();
         self.impostors.clear();
+        self.built.clear();
         self.draws.clear();
     }
 }
@@ -585,6 +591,8 @@ pub struct Renderer {
     water: wgpu::RenderPipeline,
     far: wgpu::RenderPipeline,
     impostor: wgpu::RenderPipeline,
+    /// The same boxes for what people have built (farbuilt.rs).
+    impostor_built: wgpu::RenderPipeline,
     impostor_cube: wgpu::Buffer,
     impostor_camera: wgpu::Buffer,
     impostor_bind: wgpu::BindGroup,
@@ -1225,6 +1233,43 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        // What people have built: the same boxes, cut off pixel by pixel where the voxel
+        // rings take over, which the trees' pipeline need not pay for.
+        let impostor_built = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("impostor built"),
+            layout: Some(&impostor_layout),
+            vertex: wgpu::VertexState {
+                module: &impostor_module,
+                entry_point: Some("vs_built"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<BoxCorner>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &impostor_box_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: size_of::<BoxInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &impostor_instance_attrs,
+                    }),
+                ],
+            },
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: depth_state(true, wgpu::CompareFunction::Greater),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &impostor_module,
+                entry_point: Some("fs_built"),
+                compilation_options: Default::default(),
+                targets: &hdr_targets(None),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let sides: [(Vec3, Vec3, Vec3); 6] = [
             (Vec3::X, Vec3::Y, Vec3::Z),
             (Vec3::NEG_X, Vec3::Z, Vec3::Y),
@@ -1563,6 +1608,7 @@ impl Renderer {
             water,
             far,
             impostor,
+            impostor_built,
             impostor_cube,
             impostor_camera,
             impostor_bind,
@@ -1925,7 +1971,7 @@ impl Renderer {
         // Last frame's lists, emptied, so that they keep the room they grew to.
         let mut lists = std::mem::take(&mut self.lists);
         lists.clear();
-        let DrawLists { instances, opaque, opaque_edge, casters, water, impostors: impostor_draws, draws } = &mut lists;
+        let DrawLists { instances, opaque, opaque_edge, casters, water, impostors: impostor_draws, built: built_draws, draws } = &mut lists;
         // Which of a chunk's skylines the sun (or moon) is on the side of: toward
         // sunrise, or toward sunset (as skyline_light in common.wgsl chooses).
         let sun_side = if scene.env.sun_dir.x > 0.0 { 0 } else { 1 };
@@ -2104,6 +2150,26 @@ impl Renderer {
             }
         }
 
+        // What people have built, a square at a time: those reaching beyond the voxel
+        // rings and coming within sight. Each continent's are a buffer of their own.
+        let mut built_spans: Vec<(&wgpu::Buffer, Range<usize>)> = Vec::new();
+        for shown in scene.impostors.built.continents() {
+            let start = built_draws.len();
+            for square in &shown.squares {
+                let lo = (square.lo.as_dvec3() - camera.pos).as_vec3();
+                let hi = (square.hi.as_dvec3() - camera.pos).as_vec3();
+                let nearest = Vec2::new(lo.x.max(-hi.x).max(0.0), lo.z.max(-hi.z).max(0.0)).length();
+                let reach = Vec2::new(lo.x.abs().max(hi.x.abs()), lo.z.abs().max(hi.z.abs())).length();
+                if reach >= voxel_radius && nearest < crate::farbuilt::SIGHT && frustum.intersects_box(lo, hi) {
+                    built_draws.push([BOX_SIDES * 6, square.count, 0, 0, square.first]);
+                    stats.built_boxes += square.count;
+                }
+            }
+            if built_draws.len() > start {
+                built_spans.push((&shown.buffer, start..built_draws.len()));
+            }
+        }
+
         // Translucent water blends correctly only when drawn far to near.
         water.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         stats.shadow_draws = std::array::from_fn(|i| casters[i].len() as u32);
@@ -2117,7 +2183,7 @@ impl Renderer {
         self.stats = stats;
 
         // All of this frame's chunk draws, in one buffer the passes take slices of.
-        draws.reserve(opaque.len() + opaque_edge.len() + water.len() + impostor_draws.len() + casters.iter().map(Vec::len).sum::<usize>());
+        draws.reserve(opaque.len() + opaque_edge.len() + water.len() + impostor_draws.len() + built_draws.len() + casters.iter().map(Vec::len).sum::<usize>());
         let mut append = |list: &mut dyn Iterator<Item = ChunkDraw>| {
             let start = draws.len();
             draws.extend(list);
@@ -2128,6 +2194,10 @@ impl Renderer {
         let edge_list = append(&mut opaque_edge.iter().copied());
         let water_list = append(&mut water.iter().map(|w| w.0));
         let impostor_list = append(&mut impostor_draws.iter().copied());
+        let built_list = append(&mut built_draws.iter().copied());
+        for (_, span) in &mut built_spans {
+            *span = built_list.start + span.start..built_list.start + span.end;
+        }
         if draws.len() > self.indirect_capacity {
             self.indirect_capacity = draws.len().next_power_of_two();
             self.indirect = indirect_buffer(device, self.indirect_capacity);
@@ -2153,7 +2223,7 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&ImpostorCamera {
                 voxel: [voxel.x, voxel.y, voxel.z, 0],
-                frac: [frac.x, frac.y, frac.z, 0.0],
+                frac: [frac.x, frac.y, frac.z, crate::farbuilt::SIGHT],
             }),
         );
 
@@ -2276,6 +2346,16 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.impostor_cube.slice(..));
                 pass.set_vertex_buffer(1, scene.impostors.buffer().slice(..));
                 draw_chunks(&mut pass, indirect, &draws, impostor_list.clone());
+                pass.set_vertex_buffer(1, self.instances.slice(..));
+            }
+            if !built_spans.is_empty() {
+                pass.set_pipeline(&self.impostor_built);
+                pass.set_bind_group(1, &self.impostor_bind, &[]);
+                pass.set_vertex_buffer(0, self.impostor_cube.slice(..));
+                for (buffer, span) in &built_spans {
+                    pass.set_vertex_buffer(1, buffer.slice(..));
+                    draw_chunks(&mut pass, indirect, &draws, span.clone());
+                }
                 pass.set_vertex_buffer(1, self.instances.slice(..));
             }
             if let Some(t) = &self.timer {
@@ -2637,7 +2717,7 @@ pub fn screenshot(
     }
     image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8)?;
     log::info!(
-        "screenshot {} ({} chunks drawn, {} quads, shadow draws {:?}, multi-draw {}, arena {} MiB, meshes {} MiB, far trees {}/{} boxes)",
+        "screenshot {} ({} chunks drawn, {} quads, shadow draws {:?}, multi-draw {}, arena {} MiB, meshes {} MiB, far trees {}/{} boxes, built {}/{} boxes, voxels to {:.0})",
         path.display(),
         renderer.stats.chunks_drawn,
         renderer.stats.quads_drawn,
@@ -2646,7 +2726,10 @@ pub fn screenshot(
         streamer.stats.arena_bytes >> 20,
         streamer.stats.mesh_bytes >> 20,
         renderer.stats.impostor_boxes,
-        impostors.boxes
+        impostors.boxes,
+        renderer.stats.built_boxes,
+        impostors.built.boxes,
+        streamer.bands()[LEVELS - 1]
     );
     // The frames that follow, as a game would draw them a sixtieth of a second apart, each
     // saved beside the first: VOXEL_SEQUENCE=N, with VOXEL_SEQUENCE_MOVES naming what

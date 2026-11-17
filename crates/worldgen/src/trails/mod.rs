@@ -367,6 +367,11 @@ impl Network {
         self.stamps.len()
     }
 
+    /// Every stamp, in the order they were laid: for what is drawn of them from afar.
+    pub fn stamps(&self) -> impl Iterator<Item = &Stamp> {
+        self.stamps.iter()
+    }
+
     /// Every trail point; for tests and tools.
     pub fn points(&self) -> impl Iterator<Item = &TrailPoint> {
         self.tiles.values().flatten()

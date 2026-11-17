@@ -9,6 +9,7 @@ mod crows;
 mod editor;
 mod env;
 mod fallen;
+mod farbuilt;
 mod farview;
 mod gfx;
 mod impostors;

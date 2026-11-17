@@ -23,6 +23,7 @@ use worldgen::{
 
 use crate::{
     arena::{MeshSpan, VertexArena},
+    farbuilt::FarBuilt,
     farview,
     gfx::Gpu,
     lod,
@@ -143,6 +144,8 @@ pub struct Impostors {
     arena: VertexArena,
     /// Boxes loaded, for statistics.
     pub boxes: u64,
+    /// What people have built, drawn as boxes with the trees and loaded with them.
+    pub built: FarBuilt,
 }
 
 impl Impostors {
@@ -155,7 +158,7 @@ impl Impostors {
             .expect("thread pool");
         let (tx, rx) = channel();
         Self {
-            world,
+            world: world.clone(),
             models: Arc::default(),
             pool,
             tx,
@@ -171,6 +174,7 @@ impl Impostors {
             center: None,
             arena: VertexArena::new(gpu, "tree impostors", 32 << 20, size_of::<BoxInstance>() as u64),
             boxes: 0,
+            built: FarBuilt::new(world),
         }
     }
 
@@ -197,6 +201,7 @@ impl Impostors {
     /// rest wait in the channel for the next frame.
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
         self.update_within(gpu, camera, UPLOAD_MS);
+        self.built.update(gpu, camera);
     }
 
     fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
@@ -343,6 +348,7 @@ impl Impostors {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         log::info!("stage: far trees loaded after {:.2} s, {}", began.elapsed().as_secs_f32(), self.progress());
+        self.built.wait_idle(gpu, camera);
     }
 }
 
