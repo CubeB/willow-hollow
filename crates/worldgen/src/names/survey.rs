@@ -9,6 +9,7 @@ use crate::{
     macro_layout::{CellKind, MACRO_SIZE},
     noise::{fbm2, hash2},
     scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
+    settlements::Kind,
     structures::{self, Field},
     trails::sites,
 };
@@ -780,18 +781,31 @@ impl<'a> Survey<'a> {
         for (k, site) in self.c.trails.sites.iter().enumerate() {
             let at = Vec2::new(site.x as f32, site.z as f32);
             let facts = self.facts(self.index(at), &[]);
-            g.add_site(
-                k,
-                Request {
-                    kind: PlaceKind::Landmark(site.kind),
-                    at,
-                    radius: site.kind.radius(),
-                    line: Vec::new(),
-                    importance: sites::importance(site.kind),
-                    facts: &facts,
-                    salt: hash2(0x517e, site.x, site.z),
-                },
-            );
+            let req = Request {
+                kind: PlaceKind::Landmark(site.kind),
+                at,
+                radius: site.kind.radius(),
+                line: Vec::new(),
+                importance: sites::importance(site.kind),
+                facts: &facts,
+                salt: hash2(0x517e, site.x, site.z),
+            };
+            // A landing that became a settlement's port is called after the place:
+            // a great town's harbour, a town's quay, a village's landing.
+            let port = self.c.trails.settlements.iter().enumerate().find(|(_, s)| s.port == Some(k));
+            match port.and_then(|(j, s)| Some((g.settlement(j)?.name.clone(), s.kind))) {
+                Some((town, kind)) => {
+                    let word = match kind {
+                        Kind::GreatTown => "Harbour",
+                        Kind::Town => "Quay",
+                        _ => "Landing",
+                    };
+                    g.add_site_named(k, req, format!("{town} {word}"));
+                }
+                None => {
+                    g.add_site(k, req);
+                }
+            }
         }
     }
 }

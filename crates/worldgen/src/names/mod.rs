@@ -334,9 +334,32 @@ impl Gazetteer {
         self.places.len() - 1
     }
 
+    /// [`Self::add_site`] for a landmark that takes its name whole from a place already
+    /// named, as a town's port does from the town ("Brynell Harbour"), spending none of
+    /// the words other places are named from.
+    pub(crate) fn add_site_named(&mut self, site: usize, req: Request, name: String) -> usize {
+        self.places.push(Place {
+            name,
+            kind: req.kind,
+            at: req.at,
+            radius: req.radius,
+            line: req.line,
+            importance: req.importance,
+            site: None,
+            settlement: None,
+            core: None,
+        });
+        self.file_site(site, self.places.len() - 1)
+    }
+
     /// [`Self::add`] for the landmark at `site` in `Network::sites`.
     pub(crate) fn add_site(&mut self, site: usize, req: Request) -> usize {
         let i = self.add(req);
+        self.file_site(site, i)
+    }
+
+    /// Files place `i` as the name of the landmark at `site`.
+    fn file_site(&mut self, site: usize, i: usize) -> usize {
         self.places[i].site = Some(site);
         if self.sites.len() <= site {
             self.sites.resize(site + 1, None);
