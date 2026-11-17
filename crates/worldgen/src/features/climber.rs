@@ -1317,6 +1317,10 @@ pub struct Surroundings<'a> {
     pub stamps: &'a HashMap<IVec3, Voxel>,
     /// Columns already read: reading one is the slow part of a voxel query.
     columns: RefCell<HashMap<(i32, i32), Column>>,
+    /// The voxels of each placement's roots (by its index), worked out the first time
+    /// anything low enough beside it is asked about: a large tree's flaring foot stands
+    /// outside its model, where ivy finding the trunk would otherwise start inside it.
+    roots: RefCell<HashMap<u32, HashMap<IVec3, Voxel>>>,
     /// Which placements can reach each square of [`BUCKET`] voxels, in placement order,
     /// with the heights they span.
     buckets: Buckets,
@@ -1332,7 +1336,7 @@ impl<'a> Surroundings<'a> {
     pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a HashMap<IVec3, Voxel>) -> Self {
         let mut buckets = Buckets::new();
         for (i, p) in placements.iter().enumerate() {
-            let reach = lib.get(p.species, p.variant).reach;
+            let reach = p.reach(lib);
             let (lo, hi) = (p.bottom(), p.top(lib));
             for bz in (p.pos.z - reach).div_euclid(BUCKET)..=(p.pos.z + reach).div_euclid(BUCKET) {
                 for bx in (p.pos.x - reach).div_euclid(BUCKET)..=(p.pos.x + reach).div_euclid(BUCKET) {
@@ -1340,7 +1344,7 @@ impl<'a> Surroundings<'a> {
                 }
             }
         }
-        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default(), buckets }
+        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default(), roots: RefCell::default(), buckets }
     }
 
     fn column(&self, x: i32, z: i32) -> Column {
@@ -1360,11 +1364,28 @@ impl Voxels for Surroundings<'_> {
             if p.y < lo || p.y > hi {
                 continue;
             }
-            if let Some(v) = super::model_voxel(self.lib, &self.placements[i as usize], p) {
+            let placement = &self.placements[i as usize];
+            if let Some(v) = super::model_voxel(self.lib, placement, p) {
                 if self.mats.get(v).kind == Kind::Solid {
                     return v;
                 }
                 leaf = leaf.or(Some(v));
+            }
+            // Roots and flares stand no higher than this over the tree's own ground.
+            if let Some(roots) = &placement.roots
+                && p.y <= placement.pos.y + 20
+            {
+                let mut known = self.roots.borrow_mut();
+                let voxels = known.entry(i).or_insert_with(|| {
+                    let mut voxels = HashMap::new();
+                    roots.voxels(placement.pos, |q, v| {
+                        voxels.insert(q, v);
+                    });
+                    voxels
+                });
+                if let Some(&v) = voxels.get(&p) {
+                    return v;
+                }
             }
         }
         let col = self.column(p.x, p.z);
