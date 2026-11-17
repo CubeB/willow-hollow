@@ -1,8 +1,9 @@
 //! The village tree: the big old tree near a village, where people leave small things
 //! among its roots, tie ribbons to its lower branches, and have worn a path round it.
 //!
-//! [`village_tree`] finds it: the nearest giant to the village's middle, or failing one the
-//! stoutest tree near. [`dress`] works out what the village has added to it, by how long
+//! [`plant_all`] plants one for each settlement on the ground its layout keeps beside the
+//! green, and dresses it. [`village_tree`] finds one where none was planted: the nearest
+//! giant to the village's middle, or failing one the stoutest tree near. [`dress`] works out what the village has added to it, by how long
 //! the village has stood: offerings and ribbons, as fine parts to stamp with the rest of
 //! the village, and the [`WornRing`] of trodden ground round the trunk. The tree itself
 //! is left as it grew, so it stands where it always would have, roots and all, and a
@@ -16,7 +17,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use glam::{IVec3, Vec2};
+use glam::{IVec2, IVec3, Vec2};
 use voxel::{
     Voxel,
     mesh::{CELLS, PlantBox},
@@ -30,8 +31,79 @@ use crate::{
     noise::{hash2, hash3, perlin2, unit},
     scale::m,
     surface::{Cover, Sampler, Worn},
+    settlements::Age,
     trails::{Network, Stamp},
 };
+
+/// Plants a tree for every settlement on the ground its layout kept for one beside the
+/// green, of the country's biggest kind, in a form whose crown keeps clear of the roofs
+/// about it where one will; or where the layout kept none, takes the stoutest tree left
+/// standing within the settlement. Then dresses each as the place's age has it: its
+/// ribbons and offerings are stamped, and its worn ring and where it stands kept in `net`.
+pub(crate) fn plant_all(c: &Continent, seed: u32, net: &mut Network) {
+    let lib = Library::shared();
+    // Each planted before any is looked for, so that each is grown with all the others in
+    // the ground as the world will have them.
+    let chosen: Vec<Option<features::Planted>> = (0..net.settlements.len())
+        .map(|k| {
+            let (at, _) = net.layouts.get(k)?.tree?;
+            let l = &net.layouts[k];
+            let room = net.plots[l.plots.clone()].iter().map(|p| gap(at, p.lo, p.hi)).fold(f32::MAX, f32::min);
+            plant(c, seed, net, lib, at, room)
+        })
+        .collect();
+    net.planted = chosen.iter().flatten().copied().collect();
+    let origin = (c.desc.mx * MACRO_SIZE, c.desc.mz * MACRO_SIZE);
+    let ks: Vec<usize> = (0..net.settlements.len()).collect();
+    let net_now = &*net;
+    let dressed = crate::trails::build::in_parallel(&ks, |&k| {
+        let s = &net_now.settlements[k];
+        let tree = match chosen[k] {
+            Some(t) => {
+                let margin = features::MAX_REACH + 1;
+                let sampler = Sampler::with_network(c, seed, t.x - margin, t.z - margin, 2 * margin + 1, net_now);
+                let at = (origin.0 + t.x, origin.1 + t.z);
+                features::place(seed, lib, &sampler, t.x, t.z, 1, origin).into_iter().find(|p| (p.pos.x, p.pos.z) == at && p.species == t.species)
+            }
+            None => village_tree(c, seed, net_now, lib, Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5), s.radius),
+        }?;
+        let age = match s.age {
+            Age::Young => 0.1,
+            Age::Established => 0.45,
+            Age::Ancient => 0.8,
+        } + 0.2 * unit(hash2(s.seed ^ 0x7ee1, 1, 2));
+        Some((tree.pos - IVec3::new(origin.0, 0, origin.1), dress_at(c, seed, net_now, lib, &tree, age)))
+    });
+    net.village_trees = vec![None; net.settlements.len()];
+    for (k, d) in dressed.into_iter().enumerate() {
+        let Some((at, d)) = d else { continue };
+        net.village_trees[k] = Some(at);
+        net.add_stamp_with(Vec::new(), d.fine);
+        net.rings.push(d.ring);
+    }
+}
+
+/// How far continent-local `p` is from the columns `lo..=hi`, in voxels.
+fn gap(p: Vec2, lo: IVec2, hi: IVec2) -> f32 {
+    let (lo, hi) = (lo.as_vec2(), hi.as_vec2() + 1.0);
+    let d = (lo - p).max(p - hi).max(Vec2::ZERO);
+    d.length()
+}
+
+/// The tree a village plants at continent-local `at`, whose crown should keep within
+/// `room` voxels of its trunk: of the country's biggest kind, in the form that keeps
+/// within it, or the smallest if none does, turned as the seed has it.
+fn plant(c: &Continent, seed: u32, net: &Network, lib: &Library, at: Vec2, room: f32) -> Option<features::Planted> {
+    let (x, z) = (at.x.floor() as i32, at.y.floor() as i32);
+    let col = Sampler::with_network(c, seed, x, z, 1, net).column(x, z);
+    let salt = hash2(seed ^ 0x9a17, x, z);
+    let species = features::village_species(col.biome, unit(salt))?;
+    let n = species.variants();
+    let first = (salt >> 8) as usize % n;
+    let reach = |v: usize| lib.get(species, v).reach as f32;
+    let variant = (0..n).map(|i| (first + i) % n).find(|&v| reach(v) <= room + m(1.0)).unwrap_or_else(|| (0..n).min_by(|&a, &b| reach(a).total_cmp(&reach(b))).unwrap_or(0));
+    Some(features::Planted { x, z, species, variant, turns: (salt >> 20) % 4 })
+}
 
 /// How far from a village's middle its tree may stand.
 pub const REACH: f32 = m(400.0);

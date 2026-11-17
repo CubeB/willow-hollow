@@ -2064,6 +2064,9 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         net.add_stamp(absolute(voxels, IVec3::new(x, trail_y.floor() as i32 + 1, z), 0));
     }
 
+    // Each settlement's tree, last, so that it is found among what is left standing once
+    // everything else is down, and the ribbons tied to it are stamped with the rest.
+    crate::settlements::tree::plant_all(c, world_seed, &mut net);
     terrace_walls(c, world_seed, &mut net);
     net
 }

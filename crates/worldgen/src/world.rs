@@ -20,7 +20,6 @@ use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
     scale::{BLOCK, m, m64},
-    settlements::tree::WornRing,
     surface::{self, Column, Cover, Sampler, node},
     trails,
 };
@@ -60,7 +59,6 @@ pub struct GameWorld {
     materials: Materials,
     config: SimConfig,
     /// Tree and feature models, built on first use.
-    library: OnceLock<Library>,
     /// Simulated macro-cells. Each slot is filled once, by whichever thread asks first;
     /// others asking for the same cell wait for it rather than simulating it again.
     continents: Mutex<HashMap<(i32, i32), Slot>>,
@@ -77,9 +75,6 @@ pub struct GameWorld {
     /// The columns whose flower has been picked: nothing grows on them until it is
     /// back (see `pick`).
     picked: RwLock<HashSet<(i32, i32)>>,
-    /// Village trees dressed by hand (see `dress_tree_near`), each with the macro-cell it
-    /// is in: drawn as the continent's own stamps are, its ring worn into the ground.
-    dressed: RwLock<Vec<((i32, i32), Arc<(trails::Stamp, WornRing)>)>>,
 }
 
 impl GameWorld {
@@ -92,7 +87,6 @@ impl GameWorld {
             seed,
             materials: mat::build(),
             config,
-            library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
             soon: Default::default(),
             after_made: Default::default(),
@@ -101,7 +95,6 @@ impl GameWorld {
             placed: Default::default(),
             tors: Default::default(),
             picked: Default::default(),
-            dressed: Default::default(),
         }
     }
 
@@ -110,28 +103,13 @@ impl GameWorld {
     }
 
     pub fn library(&self) -> &Library {
-        self.library.get_or_init(Library::build)
+        Library::shared()
     }
 
     /// The tors and moor stonework of continent `c` that reach the world square from
     /// `(x0, z0)`, `span` voxels wide.
     pub fn tors_near(&self, c: &Continent, x0: i32, z0: i32, span: i32) -> Vec<Arc<features::tor::Tor>> {
         self.tors.near(self.seed, c, x0, z0, span)
-    }
-
-    /// Dresses the village tree for a village at world column `(x, z)` (see
-    /// [`crate::settlements::tree`]) as one `age` old (0 to 1) would: for looking at one
-    /// before the villages place their own. Columns generated from now on show it. The
-    /// tree, or None with none near enough.
-    pub fn dress_tree_near(&self, x: i32, z: i32, age: f32) -> Option<features::Placement> {
-        use crate::settlements::tree;
-        let (mx, mz) = cell_of(x, z);
-        let c = self.continent(mx, mz);
-        let core = glam::Vec2::new((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32);
-        let p = tree::village_tree(&c, self.seed, &c.trails, self.library(), core, tree::REACH)?;
-        let d = tree::dress_at(&c, self.seed, &c.trails, self.library(), &p, age);
-        self.dressed.write().expect("dressed trees poisoned").push(((mx, mz), Arc::new((d.stamp(), d.ring))));
-        Some(p)
     }
 
     fn slot(&self, mx: i32, mz: i32) -> Slot {
@@ -492,16 +470,6 @@ fn headroom(out: &[(i32, PaddedChunk)], mats: &Materials, columns: &[Column], wx
     }
 }
 
-/// Whether a village tree dressed by hand, its stamp and its worn ring, reaches the padded
-/// chunk column from continent-local `(lx0, lz0)` or the column more round it that its
-/// ground is worked out with.
-fn dressed_reaches((stamp, ring): &(trails::Stamp, WornRing), lx0: i32, lz0: i32) -> bool {
-    let r = ring.reach();
-    let (x0, z0) = (stamp.lo.x.min((ring.x - r).floor() as i32), stamp.lo.z.min((ring.z - r).floor() as i32));
-    let (x1, z1) = (stamp.hi.x.max((ring.x + r).ceil() as i32), stamp.hi.z.max((ring.z + r).ceil() as i32));
-    x0 <= lx0 + PAD as i32 && x1 >= lx0 - 1 && z0 <= lz0 + PAD as i32 && z1 >= lz0 - 1
-}
-
 /// The darker, weathered form of a cliff rock, for the streaks water leaves down a face.
 fn stained(rock: Voxel) -> Voxel {
     match rock {
@@ -761,21 +729,7 @@ impl GameWorld {
         // are the next chunk column's own, and must come out here as they do there, which
         // takes their neighbours on every side (for the slope, and for a trail's steps).
         const WIDE: usize = PAD + 2;
-        let mut wide: Vec<Column> = (0..WIDE * WIDE).map(|i| sampler.column(lx0 - 1 + (i / WIDE) as i32, lz0 - 1 + (i % WIDE) as i32)).collect();
-        // Village trees dressed by hand that reach here (see `dress_tree_near`), their
-        // rings worn into the ground.
-        let dressed: Vec<_> = {
-            let all = self.dressed.read().expect("dressed trees poisoned");
-            all.iter().filter(|(cell, d)| *cell == (mx, mz) && dressed_reaches(d, lx0, lz0)).map(|(_, d)| d.clone()).collect()
-        };
-        for d in &dressed {
-            for (i, col) in wide.iter_mut().enumerate() {
-                let (lx, lz) = (lx0 - 1 + (i / WIDE) as i32, lz0 - 1 + (i % WIDE) as i32);
-                if let Some(worn) = d.1.wear(self.seed, glam::Vec2::new(lx as f32 + 0.5, lz as f32 + 0.5), lx, lz, col.cover, 0.0) {
-                    (col.cover, col.worn) = (Cover::Trail, Some(worn));
-                }
-            }
-        }
+        let wide: Vec<Column> = (0..WIDE * WIDE).map(|i| sampler.column(lx0 - 1 + (i / WIDE) as i32, lz0 - 1 + (i % WIDE) as i32)).collect();
         let mut columns = Vec::with_capacity(PAD * PAD);
         let (mut lo, mut hi) = (i32::MAX, i32::MIN);
         for px in 0..PAD {
@@ -911,7 +865,7 @@ impl GameWorld {
         }
         // Landmarks, bridges and lanterns, whose voxels are continent-local.
         let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));
-        let stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).chain(dressed.iter().map(|d| &d.0)).collect();
+        let stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).collect();
         for s in &stamps {
             hi = hi.max(s.hi.y);
             lo = lo.min(s.lo.y);

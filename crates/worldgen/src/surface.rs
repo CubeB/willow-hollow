@@ -371,6 +371,10 @@ pub struct Sampler<'a> {
     shores: coast::Shores,
     trail_points: Vec<TrailPoint>,
     pads: Vec<Pad>,
+    /// Trees planted by hand that features in the area must know of, and the ground worn
+    /// round each village tree that reaches it.
+    planted: Vec<crate::features::Planted>,
+    rings: Vec<crate::settlements::tree::WornRing>,
     /// Small ravines that can reach the area.
     ravines: Vec<ravine::Ravine>,
 }
@@ -431,6 +435,17 @@ impl<'a> Sampler<'a> {
         });
         heads.retain(|h| h.x >= lo.x && h.x <= hi.x && h.y >= lo.y && h.y <= hi.y);
         let (trail_points, pads) = net.gather(lo, hi);
+        let wide = crate::features::PLANTED_REACH as f32 + 1.0;
+        let planted = net.planted.iter().filter(|t| (t.x as f32) >= lo.x - wide && (t.x as f32) <= hi.x + wide && (t.z as f32) >= lo.y - wide && (t.z as f32) <= hi.y + wide).copied().collect();
+        let rings = net
+            .rings
+            .iter()
+            .filter(|r| {
+                let q = r.reach();
+                r.x + q >= lo.x && r.x - q <= hi.x && r.z + q >= lo.y && r.z - q <= hi.y
+            })
+            .copied()
+            .collect();
         let mut s = Self {
             c,
             world_seed,
@@ -444,6 +459,8 @@ impl<'a> Sampler<'a> {
             shores: coast::Shores::new(c, lo, hi),
             trail_points,
             pads,
+            planted,
+            rings,
             ravines: Vec::new(),
         };
         s.ravines = s.small_ravines(lo, hi);
@@ -513,6 +530,11 @@ impl<'a> Sampler<'a> {
     /// The small ravines that can reach the area.
     pub fn ravines(&self) -> &[ravine::Ravine] {
         &self.ravines
+    }
+
+    /// The trees planted by hand that features placed in the area must know of.
+    pub fn planted(&self) -> &[crate::features::Planted] {
+        &self.planted
     }
 
     /// Springs whose pools can reach the area.
@@ -950,7 +972,7 @@ impl<'a> Sampler<'a> {
         lake_level: Option<i32>,
         near_sea: bool,
     ) -> (f32, Option<Worn>) {
-        if self.trail_points.is_empty() && self.pads.is_empty() {
+        if self.trail_points.is_empty() && self.pads.is_empty() && self.rings.is_empty() {
             return (f32::MAX, None);
         }
         let mut worn = None;
@@ -1039,6 +1061,13 @@ impl<'a> Sampler<'a> {
                     dir: Vec2::X,
                     point: hash2(self.world_seed ^ 0x7a12, lx, lz),
                 });
+                *cover = Cover::Trail;
+            }
+        }
+        // The ground trodden bare round a village tree. It clears nothing: the tree stands.
+        for ring in &self.rings {
+            if dry && let Some(w) = ring.wear(self.world_seed, p, lx, lz, *cover, slope) {
+                worn = Some(w);
                 *cover = Cover::Trail;
             }
         }

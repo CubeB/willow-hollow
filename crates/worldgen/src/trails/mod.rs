@@ -314,6 +314,13 @@ pub struct Network {
     pub plots: Vec<crate::settlements::layout::Plot>,
     /// How each settlement is laid out about its buildings, by index in `settlements`.
     pub layouts: Vec<crate::settlements::layout::Layout>,
+    /// Where each settlement's tree stands, by index in `settlements`: the foot of its
+    /// trunk, continent-local, or None where it has none.
+    pub village_trees: Vec<Option<IVec3>>,
+    /// Every tree planted by hand, for [`crate::features::place`] to grow.
+    pub planted: Vec<crate::features::Planted>,
+    /// The ground trodden bare round each village tree.
+    pub rings: Vec<crate::settlements::tree::WornRing>,
 }
 
 impl Network {
