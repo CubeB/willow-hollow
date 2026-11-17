@@ -226,6 +226,23 @@ impl GameWorld {
         out
     }
 
+    /// The tops of the chimneys and smoke holes of lived-in homes within `reach` voxels
+    /// of the column at `(x, z)`, in world voxels. Never blocks: nothing from a continent
+    /// not yet simulated. This is where the game sends chimney smoke up from.
+    pub fn chimneys_near(&self, x: i32, z: i32, reach: i32) -> Vec<glam::DVec3> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        let (centre, r2) = (glam::DVec2::new(x as f64, z as f64), reach as f64 * reach as f64);
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = glam::DVec3::new((mx * MACRO_SIZE) as f64, 0.0, (mz * MACRO_SIZE) as f64);
+                out.extend(c.trails.chimneys.iter().map(|p| p.as_dvec3() + origin).filter(|p| (glam::DVec2::new(p.x, p.z) - centre).length_squared() <= r2));
+            }
+        }
+        out
+    }
+
     /// The wild bees' and wasps' nests (see [`features::nests`]) whose door is within
     /// `reach` voxels of the column at `(x, z)`, nearest first: the same nests the chunks
     /// there are built with, found without building them. Never blocks, and only from

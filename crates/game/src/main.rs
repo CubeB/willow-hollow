@@ -4,6 +4,7 @@ mod aurora;
 mod camera;
 mod camp;
 mod character;
+mod chimneys;
 mod commands;
 mod crows;
 mod editor;
@@ -153,6 +154,9 @@ struct Options {
     shot_camp: Option<u8>,
     /// How far ahead that camp is made, in metres.
     camp_ahead: f64,
+    /// Chimneys set out ahead of the camera, from `camp_ahead` metres on, to see their
+    /// smoke where there is no village (`--chimneys`).
+    shot_chimneys: usize,
     /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
@@ -220,6 +224,7 @@ impl Default for Options {
             shot_prompt: None,
             shot_camp: None,
             camp_ahead: CAMP_AHEAD,
+            shot_chimneys: 0,
             rest: false,
             shot_lantern: false,
             shot_crows: None,
@@ -279,6 +284,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         things set down
   --camp-ahead M        make that camp M metres ahead instead (default 4.2), to see its
                         smoke from far off
+  --chimneys N          N chimneys smoking ahead, four to a row from --camp-ahead metres
+                        on, as if a village stood there: to see chimney smoke at the hour
+                        --time gives (give --ambient 30 or so on a screenshot for a full
+                        column)
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
@@ -327,6 +336,7 @@ The structure editor, for looking at the landmarks and drawing your own:
   --place N             seen in place N of its list (0 to 8)
   --layer L             cut away everything above layer L
   --copy                start drawing on a copy of the variant
+  --furnished           a home of the house kit furnished, as its variant's household keeps it
   --orbit YAW,PITCH[,D] the view, in degrees, D voxels off
   --hover X,Y           on a screenshot, as if the cursor were at X,Y
   --structures-dir DIR  read and save structures in DIR, not the repository's
@@ -435,6 +445,7 @@ fn parse_args() -> Result<Options> {
             }
             "--crows-ahead" => o.crows_ahead = value()?.parse::<f64>()?.clamp(0.0, 500.0),
             "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
+            "--chimneys" => o.shot_chimneys = value()?.parse::<usize>()?.min(64),
             "--camp" => {
                 let word = value()?;
                 o.shot_camp = Some(commands::fire_state(&word).ok_or_else(|| anyhow::anyhow!("unknown fire '{word}': laid, lit, out or burnt"))?);
@@ -487,6 +498,7 @@ fn parse_args() -> Result<Options> {
             "--place" => o.structures.get_or_insert_default().place = Some(value()?.parse()?),
             "--layer" => o.structures.get_or_insert_default().layer = Some(value()?.parse()?),
             "--copy" => o.structures.get_or_insert_default().copy = true,
+            "--furnished" => o.structures.get_or_insert_default().furnished = true,
             "--structures-dir" => o.structures.get_or_insert_default().dir = Some(value()?.into()),
             "--orbit" => {
                 let v: Vec<f32> = value()?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>()?;
@@ -603,6 +615,14 @@ fn ground_near(voxels: &mut WorldVoxels, x: f64, y: f64, z: f64) -> Option<f64> 
         }
     }
     None
+}
+
+/// The ground under `(x, z)` near the height `foot`, or, further off, wherever it is
+/// above or below it, as a camp made far ahead finds it.
+fn ground_ahead(voxels: &mut WorldVoxels, x: f64, z: f64, foot: f64) -> Option<f64> {
+    ground_near(voxels, x, foot + 2.0, z)
+        .or_else(|| ground_near(voxels, x, foot - 4.0, z))
+        .or_else(|| (-30..30).rev().find_map(|k| ground_near(voxels, x, foot + 8.0 * k as f64, z)))
 }
 
 /// The fires of the camps that were in the world already, near `pos`: the top of each
@@ -978,6 +998,8 @@ struct Running {
     thing_near: Option<placed::Handle>,
     /// The embers of camps that were here already, near the player: fires to rest by.
     embers: Vec<DVec3>,
+    /// The chimneys of the homes near the player, and which are smoking at this hour.
+    chimneys: chimneys::Chimneys,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1170,6 +1192,10 @@ impl Running {
                 log::info!("resting by the fire from {time:.2} h");
             }
         }
+        // Chimneys asked for by hand, smoking ahead from the first frame.
+        let mut chimneys = chimneys::Chimneys::new();
+        let foot = camera.pos.y - player::EYE_HEIGHT;
+        chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
         let mut map = Minimap::new(&gpu, surface.config.format, world.clone(), map_dir);
         map.corner = settings.minimap;
@@ -1239,6 +1265,7 @@ impl Running {
             placed,
             thing_near: None,
             embers: Vec::new(),
+            chimneys,
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -2065,6 +2092,7 @@ impl Running {
         let burning: Vec<DVec3> = self.placed.near(self.camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
         let mut fires = self.placed.smoking(self.camera.pos, m64(particles::SMOKE_SIGHT), (SMOULDERS / self.settings.year_days.max(1.0)) as f64);
         fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
+        self.chimneys.update(dt, &self.world, self.camera.pos, self.env.time);
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -2075,6 +2103,7 @@ impl Running {
             leaves: &self.leaves,
             flowers: &self.flowers,
             fires: &fires,
+            chimneys: self.chimneys.smoking(),
             player_entered_water: entered_water,
             leaf_fall: season::leaf_fall(self.env.date),
             date: self.env.date,
@@ -2811,6 +2840,12 @@ fn main() -> Result<()> {
         let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);
         smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
+        // And from the chimneys about, and any set out ahead by hand.
+        let mut chimneys = chimneys::Chimneys::new();
+        let foot = camera.pos.y - player::EYE_HEIGHT;
+        chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
+        chimneys.update(0.0, &world, camera.pos, env.time);
+        log::info!("{} chimneys smoking near at {:.1} h", chimneys.smoking().len(), env.time);
         let mut particles = Particles::new();
         if opts.murmuration {
             particles.starlings.forced = Some(camera.forward());
@@ -2829,6 +2864,7 @@ fn main() -> Result<()> {
                 leaves: &leaves,
                 flowers: &flowers,
                 fires: &smoking,
+                chimneys: chimneys.smoking(),
                 player_entered_water: None,
                 leaf_fall: season::leaf_fall(env.date),
                 date: env.date,

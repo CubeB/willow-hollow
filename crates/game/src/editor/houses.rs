@@ -347,6 +347,32 @@ impl Houses {
     }
 }
 
+/// The household the home on view is shown furnished for ("Furnished"): the sleepers of
+/// `s`, some of them children, its wealth, worn as it is old, a trade more often than not,
+/// and now and then nobody at home, as `variant` has them.
+pub fn household(s: &Spec, variant: u32) -> worldgen::settlements::furnish::Household {
+    use worldgen::settlements::Livelihood;
+    let h = |k: i32| unit(hash2(variant ^ 0x4805_e5ed, k, 1));
+    let n = Livelihood::ALL.len();
+    let trade = (h(1) < 0.65).then(|| Livelihood::ALL[((h(2) * n as f32) as usize).min(n - 1)]);
+    let children = (h(3) * s.sleepers as f32 * 0.6) as u8;
+    worldgen::settlements::furnish::Household { region: s.region, sleepers: s.sleepers, children, trade, wealth: s.wealth, neglect: s.age * 0.7, lived_in: h(4) > 0.12 }
+}
+
+/// What that household keeps in the home `b`, as the village would furnish it, and a
+/// line saying who lives there.
+pub fn furnish(s: &Spec, variant: u32, b: &Building) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>, String) {
+    let h = household(s, variant);
+    let f = worldgen::settlements::furnish::furnish(b, &h, &palette(s.region, variant), variant);
+    let who = if h.lived_in {
+        let trade = h.trade.map_or(String::new(), |t| format!(", a {} at work", t.word()));
+        format!("Lived in: {} sleeping, {} of them children{trade}; {} things set, {} windows lit", h.sleepers, h.children, f.items.len(), f.items.iter().filter(|i| matches!(i.what, worldgen::settlements::furnish::What::Pane { lit: true })).count())
+    } else {
+        format!("Empty, {} things left behind", f.items.iter().filter(|i| !matches!(i.what, worldgen::settlements::furnish::What::Pane { .. })).count())
+    };
+    (f.voxels, f.fine, who)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

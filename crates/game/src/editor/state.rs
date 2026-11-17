@@ -174,6 +174,8 @@ pub struct Options {
     pub place: Option<usize>,
     pub screenshot: Option<PathBuf>,
     pub size: (u32, u32),
+    /// A home of the house kit furnished for a household of its variant.
+    pub furnished: bool,
 }
 
 pub struct Editor {
@@ -215,6 +217,9 @@ pub struct Editor {
     houses: houses::Houses,
     /// Walking into a saved house on view: whether the door still leads to every bed.
     walk: Option<kit::Walk>,
+    /// The home is shown furnished, and who lives there.
+    furnished: bool,
+    household: String,
     /// The window was asked to close with changes not saved, and is asking what to do.
     pub closing: bool,
     /// Done: the window may close.
@@ -256,6 +261,8 @@ impl Editor {
             house: None,
             houses,
             walk: None,
+            furnished: opts.furnished,
+            household: String::new(),
             closing: false,
             quit: false,
         };
@@ -508,7 +515,13 @@ impl Editor {
             }
             Showing::Signpost => (landmarks::signpost(&local.varied(seed), &[0.4, 2.3, 4.4]), Vec::new(), Vec::new()),
             Showing::House(h) => {
-                let (b, v, f) = self.houses.build(h, seed);
+                let (b, mut v, mut f) = self.houses.build(h, seed);
+                if self.furnished {
+                    let (fv, ff, who) = houses::furnish(&self.houses.spec(h, seed), seed, &b);
+                    v.extend(fv);
+                    f.extend(ff);
+                    self.household = who;
+                }
                 self.house = Some(b);
                 (v, f, Vec::new())
             }
@@ -1197,7 +1210,11 @@ impl Editor {
                     self.select(Showing::House(next));
                 }
                 let air = ui.checkbox(&mut self.show_air, "Show carved air").on_hover_text("The rooms and the way in, drawn as blue boxes").changed();
-                if stepped || air {
+                let furnished = ui.checkbox(&mut self.furnished, "Furnished").on_hover_text("As a household of this variant keeps it: cut the layers to see inside").changed();
+                if self.furnished {
+                    ui.small(&self.household);
+                }
+                if stepped || air || furnished {
                     self.stale = true;
                 }
                 ui.add_space(6.0);
