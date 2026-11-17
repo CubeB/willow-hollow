@@ -82,9 +82,20 @@
 //! sizes the rules give until there is a bed for everyone (a round hut that would have to
 //! grow too far is built square), and lowers a pitch that would lift the roof so far over
 //! a wide room that moss would take the room for outdoors.
+//!
+//! # Houses saved from the editor
+//!
+//! Any of the kit's homes can be copied in the structure editor into a design of kind
+//! `house` ([`copy`]), edited by hand and saved under `assets/structures/house/`. [`build`]
+//! then chooses, by the seed, between the kit and the houses saved for the same region
+//! and step, each by its weight (see [`crate::features::designs`]). A saved house keeps
+//! the door, beds and the rest the kit gave it ([`Home`]), and its floor is found again by
+//! walking in ([`walk`]) whenever it is built. With nothing saved, [`build`] is the kit.
 
 pub mod rules;
+pub mod walk;
 
+mod copy;
 mod make;
 mod plan;
 #[cfg(test)]
@@ -94,10 +105,12 @@ use glam::{IVec2, IVec3};
 use voxel::{Voxel, mesh::PlantBox};
 
 use crate::{
-    features::{landmarks::Palette, parts, shape::rotate},
+    features::{designs, landmarks::Palette, parts, shape::rotate},
     settlements::Region,
 };
-pub use rules::{Cover, Form, RoofShape, WallKind};
+pub use copy::{Home, copy, from_design};
+pub use rules::{Cover, Form, RoofShape, Rules, WallKind};
+pub use walk::{Walk, walk};
 
 /// How far up the ladder of building a home is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -349,9 +362,27 @@ pub struct Building {
 }
 
 /// Builds the home `spec` asks for, of the materials of palette `pal` (taken as it is:
-/// vary it for the place first, as landmarks do, if wanted).
+/// vary it for the place first, as landmarks do, if wanted). This is what the world
+/// builds: the kit's own, or a house saved for its region and step when the seed picks
+/// one (see [`build_with`]).
 pub fn build(spec: &Spec, pal: &Palette) -> Building {
-    make::make(spec, pal, rules::rules(spec.region).step(spec.step))
+    build_with(spec, pal, rules::rules(spec.region))
+}
+
+/// [`build`] with `rules` in place of the rules compiled in for the region: the structure
+/// editor's, read from the kit's files as they are saved. A house saved for the region
+/// and step is chosen by the seed against the kit, each by its weight, and only for a
+/// household it has a bed for each of; it is built as it was drawn, whatever the age and
+/// wealth asked for.
+pub fn build_with(spec: &Spec, pal: &Palette, rules: &Rules) -> Building {
+    designs::pick_house(spec.region, spec.step, spec.seed, spec.sleepers)
+        .and_then(|d| from_design(d, pal, spec.seed))
+        .unwrap_or_else(|| generate(spec, pal, rules))
+}
+
+/// The kit's own home for `spec` by `rules`, never a saved house.
+pub fn generate(spec: &Spec, pal: &Palette, rules: &Rules) -> Building {
+    make::make(spec, pal, rules.step(spec.step))
 }
 
 impl PartialEq for Building {

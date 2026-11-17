@@ -21,7 +21,8 @@ macro_rules! words {
                 match self { $($name::$v => $w),* }
             }
 
-            fn by_word(w: &str) -> Option<Self> {
+            /// The option a kit file's word names.
+            pub fn by_word(w: &str) -> Option<Self> {
                 Self::ALL.iter().copied().find(|x| x.word().eq_ignore_ascii_case(w))
             }
         }

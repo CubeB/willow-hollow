@@ -288,6 +288,59 @@ variant and can be left as they are. A file the game cannot read fails
 `--screenshot FILE` with `--structures` draws the editor once without a window
 (`--help` lists `--layer`, `--copy`, `--orbit` and `--hover` for it).
 
+**Houses in the editor.** Nobody draws the homes: the house kit
+(`worldgen::settlements::kit`) builds them from rules. *Houses* in the editor's list
+shows *the kit's own* (`--structure house/temperate/timber`): choose a region, a step
+(hut, timber house or stone house) and a variant. Each variant is another household,
+and *Household* shows its age, wealth and how many sleep there; move a slider and that
+holds for every variant, so the arrows step through the variety of one household
+(*As the variant has it* lets go again).
+
+The kit's rules are `assets/structures/kit/<region>.txt`. Run from the repository (or
+with `--structures-dir`), the editor builds the kit's homes from those files, and reads
+a file again within half a second of its being saved, or at *Read the kit files again*,
+so a change to the rules shows without a rebuild. A line the kit cannot read is named in
+red in the panel, and until it reads the homes are built with the rules last read from
+the file (or those compiled in). The world always builds with the rules compiled into
+the game: it takes up a change when the game is built again, and the panel says when
+the files and the game differ.
+
+*Copy this house to edit* (or `--copy`) turns the home shown into a house of your own,
+saved as `assets/structures/house/<name>.txt`. Its file is a structure file with three
+more things: the `region:` and `step:` it was copied for, and a `home:` section keeping
+where the kit put its door, beds, hearth, furniture places, windows, smoke and anchors
+(`crates/worldgen/src/settlements/kit/copy.rs` says how each line reads). Its blocks are roles, as a copied
+landmark's are, so built again in the same place it is the kit's home to the voxel. The
+floor is not kept: it is found again by walking in from before the door each time the
+house is built (`kit::walk`), so it follows the edits. The view outlines the beds (cut
+the layers above away to see them) and marks the way in; if an edit shuts the door on
+any bed they turn red and the panel says so. It still saves, but
+`every_saved_structure_reads` fails until the way is open again, since every home in the
+world must be walked into.
+
+A saved house is one of the homes `kit::build` makes for its region and step: each home
+is the kit's or one of the saved ones, chosen by its seed in proportion to their weights,
+and a saved house only for a household it has a bed for each of. It is built as drawn,
+whatever the age and wealth asked for. The kit's weight is in `house/generator.txt`, as
+a generator's is, written from *How often in the world*; left out, it is 10, not 0, so
+one saved house of weight 1 is one home in eleven of its region and step rather than
+every one of them. With no houses saved, `kit::build` is the kit and the world is as it
+was. `--structure house/<name>` opens a saved house. To try a hand edit on a house's file
+without the editor, `KIT_COPY="temperate hut 5" cargo test --release -p worldgen --lib
+kit::copy::tests::print -- --ignored --nocapture` prints a copy of one.
+
+**Settlement buildings.** The tavern, smithy, sawmill, granary, market hall, guild house,
+well head and gate are kinds of their own (`designs::Special`), listed under *Settlement
+buildings*, each with its folder (`tavern/`, `market-hall/`, `guild-house/`,
+`well-head/`...), so they can be drawn before stage 3 (#203) brings their generators. Until
+then the generator's own is a stand-in: a plain home of the kit, of the country in *Seen
+in*, for a building people go into, which can be copied with its door and beds as a
+house can; and an empty plot for the well head and the gate, which are started from
+nothing. The tavern stands in as a timber house with six beds and the guild house as a
+stone house with two; the smithy and the market hall as stone houses, and the sawmill
+and the granary as timber houses, with none (`editor/houses.rs`, `stand_in`). The world
+does not build any of them yet.
+
 **Small delights** live in `crates/worldgen/src/trails/delights.rs`. Each kind has a
 reason to stand where it does and a chance of being taken up when the reason holds;
 `APART` and `APART_SAME` keep any two from standing near each other. They are meant to

@@ -3,7 +3,14 @@ landmark and one file to a structure. They are compiled into the game: rebuild i
 saving to see them in the world. docs/DEVELOPMENT.md says how the editor works, how a
 file reads and how the world chooses between these and the generator's own.
 
+The house folder holds homes copied from the house kit and edited: each says the region
+and step it was copied for, and keeps where its door and beds are. The world builds one
+now and then among the kit's homes of that region and step. The folders of the
+settlement buildings (tavern, smithy, sawmill, granary, market-hall, guild-house,
+well-head, gate) are drawn ahead of their generators; the world does not build them yet.
+
 The kit folder is not structures: it holds the house kit's rules, one file to a region,
 saying how its huts, timber houses and stone houses are built. They are written by hand,
-read the same way (rebuild to see a change, under Houses in the editor), and
-worldgen's settlements::kit says how one reads.
+read the same way (the editor's Houses view reads them again as they are saved; the
+world takes them up when the game is built again), and worldgen's settlements::kit says
+how one reads.
