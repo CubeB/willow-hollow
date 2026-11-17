@@ -175,6 +175,9 @@ pub struct Progress {
     pub time: f32,
     /// Time of year, 0 to 1 from the spring equinox.
     pub date: f32,
+    /// Which year of the world it is, from 0 for the one it began in; None in a save from
+    /// before the years were kept.
+    pub year: Option<u32>,
     pub travel: Travel,
     /// Which way the boat points, in radians.
     pub heading: f32,
@@ -187,8 +190,9 @@ impl Progress {
             Travel::Flying => "flying",
             Travel::Sailing => "sailing",
         };
+        let year = self.year.map_or_else(String::new, |y| format!("year = {y}\n"));
         format!(
-            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\ntravel = {travel}\nheading = {}\n",
+            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\n{year}travel = {travel}\nheading = {}\n",
             self.pos.x, self.pos.y, self.pos.z, self.yaw, self.pitch, self.time, self.date, self.heading
         )
     }
@@ -207,6 +211,7 @@ impl Progress {
             pitch: f.finite("pitch")? as f32,
             time: f.finite("time").map_or(10.0, |t| t.rem_euclid(24.0) as f32),
             date: f.finite("date").map_or(crate::season::DEFAULT_DATE, |d| d.rem_euclid(1.0) as f32),
+            year: f.get("year"),
             travel,
             heading: f.finite("heading").unwrap_or(0.0) as f32,
         })
@@ -346,6 +351,7 @@ mod tests {
             pitch: -0.3,
             time: 17.5,
             date: 0.62,
+            year: Some(3),
             travel: Travel::Sailing,
             heading: 2.5,
         }
@@ -386,6 +392,15 @@ mod tests {
     #[test]
     fn positions_come_back_exact() {
         assert_eq!(Progress::from_text(&progress().to_text()), Some(progress()));
+    }
+
+    #[test]
+    fn a_save_from_before_the_years_were_kept_has_none() {
+        let old = "x = 1\ny = 2\nz = 3\nyaw = 0\npitch = 0\ntime = 9\ndate = 0.5\ntravel = walking\n";
+        assert_eq!(Progress::from_text(old).map(|p| (p.date, p.year)), Some((0.5, None)));
+        assert_eq!(Progress::from_text(&format!("{old}year = -2\n")).map(|p| p.year), Some(None));
+        let first = Progress { year: Some(0), ..progress() };
+        assert_eq!(Progress::from_text(&first.to_text()), Some(first));
     }
 
     #[test]

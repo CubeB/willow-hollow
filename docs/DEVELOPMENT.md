@@ -86,10 +86,16 @@ Delete `settings.txt` there to go back to the defaults. A hand-edited or damaged
 never stops the game from starting: anything unreadable falls back to its default.
 
 Each world N keeps its own files beside it, all plain text but the map: `world-N.txt`
-(where you stand), `pack-N.txt` (what you carry), `journal-N.txt` (the journal: a line
-to each find, place, river and note, and the distances gone) and `map-N/` (what the map
-has seen). Any of them can be deleted on its own; a line the game cannot read is left
-out and the rest still loads.
+(where you stand, the hour, the date and the world's year), `pack-N.txt` (what you
+carry), `journal-N.txt` (the journal: a line to each find, place, river and note, and
+the distances gone) and `map-N/` (what the map has seen). Any of them can be deleted on
+its own; a line the game cannot read is left out and the rest still loads.
+
+The world's year counts from 0, the year it began in, and turns each time the date
+comes round from winter into spring (`season::advance_year`); the journal's "of the
+first year" is year 0. A world saved before the year was kept takes it from its journal,
+which counted the springs. Anything drawn that changes over the years should read
+`Environment::year`, which the game keeps with the hour and the date.
 
 ## Tests
 
@@ -123,8 +129,9 @@ degrees: yaw 0 looks toward +x (where the sun rises), 180 toward -x (where it se
 (`--date may`) or a fraction of the year from the spring equinox. Each flower is out in
 its own months (`Flower::months` in `worldgen/src/features/plants.rs`), so a shot of a
 bluebell wood needs `--date may` and one of heather `--date august`; the default date is
-the middle of July. PNG files are ignored by git everywhere except under `docs/`, so
-shots can be written anywhere.
+the middle of July. `--year N` sets the world's year (0 is its first), which the journal
+shows. PNG files are ignored by git everywhere except under `docs/`, so shots can be
+written anywhere.
 
 The windows can be put on a shot too: `--pack` for the pack, and `--journal [PAGE]` for
 the journal open at `finds`, `places`, `walk` or `days`. A screenshot reads no save, so
@@ -406,6 +413,7 @@ cannot be done says why and how it is used.
 | `time [hour\|+h\|-h]` | Set the hour (`18`, `18:30`, or a word: `dawn`, `noon`, `dusk`, `midnight`...), or move it on or back (`+3`, `-1.5`). Alone, says the time |
 | `date [month\|0-1]` | Set the time of year: a month (`may`, `oct`) or a fraction of the year from the spring equinox, as `--date` takes |
 | `season <name>` | The middle of `spring`, `summer`, `autumn` or `winter` |
+| `year [n\|+n\|-n]` | Set which year of the world it is, counting its first as 0, as `--year` takes, or move it on or back. Alone, says the year. The date stays as it is |
 | `tp <x> <z> [h]` | Go to voxel x, z, the eye h voxels above the ground or water there (eye height when not given). Also `tp x,z,h`, as `pos` prints it |
 | `tp <place>` | Go to the named place on this continent whose name has these words in it, nearest first (`tp hollin tarn`) |
 | `tp home`, `tp back`, `back` | Go to the world's start; go back to where the last tp left from |
@@ -425,7 +433,7 @@ cannot be done says why and how it is used.
 
 `--command "LINE"` runs a line at the start, as if typed, and can be given as often as
 needed; what each says goes in the log and in the console. On a screenshot the commands
-set the shot up as their flags would: `weather`, `time`, `date`, `season`, `tp` (as
+set the shot up as their flags would: `weather`, `time`, `date`, `season`, `year`, `tp` (as
 `--over`), `pos`, `places`, `spawn camp`, `spawn murmuration`, `spawn crows`,
 `spawn boat` and `aurora`; any other, or one that fails, stops the shot with what was
 wrong. `--console` draws the console open on a screenshot, with what the commands said,

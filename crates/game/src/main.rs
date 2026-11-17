@@ -100,6 +100,8 @@ struct Options {
     time: Option<f32>,
     /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
     date: Option<f32>,
+    /// The world's year, from 0 for its first, if not the one left off in.
+    year: Option<u32>,
     /// Weather to hold for this run (clear, overcast, rain, snow, storm, fog).
     weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
@@ -186,6 +188,7 @@ impl Default for Options {
             look: (35.0, -18.0),
             time: None,
             date: None,
+            year: None,
             weather: None,
             fresh: false,
             murmuration: false,
@@ -244,6 +247,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --season S            spring, summer, autumn or winter
   --date F              time of year, 0-1 from the spring equinox, or a month (may, october):
                         each flower has its own months
+  --year N              the world's year, counting its first as 0 (the journal's first year)
   --weather W           hold the weather: clear, fair, broken, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
@@ -281,7 +285,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --aurora              the northern lights out tonight, wherever the camera is
   --command LINE        run a console command at the start (` or / opens the console in
                         game; 'help' lists the commands); give it as often as you like.
-                        On a screenshot: weather, time, date, season, tp, spawn camp,
+                        On a screenshot: weather, time, date, season, year, tp, spawn camp,
                         murmuration, crows and boat, and aurora
   --console             show the console on a screenshot, with what --command said; in
                         a run, start with it open
@@ -366,6 +370,7 @@ fn parse_args() -> Result<Options> {
                 };
                 o.date = Some(date.rem_euclid(1.0));
             }
+            "--year" => o.year = Some(value()?.parse().map_err(|_| anyhow::anyhow!("--year takes a whole number from 0"))?),
             "--weather" => {
                 let name = value()?;
                 o.weather = Some(weather::Forced::named(&name).ok_or_else(|| anyhow::anyhow!("unknown weather {name}"))?);
@@ -1057,6 +1062,9 @@ impl Running {
         let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
         let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
         let date = opts.date.or(progress.map(|p| p.date)).unwrap_or(season::DEFAULT_DATE);
+        // A world saved before it kept its year takes it from the journal, which counted
+        // the springs; a new one begins in year 0.
+        let year = opts.year.or(progress.and_then(|p| p.year.or(journal.year()))).unwrap_or(0);
         // What has been seen of this world is kept with the rest of its save; a visit to
         // a place given by hand keeps nothing.
         // A camp asked for by hand, to look at or to time: made where the run begins.
@@ -1096,7 +1104,7 @@ impl Running {
             far: FarView::new(&gpu, world.clone()),
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
-            env: Environment::at(time, date),
+            env: Environment::at(time, date).in_year(year),
             particles: {
                 let mut p = Particles::new();
                 // Asked for: ahead of where the camera first looks.
@@ -1293,7 +1301,7 @@ impl Running {
     /// Writes up the journal: the time gone by (`days`, of the game's), the way gone,
     /// and, every second or so, the named places come to.
     fn keep_journal(&mut self, dt: f32, days: f32) {
-        self.journal.tick(days, self.env.date, self.env.time, self.weather.now.snow > 0.3);
+        self.journal.tick(days, self.env.date, self.env.year, self.env.time, self.weather.now.snow > 0.3);
         let way = match (self.walking, self.player.mode, self.player.swimming) {
             (false, ..) => None,
             (true, Mode::Boat, _) => Some(journal::Way::Sail),
@@ -1631,6 +1639,7 @@ impl Running {
             pitch: self.camera.pitch,
             time: self.env.time,
             date: self.env.date,
+            year: Some(self.env.year),
             travel: match (flying, self.player.mode) {
                 (true, _) => Travel::Flying,
                 (false, Mode::Boat) => Travel::Sailing,
@@ -1910,8 +1919,8 @@ impl Running {
             }
         }
         if days > 0.0 {
-            let date = season::advance(self.env.date, days, self.settings.year_days);
-            self.env = Environment::at(self.env.time + days * 24.0, date);
+            let (date, year) = season::advance_year(self.env.date, self.env.year, days, self.settings.year_days);
+            self.env = Environment::at(self.env.time + days * 24.0, date).in_year(year);
         }
         self.keep_journal(dt, days);
         // What was gathered a year or two ago has grown back: looked over now and then.
@@ -2226,7 +2235,7 @@ impl Running {
                     });
             });
         if time != self.env.time || date != self.env.date {
-            self.env = Environment::at(time, date);
+            self.env = Environment::at(time, date).in_year(self.env.year);
         }
         if choice.resume {
             self.set_menu(false);
@@ -2637,7 +2646,7 @@ fn main() -> Result<()> {
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let mut impostors = Impostors::new(&gpu, world.clone());
         let t = Instant::now();
-        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
+        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE)).in_year(opts.year.unwrap_or(0));
         // Screenshots are clear unless a weather is asked for.
         let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
@@ -2839,7 +2848,7 @@ fn main() -> Result<()> {
             let mut view = journal::View::new(world.materials());
             view.page = page;
             let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
-            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue()), view)
+            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue(), env.year), view)
         });
         // A hotbar as it might be an hour into a walk: sticks, things picked.
         let hotbar = opts.shot_hotbar.then(|| {
@@ -3014,7 +3023,16 @@ impl commands::Game for Running {
     }
 
     fn set_clock(&mut self, hour: f32, date: f32) {
-        self.env = Environment::at(hour, date);
+        self.env = Environment::at(hour, date).in_year(self.env.year);
+    }
+
+    fn year(&self) -> u32 {
+        self.env.year
+    }
+
+    fn set_year(&mut self, year: u32) -> commands::Reply {
+        self.env.year = year;
+        Ok(String::new())
     }
 
     fn weather(&self) -> String {
@@ -3176,6 +3194,15 @@ impl commands::Game for Shot<'_> {
 
     fn set_clock(&mut self, hour: f32, date: f32) {
         (self.opts.time, self.opts.date) = (Some(hour), Some(date));
+    }
+
+    fn year(&self) -> u32 {
+        self.opts.year.unwrap_or(0)
+    }
+
+    fn set_year(&mut self, year: u32) -> commands::Reply {
+        self.opts.year = Some(year);
+        Ok(String::new())
     }
 
     fn weather(&self) -> String {

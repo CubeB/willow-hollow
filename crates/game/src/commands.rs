@@ -58,6 +58,13 @@ pub trait Game {
     /// The hour, and the date as a fraction of the year from the spring equinox.
     fn clock(&self) -> (f32, f32);
     fn set_clock(&mut self, hour: f32, date: f32);
+    /// Which year of the world it is, counting its first as 0.
+    fn year(&self) -> u32 {
+        0
+    }
+    fn set_year(&mut self, _year: u32) -> Reply {
+        cannot("changing the year")
+    }
     /// What the weather is doing, in words.
     fn weather(&self) -> String;
     /// Holds a weather, or with None lets it go its own way.
@@ -127,6 +134,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "time", also: &[], usage: "time [hour|+h|-h]", about: "set the hour (18, 18:30, dusk), or move it on or back", words: hour_words, run: time },
     Spec { name: "date", also: &[], usage: "date [month|0-1]", about: "set the time of year: a month, or a fraction of the year from the spring equinox", words: month_words, run: date },
     Spec { name: "season", also: &[], usage: "season <spring|summer|autumn|winter>", about: "set the time of year to the middle of a season", words: season_words, run: set_season },
+    Spec { name: "year", also: &[], usage: "year [n|+n|-n]", about: "say which year of the world it is (its first is 0), or set it", words: none, run: year },
     Spec { name: "tp", also: &["teleport", "go"], usage: "tp <x> <z> [h] | tp x,z[,h] | tp <place> | tp home | tp back", about: "go to voxel x, z (h above the ground), to a named place, to the world's start, or back", words: tp_words, run: tp },
     Spec { name: "back", also: &[], usage: "back", about: "go back to where the last tp left from", words: none, run: |_, game| game.back() },
     Spec { name: "pos", also: &["where"], usage: "pos", about: "say where you are, ready for tp and for --over and --look", words: none, run: pos },
@@ -279,6 +287,25 @@ fn date(args: &[&str], game: &mut dyn Game) -> Reply {
     let d = date_of(word)?;
     game.set_clock(hour, d);
     Ok(format!("it is now {}", date_words(d)))
+}
+
+/// The year `word` asks for, from `now`: a year counted from 0, or so many on or back.
+fn year_of(word: &str, now: u32) -> Result<u32, String> {
+    let wrong = || format!("'{word}' is not a year: a whole number from 0 (the world's first year), or +n or -n");
+    let step = |n: &str| n.parse::<u32>().map_err(|_| wrong());
+    match word.as_bytes().first() {
+        Some(b'+') => Ok(now.saturating_add(step(&word[1..])?)),
+        Some(b'-') => Ok(now.saturating_sub(step(&word[1..])?)),
+        _ => step(word),
+    }
+}
+
+fn year(args: &[&str], game: &mut dyn Game) -> Reply {
+    let now = game.year();
+    let Some(word) = args.first() else { return Ok(format!("it is year {now} of this world (its first is 0)")) };
+    let y = year_of(word, now)?;
+    game.set_year(y)?;
+    Ok(format!("it is now year {y} of this world"))
 }
 
 fn set_season(args: &[&str], game: &mut dyn Game) -> Reply {
@@ -749,6 +776,7 @@ mod tests {
     struct Mock {
         hour: f32,
         date: f32,
+        year: u32,
         weather: Option<Option<Forced>>,
         went: Option<(f64, f64, Option<f64>)>,
         spawned: Vec<Spawn>,
@@ -758,7 +786,7 @@ mod tests {
 
     impl Mock {
         fn new() -> Self {
-            Self { hour: 10.0, date: 0.32, weather: None, went: None, spawned: Vec::new(), given: Vec::new(), pace: 1.0 }
+            Self { hour: 10.0, date: 0.32, year: 0, weather: None, went: None, spawned: Vec::new(), given: Vec::new(), pace: 1.0 }
         }
     }
 
@@ -774,6 +802,13 @@ mod tests {
         }
         fn set_clock(&mut self, hour: f32, date: f32) {
             (self.hour, self.date) = (hour, date);
+        }
+        fn year(&self) -> u32 {
+            self.year
+        }
+        fn set_year(&mut self, year: u32) -> Reply {
+            self.year = year;
+            Ok(String::new())
         }
         fn weather(&self) -> String {
             "fair".into()
@@ -830,6 +865,22 @@ mod tests {
         assert_eq!(date_of("0.5"), Ok(0.5));
         assert!(date_of("1.5").is_err());
         assert!(date_of("smarch").is_err());
+    }
+
+    #[test]
+    fn the_year_is_said_and_set_from_0_or_moved_on_and_back() {
+        let mut game = Mock::new();
+        assert!(run("year", &mut game).unwrap().contains("year 0"));
+        assert_eq!(run("year 4", &mut game), Ok("it is now year 4 of this world".into()));
+        assert_eq!(game.year, 4);
+        run("year +2", &mut game).unwrap();
+        assert_eq!(game.year, 6);
+        run("year -10", &mut game).unwrap();
+        assert_eq!(game.year, 0);
+        assert!(run("year last", &mut game).unwrap_err().contains("'last'"));
+        assert!(run("year 1.5", &mut game).is_err());
+        // The date is left as it was.
+        assert_eq!((game.hour, game.date), (10.0, 0.32));
     }
 
     #[test]

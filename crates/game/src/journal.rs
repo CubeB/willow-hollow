@@ -54,7 +54,8 @@ pub struct Stamp {
     pub hour: f32,
     /// Which day of the walk, from 1.
     pub day: u32,
-    /// Which year of the walk, from 1; the year turns at the spring equinox.
+    /// Which year of the world, from 1 for its first (its year 0); the year turns at the
+    /// spring equinox.
     pub year: u32,
 }
 
@@ -179,8 +180,9 @@ pub struct Journal {
     date: Option<f32>,
     /// Game days since the midnight before the walk began.
     days: f64,
-    /// Seasons that have turned since the walk began, and years: the year turns at the
-    /// spring equinox.
+    /// Seasons that have turned since the walk began, and the world's year as of the last
+    /// tick (from 0). It is saved so that a world saved before it kept its own year can
+    /// take its year from here.
     seasons: u32,
     years: u32,
     /// The year whose first snow has been written down.
@@ -276,6 +278,13 @@ impl Journal {
         self.days.floor() as u32 + 1
     }
 
+    /// The world's year as the journal last knew it, from 0, if it has known the world at
+    /// all. Until the world kept its own year the journal counted the springs, so this is
+    /// the year of a world saved before then.
+    pub fn year(&self) -> Option<u32> {
+        self.date.map(|_| self.years)
+    }
+
     fn note(&mut self, text: String) {
         log::debug!("journal, day {}: {text}", self.now.day);
         self.notes.push_back(Note { when: self.now, text });
@@ -285,11 +294,12 @@ impl Journal {
         self.unsaved = true;
     }
 
-    /// Moves the journal's clock on by `days` game days, to time of year `date` and
-    /// `hour` of the day; `snowing` if snow is falling on the player. The seasons and
-    /// the years are read from the date as it changes, so the journal agrees with the
-    /// world however the date came to be what it is.
-    pub fn tick(&mut self, days: f32, date: f32, hour: f32, snowing: bool) {
+    /// Moves the journal's clock on by `days` game days, to time of year `date` in the
+    /// world's `year` (from 0), and `hour` of the day; `snowing` if snow is falling on the
+    /// player. The seasons are read from the date as it changes, and the year is the
+    /// world's, so the journal agrees with the world however its clock came to be where it
+    /// is.
+    pub fn tick(&mut self, days: f32, date: f32, year: u32, hour: f32, snowing: bool) {
         let (date, hour) = (date.rem_euclid(1.0), hour.rem_euclid(24.0));
         if days > 0.0 {
             self.days += days as f64;
@@ -304,9 +314,9 @@ impl Journal {
                 date
             }
         };
-        // Round from winter into spring is a new year.
-        if date + 0.5 < before {
-            self.years += 1;
+        if self.years != year {
+            self.years = year;
+            self.unsaved = true;
         }
         self.now = Stamp { date, hour, day: self.day(), year: self.years + 1 };
         if self.now.quarter() != (Stamp { date: before, ..self.now }).quarter() {
@@ -567,9 +577,10 @@ impl Journal {
 
     /// A journal as it might stand after a walk of some weeks round continent-local `at`
     /// on continent `c`, to `count` of its nearest places, for screenshots.
-    pub fn sample(c: &Continent, at: Vec2, count: usize, catalogue: &[Item]) -> Self {
+    /// It is written in the world's `year` (from 0).
+    pub fn sample(c: &Continent, at: Vec2, count: usize, catalogue: &[Item], year: u32) -> Self {
         let mut j = Self::new();
-        j.tick(0.0, 0.04, 7.5, false);
+        j.tick(0.0, 0.04, year, 7.5, false);
         if count == 0 {
             return j;
         }
@@ -593,8 +604,8 @@ impl Journal {
         for (k, p) in near.iter().enumerate() {
             // A day or so between one place and the next, and the hour moving round.
             let stride = 0.9 + 0.17 * (k % 5) as f32;
-            j.tick(stride, j.now.date + stride / 24.0, j.now.hour + stride * 24.0, false);
-            j.tick(0.0, j.now.date, j.now.hour, j.now.quarter() == 3);
+            j.tick(stride, j.now.date + stride / 24.0, year, j.now.hour + stride * 24.0, false);
+            j.tick(0.0, j.now.date, year, j.now.hour, j.now.quarter() == 3);
             let region = names.region_at(p.at).and_then(|i| names.places.get(i)).map_or("", |r| r.name.as_str());
             j.reach(region, "region", region);
             j.here = format!("by {}", p.name);
@@ -1021,11 +1032,11 @@ mod tests {
     #[test]
     fn the_first_of_a_kind_is_written_down_once_with_where_and_when() {
         let mut j = Journal::new();
-        j.tick(0.0, 0.8, 19.0, false);
+        j.tick(0.0, 0.8, 0, 19.0, false);
         j.here = "by Carn Hollow".into();
         assert!(j.found(&thing("poppy", "Poppy")));
         assert!(!j.found(&thing("poppy", "Poppy")));
-        j.tick(30.0, 0.05, 9.0, false);
+        j.tick(30.0, 0.05, 1, 9.0, false);
         j.here.clear();
         assert!(j.found(&thing("holly-berries", "Holly berries")));
         assert!(!j.found(&thing("poppy", "Poppy")));
@@ -1045,11 +1056,14 @@ mod tests {
         let c = world();
         let centre = Vec2::splat(c.size as f32 * c.cell_size() * 0.5);
         let mats = mat::build();
-        let j = Journal::sample(&c, centre, 12, &catalogue(&mats));
+        let j = Journal::sample(&c, centre, 12, &catalogue(&mats), 2);
         assert!(j.finds().len() >= 10 && j.places().len() >= 12 && j.notes().count() > 20 && j.walked > 100.0);
+        // Written in the world's year 2, its third.
+        assert!(j.finds().iter().all(|f| f.when.year == 3 && f.when.when().ends_with("of the third year")));
         let text = j.to_text();
         let back = Journal::from_text(&text);
         assert!(!back.unsaved);
+        assert_eq!(back.year(), Some(2));
         assert_eq!(back.to_text(), text);
         assert_eq!((back.finds(), back.places(), back.rivers()), (j.finds(), j.places(), j.rivers()));
         assert_eq!((back.day(), back.seasons(), back.highest.clone()), (j.day(), j.seasons(), j.highest.clone()));
@@ -1065,7 +1079,7 @@ mod tests {
         assert_eq!(back.walked, j.walked);
         // Bars and line ends in what is written cannot break the save.
         let mut odd = Journal::new();
-        odd.tick(0.0, 0.1, 12.0, false);
+        odd.tick(0.0, 0.1, 0, 12.0, false);
         odd.here = "by the | Ford".into();
         odd.found(&Item::new("x", "A | thing", "One\nline.", [1, 2, 3], Shape::Reed));
         odd.reach("Bar | Tor", "tor", "The\rMoor");
@@ -1082,7 +1096,7 @@ mod tests {
         let c = world();
         let names = &c.trails.names;
         let mut j = Journal::new();
-        j.tick(0.0, 0.3, 10.0, false);
+        j.tick(0.0, 0.3, 0, 10.0, false);
         let small = |p: &&worldgen::names::Place| matches!(p.kind, PlaceKind::Landmark(_) | PlaceKind::Falls | PlaceKind::Lake);
         let places: Vec<&worldgen::names::Place> = names.places.iter().filter(small).take(6).collect();
         assert!(places.len() >= 3, "the test world has few places: {}", names.places.len());
@@ -1163,7 +1177,7 @@ mod tests {
         let mut to_sea = 0;
         for p in rivers {
             let mut j = Journal::new();
-            j.tick(0.0, 0.3, 10.0, false);
+            j.tick(0.0, 0.3, 0, 10.0, false);
             // Up from the mouth is not down to it.
             for at in &p.line {
                 j.survey(&c, *at, true);
@@ -1214,24 +1228,31 @@ mod tests {
     fn days_seasons_and_years_pass_and_the_first_snow_is_noted_once_a_winter() {
         let mut j = Journal::new();
         // Begun at six in the evening, in early summer.
-        j.tick(0.0, 0.3, 18.0, false);
-        assert_eq!((j.day(), j.seasons(), j.now.year), (1, 0, 1));
+        assert_eq!(j.year(), None, "a new journal knows no year");
+        j.tick(0.0, 0.3, 0, 18.0, false);
+        assert_eq!((j.day(), j.seasons(), j.now.year, j.year()), (1, 0, 1, Some(0)));
         // Midnight turns the day.
-        j.tick(0.3, 0.3125, 1.2, false);
+        j.tick(0.3, 0.3125, 0, 1.2, false);
         assert_eq!(j.day(), 2);
-        // On into autumn, winter, and the next spring, a step at a time.
-        let mut date = 0.3125f32;
+        // On into autumn, winter, and the next spring, a step at a time, the world's year
+        // turning as the date comes round.
+        let (mut date, mut year) = (0.3125f32, 0);
         for _ in 0..180 {
-            date = (date + 0.1 / 24.0).rem_euclid(1.0);
-            j.tick(0.1, date, 12.0, j.now.quarter() == 3);
+            (date, year) = crate::season::advance_year(date, year, 0.1, 24.0);
+            j.tick(0.1, date, year, 12.0, j.now.quarter() == 3);
         }
-        assert_eq!((j.seasons(), j.now.year), (3, 2));
+        assert_eq!((j.seasons(), j.now.year, j.year()), (3, 2, Some(1)));
         let notes: Vec<&str> = j.notes().map(|n| n.text.as_str()).collect();
         assert_eq!(notes, ["Autumn came in.", "Winter came in.", "First snow.", "Spring came in."]);
-        // The clock comes back from a save.
+        // The clock comes back from a save, and with it the year, for a world saved before
+        // it kept its own.
         let mut back = Journal::from_text(&j.to_text());
-        back.tick(0.0, date, 12.0, false);
+        assert_eq!(back.year(), Some(1));
+        back.tick(0.0, date, year, 12.0, false);
         assert_eq!((back.day(), back.seasons(), back.now), (j.day(), j.seasons(), j.now));
+        // A year set by hand is the journal's year too.
+        back.tick(0.0, date, 6, 12.0, false);
+        assert_eq!(back.now.when(), "early spring of the seventh year");
         assert_eq!(Stamp { date: 0.62, hour: 19.0, day: 3, year: 1 }.when(), "mid-autumn of the first year");
         assert_eq!(Stamp { date: 0.9, hour: 19.0, day: 3, year: 14 }.when(), "midwinter, year 14");
         assert_eq!((Stamp { hour: 19.0, ..Stamp::default() }.time_of_day(), Stamp { hour: 5.5, ..Stamp::default() }.time_of_day()), ("at dusk", "at dawn"));
