@@ -10,14 +10,14 @@ use crate::{
 };
 
 /// The palette a region's homes take where it stands on its usual rock.
-fn palette(region: Region) -> Palette {
+pub(crate) fn palette(region: Region) -> Palette {
     let biome = region.biome();
     Palette::local(biome, mat::bedrock(biome).0)
 }
 
 /// A spread of homes: the corners of age and wealth first, then whatever the seed says,
 /// asking for anything from nobody to more than the step sleeps.
-fn spec(region: Region, step: Step, seed: u32) -> Spec {
+pub(crate) fn spec(region: Region, step: Step, seed: u32) -> Spec {
     let h = |k: i32| unit(hash2(seed ^ 0x51ec_0b1d, k, step as i32 * 8 + region as i32));
     let (age, wealth) = match seed {
         0 => (0.0, 0.0),
@@ -30,7 +30,7 @@ fn spec(region: Region, step: Step, seed: u32) -> Spec {
     Spec { region, step, age, wealth, sleepers, seed }
 }
 
-const SEEDS: u32 = 24;
+pub(crate) const SEEDS: u32 = 24;
 
 fn every_home() -> impl Iterator<Item = (Spec, Building)> {
     Region::ALL.into_iter().flat_map(|region| {
@@ -44,22 +44,22 @@ fn every_home() -> impl Iterator<Item = (Spec, Building)> {
     })
 }
 
-fn name(s: &Spec) -> String {
+pub(crate) fn name(s: &Spec) -> String {
     format!("{} {} seed {} (age {:.2}, wealth {:.2}, {} sleepers)", s.region.word(), s.step.word(), s.seed, s.age, s.wealth, s.sleepers)
 }
 
 /// The building's voxels by place, standing on flat ground: below `y = 0` is earth
 /// wherever the building says nothing.
-struct Site {
-    at: HashMap<IVec3, Voxel>,
+pub(crate) struct Site {
+    pub(crate) at: HashMap<IVec3, Voxel>,
 }
 
 impl Site {
-    fn new(b: &Building) -> Self {
+    pub(crate) fn new(b: &Building) -> Self {
         Site { at: b.voxels.iter().copied().collect() }
     }
 
-    fn solid(&self, q: IVec3) -> bool {
+    pub(crate) fn solid(&self, q: IVec3) -> bool {
         match self.at.get(&q) {
             Some(&v) => v != AIR,
             None => q.y < 0,
@@ -74,7 +74,7 @@ const STEP_UP: i32 = 2;
 const DROP: i32 = 3;
 
 /// Every floor voxel a person walking in from outside the door stands over.
-fn walked(b: &Building, site: &Site) -> HashSet<IVec3> {
+pub(crate) fn walked(b: &Building, site: &Site) -> HashSet<IVec3> {
     let fits = |p: IVec3| (0..BODY.1).all(|y| (0..BODY.0).all(|z| (0..BODY.0).all(|x| !site.solid(p + IVec3::new(x, y, z)))));
     let stands = |p: IVec3| (0..BODY.0).any(|z| (0..BODY.0).any(|x| site.solid(p + IVec3::new(x, -1, z))));
     let top = b.voxels.iter().map(|(q, _)| q.y).max().unwrap();

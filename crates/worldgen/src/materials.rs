@@ -358,6 +358,11 @@ palette! {
     SHINGLE_OLD       = (126, 122, 114), Solid, 2;
     ROOF_TILE_OLD     = (128,  80,  64), Solid, 2;
     ROOF_MUD          = (176, 136,  94), Solid, 1;
+    // Window glass (settlements::furnish), added last so existing ids keep their numbers:
+    // a pane with a lamp or the fire behind it, a dim warm brown by day that glows after
+    // dark as a lantern's glass does, and a pane with nobody home behind it.
+    WINDOW_LIT        = (120,  84,  46), Solid, 0, glow;
+    WINDOW_DARK       = ( 54,  60,  66), Solid, 0;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,

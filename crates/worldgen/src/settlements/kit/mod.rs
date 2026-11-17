@@ -99,7 +99,7 @@ mod copy;
 mod make;
 mod plan;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use glam::{IVec2, IVec3};
 use voxel::{Voxel, mesh::PlantBox};
