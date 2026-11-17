@@ -35,7 +35,9 @@ use super::{
     Age, Kind, Livelihood, Reason, Region, Settlement,
     furnish::{self, Household},
     kit::{self, AnchorKind, Building, Spec, Step},
+    special::{self, Built, Facts, SpecialSpec},
 };
+use crate::features::designs::Special;
 use crate::{
     biome::Biome,
     continent::Continent,
@@ -100,7 +102,20 @@ impl Purpose {
     /// Whether stage 3 puts a building of its own on this plot in place of the kit's
     /// house that stands in for it.
     pub fn special(self) -> bool {
-        matches!(self, Purpose::Smithy | Purpose::Tavern | Purpose::Sawmill | Purpose::Granary | Purpose::MarketHall | Purpose::GuildHouse)
+        self.which().is_some()
+    }
+
+    /// The building of its own that stage 3 puts on this plot (see [`special::build`]).
+    pub fn which(self) -> Option<Special> {
+        Some(match self {
+            Purpose::Smithy => Special::Smithy,
+            Purpose::Tavern => Special::Tavern,
+            Purpose::Sawmill => Special::Sawmill,
+            Purpose::Granary => Special::Granary,
+            Purpose::MarketHall => Special::MarketHall,
+            Purpose::GuildHouse => Special::GuildHouse,
+            _ => return None,
+        })
     }
 
     /// Whether a household lives there.
@@ -662,10 +677,19 @@ impl<'a> Town<'a> {
         let wants = self.wants();
         // The kit's buildings are most of the work, and each stands alone, so they are
         // built side by side.
+        // The tavern, the smithy and the rest are stage 3's own (see [`special`]), each
+        // furnished as it is built; the homes and workplaces are the kit's.
         let (region, pal) = (self.s.region, &self.pal);
-        let kits = in_parallel(&wants, |w| kit::build(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed }, pal));
-        for (want, built) in wants.into_iter().zip(kits) {
-            self.raise(net, want, built);
+        let facts = Facts::of(&self.s);
+        let kits = in_parallel(&wants, |w| {
+            let own = w.purpose.which().and_then(|which| special::build(&SpecialSpec { which, region, age: w.age, wealth: w.wealth, seed: w.seed, stream: None, facts }, pal));
+            match own {
+                Some(own) => (own.building.clone(), Some(own)),
+                None => (kit::build(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed }, pal), None),
+            }
+        });
+        for (want, (built, own)) in wants.into_iter().zip(kits) {
+            self.raise(net, want, built, own);
         }
         self.door_paths(net);
         // The ground as it is now, every plot levelled and every way worn.
@@ -1182,7 +1206,8 @@ impl<'a> Town<'a> {
 
     /// Builds what `want` asks for and finds it a plot, smaller and plainer if it must
     /// be; then levels its pad, furnishes it, stamps it into the world and records it.
-    fn raise(&mut self, net: &mut Network, want: Want, built: Building) {
+    fn raise(&mut self, net: &mut Network, want: Want, built: Building, own: Option<Built>) {
+        let mut own = own;
         let spec = |step: Step, beds: u8| Spec { region: self.s.region, step, age: want.age, wealth: want.wealth, sleepers: beds, seed: want.seed };
         let garden = match want.purpose {
             Purpose::Home => unit(want.seed ^ 0x9a2d) < 0.85,
@@ -1203,6 +1228,7 @@ impl<'a> Town<'a> {
                 2 => Lot::new(built.clone(), false, yard.filter(|_| !matches!(want.purpose, Purpose::Home))),
                 _ => {
                     // At the last, a hut: there was no room for anything bigger.
+                    own = None;
                     want.step = Step::Hut;
                     want.beds = want.beds.min(Step::Hut.max_sleepers());
                     want.residents = want.residents.min(want.beds);
@@ -1215,9 +1241,31 @@ impl<'a> Town<'a> {
             }
         }
         // Where there is no room even for a hut it goes unbuilt; the tests see none do.
-        let Some((lot, spot)) = chosen else { return };
-        let (t, b) = (spot.turns, &lot.b);
+        let Some((mut lot, spot)) = chosen else { return };
         let origin = IVec3::new(spot.origin.x, spot.y as i32 + 1, spot.origin.y);
+        // A sawmill near water turns a wheel on the side toward it, where the ground the
+        // wheel's pit takes is free; elsewhere it saws by hand over a pit.
+        if want.purpose == Purpose::Sawmill
+            && let (Some(w), Some(_)) = (self.water, &own)
+        {
+            let d = w - flat(origin).as_vec2();
+            if d.length() < m(60.0) {
+                let toward = if d.x.abs() > d.y.abs() { IVec3::new(d.x.signum() as i32, 0, 0) } else { IVec3::new(0, 0, d.y.signum() as i32) };
+                let spec = SpecialSpec { which: Special::Sawmill, region: self.s.region, age: want.age, wealth: want.wealth, seed: want.seed, stream: Some(rotate(toward, (4 - spot.turns) & 3)), facts: Facts::of(&self.s) };
+                if let Some(wheeled) = special::build(&spec, &self.pal) {
+                    let (a, b) = turn_rect((wheeled.building.footprint.lo, wheeled.building.footprint.hi), spot.turns);
+                    let (a, b) = (a + flat(origin), b + flat(origin));
+                    let (old_a, old_b) = turn_rect((lot.b.footprint.lo, lot.b.footprint.hi), spot.turns);
+                    let (old_a, old_b) = (old_a + flat(origin), old_b + flat(origin));
+                    let more: Vec<IVec2> = (a.y..=b.y).flat_map(|z| (a.x..=b.x).map(move |x| IVec2::new(x, z))).filter(|c| !(c.cmpge(old_a).all() && c.cmple(old_b).all())).collect();
+                    if !self.grid.any(&more, WAY | PLOT | THING | KEEP) {
+                        lot.b = wheeled.building.clone();
+                        own = Some(wheeled);
+                    }
+                }
+            }
+        }
+        let (t, b) = (spot.turns, &lot.b);
         let garden = lot.garden.map(|g| {
             let (a, b) = turn_rect(g, t);
             (a + flat(origin), b + flat(origin))
@@ -1253,13 +1301,17 @@ impl<'a> Town<'a> {
             // A store is kept, though nobody lives in it (`furnish` stocks it).
             lived_in: want.residents > 0 || want.purpose == Purpose::Store,
         };
-        let inside = furnish::furnish(b, &household, &self.pal, want.seed);
+        // Stage 3's own buildings come furnished, their beds and fires among them.
+        let inside = if own.is_some() { furnish::Furnished::default() } else { furnish::furnish(b, &household, &self.pal, want.seed) };
         let mut voxels: Vec<(IVec3, Voxel)> = b.voxels.iter().chain(&inside.voxels).map(|&(q, v)| (origin + rotate(q, t), v)).collect();
         voxels.shrink_to_fit();
         let mut fine = parts::place_fine(&b.fine, origin, t);
         fine.extend(parts::place_fine(&inside.fine, origin, t));
         net.add_stamp_with(voxels, fine);
-        if inside.fire.is_some() {
+        if let Some(own) = &own {
+            net.guest_beds.extend(own.guest_beds_at(origin, t));
+        }
+        if inside.fire.is_some() || own.as_ref().is_some_and(|o| o.fire.is_some()) {
             let q = origin + rotate(b.smoke, t);
             net.chimneys.push(Vec3::new(q.x as f32 + 0.5, q.y as f32, q.z as f32 + 0.5));
         }
@@ -1274,7 +1326,8 @@ impl<'a> Town<'a> {
             facing: flat(rotate(b.door.facing, t)),
             lo: lo + flat(origin),
             hi: hi + flat(origin),
-            sleepers: want.residents,
+            // Those who live in one of stage 3's own: its beds, but for a tavern's guests.
+            sleepers: own.as_ref().map_or(want.residents, |o| b.inside.beds.len().saturating_sub(o.guest_beds.len()) as u8),
             pads: spot.discs.clone(),
             garden,
             yard,

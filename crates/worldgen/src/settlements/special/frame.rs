@@ -408,6 +408,14 @@ impl<'a> Frame<'a> {
             Cover::Shingle => (mat::SHINGLE, mat::SHINGLE_OLD),
             Cover::Mud => (mat::ROOF_MUD, mat::ROOF_MUD),
         };
+        // Thatch weathers as a whole, as the kit's does: new or old straw all over, with
+        // only a few patches of the other.
+        if matches!(cover, Cover::Thatch | Cover::Reed | Cover::Palm) {
+            let weathered = self.spec.age > 0.75;
+            let (most, few) = if weathered { (old, new) } else { (new, old) };
+            let share = if weathered { 0.06 } else { (self.spec.age - 0.45).max(0.0) * 0.25 };
+            return if self.patch(q, 5, 0x0d1d) < share { few } else { most };
+        }
         let worn = self.patch(q, 3, 0x0d1d) < self.spec.age * 0.8;
         let mended = self.spec.age > 0.65 && self.patch(q + IVec3::ONE, 4, 0x9a7c) < 0.15;
         if worn && !mended { old } else { new }
