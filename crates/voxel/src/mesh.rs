@@ -1044,6 +1044,9 @@ pub fn add_plants<'a>(
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
                     | if open { flags::SKY } else { 0 }
                     | if sways || b.flap != 0 { flags::FOLIAGE } else { 0 }
+                    // Embers on a hearth and glass in a window shine as a whole voxel of
+                    // them would. Not on what sways: with FOLIAGE it would read as WASH.
+                    | if m.emissive && !(sways || b.flap != 0) { flags::EMISSIVE } else { 0 }
                     | drawn << flags::PLANT_SHIFT;
                 let code = match cloth {
                     Cloth::None => season_bits(b.season),

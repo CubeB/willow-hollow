@@ -12,7 +12,7 @@ use std::{
 };
 
 use glam::IVec3;
-use voxel::{AIR, CHUNK, Kind, Materials, PAD, PaddedChunk, Voxel};
+use voxel::{AIR, CHUNK, Kind, Materials, PAD, PaddedChunk, Voxel, mesh::CELLS};
 use worldgen::{
     World,
     biome::Biome,
@@ -434,6 +434,13 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     for s in &stamps {
         for (cell, v) in built_cells(&s.voxels, origin, step, mats) {
             put(cell, v, true);
+        }
+        // A lit window, a pane of glass among the fine parts, takes the cell of the wall it
+        // is in, so that it glows from here at night as the far boxes show it beyond. The
+        // fire inside does not: at this size its cell would take the wall's.
+        for b in s.fine.iter().filter(|b| b.voxel == mat::WINDOW_LIT) {
+            let q = IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)) + origin;
+            put(q.div_euclid(IVec3::splat(step)), b.voxel, true);
         }
     }
     (chunks, placements, wash)

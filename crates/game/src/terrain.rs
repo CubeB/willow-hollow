@@ -962,10 +962,16 @@ fn lamp_voxels(chunks: &[(i32, voxel::PaddedChunk)], col: Col, mats: &voxel::Mat
     let lit: Vec<bool> = (0..mats.len()).map(|i| mats.get(i as voxel::Voxel).emissive).collect();
     let mut out = Vec::new();
     // Nearly every chunk holds nothing lit, and is passed over a run of voxels at a time
-    // by asking only whether any is in the range of the lit materials.
-    let Some(first) = lit.iter().position(|&l| l) else { return out };
-    let span = (lit.iter().rposition(|&l| l).unwrap_or(first) - first) as voxel::Voxel;
-    let in_range = |run: &[voxel::Voxel]| run.iter().fold(false, |any, &v| any | (v.wrapping_sub(first as voxel::Voxel) <= span));
+    // by asking only whether any is in the ranges of the lit materials. There are two,
+    // split at the widest gap between lit ids: lanterns and embers, and the glass of a lit
+    // window added at the end of the palette, which one range would stretch over nearly
+    // every material.
+    let ids: Vec<usize> = (0..lit.len()).filter(|&i| lit[i]).collect();
+    let Some(&first) = ids.first() else { return out };
+    let cut = (1..ids.len()).max_by_key(|&k| ids[k] - ids[k - 1]).unwrap_or(ids.len());
+    let (a, a_span) = (first as voxel::Voxel, (ids[cut - 1] - first) as voxel::Voxel);
+    let (b, b_span) = if cut < ids.len() { (ids[cut] as voxel::Voxel, (ids[ids.len() - 1] - ids[cut]) as voxel::Voxel) } else { (a, a_span) };
+    let in_range = |run: &[voxel::Voxel]| run.iter().fold(false, |any, &v| any | (v.wrapping_sub(a) <= a_span) | (v.wrapping_sub(b) <= b_span));
     for (cy, chunk) in chunks {
         let voxels = chunk.voxels();
         if !voxels.chunks(256).any(in_range) {

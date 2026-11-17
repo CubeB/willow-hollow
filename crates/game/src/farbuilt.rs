@@ -454,6 +454,22 @@ mod tests {
     use super::*;
     use worldgen::{World, world::GameWorld};
 
+    /// A lit window, a pane of glass among a home's fine parts, glows from afar; one with
+    /// nobody behind it does not (#202).
+    #[test]
+    fn a_lit_window_glows_from_afar() {
+        let mats = worldgen::materials::build();
+        let pane = |voxel| voxel::mesh::PlantBox { lo: [42, 20, 8], hi: [43, 28, 16], voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
+        let wall: Vec<(IVec3, Voxel)> = (0..6).flat_map(|y| (0..6).map(move |z| (IVec3::new(10, y, z), worldgen::materials::STONE))).collect();
+        let glows = |voxel| {
+            let stamp = Stamp { lo: IVec3::new(10, 0, 0), hi: IVec3::new(10, 5, 5), voxels: wall.clone(), fine: vec![pane(voxel)] };
+            let mut out = Vec::new();
+            stamp_boxes(&stamp, IVec3::ZERO, &mats, &mut out);
+            out.iter().filter(|b| b.flags & flags::GLOW != 0).count()
+        };
+        assert_eq!((glows(worldgen::materials::WINDOW_LIT), glows(worldgen::materials::WINDOW_DARK)), (1, 0));
+    }
+
     /// Every solid cell of a stamp is covered by exactly one box, and no box covers an
     /// empty cell but for a flame's: the boxes are the shape the coarse ring draws.
     #[test]
