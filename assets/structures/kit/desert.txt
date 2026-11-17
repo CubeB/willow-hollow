@@ -24,12 +24,12 @@ timber:
   footprint: rect 4, l 1
   width: 12 15
   length: 15 21
-  walls: mudbrick 2, wattle 1 poor
+  walls: mudbrick
   base: 0
   wall height: 6 7
-  roof: thatch
-  roof shape: flat 2, gable 1 poor
-  pitch: 1.0 1.2
+  roof: mud 2, thatch 1 poor
+  roof shape: flat 3, hip 1 poor
+  pitch: 0.75 0.9
   overhang: 1
   floor: earth
   smoke: hole
