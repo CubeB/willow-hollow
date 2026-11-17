@@ -59,6 +59,8 @@ pub enum Spawn {
     Boat,
     /// This many of a thing from the pack's list, set down at the feet.
     Thing(String, u32),
+    /// This many people of the country about, standing in rows ahead.
+    People(u32),
 }
 
 /// What the commands act on. Only what every game can say is required; the rest can't
@@ -157,7 +159,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
-    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, or set things down", words: spawn_words, run: spawn },
+    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, or set things down", words: spawn_words, run: spawn },
     Spec { name: "aurora", also: &[], usage: "aurora [on|off|auto]", about: "the northern lights out every night, never, or as the night has them", words: on_off_auto, run: aurora },
     Spec { name: "give", also: &[], usage: "give <thing> [n]", about: "put things in the pack: sticks, lantern, a flower (poppy, bluebell...), holly-berries...", words: item_words, run: give },
     Spec { name: "speed", also: &[], usage: "speed [times]", about: "walk, run and swim this many times faster (1 is usual)", words: none, run: speed },
@@ -524,7 +526,7 @@ pub fn fire_word(state: u8) -> &'static str {
 pub const CROWS: &[&str] = &["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"];
 
 fn spawn_words() -> Vec<&'static str> {
-    let mut w = vec!["camp", "murmuration", "crows", "boat"];
+    let mut w = vec!["camp", "murmuration", "crows", "boat", "people"];
     w.extend(item_words().into_iter().filter(|i| *i != "lantern"));
     w
 }
@@ -547,6 +549,7 @@ pub fn spawning(args: &[&str]) -> Result<Spawn, String> {
             Spawn::Crows(how)
         }
         "boat" => Spawn::Boat,
+        "people" | "folk" => Spawn::People(rest.first().map_or(Ok(12), |n| count(n))?.min(60)),
         _ => {
             let n = match rest.first() {
                 Some(n) => count(n)?,
@@ -1107,5 +1110,13 @@ mod tests {
         assert_eq!(compass(0.0, -10.0), "N");
         assert_eq!(compass(10.0, 0.0), "E");
         assert_eq!(compass(-10.0, 10.0), "SW");
+    }
+
+    #[test]
+    fn people_are_called_by_the_dozen_or_as_many_as_asked() {
+        assert_eq!(spawning(&["people"]), Ok(Spawn::People(12)));
+        assert_eq!(spawning(&["people", "5"]), Ok(Spawn::People(5)));
+        assert_eq!(spawning(&["people", "500"]), Ok(Spawn::People(60)));
+        assert!(spawning(&["people", "some"]).is_err());
     }
 }

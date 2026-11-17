@@ -20,6 +20,7 @@ mod lod;
 mod minimap;
 mod overlay;
 mod particles;
+mod people;
 mod placed;
 mod player;
 mod profile;
@@ -95,6 +96,8 @@ struct Options {
     figure_rise: f32,
     /// How far the figure on a screenshot has swung its furled glider up from its back.
     figure_furl: f32,
+    /// Generated people standing in rows before a screenshot's camera.
+    shot_people: Option<people::Gallery>,
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
@@ -185,6 +188,7 @@ impl Default for Options {
             figure_bank: 0.0,
             figure_rise: -1.5,
             figure_furl: 0.0,
+            shot_people: None,
             look: (35.0, -18.0),
             time: None,
             date: None,
@@ -242,6 +246,15 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure-bank DEG     with --figure-glide, the wing banked DEG degrees, right wing down
   --figure-rise V       with --figure-glide, rising V metres a second (default -1.5)
   --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
+  --people N            on a screenshot, N generated people in rows ahead, facing the camera:
+                        a household first, then every trade and age
+  --people-region R     their region (temperate, upland, northern, alpine, desert, wetland,
+                        rainforest, oldgrowth); the camera's own if not given
+  --people-ahead M      the first row M metres ahead (default 3.5)
+  --people-stride V     caught mid stride at V metres a second (default standing)
+  --people-turn DEG     turned DEG degrees from facing the camera (90 shows them side on)
+  --people-age A        all child, adult or elder after the household
+  --people-far          drawn as they are from far off, in a few boxes each
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
@@ -352,6 +365,21 @@ fn parse_args() -> Result<Options> {
             "--figure-bank" => o.figure_bank = value()?.parse()?,
             "--figure-rise" => o.figure_rise = value()?.parse()?,
             "--figure-furl" => o.figure_furl = value()?.parse()?,
+            "--people" => o.shot_people.get_or_insert_default().count = value()?.parse::<usize>()?.min(60),
+            "--people-region" => {
+                let word = value()?;
+                let region = worldgen::settlements::Region::ALL.into_iter().find(|r| r.word() == word);
+                o.shot_people.get_or_insert_default().region = Some(region.ok_or_else(|| anyhow::anyhow!("unknown region {word}"))?);
+            }
+            "--people-ahead" => o.shot_people.get_or_insert_default().ahead = value()?.parse::<f64>()?.clamp(0.5, 300.0),
+            "--people-stride" => o.shot_people.get_or_insert_default().stride = value()?.parse::<f32>()?.clamp(0.0, 8.0),
+            "--people-turn" => o.shot_people.get_or_insert_default().turn = value()?.parse::<f32>()?.to_radians(),
+            "--people-age" => {
+                let word = value()?;
+                let age = [people::Age::Child, people::Age::Adult, people::Age::Elder].into_iter().find(|a| a.word() == word);
+                o.shot_people.get_or_insert_default().only = Some(age.ok_or_else(|| anyhow::anyhow!("unknown age {word}: child, adult or elder"))?);
+            }
+            "--people-far" => o.shot_people.get_or_insert_default().far = true,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
@@ -855,6 +883,8 @@ struct Running {
     particles: Particles,
     /// The crows about the player, and their nests.
     crows: crows::Crows,
+    /// People stood about by `spawn people`, to see them before anyone lives anywhere.
+    people: Vec<people::Standing>,
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
@@ -1134,6 +1164,7 @@ impl Running {
                 p
             },
             crows: crows::Crows::new(world.clone()),
+            people: Vec::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
@@ -2046,6 +2077,7 @@ impl Running {
         let mut held_light = None;
         fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
         self.crows.draw(self.camera.pos, &mut self.props);
+        people::draw_all(&self.people, false, self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2684,6 +2716,10 @@ fn main() -> Result<()> {
         let mut voxels = WorldVoxels::new(world.clone());
         let (biome, leaves, flowers, low, sticks, nests) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
+        let gallery = opts.shot_people.as_ref().map(|g| {
+            let region = g.region.unwrap_or(worldgen::settlements::Region::of(biome));
+            (people::stand_gallery(g, region, settings.seed, camera.pos, camera.yaw, &|x, z| surface_height(&world, x, z)), g.far)
+        });
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
         // The northern lights, if they are out tonight here (or asked for).
@@ -2788,6 +2824,9 @@ fn main() -> Result<()> {
         }
         crows.report(camera.pos);
         crows.draw(camera.pos, &mut props);
+        if let Some((standing, far)) = &gallery {
+            people::draw_all(standing, *far, camera.pos, &mut props);
+        }
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
@@ -3152,6 +3191,14 @@ impl commands::Game for Running {
                 self.reach_timer = 0.0;
                 Ok(word)
             }
+            Spawn::People(n) => {
+                // Of the country here, and new ones for each place they are called to.
+                let region = worldgen::settlements::Region::of(self.world.column(eye.x.floor() as i32, eye.z.floor() as i32).biome);
+                let seed = worldgen::noise::hash2(self.settings.seed, eye.x.floor() as i32, eye.z.floor() as i32);
+                let g = people::Gallery { count: n as usize, region: Some(region), ..Default::default() };
+                self.people = people::stand_gallery(&g, region, seed, eye, self.camera.yaw, &|x, z| surface_height(&self.world, x, z));
+                Ok(format!("{n} people of the {} country stand ahead, a household in front", region.word()))
+            }
         }
     }
 
@@ -3286,6 +3333,10 @@ impl commands::Game for Shot<'_> {
                 format!("a boat afloat {:.0} m ahead", at.with_y(eye.y).distance(eye) / m64(1.0))
             }
             Spawn::Thing(..) => return Err("things can't be set down on a screenshot: spawn camp sets a few down".into()),
+            Spawn::People(n) => {
+                self.opts.shot_people.get_or_insert_default().count = n as usize;
+                format!("{n} people stand ahead, a household in front")
+            }
         })
     }
 
