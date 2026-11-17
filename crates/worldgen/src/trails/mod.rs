@@ -293,6 +293,9 @@ pub struct Network {
     /// villages, then hamlets. Each stands about a green, a pad after the landmarks' own
     /// (so [`Self::gather`] finds it), and is a node of the trails as a landmark is.
     pub settlements: Vec<crate::settlements::Settlement>,
+    /// Where smoke leaves every lived-in home with a fire: the top of each chimney or
+    /// smoke hole, in continent-local voxels. The game sends chimney smoke up from here.
+    pub chimneys: Vec<Vec3>,
 }
 
 impl Network {
