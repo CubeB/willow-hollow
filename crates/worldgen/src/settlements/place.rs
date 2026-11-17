@@ -78,6 +78,8 @@ struct Spot {
     /// As a town; below zero, not fit for one.
     town: f32,
     reason: Reason,
+    /// Within reach of the sea.
+    sea: bool,
 }
 
 /// The continent map, read for settling.
@@ -329,7 +331,7 @@ impl<'a> Map<'a> {
         } else {
             Reason::Open
         };
-        Some(Spot { cell: i, score, town, reason })
+        Some(Spot { cell: i, score, town, reason, sea })
     }
 
     /// Square kilometres of ground people could live on.
@@ -693,9 +695,17 @@ pub fn place(c: &Continent, world_seed: u32, comp: &[u32]) -> Placed {
 
     let mut by_town: Vec<Spot> = spots.iter().filter(|s| s.town >= 0.0).copied().collect();
     by_town.sort_by(|a, b| b.town.total_cmp(&a.town).then(a.cell.cmp(&b.cell)));
+    // The biggest rivers are biggest at their mouths, so the best ground for a town is
+    // nearly always by the sea. Once one town has its port, the next stands inland where
+    // it can, where rivers meet or a big one is crossed, so that not every town is a port.
+    let inland: Vec<Spot> = by_town.iter().filter(|s| !s.sea).copied().collect();
     for k in 0..towns {
         let kind = if great && k == 0 { Kind::GreatTown } else { Kind::Town };
-        try_place(&mut chosen, &by_town, kind, None, &|chosen, p| far_from(chosen, p, TOWN_GAP));
+        let apart = |chosen: &[Chosen], p: Vec2| far_from(chosen, p, TOWN_GAP);
+        let port = chosen.iter().any(|c| c.kind >= Kind::Town && c.spot.sea);
+        if !(port && try_place(&mut chosen, &inland, kind, None, &apart)) {
+            try_place(&mut chosen, &by_town, kind, None, &apart);
+        }
     }
     // Each village in turn on the best ground left, favouring ground well away from the
     // settlements already placed, so that they spread over the land rather than
