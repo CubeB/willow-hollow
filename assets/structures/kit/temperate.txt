@@ -3,7 +3,7 @@
 about: Temperate lowland: cob and wattle huts under thatch, timber-framed houses, and stone houses under slate or tile.
 
 hut:
-  footprint: rect 4, round 2
+  footprint: rect 3, round 3
   width: 9 12
   length: 11 15
   thick: 1 2
@@ -11,7 +11,7 @@ hut:
   base: 0 1
   wall height: 5 6
   roof: thatch
-  roof shape: gable 2, hip 2
+  roof shape: gable 1, hip 3
   pitch: 1.0 1.3
   overhang: 1 2
   floor: earth
@@ -20,7 +20,7 @@ hut:
   windows: 0 2
   door width: 2 3
   whitewash: 0.3 rich
-  round corners: 0.5
+  round corners: 0.8
 
 timber:
   footprint: rect 4, l 2 rich

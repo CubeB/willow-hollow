@@ -3,14 +3,15 @@
 about: Wetland: reed huts on stilts, plank houses on stilts, and stone houses on raised plinths, all under reed.
 
 hut:
-  footprint: rect 3, round 1
+  footprint: rect 2, round 2
   width: 9 12
   length: 11 14
   walls: reed 2, wattle 1, plank 1
   base: 0
   wall height: 5 6
   roof: reed
-  roof shape: gable 2, hip 1
+  roof shape: gable 1, hip 2
+  round corners: 0.6
   pitch: 1.1 1.4
   overhang: 1 2
   floor: boards

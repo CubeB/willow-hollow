@@ -3,14 +3,15 @@
 about: Rainforest: raised timber floors under deep palm thatch, and stone-founded houses under palm or tile.
 
 hut:
-  footprint: rect 3, round 1
+  footprint: rect 2, round 1
   width: 9 12
   length: 11 15
   walls: reed 2, plank 1, wattle 1
   base: 0
   wall height: 5 6
   roof: palm
-  roof shape: gable 2, hip 1
+  roof shape: gable 1, hip 2
+  round corners: 0.6
   pitch: 1.2 1.5
   overhang: 2 3
   floor: boards

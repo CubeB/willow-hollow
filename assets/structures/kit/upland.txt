@@ -3,7 +3,7 @@
 about: Upland moor: low drystone huts under turf, timber houses on stone footings, and stone houses under slate.
 
 hut:
-  footprint: rect 4, round 1
+  footprint: rect 3, round 2
   width: 9 12
   length: 11 15
   thick: 2

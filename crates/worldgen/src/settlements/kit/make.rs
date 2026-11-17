@@ -72,6 +72,9 @@ struct House<'a> {
     parapet: i32,
     /// How much the ridge sags at the middle, in voxels.
     sag: f32,
+    /// How full a hut's thatch swells between eaves and top, 0 (a straight slope) to 1:
+    /// steeper at the eaves and rounded over the top, as thick thatch lies.
+    bulge: f32,
     /// Each roof column's lowest and highest voxel, by (x, z).
     roof: BTreeMap<(i32, i32), (i32, i32)>,
     s: Shape,
@@ -136,6 +139,15 @@ pub(super) fn make(spec: &Spec, pal: &Palette, r: &StepRules) -> Building {
     let furniture = 1 + (wealth * 3.0).round() as i32 + (spec.step != Step::Hut) as i32;
     let size = (wealth * 0.8 + rng.unit() * 0.4 - 0.2).clamp(0.0, 1.0);
     let sag = if age > 0.5 { (age - 0.5) * 4.0 } else { 0.0 };
+    // Some huts' thatch swells full and rounded: most round ones and a few hipped ones.
+    // Rolled apart from the rest, so that no other house comes out differently.
+    let swell = unit(crate::noise::hash2(spec.seed ^ 0xb01e, 3, 7));
+    let full = match shape {
+        RoofShape::Cone => 0.6,
+        RoofShape::Hip if spec.step == Step::Hut => 0.35,
+        _ => 0.0,
+    };
+    let bulge = if swell < full { 0.45 + 0.4 * (swell / full) } else { 0.0 };
     let gables = match shape {
         RoofShape::Gable if along_x => [Some(IVec2::NEG_X), Some(IVec2::X)],
         RoofShape::Gable => [Some(IVec2::Y), Some(IVec2::NEG_Y)],
@@ -198,6 +210,7 @@ pub(super) fn make(spec: &Spec, pal: &Palette, r: &StepRules) -> Building {
         courtyard,
         parapet,
         sag,
+        bulge,
         roof: BTreeMap::new(),
         s: Shape::raw(),
         anchors: Vec::new(),
@@ -275,7 +288,15 @@ impl House<'_> {
     fn roof_top(&self, q: IVec2) -> Option<(i32, f32)> {
         let t = 2;
         let oh = self.overhang;
-        let rise = |d: f32| (self.pitch * d).round() as i32;
+        // Straight up the slope, or swelling: steeper from the wall top and rounding over
+        // at the top to the same height. Out over the eaves it runs on straight.
+        let deepest = self.deepest().max(1.0);
+        let k = if self.bulge > 0.0 { self.bulge } else { 0.0 };
+        let rise = |d: f32| {
+            let u = (d / deepest).max(0.0);
+            let swell = self.pitch * deepest * ((1.0 - k) * u + k * (2.0 * u - u * u));
+            (swell + self.pitch * d.min(0.0)).round() as i32
+        };
         match self.shape {
             RoofShape::Flat => self.plan.outer.has(q).then_some((self.plate + 1, 0.0)),
             RoofShape::Cone => {
@@ -671,7 +692,8 @@ impl House<'_> {
     }
 
     /// The roof's covering, weathered with age into patches of older material, and patched
-    /// with new where it is old.
+    /// with new where it is old. Thatch weathers as a whole: a roof is the colour of new
+    /// straw or reed, or once old of weathered, with only a few patches of the other.
     fn cover_voxel(&self, q: IVec3) -> Voxel {
         let (new, old) = match self.cover {
             Cover::Thatch => (mat::THATCH, mat::THATCH_OLD),
@@ -683,6 +705,12 @@ impl House<'_> {
             Cover::Shingle => (mat::SHINGLE, mat::SHINGLE_OLD),
             Cover::Mud => (mat::ROOF_MUD, mat::ROOF_MUD),
         };
+        if matches!(self.cover, Cover::Thatch | Cover::Reed | Cover::Palm) {
+            let weathered = self.age > 0.75;
+            let (most, few) = if weathered { (old, new) } else { (new, old) };
+            let share = if weathered { 0.06 } else { (self.age - 0.45).max(0.0) * 0.25 };
+            return if self.patch(q, 5, 0x0d1d) < share { few } else { most };
+        }
         let worn = self.patch(q, 3, 0x0d1d) < self.age * 0.8;
         let mended = self.age > 0.65 && self.patch(q + IVec3::splat(1), 4, 0x9a7c) < 0.15;
         if worn && !mended { old } else { new }
