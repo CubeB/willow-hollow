@@ -1,3 +1,4 @@
+mod animals;
 mod arena;
 mod audio;
 mod aurora;
