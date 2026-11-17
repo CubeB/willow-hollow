@@ -321,7 +321,7 @@ fn list_buildings() {
         let tree = l.tree.map(|t| t.0);
         println!("{k} {:?} {:?} {:?} at {},{} y {} r {:.0}: lanes {}, tree {tree:?} stands at {:?}, wells {:?}, stalls {}", s.kind, s.region, s.age, s.x, s.z, s.y, s.radius, l.lanes.len(), net.village_trees.get(k).copied().flatten(), l.wells, l.stalls.len());
         for p in plots_of(net, k) {
-            println!("    {:12} {:?} door {} facing {} lo {} hi {} sleeps {} garden {:?}", p.purpose.word(), p.step, p.door, p.facing, p.lo, p.hi, p.sleepers, p.garden);
+            println!("    {:12} {:?} door {} facing {} lo {} hi {} sleeps {} garden {:?} yard {:?} coop {:?}", p.purpose.word(), p.step, p.door, p.facing, p.lo, p.hi, p.sleepers, p.garden, p.yard, p.coop);
         }
     }
     println!("{} stamps, {} buildings, {} chimneys", net.stamp_count(), net.plots.len(), net.chimneys.len());

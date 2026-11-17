@@ -46,6 +46,8 @@ pub const GONE: f32 = 420.0;
 /// near is some 300; past this, the furthest are drawn in a few boxes, and then not at
 /// all, so a settlement's worth of pens beside its people never crowds out the rest.
 pub const BUDGET: usize = 1536;
+/// How near a settlement's edge comes before its animals are stood up, in metres.
+const KEPT_REACH: f64 = 300.0;
 /// How often the squares about the player are looked over for herds, in seconds.
 const LOOK_EVERY: f32 = 1.5;
 
@@ -114,6 +116,10 @@ pub struct Herds {
     at_once: bool,
     /// Look for wild herds at all.
     pub wild: bool,
+    /// Stand up the animals the settlements near keep, in their yards and pastures.
+    pub settled: bool,
+    /// What each settlement near keeps, by its continent and index, worked out once.
+    kept: HashMap<(i32, i32, usize), Vec<fauna::Kept>>,
     /// Draw every animal as from far off.
     pub far: bool,
     /// The animals take no notice of the player: for a still of them at ease near.
@@ -138,6 +144,8 @@ impl Herds {
             worker: None,
             at_once: false,
             wild: true,
+            settled: true,
+            kept: HashMap::new(),
             far: false,
             unseen: false,
             fenced: HashSet::new(),
@@ -150,9 +158,39 @@ impl Herds {
     }
 
     /// Herds for a screenshot: every square decided and all ground read at once, and the
-    /// wild herds only if `wild`.
+    /// wild herds, and the settlements' own animals, only if `wild`.
     pub fn at_once(world: Arc<GameWorld>, wild: bool) -> Self {
-        Herds { at_once: true, wild, ..Herds::new(world) }
+        Herds { at_once: true, wild, settled: wild, ..Herds::new(world) }
+    }
+
+    /// Keeps the animals of the settlements within reach of `player` in their yards and
+    /// pastures (see [`fauna::kept_about`]). Only those of a continent already made.
+    fn keep_settled(&mut self, player: DVec3) {
+        if !self.settled {
+            return;
+        }
+        use worldgen::macro_layout::{MACRO_SIZE, cell_of};
+        let (x, z) = (player.x.floor() as i32, player.z.floor() as i32);
+        let (mx, mz) = cell_of(x, z);
+        let Some(c) = self.world.continent_if_ready(mx, mz) else { return };
+        let here = glam::Vec2::new((x - mx * MACRO_SIZE) as f32, (z - mz * MACRO_SIZE) as f32);
+        let seed = self.world.seed();
+        let reach = m64(KEPT_REACH) as f32;
+        let mut wanted: Vec<fauna::Kept> = Vec::new();
+        for (k, s) in c.trails.settlements.iter().enumerate() {
+            if glam::Vec2::new(s.x as f32, s.z as f32).distance(here) - s.radius > reach {
+                continue;
+            }
+            let pens = self.kept.entry((mx, mz, k)).or_insert_with(|| fauna::kept_about(&c, seed, k));
+            wanted.extend(pens.iter().copied());
+        }
+        // Forget the settlements of other continents, so the map stays small.
+        self.kept.retain(|key, _| (key.0, key.1) == (mx, mz));
+        let flat = |v: glam::Vec2| DVec2::new(v.x as f64, v.y as f64);
+        for p in wanted {
+            let pen = Pen::rect(flat(p.middle), flat(p.half), 0.0, Some(flat(p.gate_toward)));
+            self.keep(p.key, p.kind, p.count, pen);
+        }
     }
 
     fn worker(&mut self) -> &Worker {
@@ -210,6 +248,7 @@ impl Herds {
         if self.look_in <= 0.0 {
             self.look_in = LOOK_EVERY;
             self.look_round(player);
+            self.keep_settled(player);
         }
         let flat = |p: DVec3| DVec2::new(p.x, p.z);
         let gone = m64(GONE as f64);

@@ -350,6 +350,114 @@ pub fn kept_by(s: &Settlement) -> Vec<Kind> {
     out
 }
 
+/// Animals a settlement keeps, and the ground they keep to: hens about a yard's coop, a
+/// sow and her litter in a yard, or a flock or a herd on one of the place's pastures.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Kept {
+    /// The same for these animals every time they are asked for, and no others'.
+    pub key: u64,
+    pub kind: Kind,
+    pub count: usize,
+    /// The ground they keep to: a square of world columns about `middle`, `half` across
+    /// either way, square to the axes.
+    pub middle: Vec2,
+    pub half: Vec2,
+    /// Toward where the way out of it lies: the home's door, or the settlement.
+    pub gate_toward: Vec2,
+}
+
+/// The animals settlement `k` of continent `c` keeps (see [`kept_by`]), and where: hens
+/// (or ducks or geese by water) in the yards with a coop, pigs in some others, and on a
+/// pasture or two (more for a bigger place) a flock or a herd of what grazes there.
+/// `seed` is the world's. The same every time, so the same animals stand in the same
+/// places for every player.
+pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
+    use crate::settlements::{farmland::fields::Crop, layout::Purpose};
+    let net = &c.trails;
+    let Some(s) = net.settlements.get(k) else { return Vec::new() };
+    let (Some(layout), kinds) = (net.layouts.get(k), kept_by(s)) else { return Vec::new() };
+    let origin = Vec2::new((c.desc.mx * MACRO_SIZE) as f32, (c.desc.mz * MACRO_SIZE) as f32);
+    let middle = Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5);
+    let has = |kind: Kind| kinds.contains(&kind);
+    let key = |slot: u32| ((hash2(seed ^ 0x6b65_7074, s.x, s.z) as u64) << 32) | (k as u64) << 12 | slot as u64;
+    let mut out = Vec::new();
+    // The yards.
+    for (n, p) in net.plots[layout.plots.clone()].iter().enumerate() {
+        let Some((lo, hi)) = p.yard else { continue };
+        let roll = unit(hash2(seed ^ 0x79a2, p.origin.x, p.origin.z));
+        let (kind, count) = if p.coop.is_some() {
+            let fowl = if has(Kind::Goose) && roll < 0.15 {
+                Kind::Goose
+            } else if has(Kind::Duck) && roll < 0.35 {
+                Kind::Duck
+            } else {
+                Kind::Chicken
+            };
+            (fowl, 3 + (roll * 1000.0) as usize % 4)
+        } else if p.purpose == Purpose::Home && has(Kind::Pig) && roll < 0.3 {
+            (Kind::Pig, 1 + (roll * 1000.0) as usize % 3)
+        } else {
+            continue;
+        };
+        let (a, b) = (lo.as_vec2(), hi.as_vec2() + 1.0);
+        if (b - a).min_element() < 3.0 {
+            continue;
+        }
+        let door = Vec2::new(p.door.x as f32 + 0.5, p.door.z as f32 + 0.5);
+        out.push(Kept { key: key(n as u32), kind, count, middle: origin + (a + b) * 0.5, half: (b - a) * 0.5, gate_toward: origin + door });
+    }
+    // The pastures: squares wholly within one grazed field, round the place.
+    let grazers: Vec<Kind> = kinds.iter().copied().filter(|k| matches!(k, Kind::Sheep | Kind::Goat | Kind::Cattle | Kind::Ox | Kind::Pony | Kind::Donkey | Kind::Reindeer)).collect();
+    if grazers.is_empty() {
+        return out;
+    }
+    let want = match s.kind {
+        Place::Hamlet => 1,
+        Place::Village => 2,
+        Place::LargeVillage | Place::Town => 3,
+        Place::GreatTown => 4,
+    };
+    let half = Vec2::splat(m(9.0));
+    let field = |p: Vec2| crate::settlements::farmland::plot(c, seed, p.x.floor() as i32, p.y.floor() as i32);
+    let mut taken: Vec<Vec2> = Vec::new();
+    let turn0 = unit(hash2(seed ^ 0x9a57, s.x, s.z)) * std::f32::consts::TAU;
+    'look: for ring in 0..4 {
+        let r = s.radius + m(25.0) + ring as f32 * m(30.0);
+        for d in 0..12 {
+            if taken.len() >= want {
+                break 'look;
+            }
+            let at = middle + Vec2::from_angle(turn0 + d as f32 * std::f32::consts::TAU / 12.0) * r;
+            let Some(f) = field(at) else { continue };
+            if !matches!(f.crop, Crop::Pasture | Crop::Rough) || taken.iter().any(|t| t.distance(at) < m(40.0)) {
+                continue;
+            }
+            let whole = [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)]
+                .iter()
+                .all(|&(x, z)| field(at + half * Vec2::new(x, z)).is_some_and(|g| g.id == f.id));
+            if !whole {
+                continue;
+            }
+            let roll = unit(hash2(seed ^ 0x5eed, at.x as i32, at.y as i32));
+            let mut kind = grazers[(roll * grazers.len() as f32) as usize % grazers.len()];
+            if f.crop == Crop::Rough && has(Kind::Goat) {
+                kind = Kind::Goat;
+            }
+            let count = match kind {
+                Kind::Sheep => 5 + (roll * 997.0) as usize % 5,
+                Kind::Goat | Kind::Reindeer => 4 + (roll * 997.0) as usize % 4,
+                Kind::Cattle => 3 + (roll * 997.0) as usize % 4,
+                Kind::Pony => 3 + (roll * 997.0) as usize % 3,
+                Kind::Ox => 2,
+                _ => 1 + (roll * 997.0) as usize % 3,
+            };
+            taken.push(at);
+            out.push(Kept { key: key(1000 + taken.len() as u32), kind, count, middle: origin + at, half, gate_toward: origin + middle });
+        }
+    }
+    out
+}
+
 /// The side of the square of land each wild herd belongs to, in voxels: one herd at most
 /// to a square.
 pub const SQUARE: i32 = m(256.0) as i32;

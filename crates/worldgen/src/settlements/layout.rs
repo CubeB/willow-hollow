@@ -139,6 +139,10 @@ pub struct Plot {
     /// The bed of the garden behind it, if it has one: continent-local columns from the
     /// first corner to the second, inclusive, dug over, with hurdles a column outside.
     pub garden: Option<(IVec2, IVec2)>,
+    /// The yard beside it, if it has one: continent-local columns, inclusive.
+    pub yard: Option<(IVec2, IVec2)>,
+    /// Where the hen coop stands in its yard, continent-local, if hens are kept there.
+    pub coop: Option<IVec3>,
 }
 
 /// What a settlement is laid out with besides its buildings, for the stages after.
@@ -183,7 +187,7 @@ const SETBACK: f32 = 2.5;
 /// in voxels.
 const GARDEN: i32 = 6;
 const YARD: i32 = 7;
-const HOME_YARD: i32 = 5;
+const HOME_YARD: i32 = 6;
 /// The most a plot's ground may rise across it: it is terraced, but not out of a cliff.
 const PLOT_RISE: f32 = m(3.2);
 /// The most a plot's level may stand above or below its lane, in voxels, so the way up
@@ -669,8 +673,8 @@ impl<'a> Town<'a> {
         let lo = self.centre - reach;
         let fin = Sampler::with_network(self.c, self.seed, lo.x.floor() as i32, lo.y.floor() as i32, (2.0 * reach).ceil() as i32 + 2, net);
         let raised = std::mem::take(&mut self.raised);
-        for r in &raised {
-            self.dress(net, r);
+        for (k, r) in raised.iter().enumerate() {
+            self.dress(net, r, k);
         }
         self.raised = raised;
         self.wells(net, &fin);
@@ -1218,6 +1222,10 @@ impl<'a> Town<'a> {
             let (a, b) = turn_rect(g, t);
             (a + flat(origin), b + flat(origin))
         });
+        let yard = lot.yard.map(|g| {
+            let (a, b) = turn_rect(g, t);
+            (a + flat(origin), b + flat(origin))
+        });
         let owner = Some(self.raised.len());
         for &(at, r) in &spot.discs {
             let mut pad = Pad::plain(at.x, at.y, r, spot.y);
@@ -1269,6 +1277,8 @@ impl<'a> Town<'a> {
             sleepers: want.residents,
             pads: spot.discs.clone(),
             garden,
+            yard,
+            coop: None,
         });
         self.raised.push(Raised { want, lot, spot, origin });
     }
@@ -1344,7 +1354,7 @@ impl<'a> Town<'a> {
 
     /// Sets out a plot's garden, its trade's things in its yard, and what stands
     /// against its walls.
-    fn dress(&mut self, net: &mut Network, r: &Raised) {
+    fn dress(&mut self, net: &mut Network, r: &Raised, k: usize) {
         let (want, t, origin) = (r.want, r.spot.turns, r.origin);
         let b = &r.lot.b;
         // What the building takes in its model space: its solid voxels at the height of
@@ -1428,6 +1438,9 @@ impl<'a> Town<'a> {
             let (lo, hi) = kind.local(region).room(at, ft);
             taken.push((flat(lo), flat(hi) - IVec2::ONE));
             let f = self.fitting(kind, s);
+            if kind == Fitting::ChickenCoop && !f.decayed {
+                self.plots[k].coop = Some(origin + rotate(at, t));
+            }
             let extra = if kind == Fitting::WashingLine && !f.decayed { laundry(&f, s) } else { Vec::new() };
             self.hold(net, &f, origin + rotate(at, t), (ft + t) & 3, extra);
         }
