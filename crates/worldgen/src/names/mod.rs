@@ -16,6 +16,7 @@
 //! ("Greywater Falls", "Bogwatch Ruin", "The Long Reach") are mixed in throughout.
 //! The words themselves are data, in `words.txt`.
 
+pub mod folk;
 mod survey;
 mod words;
 
