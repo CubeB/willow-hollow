@@ -581,7 +581,7 @@ fn settle(c: &Continent, seed: u32, kind: Kind, cell: usize) -> Option<Settled> 
 }
 
 /// What a settlement lives by, from the country about it.
-fn livelihoods(map: &Map, p: Vec2, kind: Kind, coast: bool, buildings: u8) -> Vec<Livelihood> {
+fn livelihoods(map: &Map, p: Vec2, kind: Kind, coast: bool, buildings: u8, roll: impl Fn(u32) -> f32) -> Vec<Livelihood> {
     let k = map.country(p, LIVING);
     let mut out = Vec::new();
     let near = map.water_near(p, m(300.0));
@@ -595,11 +595,17 @@ fn livelihoods(map: &Map, p: Vec2, kind: Kind, coast: bool, buildings: u8) -> Ve
         let biome = Biome::from_u8(map.c.biome[i]);
         map.c.temperature[i] > 0.3 && !matches!(biome, Biome::Desert | Biome::Savanna | Biome::DuneSea)
     };
+    let willows = k.willow >= 0.05 || warm_bank;
     for l in Livelihood::ALL {
         let has = match l {
             Livelihood::Woodcutter => k.wood >= 0.25,
             Livelihood::Sawmill | Livelihood::LoggingCamp => k.wood >= 0.25 && buildings > 15,
-            Livelihood::Weaver | Livelihood::Fletcher => k.willow >= 0.05 || warm_bank,
+            // Baskets are woven in nearly every place where the willows grow thick, and in
+            // about half of those with a few to hand.
+            Livelihood::Weaver => willows && (k.willow >= 0.15 || roll(7) < 0.45),
+            // Arrows are made in fewer, and only where there is game in the woods or on the
+            // open country to shoot (#50).
+            Livelihood::Fletcher => willows && kind >= Kind::Village && (k.dry >= 0.15 || k.wood >= 0.4) && roll(8) < 0.6,
             Livelihood::Fisher => fishing || coast,
             Livelihood::Port => coast && kind >= Kind::Town,
             Livelihood::Hunter => k.dry >= 0.3,
@@ -817,7 +823,7 @@ pub fn place(c: &Continent, world_seed: u32, comp: &[u32]) -> Placed {
         } else {
             0
         };
-        let livelihoods = livelihoods(&map, p, kind, coast, buildings);
+        let livelihoods = livelihoods(&map, p, kind, coast, buildings, r);
         let river = map.water_near(p, m(80.0)).filter(|&(q, _)| q >= BOAT_Q).map(|(_, j)| j);
         placed.settlements.push(Settlement {
             kind,
