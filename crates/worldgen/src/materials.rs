@@ -340,7 +340,29 @@ palette! {
     DRIED_PINK        = (200, 142, 158), Solid, 2;
     DRIED_HERB        = (110, 122,  80), Solid, 2;
     DRIED_BROWN       = (124,  94,  66), Solid, 2;
+    // What the house kit builds homes of (settlements::kit), added last so existing ids
+    // keep their numbers: walls of earth, clay and woven rods, the limewash over them, and
+    // the roofs of each country. None of the roofs is wood to the seasons, so snow never
+    // falls through one into a room (voxel::mesh's `roofs`), even a roof of shingles.
+    COB               = (178, 142,  98), Solid, 2;
+    DAUB              = (206, 188, 152), Solid, 2;
+    WHITEWASH         = (230, 224, 208), Solid, 1;
+    WATTLE            = (126,  98,  66), Solid, 3;
+    MUD_BRICK         = (166, 118,  80), Solid, 2;
+    MUD_PLASTER       = (194, 154, 108), Solid, 1;
+    THATCH_OLD        = (136, 120,  84), Solid, 3;
+    REED_THATCH       = (156, 140, 100), Solid, 3;
+    PALM_THATCH       = (150, 142,  84), Solid, 3;
+    ROOF_TURF         = ( 96, 126,  64), Solid, 3;
+    SHINGLE           = (128, 104,  82), Solid, 2;
+    SHINGLE_OLD       = (126, 122, 114), Solid, 2;
+    ROOF_TILE_OLD     = (128,  80,  64), Solid, 2;
+    ROOF_MUD          = (176, 136,  94), Solid, 1;
 }
+
+/// The materials the house kit roofs with: what keeps the rain and the light off a room,
+/// so that moss and lichen leave what is under them alone (features::moss).
+pub const ROOFING: &[Voxel] = &[THATCH, SLATE, ROOF_TILE, THATCH_OLD, REED_THATCH, PALM_THATCH, ROOF_TURF, SHINGLE, SHINGLE_OLD, ROOF_TILE_OLD, ROOF_MUD];
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.
 pub fn by_name(name: &str) -> Option<Voxel> {
@@ -564,4 +586,6 @@ fn classify(m: &mut Materials) {
             m.set_plant(v, kind);
         }
     }
+    // A turf roof is grass, and dries and yellows with the grass round about.
+    m.set_plant(ROOF_TURF, pk::GROUND);
 }

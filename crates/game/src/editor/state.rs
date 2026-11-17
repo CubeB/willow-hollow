@@ -19,7 +19,10 @@ use worldgen::{
     materials as mat,
 };
 
-use super::view::{self, Grid, Orbit, Vertex};
+use super::{
+    houses,
+    view::{self, Grid, Orbit, Vertex},
+};
 
 /// The lamps there are to look at: the one put up beside the trails, and the posts that
 /// stand at the corners of a landmark. (The old gate lantern is no longer put up.)
@@ -87,6 +90,8 @@ pub enum Showing {
     Landing,
     Lantern(usize),
     Signpost,
+    /// A home of the house kit: a region and a step (see [`houses`]).
+    House(houses::House),
     /// A gallery of settlement props (an index into [`PROP_GALLERIES`]).
     Props(usize),
 }
@@ -193,6 +198,8 @@ pub struct Editor {
     filter: String,
     show_help: bool,
     mats: Materials,
+    /// The house kit's home on view, for what the panel says about it.
+    house: Option<worldgen::settlements::kit::Building>,
     /// The window was asked to close with changes not saved, and is asking what to do.
     pub closing: bool,
     /// Done: the window may close.
@@ -230,6 +237,7 @@ impl Editor {
             filter: String::new(),
             show_help: true,
             mats: mat::build(),
+            house: None,
             closing: false,
             quit: false,
         };
@@ -269,6 +277,7 @@ impl Editor {
         match head {
             "landing" => self.select(Showing::Landing),
             "signpost" => self.select(Showing::Signpost),
+            "house" | "houses" => self.select(Showing::House(houses::named(tail))),
             "props" => self.select(Showing::Props(tail.and_then(|t| PROP_GALLERIES.iter().position(|g| g.1 == t)).unwrap_or(0))),
             "lantern" | "lanterns" => self.select(Showing::Lantern(tail.and_then(|t| t.parse().ok()).unwrap_or(0).min(LAMPS.len() - 1))),
             _ => {
@@ -330,6 +339,7 @@ impl Editor {
             Showing::Landing => format!("Landing, variant {}", self.variant),
             Showing::Lantern(s) => format!("{}, variant {}", lamp_name(LAMPS[s]), self.variant),
             Showing::Signpost => "Signpost".into(),
+            Showing::House(h) => houses::title(h, self.variant),
             Showing::Props(g) => format!("Settlement props: {}, variant {}", PROP_GALLERIES[g].0.to_lowercase(), self.variant),
         }
     }
@@ -381,6 +391,11 @@ impl Editor {
                 (v, f, Vec::new())
             }
             Showing::Signpost => (landmarks::signpost(&local.varied(seed), &[0.4, 2.3, 4.4]), Vec::new(), Vec::new()),
+            Showing::House(h) => {
+                let (b, v, f) = houses::build(h, seed);
+                self.house = Some(b);
+                (v, f, Vec::new())
+            }
             Showing::Props(g) => {
                 let gallery = fittings::gallery(&local.varied(seed), seed, PROP_GALLERIES[g].2);
                 spaces = gallery.spaces;
@@ -953,6 +968,12 @@ impl Editor {
         if ui.selectable_label(self.showing == Showing::Signpost, "Signpost").clicked() {
             chosen = Some(Showing::Signpost);
         }
+        if ui.selectable_label(matches!(self.showing, Showing::House(_)), "Houses").on_hover_text("The house kit's huts, timber houses and stone houses").clicked() {
+            chosen = Some(Showing::House(match self.showing {
+                Showing::House(h) => h,
+                _ => (0, 0),
+            }));
+        }
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Props").strong());
         ui.small("What settlements are furnished and dressed with, each intact and decayed.");
@@ -982,6 +1003,18 @@ impl Editor {
         match self.showing {
             Showing::Generator(k) => self.generator_tools(ui, k),
             Showing::Saved(..) => self.design_tools(ui),
+            Showing::House(h) => {
+                let (next, stepped) = houses::tools(ui, h, &mut self.variant, self.house.as_ref());
+                if let Some(next) = next {
+                    self.select(Showing::House(next));
+                }
+                let air = ui.checkbox(&mut self.show_air, "Show carved air").on_hover_text("The rooms and the way in, drawn as blue boxes").changed();
+                if stepped || air {
+                    self.stale = true;
+                }
+                ui.add_space(6.0);
+                self.layers(ui);
+            }
             Showing::Props(g) => {
                 ui.label("Only to look at: settlements will be furnished with these.");
                 self.preview(ui);

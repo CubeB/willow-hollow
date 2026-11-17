@@ -687,6 +687,11 @@ pub fn gather<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> (HashM
         let path = path.replace('\\', "/");
         let Some((folder, file)) = path.split_once('/') else { continue };
         let Some(stem) = file.strip_suffix(".txt") else { continue };
+        // The house kit's rules live beside the structures but are not structures
+        // (see settlements::kit).
+        if folder == "kit" {
+            continue;
+        }
         let Some(kind) = kind_by_word(folder) else {
             problems.push((path.clone(), format!("`{folder}` is not a kind of structure that can be saved")));
             continue;

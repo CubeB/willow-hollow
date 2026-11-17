@@ -4,6 +4,7 @@
 //! few seeded facts (its kind, age, prosperity, water and livelihoods); everything built
 //! there follows from those facts and from the country it stands in.
 
+pub mod kit;
 pub mod place;
 
 use glam::Vec2;

@@ -309,10 +309,8 @@ const ROOF_REACH: f32 = 8.0;
 fn indoors(voxels: &ColumnVoxels, site: &Site) -> bool {
     site.canopy > 0
         && (1..=m(ROOF_REACH) as i32).any(|dy| {
-            matches!(
-                voxels.voxel(site.air + IVec3::Y * dy),
-                mat::THATCH | mat::SLATE | mat::ROOF_TILE | mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED
-            )
+            let v = voxels.voxel(site.air + IVec3::Y * dy);
+            matches!(v, mat::THATCH | mat::SLATE | mat::ROOF_TILE | mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED) || mat::ROOFING.contains(&v)
         })
 }
 
