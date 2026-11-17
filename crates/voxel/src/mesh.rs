@@ -73,13 +73,107 @@ pub struct PlantBox {
     /// renderer holds, which says between which dates the box is there and when it is in
     /// bud, in flower and gone to seed (a flower's bloom, its leaves, a berry). A box with
     /// one is drawn as a [`plant::FLOWER`](crate::plant::FLOWER) whatever its material,
-    /// and comes and goes a column at a time. See [`season_bits`].
+    /// and comes and goes a column at a time. See [`season_bits`]. A ribbon or a sheet
+    /// keeps more of what it does here instead (see [`Cloth`]).
     pub season: u8,
-    /// 0, or how far a line strung between two posts gives in the wind where this box
-    /// hangs on it: 1 where it is tied fast to 31 in the middle of a long span. The box
-    /// rides the line as it swings, and where it hangs free (`sway_lo` or `sway_hi`) it
-    /// flaps as cloth does: a string of prayer flags. See [`flap_code`].
+    /// 0, or cloth, which moves all over in the wind. From 1 to 31, how far a line strung
+    /// between two posts gives in the wind where this box hangs on it: 1 where it is tied
+    /// fast to 31 in the middle of a long span. The box rides the line as it swings, and
+    /// where it hangs free (`sway_lo` or `sway_hi`) it flaps as cloth does: a string of
+    /// prayer flags. See [`flap_code`]. Its top two bits make it a ribbon or a sheet
+    /// instead: see [`Cloth`].
     pub flap: u8,
+}
+
+/// What kind of cloth a plant box is, as its [`PlantBox::flap`] holds it (and for a ribbon
+/// or a sheet, its [`PlantBox::season`], which cloth has no other use for). The top two
+/// bits of `flap` say which: neither for a line, as prayer flags have always been written,
+/// then a ribbon, then a sheet. [`PlantBox::ribbon`] and [`PlantBox::sheet`] make them;
+/// worldgen's `features::cloth` makes whole ribbons and sheets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cloth {
+    /// Not cloth.
+    None,
+    /// On a line strung between two posts, giving this much there (see [`flap_code`]).
+    Line(u8),
+    /// A length of a ribbon tied by one end: how many cells below the knot the top of
+    /// this length hangs (up to 63), and whether its foot is the ribbon's free end.
+    Ribbon { knot: u8, end: bool },
+    /// A tile of a sheet tied at its corners: how far each corner of the tile gives, from
+    /// 0 where the sheet is tied to [`SHEET_GIVE`], in the order (low x, low z), (high x,
+    /// low z), (high x, high z), (low x, high z); and how big the whole sheet is, 0 to 3,
+    /// for how far it billows.
+    Sheet { gives: [u8; 4], span: u8 },
+}
+
+/// The top two bits of [`PlantBox::flap`], which say what kind of cloth a box is.
+const CLOTH_BITS: u8 = 0xC0;
+const RIBBON: u8 = 0x40;
+const SHEET: u8 = 0x80;
+/// How far a sheet gives where it is held least (see [`Cloth::Sheet`]).
+pub const SHEET_GIVE: u8 = 7;
+/// How far below its knot a ribbon bends, in cells (3 m): below that it would hang on as
+/// it does there.
+pub const RIBBON_BENDS: i32 = 30;
+/// The plant kind a corner of a ribbon or a sheet carries, which the shader knows it by:
+/// ground's. Ground is never foliage, so nothing else that moves in the wind has it, and
+/// with [`flags::FOLIAGE`] and a code in its tag (see [`cloth_code`]) it can only be cloth.
+/// terrain.wgsl draws it as no plant at all, so the seasons leave it alone.
+pub const CLOTH_PLANT: u8 = plant::GROUND;
+
+impl PlantBox {
+    /// What kind of cloth this box is, if any.
+    pub fn cloth(&self) -> Cloth {
+        match self.flap & CLOTH_BITS {
+            _ if self.flap == 0 => Cloth::None,
+            RIBBON => Cloth::Ribbon { knot: self.flap & 63, end: self.season & 1 != 0 },
+            SHEET => Cloth::Sheet {
+                gives: [self.flap & 7, self.flap >> 3 & 7, self.season & 7, self.season >> 3 & 7],
+                span: self.season >> 6,
+            },
+            _ => Cloth::Line(self.flap),
+        }
+    }
+
+    /// This box made into the given cloth; with [`Cloth::None`], a plain box keeping no
+    /// season.
+    pub fn with_cloth(mut self, cloth: Cloth) -> Self {
+        (self.flap, self.season) = match cloth {
+            Cloth::None => (0, 0),
+            Cloth::Line(give) => (give.clamp(1, 31), 0),
+            Cloth::Ribbon { knot, end } => (RIBBON | knot.min(63), end as u8),
+            Cloth::Sheet { gives, span } => {
+                let g = gives.map(|g| g.min(SHEET_GIVE));
+                (SHEET | g[0] | g[1] << 3, g[2] | g[3] << 3 | span.min(3) << 6)
+            }
+        };
+        self
+    }
+
+    /// A length of a ribbon (see [`Cloth::Ribbon`]).
+    pub fn ribbon(lo: [i32; 3], hi: [i32; 3], voxel: crate::Voxel, knot: u8, end: bool) -> Self {
+        Self { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 }.with_cloth(Cloth::Ribbon { knot, end })
+    }
+
+    /// A tile of a sheet (see [`Cloth::Sheet`]).
+    pub fn sheet(lo: [i32; 3], hi: [i32; 3], voxel: crate::Voxel, gives: [u8; 4], span: u8) -> Self {
+        Self { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 }.with_cloth(Cloth::Sheet { gives, span })
+    }
+}
+
+/// What a corner of a ribbon or a sheet carries to the shader, in the six bits a leaf
+/// keeps its tree's tag in (see [`tag_bits`]), on a vertex with [`flags::FOLIAGE`] and
+/// plant kind [`CLOTH_PLANT`]. A ribbon's has bit 5 clear and 1 more than how many cells
+/// below the knot the corner hangs (`below`, up to [`RIBBON_BENDS`]), so it is never 0. A
+/// sheet's has bit 5 set, how big the sheet is in bits 3 and 4, and how far the corner
+/// gives in the low three (`corner`, numbered as [`Cloth::Sheet`] lists them).
+/// `cloth_motion` in terrain.wgsl reads it back. Anything else carries 0.
+pub fn cloth_code(cloth: Cloth, below: i32, corner: usize) -> u8 {
+    match cloth {
+        Cloth::Ribbon { .. } => 1 + below.clamp(0, RIBBON_BENDS) as u8,
+        Cloth::Sheet { gives, span } => 32 | span.min(3) << 3 | gives[corner & 3].min(SHEET_GIVE),
+        _ => 0,
+    }
 }
 
 /// What a corner of a box on a line ([`PlantBox::flap`]) carries to the shader, in the six
@@ -732,6 +826,22 @@ fn split_at_voxels(b: &PlantBox, mats: &Materials, out: &mut Vec<Piece>) {
                 let (mut a, mut c) = (p, p);
                 a.hi[axis] = cut;
                 c.lo[axis] = cut;
+                // A sheet's tile cut across gives at the cut as the sheet does there.
+                if let Cloth::Sheet { gives: [g0, g1, g2, g3], span } = p.cloth()
+                    && axis != 1
+                {
+                    let f = (cut - p.lo[axis]) as f32 / (p.hi[axis] - p.lo[axis]) as f32;
+                    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f).round() as u8;
+                    let (ga, gc) = if axis == 0 {
+                        let (lo, hi) = (mix(g0, g1), mix(g3, g2));
+                        ([g0, lo, hi, g3], [lo, g1, g2, hi])
+                    } else {
+                        let (lo, hi) = (mix(g0, g3), mix(g1, g2));
+                        ([g0, g1, hi, lo], [lo, hi, g2, g3])
+                    };
+                    a = a.with_cloth(Cloth::Sheet { gives: ga, span });
+                    c = c.with_cloth(Cloth::Sheet { gives: gc, span });
+                }
                 // Each piece keeps the skin insets of the faces it still has.
                 a.thin &= !(1 << (2 * axis));
                 c.thin &= !(1 << (2 * axis + 1));
@@ -830,8 +940,19 @@ pub fn add_plants<'a>(
     if !cut.is_empty() {
         let lasting = lasting(chunk, mats);
         for piece in &mut cut {
+            let woven = match piece.b.cloth() {
+                // A length of ribbon shows its top only at the knot and its foot only at the
+                // free end: between, the next length covers them.
+                Cloth::Ribbon { knot, end } => {
+                    piece.hidden |= ((knot > 0) as u8) << 2 | (!end as u8) << 3;
+                    true
+                }
+                Cloth::Sheet { .. } => true,
+                _ => false,
+            };
             for face in 0..6 {
-                if buried(&piece.b, face, origin, &lasting) {
+                // Cloth moving all over leaves whatever it lay against.
+                if !woven && buried(&piece.b, face, origin, &lasting) {
                     piece.hidden |= 1 << face;
                 }
             }
@@ -883,6 +1004,11 @@ pub fn add_plants<'a>(
             if kind == plant::NONE && (b.flap != 0 || b.sway_lo || b.sway_hi) {
                 color &= !TAG_BITS;
             }
+            // A ribbon or a sheet moves its own way, and is marked out by a plant kind of
+            // its own (CLOTH_PLANT).
+            let cloth = b.cloth();
+            let woven = matches!(cloth, Cloth::Ribbon { .. } | Cloth::Sheet { .. });
+            let drawn = if woven { CLOTH_PLANT } else { kind };
             let vertex = |i: usize| {
                 let mut cell = [0i32; 3];
                 cell[n_axis] = n;
@@ -912,13 +1038,27 @@ pub fn add_plants<'a>(
                     }
                 }
                 // Darker where a rooted stem meets the ground.
-                let ao = if !at_top && !b.sway_lo { 1 } else { 3 };
+                let ao = if !at_top && !b.sway_lo && !woven { 1 } else { 3 };
                 let sways = if at_top { b.sway_hi } else { b.sway_lo };
-                // A box on a line moves all over, with the line.
+                // A box on a line moves all over, with the line, and so does other cloth.
                 let fl = ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)
                     | if open { flags::SKY } else { 0 }
                     | if sways || b.flap != 0 { flags::FOLIAGE } else { 0 }
-                    | kind << flags::PLANT_SHIFT;
+                    | drawn << flags::PLANT_SHIFT;
+                let code = match cloth {
+                    Cloth::None => season_bits(b.season),
+                    Cloth::Line(_) => tag_bits(flap_code(b.flap, sways)),
+                    Cloth::Ribbon { knot, .. } => tag_bits(cloth_code(cloth, knot as i32 + b.hi[1] - cell[1], 0)),
+                    Cloth::Sheet { .. } => {
+                        let corner = match (cell[0] == b.hi[0], cell[2] == b.hi[2]) {
+                            (false, false) => 0,
+                            (true, false) => 1,
+                            (true, true) => 2,
+                            (false, true) => 3,
+                        };
+                        tag_bits(cloth_code(cloth, 0, corner))
+                    }
+                };
                 // A corner on the box's far edge, exactly on a voxel boundary, belongs to the
                 // voxel before it. With a quarter set, the same bit is a half step instead.
                 let mut corner = 0u32;
@@ -927,7 +1067,7 @@ pub fn add_plants<'a>(
                 }
                 Vertex {
                     a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | ao << 21 | frac[0] << 23 | frac[1] << 25 | frac[2] << 27 | corner << 29,
-                    b: color | if b.flap != 0 { tag_bits(flap_code(b.flap, sways)) } else { season_bits(b.season) } | (fl as u32) << 24,
+                    b: color | code | (fl as u32) << 24,
                 }
             };
             let order = if positive { [0, 1, 2, 3] } else { [0, 3, 2, 1] };
@@ -1214,6 +1354,90 @@ mod tests {
                 assert_eq!(fl & flags::FOLIAGE != 0, y == 5, "only a rod's free end sways");
                 assert_eq!(tag_of(v.b), 0, "a rod is not taken for a flag");
             }
+        }
+    }
+
+    #[test]
+    fn cloth_reads_back_as_it_was_made_and_a_line_as_it_always_was() {
+        let (_, stone, _) = mats();
+        let plain = PlantBox { lo: [0; 3], hi: [1; 3], voxel: stone, sway_lo: false, sway_hi: false, thin: 0, season: 9, flap: 0 };
+        assert_eq!(plain.cloth(), Cloth::None);
+        for give in 1..=31 {
+            assert_eq!(PlantBox { flap: give, season: 0, ..plain }.cloth(), Cloth::Line(give));
+        }
+        for cloth in [
+            Cloth::Ribbon { knot: 0, end: false },
+            Cloth::Ribbon { knot: 63, end: true },
+            Cloth::Sheet { gives: [0, 7, 3, 5], span: 3 },
+            Cloth::Sheet { gives: [7, 0, 0, 1], span: 0 },
+        ] {
+            assert_eq!(plain.with_cloth(cloth).cloth(), cloth);
+        }
+        // Every code a ribbon or a sheet carries is one, and they never meet.
+        let ribbon = |below| cloth_code(Cloth::Ribbon { knot: 0, end: false }, below, 0);
+        assert_eq!((ribbon(-3), ribbon(0), ribbon(12), ribbon(99)), (1, 1, 13, 1 + RIBBON_BENDS as u8));
+        assert!(ribbon(99) < 32);
+        let sheet = cloth_code(Cloth::Sheet { gives: [0, 7, 2, 4], span: 2 }, 0, 1);
+        assert_eq!(sheet, 32 | 2 << 3 | 7);
+        assert_eq!(cloth_code(Cloth::Line(5), 3, 1), 0);
+    }
+
+    /// Each corner of a mesh's cloth: where it is in cells, its plant kind and its code.
+    fn cloth_corners(mesh: &ChunkMesh) -> Vec<([i32; 3], u8, u8)> {
+        mesh.opaque
+            .iter()
+            .map(|v| {
+                let fine = |shift: u32, frac: u32| (((v.a >> shift) & 63) * 4 + ((v.a >> frac) & 3)) as i32;
+                let fl = (v.b >> 24) as u8;
+                assert!(fl & flags::FOLIAGE != 0, "all cloth moves");
+                assert_eq!((v.a >> 21) & 3, 3, "cloth hangs free, unshaded");
+                ([fine(0, 23), fine(6, 25), fine(12, 27)], fl >> flags::PLANT_SHIFT, tag_of(v.b))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_ribbon_carries_how_far_each_corner_hangs_below_its_knot() {
+        let (m, stone, _) = mats();
+        let c = PaddedChunk::new();
+        // Two lengths of a ribbon tied at cell height 30, the second its free end.
+        let a = PlantBox::ribbon([5, 29, 2], [7, 30, 3], stone, 0, false);
+        let b = PlantBox::ribbon([5, 28, 2], [7, 29, 3], stone, 1, true);
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, [a, b].iter(), &c, [0, 0, 0], &m, &[]);
+        let corners = cloth_corners(&mesh);
+        // Four sides each, the knot's top and the free end's foot; none between.
+        assert_eq!(corners.len(), (4 + 4 + 2) * 4);
+        for (p, kind, code) in corners {
+            assert_eq!(kind, CLOTH_PLANT);
+            assert_eq!(code as i32, 1 + 30 - p[1], "at {p:?}");
+        }
+    }
+
+    #[test]
+    fn a_sheet_carries_how_far_each_corner_gives_even_where_it_is_cut() {
+        let (m, stone, _) = mats();
+        let c = PaddedChunk::new();
+        // A tile across a voxel's edge (cells 6 to 10 along x), cut there in two.
+        let tile = PlantBox::sheet([6, 20, 0], [10, 21, 4], stone, [0, 4, 6, 2], 1);
+        let mut mesh = ChunkMesh::default();
+        add_plants(&mut mesh, [tile].iter(), &c, [0, 0, 0], &m, &[]);
+        let corners = cloth_corners(&mesh);
+        assert!(!corners.is_empty());
+        for (p, kind, code) in corners {
+            assert_eq!(kind, CLOTH_PLANT);
+            assert_eq!(code & !7, 32 | 1 << 3);
+            let want = match (p[0], p[2]) {
+                (6, 0) => 0,
+                (10, 0) => 4,
+                (10, 4) => 6,
+                (6, 4) => 2,
+                // At the cut, half way along each edge.
+                (8, 0) => 2,
+                (8, 4) => 4,
+                other => panic!("a corner at {other:?}"),
+            };
+            assert_eq!(code & 7, want, "at {p:?}");
         }
     }
 

@@ -294,6 +294,20 @@ there (`PlantBox::flap`), and `flap_motion` in terrain.wgsl swings the line and
 flutters each flag's free edge in the wind, each at its own phase. Motion does not show
 in one shot: take two with different `VOXEL_CLOCK` values and compare them.
 
+Two other kinds of cloth move in the wind (`features/cloth.rs`), made of fine boxes in
+cells like the flags. A ribbon tied by one end (`cloth::ribbon`) hangs from its knot in
+still air, leans out downwind the harder it blows and flutters most at its free end. A
+sheet tied at its corners (`cloth::sheet`, for sail shades and awnings) billows up and
+down between them and ripples at its free edges; it lies smoothest tied level, since a
+slope is built in steps a cell high. Cloth is told from flags and plants by the ground's
+plant kind, which nothing that sways otherwise has, with a code in the colour's tag:
+for a ribbon how far below its knot that corner hangs, for a sheet how far it gives
+there and how big it is (`mesh::cloth_code`, read by `cloth_motion` in terrain.wgsl).
+What it was made as is kept in `PlantBox::flap` and `season` (`PlantBox::cloth`), and a
+sheet's corners turn with the model it belongs to (`parts::place_fine`). Ribbons hang
+from the tie beam of a shrine's stone gate, and a camp in desert or savanna has a sail
+shade over its bench. Cloth casts a shadow that stays still, as the flags' do.
+
 **Bees' and wasps' nests** (`crates/worldgen/src/features/nests.rs`) belong to the trees
 and boulders they are in, chosen by a hash of where each stands: a colony of bees in a
 hollow of an old tree or a crevice in a boulder, a wasps' globe under a branch.

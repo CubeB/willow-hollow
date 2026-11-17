@@ -10,6 +10,7 @@ pub mod aquatic;
 pub mod attach;
 pub mod cave;
 pub mod climber;
+pub mod cloth;
 pub mod designs;
 pub mod landmarks;
 pub mod moorstones;

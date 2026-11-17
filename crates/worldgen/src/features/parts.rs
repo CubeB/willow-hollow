@@ -101,13 +101,13 @@ pub fn rotate_box(lo: IVec3, hi: IVec3, turns: u32) -> (IVec3, IVec3) {
 }
 
 /// Moves fine parts made in model space to where the model stands: turned, then with
-/// model voxel 0 at voxel `origin`.
+/// model voxel 0 at voxel `origin`. A sheet of cloth's corners turn with it.
 pub fn place_fine(parts: &[PlantBox], origin: IVec3, turns: u32) -> Vec<PlantBox> {
     parts
         .iter()
         .map(|b| {
             let (lo, hi) = rotate_box(IVec3::from_array(b.lo), IVec3::from_array(b.hi), turns);
-            PlantBox { lo: (lo + origin * CELLS).to_array(), hi: (hi + origin * CELLS).to_array(), ..*b }
+            PlantBox { lo: (lo + origin * CELLS).to_array(), hi: (hi + origin * CELLS).to_array(), ..super::cloth::turned(b, turns) }
         })
         .collect()
 }

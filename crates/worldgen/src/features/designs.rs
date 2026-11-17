@@ -352,7 +352,8 @@ impl Design {
                 sway_lo: b.sway_lo,
                 sway_hi: b.sway_hi,
                 thin: b.thin,
-                season: b.season,
+                // A design keeps no cloth, and what cloth keeps here is not a season.
+                season: if b.cloth() == voxel::mesh::Cloth::None { b.season } else { 0 },
             });
         }
         d
