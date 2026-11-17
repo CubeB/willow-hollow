@@ -21,6 +21,7 @@ use worldgen::{
     settlements::{
         Region,
         kit::{self, Building, Rules, Spec, Step},
+        special::{self, Built, Facts, SpecialSpec},
     },
 };
 
@@ -73,24 +74,60 @@ pub fn palette(region: Region, variant: u32) -> Palette {
     Palette::local(biome, mat::bedrock(biome).0).varied(variant)
 }
 
-/// What a settlement building is shown as until stage 3 (#203) brings its generator: a
-/// plain home of the kit for a building people go into, of the step, wealth and beds
-/// below; and nothing at all, an empty plot, for a well head or a gate, which the kit has
-/// nothing like. Its age comes from the variant.
-pub fn stand_in(kind: Special, region: Region, variant: u32) -> Option<Spec> {
-    let (step, wealth, sleepers) = match kind {
-        // Rooms for travellers.
-        Special::Tavern => (Step::Timber, 0.7, 6),
-        // Stone, for the fire; nobody sleeps in a forge.
-        Special::Smithy => (Step::Stone, 0.5, 0),
-        Special::Sawmill => (Step::Timber, 0.4, 0),
-        Special::Granary => (Step::Timber, 0.3, 0),
-        Special::MarketHall => (Step::Stone, 1.0, 0),
-        Special::GuildHouse => (Step::Stone, 0.9, 2),
-        Special::WellHead | Special::Gate => return None,
-    };
-    let age = unit(hash2(variant ^ 0x5a1d_57e5, 1, 0));
-    Some(Spec { region, step, age, wealth, sleepers, seed: variant })
+/// What variant `variant` asks of a settlement building's generator (`settlements::special`)
+/// in `region`: its age and wealth, the side of a sawmill's stream (none every fourth
+/// variant, which saws over a pit), and the facts a guild house's guilds come from.
+/// Nothing for a well head or a gate, which have no generator: an empty plot.
+pub fn special(kind: Special, region: Region, variant: u32) -> Option<SpecialSpec> {
+    if !special::MADE.contains(&kind) {
+        return None;
+    }
+    let h = |k: i32| unit(hash2(variant ^ 0x5a1d_57e5, k, 0));
+    let stream = [None, Some(IVec3::Z), Some(IVec3::NEG_Z), Some(IVec3::NEG_X)][(variant % 4) as usize];
+    let facts = Facts { willows: h(3) < 0.5, stone: h(4) < 0.5, trade: h(5) < 0.5, colour: h(6) < 0.4 };
+    Some(SpecialSpec { which: kind, region, age: h(1), wealth: h(2), seed: variant, stream, facts })
+}
+
+/// A settlement building of the generator, of the stone and timber of its region's
+/// country, as variant `variant` has it.
+pub fn build_special(kind: Special, region: Region, variant: u32) -> Option<Built> {
+    special::build(&special(kind, region, variant)?, &palette(region, variant))
+}
+
+/// The settlement building on view as a structure of one's own, named `name`.
+pub fn copy_special(kind: Special, region: Region, variant: u32, name: &str) -> Option<Design> {
+    special::copy(&special(kind, region, variant)?, &palette(region, variant), name)
+}
+
+/// What a settlement building has that a home has not, in a line: its guest beds, its
+/// fire, its wheel or its guilds.
+pub fn special_notes(b: &Built) -> String {
+    let mut out = vec![format!("{} beds, {} places for furniture, {} windows", b.building.inside.beds.len(), b.building.inside.furniture.len(), b.building.inside.windows.len())];
+    if !b.guest_beds.is_empty() {
+        out.push(format!("{} of them let to travellers", b.guest_beds.len()));
+    }
+    if b.fire.is_some() {
+        out.push("a fire always alight".into());
+    }
+    if let Some(w) = b.wheel {
+        out.push(format!("a water wheel {} voxels across on the {} side", w.radius * 2 + 1, side_word(w.side)));
+    }
+    if !b.guilds.is_empty() {
+        out.push(format!("the guilds of {}", b.guilds.iter().map(|g| g.name()).collect::<Vec<_>>().join(", ")));
+    }
+    let (w, d) = (b.building.footprint.hi - b.building.footprint.lo + 1).into();
+    out.push(format!("{w} by {d} voxels in all"));
+    out.join("; ")
+}
+
+/// A side of a building as built, door at +X, in words.
+fn side_word(d: IVec3) -> &'static str {
+    match (d.x.signum(), d.z.signum()) {
+        (1, _) => "front",
+        (-1, _) => "back",
+        (_, 1) => "right",
+        _ => "left",
+    }
 }
 
 /// A household set by hand: each of its age, wealth and number sleeping there, or `None`
@@ -256,12 +293,6 @@ impl Houses {
     pub fn copy(&self, house: House, variant: u32, name: &str) -> Design {
         let s = self.spec(house, variant);
         kit::copy(&s, &palette(s.region, variant), self.kit.rules(s.region), Kind::House(s.region, s.step), name)
-    }
-
-    /// A settlement building's stand-in (see [`stand_in`]) built of `pal`, if it has one.
-    pub fn stand_in(&self, kind: Special, region: Region, variant: u32, pal: &Palette) -> Option<Building> {
-        let s = stand_in(kind, region, variant)?;
-        Some(kit::generate(&s, pal, self.kit.rules(region)))
     }
 
     /// The region, step, variant and household to show, and what the variant made.

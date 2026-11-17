@@ -11,7 +11,7 @@ use voxel::{AIR, Materials, Voxel, mesh::PlantBox};
 use worldgen::{
     biome::Biome,
     features::{
-        designs::{self, Cell, Design, Kind, Role},
+        designs::{self, Cell, Design, Kind, Role, Special},
         fittings::{self, Group},
         landmarks::{self, Landmark, Palette},
         parts::{self, LampStyle},
@@ -186,6 +186,9 @@ pub struct Editor {
     pub showing: Showing,
     pub variant: u32,
     pub place: usize,
+    /// The region a settlement building's generator builds in, as an index into
+    /// [`Region::ALL`]: it is built of that region's own country, as the kit's homes are.
+    pub region: usize,
     pub tool: Tool,
     pub brush: Cell,
     pub mirror_x: bool,
@@ -220,6 +223,8 @@ pub struct Editor {
     /// The home is shown furnished, and who lives there.
     furnished: bool,
     household: String,
+    /// What the settlement building on view has besides its rooms, in a line.
+    special_notes: String,
     /// The window was asked to close with changes not saved, and is asking what to do.
     pub closing: bool,
     /// Done: the window may close.
@@ -230,13 +235,15 @@ impl Editor {
     pub fn new(opts: &Options) -> Self {
         let dir = opts.dir.clone().unwrap_or_else(default_dir);
         let houses = houses::Houses::new(&dir);
+        let place = opts.place.unwrap_or(0).min(PLACES.len() - 1);
         let mut e = Editor {
             dir,
             kinds: Vec::new(),
             problems: Vec::new(),
             showing: Showing::Generator(0),
             variant: opts.variant.unwrap_or(1),
-            place: opts.place.unwrap_or(0).min(PLACES.len() - 1),
+            place,
+            region: Region::ALL.iter().position(|&r| r == Region::of(PLACES[place].1)).unwrap_or(0),
             tool: Tool::Build,
             brush: Cell::Role(Role::Stone),
             mirror_x: false,
@@ -263,6 +270,7 @@ impl Editor {
             walk: None,
             furnished: opts.furnished,
             household: String::new(),
+            special_notes: String::new(),
             closing: false,
             quit: false,
         };
@@ -333,6 +341,12 @@ impl Editor {
                     self.message = format!("There is no kind of structure called {head}");
                     return;
                 };
+                // A settlement building's generator in a region: `tavern/desert`.
+                if matches!(self.kinds[k].kind, Kind::Special(_))
+                    && let Some(r) = tail.and_then(|t| Region::ALL.iter().position(|r| r.word() == t))
+                {
+                    self.region = r;
+                }
                 self.select(match saved(self, k) {
                     Some(i) => Showing::Saved(k, i),
                     None => Showing::Generator(k),
@@ -394,21 +408,28 @@ impl Editor {
     fn shown_palette(&self) -> Palette {
         match self.building_kind() {
             Some(Kind::House(region, _)) => houses::palette(region, self.variant),
+            _ if self.special_shown().is_some() => houses::palette(Region::ALL[self.region], self.variant),
             _ => self.palette().varied(self.variant),
         }
     }
 
-    /// The region of the place a structure is seen in.
-    fn place_region(&self) -> Region {
-        Region::of(PLACES[self.place].1)
+    /// The settlement building whose generator is on view, if one is.
+    fn special_shown(&self) -> Option<Special> {
+        match self.showing {
+            Showing::Generator(k) => match self.kinds[k].kind {
+                Kind::Special(s) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// The name shown for what is on view.
     pub fn title(&self) -> String {
         match self.showing {
             Showing::Generator(k) => match self.kinds[k].kind {
-                Kind::Special(s) if houses::stand_in(s, self.place_region(), 0).is_none() => format!("{}: an empty plot until it has a generator", s.label()),
-                Kind::Special(s) => format!("{}: the kit's stand-in, variant {}", s.label(), self.variant),
+                Kind::Special(s) if houses::special(s, Region::ALL[self.region], 0).is_none() => format!("{}: an empty plot, which has no generator", s.label()),
+                Kind::Special(s) => format!("{}: the generator's own, {}, variant {}", s.label(), houses::region_label(Region::ALL[self.region]).to_lowercase(), self.variant),
                 kind => format!("{}: the generator's own, variant {}", folder_label(kind), self.variant),
             },
             Showing::Saved(k, i) => {
@@ -468,10 +489,12 @@ impl Editor {
         self.walk = None;
         let (mut voxels, mut fine, props) = match self.showing {
             Showing::Generator(k) => match self.kinds[k].kind {
-                Kind::Special(s) => match self.houses.stand_in(s, self.place_region(), seed, &local.varied(seed)) {
+                Kind::Special(s) => match houses::build_special(s, Region::ALL[self.region], seed) {
                     Some(b) => {
-                        let (v, f) = (b.voxels.clone(), b.fine.clone());
-                        self.house = Some(b);
+                        let (v, f) = (b.building.voxels.clone(), b.building.fine.clone());
+                        self.walk = Some(kit::walk(&b.building));
+                        self.special_notes = houses::special_notes(&b);
+                        self.house = Some(b.building);
                         (v, f, Vec::new())
                     }
                     None => (Vec::new(), Vec::new(), Vec::new()),
@@ -624,6 +647,10 @@ impl Editor {
             let red = [255, 80, 60];
             for (n, bed) in b.inside.beds.iter().enumerate() {
                 let (lo, hi) = bed.cells().fold((IVec3::MAX, IVec3::MIN), |(a, c), q| (a.min(q), c.max(q)));
+                // Those on a floor cut away are not outlined over the one looked at.
+                if self.cut.is_some_and(|cut| lo.y > cut) {
+                    continue;
+                }
                 let rgb = if walk.cut_off.contains(&n) { red } else { [240, 200, 90] };
                 view::cuboid(&mut out, lo.as_vec3() + Vec3::splat(0.06), hi.as_vec3() + Vec3::new(0.94, 0.45, 0.94), rgb, 0.7, view::OUTLINE, false);
             }
@@ -824,11 +851,9 @@ impl Editor {
                     (k, Design::copy_of(kind, &self.palette().varied(self.variant), self.variant, &name))
                 }
                 Kind::Special(s) => {
-                    let name = named(self, format!("{} {}", s.label(), self.variant));
-                    let design = match houses::stand_in(s, self.place_region(), self.variant) {
-                        Some(spec) => kit::copy(&spec, &self.palette().varied(self.variant), self.houses.kit.rules(spec.region), Kind::Special(s), &name),
-                        None => Design::new(Kind::Special(s), &name),
-                    };
+                    let region = Region::ALL[self.region];
+                    let name = named(self, format!("{} {} {}", houses::region_label(region), s.label().to_lowercase(), self.variant));
+                    let design = houses::copy_special(s, region, self.variant, &name).unwrap_or_else(|| Design::new(Kind::Special(s), &name));
                     (k, design)
                 }
                 Kind::House(..) => return,
@@ -898,7 +923,7 @@ impl Editor {
                 // Read back, to be sure what was written is what is drawn.
                 match Design::parse(&text) {
                     Ok(_) if shut.is_some() => format!("Saved {}, but: {} The tests hold every saved house to being walked into.", short(&entry.path), shut.unwrap_or_default()),
-                    Ok(back) if back == entry.design && matches!(back.kind, Kind::Special(_)) => format!("Saved {}. The world does not build these yet: their generators come with stage 3.", short(&entry.path)),
+                    Ok(back) if back == entry.design && matches!(back.kind, Kind::Special(_)) => format!("Saved {}. The world builds its settlements' own of these, not saved ones, for now.", short(&entry.path)),
                     Ok(back) if back == entry.design => format!("Saved {}. Build the game again to see it in the world.", short(&entry.path)),
                     Ok(_) => format!("Saved {}, but it reads back differently: please report this.", short(&entry.path)),
                     Err(e) => format!("Saved {}, but it does not read back: {e}", short(&entry.path)),
@@ -1115,13 +1140,11 @@ impl Editor {
     fn list(&mut self, ui: &mut egui::Ui) {
         let mut chosen = None;
         // A kind's own and the ones saved of it, under its name.
-        let place = self.place_region();
         let folder = |ui: &mut egui::Ui, k: usize, files: &KindFiles, chosen: &mut Option<Showing>| {
             let open = matches!(self.showing, Showing::Generator(j) | Showing::Saved(j, _) if j == k);
             egui::CollapsingHeader::new(folder_label(files.kind)).id_salt(k).open(open.then_some(true)).show(ui, |ui| {
                 let own = match files.kind {
-                    Kind::Special(s) if houses::stand_in(s, place, 0).is_none() => "An empty plot",
-                    Kind::Special(_) => "The kit's stand-in",
+                    Kind::Special(s) if houses::special(s, Region::Temperate, 0).is_none() => "An empty plot",
                     _ => "The generator's own",
                 };
                 if ui.selectable_label(self.showing == Showing::Generator(k), format!("{own}  (weight {})", files.generator_weight())).clicked() {
@@ -1157,7 +1180,7 @@ impl Editor {
         }
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Settlement buildings").strong());
-        ui.small("Drawn ahead of their generators, which come with stage 3. The world does not build these yet.");
+        ui.small("The tavern, smithy, sawmill and the rest, each in every region's own way. The world builds the generators' own; any you save are kept for when it builds those too.");
         for (k, files) in self.kinds.iter().enumerate().filter(|(_, f)| matches!(f.kind, Kind::Special(_))) {
             folder(ui, k, files, &mut chosen);
         }
@@ -1256,9 +1279,21 @@ impl Editor {
                 self.stale = true;
             }
         });
-        // A house is seen in the country it was copied for, as the kit's own are.
+        // A house is seen in the country it was copied for, as the kit's own are; a
+        // settlement building's generator builds in whichever region is chosen.
         if let Some(Kind::House(region, _)) = self.building_kind() {
             ui.small(format!("Seen in its own country: {}.", houses::region_label(region).to_lowercase()));
+        } else if self.special_shown().is_some() {
+            let mut region = self.region;
+            egui::ComboBox::from_label("Region").selected_text(houses::region_label(Region::ALL[region])).show_ui(ui, |ui| {
+                for (k, r) in Region::ALL.iter().enumerate() {
+                    ui.selectable_value(&mut region, k, houses::region_label(*r));
+                }
+            });
+            if region != self.region {
+                self.region = region;
+                self.stale = true;
+            }
         } else {
             let mut place = self.place;
             egui::ComboBox::from_label("Seen in").selected_text(PLACES[place].0).show_ui(ui, |ui| {
@@ -1298,24 +1333,22 @@ impl Editor {
     fn generator_tools(&mut self, ui: &mut egui::Ui, k: usize) {
         let kind = self.kinds[k].kind;
         let label = folder_label(kind);
-        // A settlement building has no generator until stage 3: the kit stands in for it,
-        // or nothing does.
-        let stand_in = match kind {
-            Kind::Special(s) => Some(houses::stand_in(s, self.place_region(), self.variant)),
+        // A settlement building's generator, or none for a well head or a gate.
+        let made = match kind {
+            Kind::Special(s) => Some(houses::special(s, Region::ALL[self.region], self.variant).is_some()),
             _ => None,
         };
-        match stand_in {
-            Some(Some(spec)) => {
-                ui.label(egui::RichText::new(format!("{label}: the kit's stand-in")).strong());
+        match made {
+            Some(true) => {
+                ui.label(egui::RichText::new(format!("{label}: the generator's own")).strong());
                 ui.small(format!(
-                    "No generator makes a {} yet: stage 3 brings one. Until then a plain {} of the kit stands in for it, of the country it is seen in, to copy and make your own. Its door, beds and hearth are kept with a copy.",
-                    label.to_lowercase(),
-                    spec.step.label().to_lowercase()
+                    "Each variant is another {} of the region chosen: older or newer, poorer or richer, and (for a sawmill) with its stream on another side or none. Copy one to make your own: its door, beds and hearth are kept with a copy.",
+                    label.to_lowercase()
                 ));
             }
-            Some(None) => {
+            Some(false) => {
                 ui.label(egui::RichText::new(format!("{label}: an empty plot")).strong());
-                ui.small(format!("No generator makes a {} yet: stage 3 brings one. The kit has nothing like it, so start one from nothing.", label.to_lowercase()));
+                ui.small(format!("No generator makes a {}: it is not a building anyone goes into. Start one from nothing.", label.to_lowercase()));
             }
             None => {
                 ui.label(egui::RichText::new(format!("{label}: the generator's own")).strong());
@@ -1324,6 +1357,9 @@ impl Editor {
         }
         ui.add_space(4.0);
         self.preview(ui);
+        if made == Some(true) && !self.special_notes.is_empty() {
+            ui.small(self.special_notes.clone());
+        }
         ui.add_space(6.0);
         self.layers(ui);
         ui.add_space(8.0);
@@ -1332,7 +1368,7 @@ impl Editor {
             ui.label("Name");
             ui.add(egui::TextEdit::singleline(&mut self.copy_name).hint_text(format!("{label} {}", self.variant)).desired_width(170.0));
         });
-        if !matches!(stand_in, Some(None)) && ui.button("Copy this variant to edit").on_hover_text("Starts a structure of your own from what is shown").clicked() {
+        if made != Some(false) && ui.button("Copy this variant to edit").on_hover_text("Starts a structure of your own from what is shown").clicked() {
             self.copy_variant();
         }
         if ui.button("Start from nothing").clicked() {
@@ -1350,8 +1386,8 @@ impl Editor {
             }
         });
         ui.small("Each site of this kind is built from the generator or one of your saved ones, chosen in proportion to their weights. Once one is saved, the generator's weight is 0 until you change it here.");
-        if stand_in.is_some() {
-            ui.small("The world does not build these yet; the weights are kept for when it does.");
+        if made.is_some() {
+            ui.small("The world builds the generator's own of these for now; the weights are kept for when it builds saved ones too.");
         }
     }
 
@@ -1496,7 +1532,7 @@ impl Editor {
         let Some(kind) = self.entry().map(|e| e.design.kind) else { return };
         match kind {
             Kind::House(r, s) => ui.small(format!("One of the {} of {} country, chosen against the kit's own of that region and step.", plural(s), houses::region_label(r).to_lowercase())),
-            Kind::Special(_) => ui.small("The world does not build these yet: their generators come with stage 3."),
+            Kind::Special(_) => ui.small("The world builds its settlements' own of these, not saved ones, for now."),
             Kind::Landmark(_) => return,
         };
         let (Some(w), Some(b)) = (&self.walk, &self.house) else { return };
@@ -1562,11 +1598,10 @@ impl Editor {
         if let (Some(b), Some(_)) = (&self.house, &self.walk) {
             label(b.door.floor.as_vec3() + Vec3::new(0.5, 2.6, 0.5) + b.door.facing.as_vec3() * 7.0, "The way in");
         }
-        if let Showing::Generator(k) = self.showing
-            && let Kind::Special(s) = self.kinds[k].kind
-            && houses::stand_in(s, self.place_region(), self.variant).is_none()
+        if let Some(s) = self.special_shown()
+            && houses::special(s, Region::ALL[self.region], self.variant).is_none()
         {
-            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "No generator yet: start one from nothing (on the right)", egui::FontId::proportional(18.0), egui::Color32::WHITE);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "No generator: start one from nothing (on the right)", egui::FontId::proportional(18.0), egui::Color32::WHITE);
         }
         if self.entry().is_some_and(|e| e.design.cells.is_empty()) {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Click on the ground to lay the first voxel", egui::FontId::proportional(18.0), egui::Color32::WHITE);

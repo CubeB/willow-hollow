@@ -1,4 +1,5 @@
-//! Camping: resting by a fire while the day or the night goes by.
+//! Camping: resting by a fire, or in a tavern's guest bed, while the day or the night
+//! goes by.
 //!
 //! Resting is the one way the player moves time. Nothing is skipped: the clock runs
 //! fast, and the sun goes down, the stars wheel over and the weather passes as they
@@ -64,6 +65,12 @@ impl Rest {
         Self { until, lying: until == Until::Dawn, age: 0.0 }
     }
 
+    /// A rest in a bed, as at an inn: lying down, the night slept through after dark, or
+    /// by day, waiting there for the dark as by a fire.
+    pub fn in_bed(env: &Environment) -> Self {
+        Self { lying: true, ..Self::begin(env) }
+    }
+
     /// How many hours go by in the next `dt` seconds of this rest: none once it is over.
     /// It settles into its pace, and eases out of it as the time waited for comes.
     pub fn hours(&mut self, env: &Environment, dt: f32) -> Option<f32> {
@@ -99,6 +106,22 @@ mod tests {
         }
         assert!(gone < 24.0);
         (rest.until, env.time, seconds)
+    }
+
+    #[test]
+    fn a_night_in_a_bed_is_slept_lying_down_until_morning() {
+        for hour in [8.0, 19.5, 23.0] {
+            let env = Environment::at(hour, 0.3);
+            let (fire, bed) = (Rest::begin(&env), Rest::in_bed(&env));
+            assert!(bed.lying, "from {hour}");
+            assert_eq!(bed.until, fire.until, "from {hour}: a bed waits for what a fire would");
+        }
+        let mut env = Environment::at(21.5, 0.3);
+        let mut rest = Rest::in_bed(&env);
+        while let Some(hours) = rest.hours(&env, 1.0 / 30.0) {
+            env = Environment::at(env.time + hours, 0.3);
+        }
+        assert!((5.0..10.0).contains(&env.time), "woke at {}", env.time);
     }
 
     #[test]

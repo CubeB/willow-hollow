@@ -321,6 +321,10 @@ pub struct Network {
     pub planted: Vec<crate::features::Planted>,
     /// The ground trodden bare round each village tree.
     pub rings: Vec<crate::settlements::tree::WornRing>,
+    /// Where a traveller may sleep the night: the middle of each guest bed of every
+    /// tavern, on its boards, in continent-local voxels (see
+    /// [`crate::settlements::special::Built::guest_beds_at`]).
+    pub guest_beds: Vec<Vec3>,
 }
 
 impl Network {

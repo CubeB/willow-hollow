@@ -161,6 +161,11 @@ struct Options {
     /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
+    /// Stand a settlement building of the country (a tavern unless another is named) this
+    /// many metres ahead of the camera, its door toward it, before a screenshot or a run.
+    tavern: Option<(worldgen::features::designs::Special, f64)>,
+    /// With a tavern: on a screenshot, standing at the foot of its first guest bed.
+    bed: bool,
     /// Hold a lit lantern on a screenshot.
     shot_lantern: bool,
     /// Set crows out on a screenshot: feeding on the ground, perched, flying, landing
@@ -226,6 +231,8 @@ impl Default for Options {
             camp_ahead: CAMP_AHEAD,
             shot_chimneys: 0,
             rest: false,
+            tavern: None,
+            bed: false,
             shot_lantern: false,
             shot_crows: None,
             crows_ahead: 12.0,
@@ -290,6 +297,14 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         column)
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
+  --tavern [M]          stand a tavern of the country M metres ahead (default 3), its
+                        door toward the camera, before a screenshot or a run. With
+                        --rest, the night in its first guest bed: in a run, to bed at
+                        once; on a screenshot, waking in it, the hours slept gone by
+  --bed                 with --tavern, on a screenshot: standing at the foot of that bed,
+                        with what E would do there (--minimap shows the hour)
+  --stand KIND [M]      as --tavern, any settlement building: smithy, sawmill, granary,
+                        market-hall, guild-house or boat-shed
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
   --crows HOW           set crows out on a screenshot near a point ahead: ground, perch,
                         tree, rock, fly, land, roost or any (they never take fright)
@@ -453,6 +468,18 @@ fn parse_args() -> Result<Options> {
             "--hotbar" => o.shot_hotbar = true,
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
+            "--tavern" | "--stand" => {
+                use worldgen::features::designs::Special;
+                let which = if a == "--stand" {
+                    let word = value()?;
+                    Special::ALL.into_iter().find(|s| s.word() == word).ok_or_else(|| anyhow::anyhow!("unknown building '{word}': {}", Special::ALL.map(|s| s.word()).join(", ")))?
+                } else {
+                    Special::Tavern
+                };
+                let far = args.next_if(|v| !v.starts_with("--"));
+                o.tavern = Some((which, far.map_or(Ok(3.0), |m| m.parse::<f64>())?.clamp(1.0, 200.0)));
+            }
+            "--bed" => o.bed = true,
             "--lantern" => o.shot_lantern = true,
             "--crows" => {
                 let how = value()?;
@@ -632,6 +659,20 @@ fn embers_near(streamer: &Streamer, voxels: &mut WorldVoxels, pos: DVec3) -> Vec
     embers
 }
 
+/// The taverns' guest beds near `pos`, as far as the embers are looked for.
+fn beds_near(world: &GameWorld, pos: DVec3) -> Vec<DVec3> {
+    world.guest_beds_near(pos.x.floor() as i32, pos.z.floor() as i32, m(24.0) as i32).into_iter().map(|b| b.as_dvec3()).collect()
+}
+
+/// What E does in a guest bed now, in words: as a fire's, the night slept through, or by
+/// day a lie down until dark.
+fn bed_prompt(env: &Environment) -> String {
+    match camp::Until::from(env) {
+        camp::Until::Dawn => "E to sleep in the bed until dawn".into(),
+        camp::Until::Dusk => "E to lie down on the bed until dark".into(),
+    }
+}
+
 /// Where a fire's light comes from, and how brightly this moment: it never burns steady.
 fn firelight(heart: DVec3, clock: f32) -> (DVec3, f32) {
     let phase = (heart.x * 0.7 + heart.z * 1.3) as f32;
@@ -695,6 +736,60 @@ fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, 
     }
     log::warn!("there is no ground here to make camp on");
     false
+}
+
+/// Stands a settlement building `which` of the country `far` metres ahead of someone
+/// whose eye is at `eye`, looking along `yaw`, its door toward them, on the highest ground
+/// under its walls; a tavern's guest beds are the world's from now on. For a look at one,
+/// and a night in a tavern, without finding a town that has one. Must come before the
+/// chunks there are made. Where its guest beds are, nearest the door first.
+fn stand_tavern(world: &GameWorld, eye: DVec3, yaw: f32, (which, far): (worldgen::features::designs::Special, f64)) -> Vec<DVec3> {
+    use worldgen::{
+        features::landmarks::Palette,
+        settlements::{Region, special},
+    };
+    let ahead = DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64);
+    // The door, at +X as built, turned to face back along the view.
+    let back = -ahead;
+    let turns = if back.x.abs() >= back.z.abs() { if back.x > 0.0 { 0 } else { 2 } } else if back.z > 0.0 { 1 } else { 3 };
+    let (x, z) = (eye.x.floor() as i32, eye.z.floor() as i32);
+    let biome = world.column(x, z).biome;
+    let seed = world.seed() ^ (x as u32).wrapping_mul(0x9e37_79b9) ^ (z as u32).wrapping_mul(0x85eb_ca6b);
+    let pal = Palette::local(biome, worldgen::materials::bedrock(biome).0).varied(seed);
+    let Some(built) = special::build(&special::SpecialSpec::new(which, Region::of(biome), seed), &pal) else { return Vec::new() };
+    let built = built.turned(turns);
+    let b = &built.building;
+    // The ground before the door `far` metres ahead.
+    let spot = eye + ahead * m64(far);
+    let before = b.door.floor + b.door.facing;
+    let (ox, oz) = (spot.x.floor() as i32 - before.x, spot.z.floor() as i32 - before.z);
+    let (lo, hi) = (b.walls.lo, b.walls.hi);
+    let top = [(lo.x, lo.y), (lo.x, hi.y), (hi.x, lo.y), (hi.x, hi.y), ((lo.x + hi.x) / 2, (lo.y + hi.y) / 2)].iter().map(|&(cx, cz)| world.column(ox + cx, oz + cz).top()).max().unwrap_or(0);
+    let origin = glam::IVec3::new(ox, top + 1, oz);
+    let cells = glam::IVec3::splat(voxel::mesh::CELLS);
+    let voxels = b.voxels.iter().map(|&(p, v)| (p + origin, v)).collect();
+    let fine = b.fine.iter().map(|f| voxel::mesh::PlantBox { lo: (glam::IVec3::from_array(f.lo) + origin * cells).to_array(), hi: (glam::IVec3::from_array(f.hi) + origin * cells).to_array(), ..*f }).collect();
+    let beds = built.guest_beds_at(origin, 0);
+    log::info!("a {} of {:?} stood at {} {} {}, its door {:?}, with {} guest beds", which.word(), Region::of(biome), origin.x, origin.y, origin.z, b.door.facing, beds.len());
+    world.stand(voxels, fine, beds.clone());
+    let door = (origin + b.door.floor).as_dvec3();
+    let mut beds: Vec<DVec3> = beds.iter().map(|b| b.as_dvec3()).collect();
+    beds.sort_by(|a, b| a.distance(door).total_cmp(&b.distance(door)));
+    beds
+}
+
+/// The guest bed `bed` (its middle, on its boards) as one comes to it from its foot: where
+/// to stand to look at it, and the way to look. The foot is the end of it with more floor
+/// beyond, so this stands in the room rather than in the wall.
+fn foot_of_bed(voxels: &mut WorldVoxels, bed: DVec3) -> (DVec3, f32) {
+    use player::Voxels;
+    let y = bed.y.floor() as i32;
+    let clear = |voxels: &mut WorldVoxels, p: DVec3| (0..4).all(|k| voxels.kind(p.x.floor() as i32, y + k, p.z.floor() as i32) != voxel::Kind::Solid);
+    let ways = [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z];
+    let (way, n) = ways.into_iter().map(|w| (w, (1..=7).take_while(|&k| clear(voxels, bed + w * k as f64)).count())).max_by_key(|&(_, n)| n).unwrap_or((DVec3::X, 1));
+    // As far back as the room lets, a step short of what stands beyond.
+    let at = bed + way * (n as f64 - 1.0).clamp(1.0, 6.0);
+    (at, ((-way.z).atan2(-way.x) as f32).rem_euclid(std::f32::consts::TAU))
 }
 
 /// The nearest water ahead of `eye` along `yaw`, within 80 m, deep enough to float a
@@ -996,6 +1091,8 @@ struct Running {
     embers: Vec<DVec3>,
     /// The chimneys of the homes near the player, and which are smoking at this hour.
     chimneys: chimneys::Chimneys,
+    /// The guest beds of the taverns near the player: the middle of each, on its boards.
+    beds: Vec<DVec3>,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1182,6 +1279,19 @@ impl Running {
                 log::info!("resting by the fire from {time:.2} h");
             }
         }
+        // A tavern asked for by hand, stood before anything about it is made; with --rest,
+        // the night in its first guest bed.
+        if let Some(stand) = opts.tavern {
+            let beds = stand_tavern(&world, camera.pos, camera.yaw, stand);
+            if opts.rest
+                && !flying
+                && let Some(&bed) = beds.first()
+            {
+                player.pos = bed;
+                rest = Some(camp::Rest::in_bed(&Environment::at(time, date)));
+                log::info!("to bed at {time:.2} h");
+            }
+        }
         // Chimneys asked for by hand, smoking ahead from the first frame.
         let mut chimneys = chimneys::Chimneys::new();
         let foot = camera.pos.y - player::EYE_HEIGHT;
@@ -1257,6 +1367,7 @@ impl Running {
             thing_near: None,
             embers: Vec::new(),
             chimneys,
+            beds: Vec::new(),
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -1633,6 +1744,14 @@ impl Running {
         self.embers.iter().copied().find(|e| (e.x - hands.x).hypot(e.z - hands.z) <= m64(2.4) && (e.y - hands.y).abs() < m64(2.0))
     }
 
+    /// The tavern's guest bed the player stands at or reaches for, if they are at one:
+    /// on its floor, not the floor above or below.
+    fn bed_near(&self) -> Option<DVec3> {
+        let (feet, hands) = (self.player.pos, self.hands());
+        let near = |b: &DVec3, p: DVec3| (b.x - p.x).hypot(b.z - p.z) <= m64(1.4) && (b.y - p.y).abs() < m64(1.0);
+        self.beds.iter().copied().find(|b| near(b, feet) || near(b, hands))
+    }
+
     /// What E would do with the thing set down within reach, or with the fire of a
     /// camp that was here already, in words; and what a left click would.
     fn camp_prompt(&self) -> Option<String> {
@@ -1641,7 +1760,7 @@ impl Running {
         }
         let until = camp::Until::from(&self.env).word();
         let Some(thing) = self.thing_near.and_then(|at| self.placed.get(at)) else {
-            return self.ember_near().map(|_| format!("E to rest by the fire until {until}"));
+            return self.ember_near().map(|_| format!("E to rest by the fire until {until}")).or_else(|| self.bed_near().map(|_| bed_prompt(&self.env)));
         };
         Some(if thing.burns() {
             format!("E to rest by the fire until {until}   \u{b7}   left click to put it out")
@@ -1680,7 +1799,17 @@ impl Running {
                 self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
-            None => false,
+            None => match self.bed_near() {
+                // Into the bed, lying in the middle of it.
+                Some(bed) => {
+                    self.player.vel = glam::Vec3::ZERO;
+                    self.player.pos = bed;
+                    self.rest = Some(camp::Rest::in_bed(&self.env));
+                    log::info!("to bed at {:.2} h", self.env.time);
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -1982,6 +2111,7 @@ impl Running {
             let on_foot = self.walking && self.player.mode == Mode::Walk;
             self.thing_near = if on_foot { self.placed.within_reach(self.hands()) } else { None };
             self.embers = embers_near(&self.streamer, &mut self.voxels, self.player.pos);
+            self.beds = beds_near(&self.world, self.player.pos);
         }
         self.hand_word = (self.hand_word - dt).max(0.0);
         if let Some((_, left)) = &mut self.notice {
@@ -2761,11 +2891,25 @@ fn main() -> Result<()> {
             };
             (feet, gait)
         });
+        // A tavern ahead, stood before the chunks about it are made; with --rest, the
+        // night slept in its first guest bed, from the hour asked to the hour it ends.
+        let beds = opts.tavern.map_or(Vec::new(), |stand| stand_tavern(&world, camera.pos, camera.yaw, stand));
+        let mut hour = opts.time.unwrap_or(10.0);
+        if opts.rest && !beds.is_empty() {
+            let date = opts.date.unwrap_or(season::DEFAULT_DATE);
+            let (mut slept, from) = (Environment::at(hour, date), hour);
+            let mut rest = camp::Rest::in_bed(&slept);
+            while let Some(hours) = rest.hours(&slept, 1.0 / 30.0) {
+                slept = Environment::at(slept.time + hours, date);
+            }
+            hour = slept.time;
+            log::info!("to bed at {from:.2} h, until {}: woke at {hour:.2} h", rest.until.word());
+        }
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let mut impostors = Impostors::new(&gpu, world.clone());
         let t = Instant::now();
-        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE)).in_year(opts.year.unwrap_or(0));
+        let mut env = Environment::at(hour, opts.date.unwrap_or(season::DEFAULT_DATE)).in_year(opts.year.unwrap_or(0));
         // Screenshots are clear unless a weather is asked for.
         let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
@@ -2781,6 +2925,27 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
+        // In the tavern's first guest bed: at its foot looking down at it, with what E
+        // would do there; or waking in it, looking down it from the pillow. The hour is
+        // put before the words, to show the night gone by.
+        let mut prompt = opts.shot_prompt.clone();
+        let hour = commands::clock_face(env.time);
+        if let Some(&bed) = beds.first()
+            && (opts.bed || opts.rest)
+        {
+            let (foot, yaw) = foot_of_bed(&mut voxels, bed);
+            log::info!("the guest bed at {:.1} {:.1} {:.1}, its foot at {:.1} {:.1}", bed.x, bed.y, bed.z, foot.x, foot.z);
+            if opts.rest {
+                camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::in_bed(&env).lowered() as f64), 0.0);
+                camera.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU);
+                camera.pitch = 0.15;
+                prompt = prompt.or(Some(format!("{hour}   \u{b7}   Morning")));
+            } else {
+                camera.pos = foot + DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+                (camera.yaw, camera.pitch) = (yaw, -0.6);
+                prompt = prompt.or(Some(format!("{hour}   \u{b7}   {}", bed_prompt(&env))));
+            }
+        }
         let (biome, leaves, flowers, low, sticks, nests) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
         let gallery = opts.shot_people.as_ref().map(|g| {
@@ -3008,7 +3173,7 @@ fn main() -> Result<()> {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
             }
-            if text && let Some(line) = &opts.shot_prompt {
+            if text && let Some(line) = &prompt {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
             if text && console.open {

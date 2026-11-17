@@ -77,6 +77,9 @@ pub struct GameWorld {
     /// The columns whose flower has been picked: nothing grows on them until it is
     /// back (see `pick`).
     picked: RwLock<HashSet<(i32, i32)>>,
+    /// Buildings stood by hand where no settlement put them (see `stand`), in world
+    /// voxels and cells, each with its guest beds.
+    stood: RwLock<Vec<(trails::Stamp, Vec<Vec3>)>>,
 }
 
 impl GameWorld {
@@ -97,6 +100,7 @@ impl GameWorld {
             placed: Default::default(),
             tors: Default::default(),
             picked: Default::default(),
+            stood: Default::default(),
         }
     }
 
@@ -242,6 +246,63 @@ impl GameWorld {
             }
         }
         out
+    }
+
+    /// The guest beds of the taverns (see [`trails::Network::guest_beds`]) within `reach`
+    /// voxels of the column at `(x, z)`, each the middle of the bed on its boards, in world
+    /// voxels. Never blocks, as [`Self::delights_near`]. The game offers a night's sleep in
+    /// whichever the player stands at.
+    pub fn guest_beds_near(&self, x: i32, z: i32, reach: i32) -> Vec<Vec3> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = Vec3::new((mx * MACRO_SIZE) as f32, 0.0, (mz * MACRO_SIZE) as f32);
+                out.extend(c.trails.guest_beds.iter().map(|&b| b + origin));
+            }
+        }
+        out.extend(self.stood.read().expect("stood poisoned").iter().flat_map(|(_, beds)| beds.iter().copied()));
+        out.retain(|at| {
+            let (dx, dz) = (at.x - x as f32, at.z - z as f32);
+            dx * dx + dz * dz <= (reach * reach) as f32
+        });
+        out
+    }
+
+    /// Stands a building where no settlement put one, for a look at it: its voxels in
+    /// world voxels and its fine parts in world cells, and the guest beds it offers (as
+    /// [`Self::guest_beds_near`] gives them). Chunks made from now on have it; any made
+    /// already are as they were until made again.
+    pub fn stand(&self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>, beds: Vec<Vec3>) {
+        // In one order, as the trails' own stamps are, for chunks the same every run.
+        voxels.sort_by_key(|&(p, _)| (p.y, p.z, p.x));
+        let cells = IVec3::splat(CELLS);
+        let ends = voxels.iter().map(|&(p, _)| p).chain(fine.iter().flat_map(|b| [IVec3::from_array(b.lo).div_euclid(cells), (IVec3::from_array(b.hi) - 1).div_euclid(cells)]));
+        let (lo, hi) = ends.fold((IVec3::MAX, IVec3::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        if lo.x > hi.x {
+            return;
+        }
+        self.stood.write().expect("stood poisoned").push((trails::Stamp { lo, hi, voxels, fine }, beds));
+    }
+
+    /// What has been stood by hand over chunk column `(cx, cz)`, moved into the voxels of
+    /// the continent whose corner is `origin`, as its own stamps are. Nothing, and no
+    /// work, in a world where nothing has been.
+    fn stood_at(&self, cx: i32, cz: i32, origin: IVec3) -> Vec<trails::Stamp> {
+        let stood = self.stood.read().expect("stood poisoned");
+        let over = |s: &trails::Stamp| (s.lo.x - 1).div_euclid(CHUNK) <= cx && cx <= (s.hi.x + 1).div_euclid(CHUNK) && (s.lo.z - 1).div_euclid(CHUNK) <= cz && cz <= (s.hi.z + 1).div_euclid(CHUNK);
+        let cells = origin * IVec3::splat(CELLS);
+        stood
+            .iter()
+            .filter(|(s, _)| over(s))
+            .map(|(s, _)| trails::Stamp {
+                lo: s.lo - origin,
+                hi: s.hi - origin,
+                voxels: s.voxels.iter().map(|&(p, v)| (p - origin, v)).collect(),
+                fine: s.fine.iter().map(|b| PlantBox { lo: (IVec3::from_array(b.lo) - cells).to_array(), hi: (IVec3::from_array(b.hi) - cells).to_array(), ..*b }).collect(),
+            })
+            .collect()
     }
 
     /// The wild bees' and wasps' nests (see [`features::nests`]) whose door is within
@@ -932,7 +993,9 @@ impl GameWorld {
         }
         // Landmarks, bridges and lanterns, whose voxels are continent-local.
         let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));
-        let stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).collect();
+        let stood = self.stood_at(cx, cz, IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE));
+        let mut stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).collect();
+        stamps.extend(&stood);
         for s in &stamps {
             hi = hi.max(s.hi.y);
             lo = lo.min(s.lo.y);

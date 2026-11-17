@@ -56,8 +56,9 @@
 //!   [`KIT_WEIGHT`], not nought: homes are many, and one saved house should not become
 //!   every home of its region.
 //! - **Settlement buildings** ([`Special`]: the tavern, the smithy and the rest), each in a
-//!   folder of its own, drawn ahead of the generators stage 3 (#203) brings. The world
-//!   does not build these yet.
+//!   folder of its own. Their generators are `settlements::special` (#203), and any of
+//!   their buildings can be copied in the editor to draw on; the world builds the
+//!   generators' own, not these.
 
 use std::{collections::HashMap, fmt::Write as _, sync::OnceLock};
 
@@ -289,8 +290,8 @@ pub const KINDS: [Landmark; 7] = [
 /// in eleven of its region and step.
 pub const KIT_WEIGHT: u32 = 10;
 
-/// A building a settlement has besides its homes, which the owner can draw before stage
-/// 3 (#203) brings their generators. The world does not build these yet.
+/// A building a settlement has besides its homes. All but the well head and the gate
+/// have generators of their own (`settlements::special`, #203).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Special {
     Tavern,
@@ -301,16 +302,20 @@ pub enum Special {
     GuildHouse,
     WellHead,
     Gate,
+    /// The fishers' boat shed, which is the fisher's home too. Last, so the kinds before
+    /// it keep the salt they choose by.
+    BoatShed,
 }
 
 impl Special {
-    pub const ALL: [Special; 8] = [
+    pub const ALL: [Special; 9] = [
         Special::Tavern,
         Special::Smithy,
         Special::Sawmill,
         Special::Granary,
         Special::MarketHall,
         Special::GuildHouse,
+        Special::BoatShed,
         Special::WellHead,
         Special::Gate,
     ];
@@ -326,6 +331,7 @@ impl Special {
             Special::GuildHouse => "guild-house",
             Special::WellHead => "well-head",
             Special::Gate => "gate",
+            Special::BoatShed => "boat-shed",
         }
     }
 
@@ -340,6 +346,7 @@ impl Special {
             Special::GuildHouse => "Guild house",
             Special::WellHead => "Well head",
             Special::Gate => "Gate",
+            Special::BoatShed => "Boat shed",
         }
     }
 }
