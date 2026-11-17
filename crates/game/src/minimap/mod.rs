@@ -1217,12 +1217,14 @@ impl Minimap {
                         // Over its place, as a pin's flag is; a lake's lies on its water.
                         on_water = *kind == PlaceKind::Lake;
                         let lift = if on_water { 0.0 } else { icon + 9.0 * f.s + if modelled { 8.0 * f.s } else { 0.0 } };
+                        let size = names::size(rank, *importance) * f.s;
+                        let (at, or) = clear_of_player(Vec2::new(p.x, p.y - lift), Vec2::new(p.x, p.y + icon + 10.0 * f.s), me_px, size, f.s);
                         named.push(Name {
                             text: name.clone(),
-                            at: Vec2::new(p.x, p.y - lift),
+                            at: if on_water { Vec2::new(p.x, p.y - lift) } else { at },
                             // Under its place, if there is no room over it.
-                            or: (!on_water).then(|| Vec2::new(p.x, p.y + icon + 10.0 * f.s)),
-                            size: names::size(rank, *importance) * f.s,
+                            or: (!on_water).then_some(or),
+                            size,
                             weight: rank as u8 as f32 * 100.0 + importance + if visited { 40.0 } else { 0.0 },
                             color: [ink[0], ink[1], ink[2], (strength * fade) as u8],
                         });
@@ -1279,7 +1281,8 @@ impl Minimap {
             {
                 icons.push(Instance::new(gpu::TRIANGLE, p.into(), icon * 0.9, [0.93, 0.50, 0.16, 1.0]));
                 if let Some(named) = named.as_deref_mut() {
-                    named.push(Name { text: "Camp".into(), at: Vec2::new(p.x, p.y - icon - 9.0 * f.s), or: Some(Vec2::new(p.x, p.y + icon + 9.0 * f.s)), size: 13.5 * f.s, weight: 1.5, color: [255, 226, 184, 255] });
+                    let (at, or) = clear_of_player(Vec2::new(p.x, p.y - icon - 9.0 * f.s), Vec2::new(p.x, p.y + icon + 9.0 * f.s), me_px, 13.5 * f.s, f.s);
+                    named.push(Name { text: "Camp".into(), at, or: Some(or), size: 13.5 * f.s, weight: 1.5, color: [255, 226, 184, 255] });
                 }
             }
         }
@@ -1333,6 +1336,23 @@ impl Minimap {
             }
         }
     }
+}
+
+/// Where the name of a place goes, over it or else under it, moved clear of the player
+/// where they stand on it. Names give way to the player (see `draw`), so the name of
+/// the very place they stand in, written just over or under its icon, would have no
+/// room at all: a great town's, the largest, was never written while they were there.
+fn clear_of_player(mut over: Vec2, mut under: Vec2, me: Option<Vec2>, size: f32, s: f32) -> (Vec2, Vec2) {
+    if let Some(me) = me
+        && (me - (over + under) * 0.5).abs().max_element() < 30.0 * s
+    {
+        // The player's own rectangle, 9 either way, and the gap names keep, 5, and a
+        // little more; a name is 1.2 of its size tall.
+        let clear = 15.0 * s + size * 0.6;
+        over.y = over.y.min(me.y - clear);
+        under.y = under.y.max(me.y + clear);
+    }
+    (over, under)
 }
 
 /// The icon a visited place shows as.
