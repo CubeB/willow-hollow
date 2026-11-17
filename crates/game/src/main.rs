@@ -168,6 +168,8 @@ struct Options {
     shot_crows: Option<String>,
     /// How far ahead that point is, in metres.
     crows_ahead: f64,
+    /// Animals on a screenshot: a gallery, a herd, pens or the wild herds about.
+    shot_animals: animals::Shot,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -227,6 +229,7 @@ impl Default for Options {
             shot_lantern: false,
             shot_crows: None,
             crows_ahead: 12.0,
+            shot_animals: animals::Shot::default(),
             picked: None,
             shot_journal: None,
             journal_fill: 16,
@@ -291,6 +294,27 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --crows HOW           set crows out on a screenshot near a point ahead: ground, perch,
                         tree, rock, fly, land, roost or any (they never take fright)
   --crows-ahead M       that point M metres ahead (default 12)
+  --animals WHICH       on a screenshot, a gallery of animals standing in rows ahead: all,
+                        kept, wild, or a kind (sheep, wild-boar, hens...) shown as a male,
+                        females and young
+  --animals-ahead M     the first row M metres ahead (default 4)
+  --animals-turn DEG    turned DEG degrees from side on (90 faces them away)
+  --animals-pose P      stand, walk, trot, run, graze or alert
+  --animals-far         drawn as from far off, in a few boxes each
+  --herd KIND           on a screenshot, a herd of KIND ahead, living as a herd does (on a
+                        still, herds take no notice of the camera unless it walks)
+  --herd-n N            N of them (default as many as a herd of them has)
+  --herd-ahead M        M metres ahead (default 30)
+  --herd-at X,Z         at voxel column X,Z instead
+  --herd-wait S         S seconds of their life before the shot (default 6); VOXEL_CLOCK
+                        adds to it, for motion between two stills
+  --herd-walk M         the player walks M metres along the view meanwhile, and the herds
+                        see them come; the shot is taken from where they stop, and where
+                        the herds are goes to the log each second
+  --herd-far            every animal drawn as from far off
+  --pens                on a screenshot, a pen of each kept kind ahead, fenced
+  --pens-ahead M        the nearest pens M metres ahead (default 12)
+  --wild                on a screenshot, the wild herds of the land about
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -499,6 +523,7 @@ fn parse_args() -> Result<Options> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
+            flag if animals::Shot::takes(flag) => o.shot_animals.flag(flag, &mut value)?,
             other => bail!("unknown argument '{other}'\n{USAGE}"),
         }
     }
@@ -904,6 +929,8 @@ struct Running {
     particles: Particles,
     /// The crows about the player, and their nests.
     crows: crows::Crows,
+    /// The animals about the player: wild herds, and the kept in their pens.
+    animals: animals::Herds,
     /// People stood about by `spawn people`, to see them before anyone lives anywhere.
     people: Vec<people::Standing>,
     /// Leaf and flower voxels near the player, refreshed now and then.
@@ -1191,6 +1218,7 @@ impl Running {
                 p
             },
             crows: crows::Crows::new(world.clone()),
+            animals: animals::Herds::new(world.clone()),
             people: Vec::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
@@ -2093,6 +2121,8 @@ impl Running {
             land: &|x, z| particles::land_under(&self.world, x, z),
         };
         self.crows.update(dt, &around);
+        let here = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.animals.update(dt, here);
         self.sub.lap(20);
         self.update_footsteps(dt);
         self.sub.lap(8);
@@ -2108,6 +2138,7 @@ impl Running {
         fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
         self.crows.draw(self.camera.pos, &mut self.props);
         people::draw_all(&self.people, false, self.camera.pos, &mut self.props);
+        self.animals.draw(self.camera.pos, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2710,6 +2741,12 @@ fn main() -> Result<()> {
         console.open = opts.shot_console;
         let opts = opts;
         let mut camera = make_camera(&opts, &world, None);
+        // The animals asked for, given their seconds of life before anything else is set
+        // out: a walk toward a herd moves the camera.
+        let animals = opts.shot_animals.any().then(|| {
+            let clock = std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            animals::ShotAnimals::set_out(&opts.shot_animals, world.clone(), &mut camera.pos, camera.yaw, clock, &|x, z| surface_height(&world, x, z))
+        });
         // The figure stands where the camera was, mid stride, and the camera steps back.
         let figure = opts.third.map(|turned| {
             let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
@@ -2863,6 +2900,9 @@ fn main() -> Result<()> {
         crows.draw(camera.pos, &mut props);
         if let Some((standing, far)) = &gallery {
             people::draw_all(standing, *far, camera.pos, &mut props);
+        }
+        if let Some(animals) = &animals {
+            animals.draw(camera.pos, &mut props);
         }
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
@@ -3236,6 +3276,22 @@ impl commands::Game for Running {
                 self.people = people::stand_gallery(&g, region, seed, eye, self.camera.yaw, &|x, z| surface_height(&self.world, x, z));
                 Ok(format!("{n} people of the {} country stand ahead, a household in front", region.word()))
             }
+            Spawn::Herd(kind, n) => {
+                // Far enough ahead that the wild do not run at once.
+                let flight = kind.habits().flight as f64;
+                let ahead = (flight * 1.8).clamp(8.0, 90.0);
+                let p = glam::DVec2::new(eye.x, eye.z) + glam::DVec2::new(self.camera.yaw.cos() as f64, self.camera.yaw.sin() as f64) * m64(ahead);
+                let at = DVec3::new(p.x, surface_height(&self.world, p.x.floor() as i32, p.y.floor() as i32), p.y);
+                let n = self.animals.call(kind, n.map(|n| n as usize), at);
+                Ok(format!("{n} {} {ahead:.0} m ahead", kind.word()))
+            }
+            Spawn::Pen(kind) => {
+                let flat = glam::DVec2::new(eye.x, eye.z);
+                let at = flat + glam::DVec2::new(self.camera.yaw.cos() as f64, self.camera.yaw.sin() as f64) * m64(12.0);
+                self.animals.set_player(eye);
+                let (pen, n) = self.animals.pen_ahead(kind, at, flat);
+                Ok(format!("{n} {} in a pen of {:.0} square metres ahead", kind.word(), pen.area()))
+            }
         }
     }
 
@@ -3373,6 +3429,16 @@ impl commands::Game for Shot<'_> {
             Spawn::People(n) => {
                 self.opts.shot_people.get_or_insert_default().count = n as usize;
                 format!("{n} people stand ahead, a household in front")
+            }
+            Spawn::Herd(kind, n) => {
+                self.opts.shot_animals.herd = Some(kind);
+                self.opts.shot_animals.herd_n = n.map(|n| n as usize);
+                format!("a herd of {} {:.0} m ahead", kind.word(), self.opts.shot_animals.herd_ahead)
+            }
+            Spawn::Pen(kind) => {
+                // A screenshot sets out every kept kind's pen at once.
+                self.opts.shot_animals.pens.get_or_insert(12.0);
+                format!("a pen of {} ahead, among the other kept animals' pens", kind.word())
             }
         })
     }

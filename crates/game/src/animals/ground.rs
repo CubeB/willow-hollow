@@ -7,7 +7,7 @@
 //! climb never walks through one; a bush is a column with no room above it. Read once
 //! when a herd is stood up, on a thread of its own, and kept as four bytes a column.
 
-use glam::{DVec2, DVec3};
+use glam::DVec2;
 use voxel::{CHUNK, Kind, PAD, PaddedChunk};
 use worldgen::{World, world::GameWorld};
 
@@ -49,7 +49,8 @@ pub struct Ground {
 }
 
 impl Ground {
-    /// Ground made by `f` for each column: for tests, and for flat stand-ins.
+    /// Ground made by `f` for each column, for tests.
+    #[cfg(test)]
     pub fn from_fn(x0: i32, z0: i32, w: i32, d: i32, f: impl Fn(i32, i32) -> Cell) -> Self {
         let cells = (0..w * d).map(|i| f(x0 + i % w, z0 + i / w)).collect();
         Ground { x0, z0, w, d, cells }
@@ -67,10 +68,6 @@ impl Ground {
 
     pub fn middle(&self) -> DVec2 {
         DVec2::new(self.x0 as f64 + self.w as f64 * 0.5, self.z0 as f64 + self.d as f64 * 0.5)
-    }
-
-    pub fn contains(&self, p: DVec3) -> bool {
-        self.at(DVec2::new(p.x, p.z)).is_some()
     }
 
     /// Reads the square from `(x0, z0)`, `w` by `d` columns, from the voxels of the

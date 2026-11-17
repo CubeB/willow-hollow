@@ -219,7 +219,6 @@ const BAY: Rgb = [0x74, 0x40, 0x22];
 const CHESTNUT: Rgb = [0x96, 0x52, 0x26];
 const PINK: Rgb = [0xd8, 0xa4, 0x90];
 const SKIN_PINK: Rgb = [0xc4, 0x88, 0x78];
-const HOOF: Rgb = [0x3a, 0x32, 0x2c];
 const HORN: Rgb = [0xa8, 0x9a, 0x80];
 const DARK_HORN: Rgb = [0x5c, 0x52, 0x46];
 const IVORY: Rgb = [0xe0, 0xd8, 0xc0];
@@ -250,7 +249,7 @@ impl Look {
         // Sized from a grown female: males bigger, the young well short of grown.
         let size = match role {
             Role::Female => b.range(0.92, 1.06),
-            Role::Male => b.range(1.06, 1.18) * if kind == Kind::Boar || kind == Kind::WildCattle { 1.06 } else { 1.0 },
+            Role::Male => b.range(1.06, 1.18) * if kind == Kind::WildCattle { 1.06 } else { 1.0 },
             Role::Young => b.range(0.5, 0.7),
         };
         let size = if kind == Kind::Ox { size.max(1.04) } else { size };
@@ -381,14 +380,14 @@ fn base(kind: Kind, shape: Shape) -> Look {
         Ox => dims(&mut l, 1.75, 0.72, 0.78, 0.7, 0.4, 0.4, 0.2, [0.3, 0.34, 0.56], 0.75, 0.16, 0.85),
         WildCattle => dims(&mut l, 1.85, 0.66, 0.82, 0.78, 0.42, 0.42, 0.2, [0.28, 0.32, 0.58], 0.7, 0.15, 0.85),
         Pig => dims(&mut l, 1.05, 0.46, 0.48, 0.26, 0.18, 0.36, 0.0, [0.26, 0.26, 0.32], 0.35, 0.13, 0.12),
-        Boar => dims(&mut l, 1.05, 0.36, 0.52, 0.34, 0.2, 0.34, 0.0, [0.22, 0.26, 0.42], 0.45, 0.1, 0.2),
+        Boar => dims(&mut l, 1.0, 0.34, 0.45, 0.3, 0.2, 0.34, 0.0, [0.22, 0.26, 0.42], 0.45, 0.1, 0.2),
         Pony | WildPony => dims(&mut l, 1.28, 0.46, 0.56, 0.68, 0.66, 0.22, 0.85, [0.18, 0.22, 0.5], 1.0, 0.12, 0.62),
         Donkey | WildAss => dims(&mut l, 1.1, 0.4, 0.5, 0.64, 0.5, 0.2, 0.7, [0.18, 0.22, 0.48], 0.9, 0.26, 0.48),
         Reindeer | WildReindeer => dims(&mut l, 1.15, 0.42, 0.52, 0.62, 0.42, 0.2, 0.6, [0.16, 0.18, 0.4], 0.75, 0.11, 0.08),
     }
     match kind {
         Pig => l.lop = 0.7,
-        Boar => l.hump = 0.12,
+        Boar => l.hump = 0.1,
         WildCattle => l.hump = 0.1,
         WildAss => (l.leg, l.length) = (0.72, 1.15),
         Pony => l.length = 1.25,

@@ -391,8 +391,10 @@ struct ImpostorCamera {
 }
 
 /// Most cubes of solid moving models drawn in one frame: room for the crows and their
-/// nests as well as the boats, the figure and what is set down.
-const PROP_CAPACITY: usize = 2048;
+/// nests as well as the boats, the figure and what is set down, and for the animals,
+/// which keep to a budget of their own (`animals::BUDGET`, 1536) so that a field of
+/// them never crowds the rest out. 60 bytes a box: 240 KiB in all.
+const PROP_CAPACITY: usize = 4096;
 
 /// Everything one frame draws.
 pub struct Scene<'a> {

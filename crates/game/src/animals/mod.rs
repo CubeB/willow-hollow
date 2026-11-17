@@ -116,6 +116,8 @@ pub struct Herds {
     pub wild: bool,
     /// Draw every animal as from far off.
     pub far: bool,
+    /// The animals take no notice of the player: for a still of them at ease near.
+    pub unseen: bool,
     /// Pens set out to be seen, with a hurdle fence drawn round them.
     fenced: HashSet<Id>,
     look_in: f32,
@@ -137,6 +139,7 @@ impl Herds {
             at_once: false,
             wild: true,
             far: false,
+            unseen: false,
             fenced: HashSet::new(),
             look_in: 0.0,
             player: None,
@@ -161,8 +164,9 @@ impl Herds {
     fn want_ground(&mut self, id: Id) {
         let Some(wanted) = self.herds.iter().find(|h| h.0 == id).map(|h| h.1.ground_wanted()) else { return };
         if self.at_once {
+            let start = std::time::Instant::now();
             let g = Arc::new(Ground::read(&self.world, wanted.0, wanted.1, wanted.2, wanted.3));
-            self.landed(id, g, 0.0);
+            self.landed(id, g, start.elapsed().as_secs_f32() * 1000.0);
         } else {
             let _ = self.worker().ask.send(Job::Ground(id, wanted));
         }
@@ -223,7 +227,7 @@ impl Herds {
         }
         for (_, h) in &mut self.herds {
             if let Some(g) = h.ground.clone() {
-                h.update(dt, &Moment { ground: &g, player: Some(player) });
+                h.update(dt, &Moment { ground: &g, player: (!self.unseen).then_some(player) });
             }
         }
         self.report_in -= dt;
@@ -295,15 +299,19 @@ impl Herds {
 
     /// Stands `count` kept animals of `kind` inside `pen` (a pen, a coop's yard or a
     /// pasture), to graze and mill about in it, treating its fence and its shut gate
-    /// as a wall. `key` names the pen: asking again with the same key does nothing, so
-    /// whoever lays out the settlements can hand over the pens about the player every
-    /// second or so. Herds far out of sight are let go, and stood up again (the same
-    /// animals) the next time their pen is handed over near. False when the pen is
-    /// beyond reach of the player and nothing was done.
+    /// as a wall. `key` names the pen: asking again with the same key and the same
+    /// animals does nothing, so whoever lays out the settlements can hand over the pens
+    /// about the player every second or so; a pen handed over changed (another kind, or
+    /// fenced anew) is stood up afresh. Herds far out of sight are let go, and stood up
+    /// again (the same animals) the next time their pen is handed over near. False when
+    /// the pen is beyond reach of the player and nothing was done.
     pub fn keep(&mut self, key: u64, kind: Kind, count: usize, pen: Pen) -> bool {
         let id = Id::Kept(key);
-        if self.herds.iter().any(|h| h.0 == id) {
-            return true;
+        if let Some((_, h)) = self.herds.iter().find(|h| h.0 == id) {
+            if h.kind == kind && h.count == count.max(1) && h.fold == Fold::Pen(pen.clone()) {
+                return true;
+            }
+            self.release(key);
         }
         let Some(player) = self.player else { return false };
         let mid = pen.middle();
@@ -356,10 +364,6 @@ impl Herds {
             self.fenced.insert(Id::Kept(key));
         }
         (pen, n)
-    }
-
-    pub fn have_sites(&self) -> bool {
-        !self.squares.is_empty()
     }
 
     pub fn herds(&self) -> impl Iterator<Item = &Herd> {
@@ -481,7 +485,8 @@ fn draw_fence(pen: &Pen, g: &Ground, cam: DVec3, out: &mut Vec<ParticleInstance>
         let (a, b) = (pen.fence[k], pen.fence[(k + 1) % n]);
         let len = a.distance(b);
         let dir = (b - a) / len.max(1e-9);
-        let yaw = -(dir.y.atan2(dir.x) as f32) + std::f32::consts::FRAC_PI_2;
+        // A box's own z turned by `yaw` points along (-sin, cos).
+        let yaw = dir.y.atan2(dir.x) as f32 - std::f32::consts::FRAC_PI_2;
         let posts = (len / m64(2.0)).ceil().max(1.0) as usize;
         for p in 0..posts {
             let at = a + dir * (len * p as f64 / posts as f64);
@@ -532,7 +537,7 @@ pub type Standing = (Look, DVec3, f32, Pose);
 /// motion between two stills. Who each is goes to the log.
 pub fn stand_gallery(g: &Gallery, seed: u32, eye: DVec3, yaw: f32, clock: f32, ground: &dyn Fn(i32, i32) -> f64) -> Vec<Standing> {
     // One kind: a row of its own, the male first, females of every colour, the young.
-    let looks: Vec<Vec<Look>> = if g.kinds.len() == 1 {
+    let rows: Vec<Vec<Look>> = if g.kinds.len() == 1 {
         let k = g.kinds[0];
         let mut row = vec![Look::new(k, hash2(seed, 0, 1), Role::Male)];
         row.extend((1..6).map(|i| Look::new(k, hash2(seed, i, 1), Role::Female)));
@@ -550,9 +555,10 @@ pub fn stand_gallery(g: &Gallery, seed: u32, eye: DVec3, yaw: f32, clock: f32, g
             };
             rows[row].push(l);
         }
-        rows.retain(|r| !r.is_empty());
         rows
     };
+    // No more than five to a row, so a row fits the view a few metres off.
+    let looks: Vec<Vec<Look>> = rows.into_iter().filter(|r| !r.is_empty()).flat_map(|r| r.chunks(5).map(<[Look]>::to_vec).collect::<Vec<_>>()).collect();
     let (ahead, right) = (DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64), DVec3::new(-yaw.sin() as f64, 0.0, yaw.cos() as f64));
     let mut out = Vec::new();
     let mut on = g.ahead;
@@ -603,6 +609,166 @@ pub fn draw_gallery(standing: &[Standing], far: bool, cam: DVec3, out: &mut Vec<
             x => x,
         };
         model::draw_at(l, detail, *feet, *facing, pose, cam, out);
+    }
+}
+
+/// What a screenshot shows of the animals, as its flags say.
+#[derive(Clone, Debug)]
+pub struct Shot {
+    /// `--animals`: a gallery of models standing still.
+    pub gallery: Option<Gallery>,
+    /// `--herd`: a herd living as one does, this many (or as many as one has), this far
+    /// ahead or at this column.
+    pub herd: Option<Kind>,
+    pub herd_n: Option<usize>,
+    pub herd_ahead: f64,
+    pub herd_at: Option<DVec2>,
+    /// `--herd-walk`: the player walks this many metres along the view over the seconds
+    /// of life, and the shot is taken from there.
+    pub walk: f64,
+    /// Seconds of life given to the herds before the shot.
+    pub wait: f32,
+    /// Every herd drawn as from far off.
+    pub far: bool,
+    /// `--pens`: a pen of each kept kind ahead, this far.
+    pub pens: Option<f64>,
+    /// `--wild`: the wild herds of the land about.
+    pub wild: bool,
+}
+
+impl Default for Shot {
+    fn default() -> Self {
+        Shot { gallery: None, herd: None, herd_n: None, herd_ahead: 30.0, herd_at: None, walk: 0.0, wait: 6.0, far: false, pens: None, wild: false }
+    }
+}
+
+impl Shot {
+    /// Whether `flag` is one of these.
+    pub fn takes(flag: &str) -> bool {
+        flag.starts_with("--animals") || flag.starts_with("--herd") || flag.starts_with("--pens") || flag == "--wild"
+    }
+
+    /// Reads one of the flags, taking its value from `value` if it has one.
+    pub fn flag(&mut self, flag: &str, value: &mut dyn FnMut() -> anyhow::Result<String>) -> anyhow::Result<()> {
+        let kind = |word: &str| Kind::named(word).ok_or_else(|| anyhow::anyhow!("no animal called '{word}'"));
+        match flag {
+            "--animals" => {
+                let word = value()?;
+                let kinds = match word.as_str() {
+                    "all" => Kind::ALL.to_vec(),
+                    "kept" => Kind::KEPT.to_vec(),
+                    "wild" => Kind::WILD.to_vec(),
+                    list => list.split(',').map(kind).collect::<anyhow::Result<_>>()?,
+                };
+                self.gallery.get_or_insert_default().kinds = kinds;
+            }
+            "--animals-ahead" => self.gallery.get_or_insert_default().ahead = value()?.parse::<f64>()?.clamp(0.5, 300.0),
+            "--animals-turn" => self.gallery.get_or_insert_default().turn = value()?.parse::<f32>()?.to_radians(),
+            "--animals-far" => self.gallery.get_or_insert_default().far = true,
+            "--animals-pose" => {
+                let g = self.gallery.get_or_insert_default();
+                match value()?.as_str() {
+                    "stand" => {}
+                    "walk" => g.gait = Some(Gait::Walk),
+                    "trot" => g.gait = Some(Gait::Trot),
+                    "run" => g.gait = Some(Gait::Run),
+                    "graze" => g.graze = true,
+                    "alert" => g.alert = true,
+                    other => anyhow::bail!("'{other}': animals stand, walk, trot, run, graze or are alert"),
+                }
+            }
+            "--herd" => self.herd = Some(kind(&value()?)?),
+            "--herd-n" => self.herd_n = Some(value()?.parse::<usize>()?.clamp(1, 40)),
+            "--herd-ahead" => self.herd_ahead = value()?.parse::<f64>()?.clamp(1.0, 400.0),
+            "--herd-at" => {
+                let v: Vec<f64> = value()?.split(',').map(|p| p.trim().parse::<f64>()).collect::<Result<_, _>>()?;
+                anyhow::ensure!(v.len() == 2, "--herd-at takes X,Z");
+                self.herd_at = Some(DVec2::new(v[0], v[1]));
+            }
+            "--herd-wait" => self.wait = value()?.parse::<f32>()?.clamp(0.0, 600.0),
+            "--herd-walk" => self.walk = value()?.parse::<f64>()?.clamp(-300.0, 300.0),
+            "--herd-far" => self.far = true,
+            "--pens" => self.pens = Some(self.pens.unwrap_or(12.0)),
+            "--pens-ahead" => self.pens = Some(value()?.parse::<f64>()?.clamp(2.0, 200.0)),
+            "--wild" => self.wild = true,
+            other => anyhow::bail!("unknown argument '{other}'"),
+        }
+        Ok(())
+    }
+
+    pub fn any(&self) -> bool {
+        self.gallery.is_some() || self.herd.is_some() || self.pens.is_some() || self.wild
+    }
+}
+
+/// A screenshot's animals, set out and given their seconds of life.
+pub struct ShotAnimals {
+    pub herds: Herds,
+    gallery: Vec<Standing>,
+    gallery_far: bool,
+}
+
+impl ShotAnimals {
+    /// Sets out what `shot` asks for before a camera at `eye` looking along `yaw`, each
+    /// on the ground `ground` gives, and lives their seconds (`clock` more for motion
+    /// between stills). The player walks toward them as `shot.walk` says, and `eye` is
+    /// moved with them.
+    pub fn set_out(shot: &Shot, world: Arc<GameWorld>, eye: &mut DVec3, yaw: f32, clock: f32, ground: &dyn Fn(i32, i32) -> f64) -> Self {
+        let seed = world.seed();
+        let gallery = shot.gallery.as_ref().map(|g| stand_gallery(g, seed, *eye, yaw, clock, ground)).unwrap_or_default();
+        let mut herds = Herds::at_once(world, shot.wild);
+        herds.far = shot.far;
+        // As the crows on a still, they take no notice of the camera, unless the player
+        // walks toward them.
+        herds.unseen = shot.walk == 0.0;
+        herds.set_player(*eye);
+        let ahead = DVec2::new(yaw.cos() as f64, yaw.sin() as f64);
+        let flat = DVec2::new(eye.x, eye.z);
+        let on_ground = |p: DVec2| DVec3::new(p.x, ground(p.x.floor() as i32, p.y.floor() as i32), p.y);
+        if let Some(kind) = shot.herd {
+            let at = shot.herd_at.unwrap_or(flat + ahead * m64(shot.herd_ahead));
+            let n = herds.call(kind, shot.herd_n, on_ground(at));
+            log::info!("a herd of {n} {} at {:.0},{:.0}", kind.word(), at.x, at.y);
+        }
+        if let Some(near) = shot.pens {
+            // Four to a row across the view, the rows going away.
+            let right = DVec2::new(-ahead.y, ahead.x);
+            for (i, kind) in Kind::KEPT.into_iter().enumerate() {
+                let (row, col) = ((i / 4) as f64, (i % 4) as f64 - 1.5);
+                let at = flat + ahead * m64(near + row * 13.0) + right * m64(col * 12.0);
+                let (pen, n) = herds.pen_ahead(kind, at, flat);
+                log::info!("a pen of {n} {} at {:.0},{:.0}, {:.0} square metres", kind.word(), at.x, at.y, pen.area());
+            }
+        }
+        // Their seconds of life, the player walking as asked, and where each herd is
+        // every second to the log.
+        let start = *eye;
+        let lift = start.y - ground(start.x.floor() as i32, start.z.floor() as i32);
+        let dt = 1.0 / 30.0;
+        let steps = ((shot.wait + clock) / dt).round() as u32;
+        let mut player = start;
+        for step in 0..=steps {
+            let t = step as f64 * dt as f64;
+            let gone = if steps == 0 { 1.0 } else { step as f64 / steps as f64 };
+            let p = DVec2::new(start.x, start.z) + ahead * m64(shot.walk * gone);
+            player = DVec3::new(p.x, ground(p.x.floor() as i32, p.y.floor() as i32) + lift, p.y);
+            herds.update(dt, player);
+            if step % 30 == 0 && (shot.herd.is_some() || shot.walk != 0.0) {
+                for line in herds.listed(player) {
+                    log::info!("  {t:>4.1} s: {line}");
+                }
+            }
+        }
+        *eye = player;
+        herds.report(player, log::Level::Info);
+        ShotAnimals { herds, gallery, gallery_far: shot.gallery.as_ref().is_some_and(|g| g.far) }
+    }
+
+    pub fn draw(&self, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+        let from = out.len();
+        draw_gallery(&self.gallery, self.gallery_far, cam, out);
+        self.herds.draw(cam, out);
+        log::info!("animals drawn in {} boxes", out.len() - from);
     }
 }
 

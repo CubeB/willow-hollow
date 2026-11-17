@@ -61,6 +61,10 @@ pub enum Spawn {
     Thing(String, u32),
     /// This many people of the country about, standing in rows ahead.
     People(u32),
+    /// A herd of animals of a kind ahead: this many, or as many as a herd of them has.
+    Herd(worldgen::fauna::Kind, Option<u32>),
+    /// A pen of animals of a kind ahead, fenced.
+    Pen(worldgen::fauna::Kind),
 }
 
 /// What the commands act on. Only what every game can say is required; the rest can't
@@ -159,7 +163,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
-    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, or set things down", words: spawn_words, run: spawn },
+    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | herd <animal> [n] | pen <animal> | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, bring a herd or a pen of animals, or set things down", words: spawn_words, run: spawn },
     Spec { name: "aurora", also: &[], usage: "aurora [on|off|auto]", about: "the northern lights out every night, never, or as the night has them", words: on_off_auto, run: aurora },
     Spec { name: "give", also: &[], usage: "give <thing> [n]", about: "put things in the pack: sticks, lantern, a flower (poppy, bluebell...), holly-berries...", words: item_words, run: give },
     Spec { name: "speed", also: &[], usage: "speed [times]", about: "walk, run and swim this many times faster (1 is usual)", words: none, run: speed },
@@ -526,7 +530,7 @@ pub fn fire_word(state: u8) -> &'static str {
 pub const CROWS: &[&str] = &["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"];
 
 fn spawn_words() -> Vec<&'static str> {
-    let mut w = vec!["camp", "murmuration", "crows", "boat", "people"];
+    let mut w = vec!["camp", "murmuration", "crows", "boat", "people", "herd", "pen"];
     w.extend(item_words().into_iter().filter(|i| *i != "lantern"));
     w
 }
@@ -550,6 +554,15 @@ pub fn spawning(args: &[&str]) -> Result<Spawn, String> {
         }
         "boat" => Spawn::Boat,
         "people" | "folk" => Spawn::People(rest.first().map_or(Ok(12), |n| count(n))?.min(60)),
+        "herd" | "herds" | "animals" | "flock" => {
+            // The kind may be more than a word ("wild boar"), the count last.
+            let (n, words) = match rest.split_last() {
+                Some((last, before)) if last.chars().all(|c| c.is_ascii_digit()) => (Some(count(last)?.min(40)), before),
+                _ => (None, rest),
+            };
+            Spawn::Herd(animal(words)?, n)
+        }
+        "pen" | "coop" | "pasture" | "fold" => Spawn::Pen(animal(rest)?),
         _ => {
             let n = match rest.first() {
                 Some(n) => count(n)?,
@@ -559,6 +572,16 @@ pub fn spawning(args: &[&str]) -> Result<Spawn, String> {
             Spawn::Thing(what, n)
         }
     })
+}
+
+/// The animal some words name: "sheep", "wild boar", "wild-goats", "hens".
+fn animal(words: &[&str]) -> Result<worldgen::fauna::Kind, String> {
+    use worldgen::fauna::Kind;
+    let all = || Kind::ALL.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ");
+    if words.is_empty() {
+        return Err(format!("of what? {}", all()));
+    }
+    Kind::named(&words.join("-")).ok_or_else(|| format!("there is no animal called '{}': {}", words.join(" "), all()))
 }
 
 fn spawn(args: &[&str], game: &mut dyn Game) -> Reply {
@@ -1118,5 +1141,16 @@ mod tests {
         assert_eq!(spawning(&["people", "5"]), Ok(Spawn::People(5)));
         assert_eq!(spawning(&["people", "500"]), Ok(Spawn::People(60)));
         assert!(spawning(&["people", "some"]).is_err());
+    }
+
+    #[test]
+    fn herds_and_pens_are_called_by_their_animal() {
+        use worldgen::fauna::Kind;
+        assert_eq!(spawning(&["herd", "sheep"]), Ok(Spawn::Herd(Kind::Sheep, None)));
+        assert_eq!(spawning(&["herd", "wild", "boar", "5"]), Ok(Spawn::Herd(Kind::Boar, Some(5))));
+        assert_eq!(spawning(&["herd", "wild-goats", "500"]), Ok(Spawn::Herd(Kind::WildGoat, Some(40))));
+        assert_eq!(spawning(&["pen", "hens"]), Ok(Spawn::Pen(Kind::Chicken)));
+        assert!(spawning(&["herd"]).is_err());
+        assert!(spawning(&["pen", "dragons"]).is_err());
     }
 }

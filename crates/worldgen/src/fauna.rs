@@ -720,16 +720,29 @@ mod tests {
         }
     }
 
-    /// Prints where the herds are on continent (0, 0), to aim screenshots at them:
+    /// Prints where the herds are on a continent, to aim screenshots at them: world 1's
+    /// continent (0, 0), or FAUNA_SEED's continent FAUNA_CONTINENT=MX,MZ.
     /// `cargo test --release -p worldgen --lib fauna::tests::print -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn print() {
+        let seed = std::env::var("FAUNA_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let (mx, mz) = std::env::var("FAUNA_CONTINENT")
+            .ok()
+            .and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?))))
+            .unwrap_or((0, 0));
+        let w = GameWorld::new(seed);
+        w.continent(mx, mz);
         let n = MACRO_SIZE / SQUARE;
-        let all = herds((0, 0), n);
-        for s in &all {
-            println!("herd {} x{} at {},{} (y {}): {}", s.kind.key(), s.count, s.home.x, s.home.z, s.home.y, s.reason);
+        let mut all = 0;
+        for sz in mz * n..(mz + 1) * n {
+            for sx in mx * n..(mx + 1) * n {
+                if let Ok(Some(s)) = site(&w, (sx, sz)) {
+                    println!("herd {} x{} at {},{} (y {}): {}", s.kind.key(), s.count, s.home.x, s.home.z, s.home.y, s.reason);
+                    all += 1;
+                }
+            }
         }
-        println!("{} herds", all.len());
+        println!("{all} herds on world {seed}'s continent {mx}, {mz}");
     }
 }

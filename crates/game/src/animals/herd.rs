@@ -506,20 +506,25 @@ impl Herd {
             && d < flight
         {
             // Off, all of them: the herd's middle moves away from the player, a good
-            // way beyond the distance it keeps.
+            // way beyond the distance it keeps; out of its range if it must, rather
+            // than be cornered at its edge, as far as its ground was read.
             self.calm = 0.0;
             let centre = self.centre();
             let away = (centre - DVec2::new(p.x, p.z)).normalize_or(DVec2::new(self.drift.cos() as f64, self.drift.sin() as f64));
-            let to = self.fold.keep(centre + away * flight * 1.2, 0.0);
-            self.focus = keep_on(ground, to, self.focus);
+            self.focus = keep_on(ground, centre + away * flight * 1.2, self.focus);
         }
         // At peace, the middle drifts slowly over the range, turning back from its edge
-        // and from ground it cannot go on.
+        // and from ground it cannot go on; driven out of it, it drifts back.
         if self.calm > 12.0 {
             self.drift += (self.unit() - 0.5) * 0.6 * dt;
             let pace = v64(0.07) * dt as f64;
+            let home = self.fold.keep(self.focus, v64(1.0));
+            if home.distance(self.focus) > 1.0 {
+                let back = home - self.focus;
+                self.drift = back.y.atan2(back.x) as f32;
+            }
             let next = self.focus + DVec2::new(self.drift.cos() as f64, self.drift.sin() as f64) * pace;
-            let kept = self.fold.keep(next, v64(1.0));
+            let kept = if home.distance(self.focus) > 1.0 { next } else { self.fold.keep(next, v64(1.0)) };
             let footing = ground.at(next).is_some_and(|c| c.water == 0 || h.swims);
             if kept.distance(next) > 1e-6 || !footing {
                 self.drift += std::f32::consts::PI * (0.5 + self.unit() * 0.5);
@@ -796,11 +801,13 @@ impl Herd {
             b.pos.y += (y - b.pos.y) * ease(8.0) as f64;
             b.pose.afloat = afloat;
         }
-        let half = v64(b.look.length * 0.5);
+        // Measured a voxel beyond its feet each way, so that a single step under it
+        // tips it a little, and the legs take up some of any slope.
+        let half = v64(b.look.length * 0.5) + 1.0;
         let dir = DVec2::new(b.facing.cos() as f64, b.facing.sin() as f64);
         let at = |p: DVec2| ground.at(p).map(|c| c.floor as f64);
         let pitch = match (at(mine + dir * half), at(mine - dir * half)) {
-            (Some(front), Some(back)) if !b.pose.afloat => ((back - front) / (2.0 * half).max(1.0)).atan().clamp(-0.45, 0.45) as f32,
+            (Some(front), Some(back)) if !b.pose.afloat => ((back - front) / (2.0 * half)).atan().clamp(-0.5, 0.5) as f32 * 0.7,
             _ => 0.0,
         };
         b.pose.pitch += (pitch - b.pose.pitch) * ease(5.0);
