@@ -77,6 +77,9 @@ pub struct Pad {
     /// Directions the paths come in from, as `front`.
     pub arrivals: [f32; 4],
     pub arrival_count: u8,
+    /// A garden's bed, worked bare: the continent-local columns from the first corner to
+    /// the second, inclusive. None on a pad with no garden.
+    pub garden: Option<(glam::IVec2, glam::IVec2)>,
 }
 
 impl Pad {
@@ -96,6 +99,7 @@ impl Pad {
             hub: 0.0,
             arrivals: [0.0; 4],
             arrival_count: 0,
+            garden: None,
         }
     }
 
@@ -103,6 +107,13 @@ impl Pad {
     /// the way from each path's arrival round to the door, in front of the door, and
     /// about the hub, ragged at the edges and broken up the less the place is used.
     pub fn worn(&self, seed: u32, p: Vec2, lx: i32, lz: i32) -> bool {
+        // A garden is dug over, so nothing wild grows in it.
+        if let Some((lo, hi)) = self.garden
+            && (lo.x..=hi.x).contains(&lx)
+            && (lo.y..=hi.y).contains(&lz)
+        {
+            return true;
+        }
         if self.wear <= 0.0 {
             return false;
         }
@@ -232,6 +243,8 @@ pub enum LanternCause {
     Approach,
     /// Somewhere along an otherwise plain stretch.
     Plain,
+    /// Along the main lane of a town or a large village.
+    Lane,
 }
 
 /// A lantern beside a trail.
@@ -269,14 +282,14 @@ pub struct Network {
     /// Filled in once the network itself is built (see [`crate::names::survey`]).
     pub names: crate::names::Gazetteer,
     tiles: HashMap<(i32, i32), Vec<TrailPoint>>,
-    pads: Vec<Pad>,
+    pub(crate) pads: Vec<Pad>,
     stamps: Vec<Stamp>,
     /// Lanterns chosen but not yet built, waiting until every trail is down so none
     /// is built on a trail laid after it: (its index in `lanterns`, voxels, fine parts).
-    held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
+    pub(crate) held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
     /// Props laid about sites, held in the same way: voxels, fine parts, and the world
     /// columns they stand in.
-    held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
+    pub(crate) held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
     /// Every milestone, bench, waymark and cairn set beside a trail, and where: the
@@ -296,10 +309,15 @@ pub struct Network {
     /// Where smoke leaves every lived-in home with a fire: the top of each chimney or
     /// smoke hole, in continent-local voxels. The game sends chimney smoke up from here.
     pub chimneys: Vec<Vec3>,
+    /// Every walk-in building of every settlement, in the order they were laid out:
+    /// settlement by settlement, each one's in the order its plots were chosen.
+    pub plots: Vec<crate::settlements::layout::Plot>,
+    /// How each settlement is laid out about its buildings, by index in `settlements`.
+    pub layouts: Vec<crate::settlements::layout::Layout>,
 }
 
 impl Network {
-    fn add_points(&mut self, points: &[TrailPoint]) {
+    pub(crate) fn add_points(&mut self, points: &[TrailPoint]) {
         for p in points {
             let key = ((p.x as i32).div_euclid(TILE), (p.z as i32).div_euclid(TILE));
             self.tiles.entry(key).or_default().push(*p);
@@ -311,7 +329,7 @@ impl Network {
     }
 
     /// A stamp with fine parts, in continent-local cells.
-    fn add_stamp_with(&mut self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
+    pub(crate) fn add_stamp_with(&mut self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
         // Models are built in hash maps, so their voxels come in a different order each
         // run. The coarse rings and the far boxes keep whichever voxel of a cell comes
         // last, so put them in one order; a stable sort leaves any voxel written twice at

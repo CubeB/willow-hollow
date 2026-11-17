@@ -69,7 +69,7 @@ pub(crate) const LANTERN_CLEAR: f32 = m(9.0);
 pub(crate) const JUNCTION_CLEAR: f32 = m(16.0);
 
 /// Quarter turns that best point a model's +X along `d`.
-fn turns_toward(d: Vec2) -> u32 {
+pub(crate) fn turns_toward(d: Vec2) -> u32 {
     // rotate() takes +X to (0,1), (-1,0) and (0,-1) for one, two and three turns.
     let axes = [vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(0.0, -1.0)];
     (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
@@ -84,7 +84,7 @@ const NEAR_SITE: f32 = m(240.0);
 
 /// Columns under a list of points. Reads the bare terrain: the network being built is
 /// not attached to the continent yet.
-fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
+pub(crate) fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
     let mut out = Vec::with_capacity(pts.len());
     for run in pts.chunks(48) {
         let (mut lo, mut hi) = (Vec2::MAX, Vec2::MIN);
@@ -138,7 +138,7 @@ pub fn river_width_at(c: &Continent, p: Vec2) -> f32 {
     if best < m(20.0) { width } else { 0.0 }
 }
 
-fn is_wet(col: &Column) -> bool {
+pub(crate) fn is_wet(col: &Column) -> bool {
     col.water_surface().is_some()
 }
 
@@ -974,7 +974,7 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
 
 /// The building materials of the place at continent-local column `(lx, lz)` and height
 /// `y`: stone from the rock in the ground there, timber from the trees of the country.
-pub(super) fn palette_at(c: &Continent, seed: u32, biome: crate::biome::Biome, lx: i32, y: i32, lz: i32) -> Palette {
+pub(crate) fn palette_at(c: &Continent, seed: u32, biome: crate::biome::Biome, lx: i32, y: i32, lz: i32) -> Palette {
     use crate::macro_layout::MACRO_SIZE;
     Palette::at(seed, biome, c.desc.mx * MACRO_SIZE + lx, y, c.desc.mz * MACRO_SIZE + lz)
 }
@@ -1343,7 +1343,7 @@ fn links(sites_at: &[(f32, f32, u32)]) -> Vec<(usize, usize, f32)> {
 
 /// Heights along a trail: terrain smoothed by a moving average, then clamped so the
 /// slope never exceeds what is comfortable to walk.
-fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
+pub(crate) fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
     const WINDOW: usize = 12;
     let max_step = MAX_SLOPE * OLD_VOXEL;
     let n = cols.len();
@@ -1589,6 +1589,7 @@ impl Layer<'_> {
                     LanternCause::Approach => 0.4,
                     LanternCause::Bridge | LanternCause::Junction => 0.25,
                     LanternCause::Plain => 0.15,
+                    LanternCause::Lane => 0.3,
                 };
             let (q, turns) = (pts[i] + normal * side * (widths[i] + m(1.0)), turns_toward(-normal * side));
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
@@ -1904,6 +1905,12 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         }
     }
 
+    // The ways a settlement's lanes follow, kept before they are laid.
+    let ways: Vec<(Vec<Vec2>, Vec<f32>)> = stretches
+        .iter()
+        .map(|s| (s.0.clone(), s.1.clone()))
+        .chain(spurs.iter().map(|s| (s.0.clone(), vec![m(0.45); s.0.len()])))
+        .collect();
     for (pts, widths, start_y, end_y, id) in stretches {
         layer.lay(pts, &widths, start_y, end_y, id, &mut net);
     }
@@ -1918,6 +1925,17 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         let widths = vec![widths_min(); pts.len()];
         layer.lay(pts, &widths, None, Some(y), after + k as u32, &mut net);
     }
+
+    // Each settlement's lanes, plots and buildings, now the trails that arrive are down.
+    // Whatever the trails left about the place before it was laid out (a lantern, a
+    // milestone, a landmark's prop) gives way to its buildings.
+    let (held_before, plots_from) = (net.held_props.len(), net.pads.len());
+    crate::settlements::layout::lay_out(c, world_seed, &mut net, first, &ways);
+    let plots: Vec<(Vec2, f32)> = net.pads[plots_from..].iter().map(|p| (vec2(p.x, p.z), p.radius + 1.0)).collect();
+    let on_plot = |c: IVec2| {
+        let c = c.as_vec2() + 0.5;
+        plots.iter().any(|&(p, r)| p.distance_squared(c) < r * r)
+    };
 
     // Lanterns, now every trail is down, except any a later trail runs over.
     let walked: Vec<Vec2> = net.points().filter(|p| p.half_width > 0.0).map(|p| vec2(p.x, p.z)).collect();
@@ -1947,7 +1965,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
-        if !on_way {
+        if !on_way && !(l.cause != LanternCause::Lane && l.footprint.iter().any(|&c| on_plot(c))) {
             keep[k] = true;
             net.add_stamp_with(voxels, fine);
         }
@@ -1959,8 +1977,11 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     });
 
     // Site props, except any standing where a trail runs.
-    for (voxels, fine, foot) in std::mem::take(&mut net.held_props) {
+    for (n, (voxels, fine, foot)) in std::mem::take(&mut net.held_props).into_iter().enumerate() {
         let Some(first) = foot.first() else { continue };
+        if n < held_before && foot.iter().any(|&c| on_plot(c)) {
+            continue;
+        }
         let first = first.as_vec2() + 0.5;
         let near = within(first, m(12.0));
         let on_way = foot.iter().any(|c| {
@@ -1979,7 +2000,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
-        if !on_way {
+        if !on_way && !marker.footprint.iter().any(|&c| on_plot(c)) {
             net.markers.push((marker.kind, marker.origin));
             net.add_stamp_with(marker.voxels, marker.fine);
         }
@@ -2012,7 +2033,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         if !junction_cells.insert(((j.x / m(6.4)) as i32, (j.y / m(6.4)) as i32)) {
             continue;
         }
-        let near: Vec<f32> = lines
+        let mut near: Vec<f32> = lines
             .values()
             .filter_map(|line| {
                 let k = line.iter().position(|p| p.distance_squared(j) < m(16.0).powi(2) && p.distance_squared(j) > m(5.6).powi(2))?;
@@ -2020,8 +2041,14 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
                 Some(d.y.atan2(d.x))
             })
             .collect();
+        // In one order, whatever order the lines are kept in, so the signpost is the same
+        // on every run.
+        near.sort_by(f32::total_cmp);
         let x = (j.x + SIGNPOST.x) as i32;
         let z = (j.y + SIGNPOST.y) as i32;
+        if on_plot(IVec2::new(x, z)) {
+            continue;
+        }
         let col = Sampler::new(c, world_seed, x, z, 1).column(x, z);
         if is_wet(&col) || col.river < m(2.4) {
             continue;
@@ -2048,52 +2075,72 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
 /// drop. Read from the finished ground, trails and all, so each wall meets the ground the
 /// game will make. On a neglected site the coping has fallen here and there.
 fn terrace_walls(c: &Continent, seed: u32, net: &mut Network) {
-    let mut walls = Vec::new();
-    for pad in net.pads.iter().filter(|p| p.walled) {
-        let centre = vec2(pad.x, pad.z);
-        let reach = (pad.radius + crate::surface::TERRACE_RING).ceil() as i32 + 1;
-        let (cx, cz) = (pad.x.floor() as i32, pad.z.floor() as i32);
-        let s = Sampler::with_network(c, seed, cx - reach - 1, cz - reach - 1, 2 * reach + 3, net);
-        // The same stone as the place it holds up (see `place_land`).
-        let pal = palette_at(c, seed, s.column(cx, cz).biome, cx, pad.y.round() as i32, cz);
-        let mut rng = Rng::new(hash2(seed ^ 0x07e4_4ace, cx, cz));
-        let pad_top = pad.y.floor() as i32;
-        let mut voxels = Vec::new();
-        for z in cz - reach..=cz + reach {
-            for x in cx - reach..=cx + reach {
-                let d = vec2(x as f32 + 0.5, z as f32 + 0.5).distance(centre) - pad.radius;
-                if !(0.0..crate::surface::TERRACE_RING).contains(&d) {
-                    continue;
-                }
-                let col = s.column(x, z);
-                if is_wet(&col) {
-                    continue;
-                }
-                let g = col.top();
-                let mut top = g;
-                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let n = s.column(x + dx, z + dz);
-                    if !is_wet(&n) {
-                        top = top.max(n.top());
-                    }
-                }
-                if top - g < 2 {
-                    continue;
-                }
-                let worn = rng.unit() < pad.neglect * 0.5;
-                let cap = if worn { top - 1 } else { top };
-                for y in g - 1..=cap {
-                    voxels.push((IVec3::new(x, y, z), if y == top { pal.stone_dark } else { pal.block(&mut rng) }));
-                }
-                // Built out over a drop: a kerb along the edge.
-                if top == pad_top && top - g >= 4 && !worn {
-                    voxels.push((IVec3::new(x, top + 1, z), pal.stone_dark));
-                }
-            }
-        }
-        walls.push(voxels);
-    }
+    let pads: Vec<&Pad> = net.pads.iter().filter(|p| p.walled).collect();
+    // Each pad's wall is found from the ground about it alone, so they are found side by
+    // side: a settlement's buildings each stand on a pad or a few.
+    let walls = in_parallel(&pads, |pad| terrace_wall(c, seed, net, pad));
     for voxels in walls {
         net.add_stamp(voxels);
     }
+}
+
+/// The wall that holds one terraced pad (see [`terrace_walls`]).
+fn terrace_wall(c: &Continent, seed: u32, net: &Network, pad: &Pad) -> Vec<(IVec3, Voxel)> {
+    let centre = vec2(pad.x, pad.z);
+    let reach = (pad.radius + crate::surface::TERRACE_RING).ceil() as i32 + 1;
+    let (cx, cz) = (pad.x.floor() as i32, pad.z.floor() as i32);
+    let s = Sampler::with_network(c, seed, cx - reach - 1, cz - reach - 1, 2 * reach + 3, net);
+    // The same stone as the place it holds up (see `place_land`).
+    let pal = palette_at(c, seed, s.column(cx, cz).biome, cx, pad.y.round() as i32, cz);
+    let mut rng = Rng::new(hash2(seed ^ 0x07e4_4ace, cx, cz));
+    let pad_top = pad.y.floor() as i32;
+    let mut voxels = Vec::new();
+    for z in cz - reach..=cz + reach {
+        for x in cx - reach..=cx + reach {
+            let d = vec2(x as f32 + 0.5, z as f32 + 0.5).distance(centre) - pad.radius;
+            if !(0.0..crate::surface::TERRACE_RING).contains(&d) {
+                continue;
+            }
+            let col = s.column(x, z);
+            if is_wet(&col) {
+                continue;
+            }
+            let g = col.top();
+            let mut top = g;
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = s.column(x + dx, z + dz);
+                if !is_wet(&n) {
+                    top = top.max(n.top());
+                }
+            }
+            if top - g < 2 {
+                continue;
+            }
+            let worn = rng.unit() < pad.neglect * 0.5;
+            let cap = if worn { top - 1 } else { top };
+            for y in g - 1..=cap {
+                voxels.push((IVec3::new(x, y, z), if y == top { pal.stone_dark } else { pal.block(&mut rng) }));
+            }
+            // Built out over a drop: a kerb along the edge.
+            if top == pad_top && top - g >= 4 && !worn {
+                voxels.push((IVec3::new(x, top + 1, z), pal.stone_dark));
+            }
+        }
+    }
+    voxels
+}
+
+/// `f` of each of `items`, in their order, worked out on as many threads as there are
+/// cores (up to eight). For work of which each piece stands alone, so the result is the
+/// same however it is shared out.
+pub(crate) fn in_parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    if threads < 2 || items.len() < 4 {
+        return items.iter().map(&f).collect();
+    }
+    let (per, f) = (items.len().div_ceil(threads), &f);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = items.chunks(per).map(|part| s.spawn(move || part.iter().map(f).collect::<Vec<R>>())).collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    })
 }

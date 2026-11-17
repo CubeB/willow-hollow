@@ -444,8 +444,10 @@ fn nothing_stands_on_the_walkable_trail() {
     let w = world();
     let c = w.continent(0, 0);
     let net = &c.trails;
-    // Beside a trail a lantern is a pole of sticks, never a gate across the way.
-    assert!(net.lanterns.iter().all(|l| l.style == crate::features::parts::LampStyle::Stick));
+    // Beside a trail a lantern is a pole of sticks, never a gate across the way; along a
+    // village's lane it may be a finer post, but still a single one beside the way.
+    use crate::features::parts::LampStyle;
+    assert!(net.lanterns.iter().all(|l| l.style == LampStyle::Stick || (l.cause == crate::trails::LanternCause::Lane && !matches!(l.style, LampStyle::Gate | LampStyle::Pair))));
     let points: Vec<_> = net.points().filter(|p| p.half_width > 0.0).collect();
     for l in &net.lanterns {
         assert!(!l.footprint.is_empty());

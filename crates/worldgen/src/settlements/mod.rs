@@ -6,6 +6,7 @@
 
 pub mod furnish;
 pub mod kit;
+pub mod layout;
 pub mod place;
 pub mod tree;
 
