@@ -444,6 +444,17 @@ impl Gazetteer {
                 }
             };
             let Some((name, slots)) = fill(pattern, value) else { continue };
+            // A name that says its opening twice, as "Caercaerdur" or "Caer Caerwen": the
+            // word just before the root, joined to it or not, must not begin as it does.
+            let echoes = |slot: &str, letters: usize| {
+                pattern.split_once(slot).is_some_and(|(before, _)| {
+                    let lead = before.split_whitespace().last().unwrap_or("").to_lowercase();
+                    lead.len() >= letters && low.len() >= letters && lead.as_bytes()[..letters] == low.as_bytes()[..letters]
+                })
+            };
+            if echoes("{low}", 2) || echoes("{root}", 3) {
+                continue;
+            }
             let has = |s: &str| slots.iter().any(|x| x == s);
             // A role and a type saying the same thing, as in "Watchwatch".
             if let (Some(role), Some(t)) = (role, kind_word)
