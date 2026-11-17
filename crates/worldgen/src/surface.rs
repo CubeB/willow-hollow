@@ -517,6 +517,11 @@ impl<'a> Sampler<'a> {
         lx - reach >= x0 && lz - reach >= z0 && lx + reach < x0 + span && lz + reach < z0 + span
     }
 
+    /// The continent it samples.
+    pub fn continent(&self) -> &'a Continent {
+        self.c
+    }
+
     /// How far in from its wall continent-local column `(lx, lz)` is, if it lies in a
     /// small ravine.
     pub fn ravine_at(&self, lx: i32, lz: i32) -> Option<f32> {

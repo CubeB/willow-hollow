@@ -69,6 +69,10 @@ pub struct Continent {
     pub trails: crate::trails::Network,
     /// Fault scarps, for drawing each step as a sharp face (see [`Continent::scarp`]).
     pub scarps: scarp::Scarps,
+    /// How managed each spot is, about the settlements (see
+    /// [`crate::settlements::farmland`]). Worked out after the trails; empty for a
+    /// continent fresh from [`generate`].
+    pub land: crate::settlements::farmland::Land,
 }
 
 impl Continent {
@@ -410,6 +414,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         biome,
         trails: Default::default(),
         scarps,
+        land: Default::default(),
     }
 }
 
@@ -482,6 +487,7 @@ fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
         biome: vec![Biome::Ocean as u8; n],
         trails: Default::default(),
         scarps: Default::default(),
+        land: Default::default(),
     }
 }
 

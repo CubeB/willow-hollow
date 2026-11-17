@@ -37,6 +37,7 @@ use crate::{
     materials as mat,
     noise::{fbm2, hash2, hash3, unit},
     scale::{BLOCK, m, m64},
+    settlements::farmland::orchard::{Fate, Stand},
     surface::{Column, Cover, Sampler},
 };
 use shape::{Template, rotate};
@@ -795,7 +796,24 @@ impl Cell {
         let nothing = |chosen: bool| Grown { chosen, feature: None };
         let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
         let col = sampler.column(lx, lz);
-        let Some(mut species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
+        let chosen = choose(&col, layer, roll(3), roll(4), x, z, world_seed);
+        // About a settlement the land has been worked: its fields cleared of trees, but
+        // for the hedgerows' and the odd old one. Out in the wild this is one lookup, and
+        // changes nothing.
+        let stand = match layer.salt {
+            s if s == GIANTS.salt => Stand::Giant,
+            s if s == TREES.salt => Stand::Tree,
+            _ => Stand::Small,
+        };
+        let worked = crate::settlements::farmland::orchard::fate(sampler.continent(), world_seed, stand, chosen, &col, lx, lz, roll(12), roll(13));
+        let chosen = match worked {
+            Fate::Wild => chosen,
+            Fate::Felled => None,
+            Fate::Stump => Some(Species::Stump),
+            Fate::Coppiced => Some(Species::Bush),
+            Fate::Kept(species) => Some(species),
+        };
+        let Some(mut species) = chosen else {
             return nothing(false);
         };
         // About a landmark the trees have been felled back, the nearer the more, leaving

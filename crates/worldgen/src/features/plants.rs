@@ -481,6 +481,10 @@ pub fn seasons() -> [[f32; 4]; SEASON_SLOTS] {
         rows[f.bloom_code() as usize] = f.bloom().row();
         rows[f.leaf_code() as usize] = f.leaves().row();
     }
+    // Then the crops of the fields, sown, ripe and cut (see settlements::farmland::crops).
+    for (code, s) in crate::settlements::farmland::crops::seasons() {
+        rows[code as usize] = s.row();
+    }
     rows
 }
 
@@ -855,6 +859,12 @@ pub fn washes() -> &'static [Wash] {
         }
         for &f in Flower::ALL {
             add(Growth::Flower(f));
+        }
+        // The crops of the fields, seen from afar (see settlements::farmland::crops).
+        for w in crate::settlements::farmland::crops::washes_of_crops() {
+            if !all.contains(&w) {
+                all.push(w);
+            }
         }
         assert!(all.len() < 256, "a wash is named in a byte");
         all

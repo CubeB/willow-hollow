@@ -9,6 +9,7 @@ pub mod kit;
 pub mod layout;
 pub mod place;
 pub mod tree;
+pub mod farmland;
 
 use glam::Vec2;
 

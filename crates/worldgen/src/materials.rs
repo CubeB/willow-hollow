@@ -363,6 +363,36 @@ palette! {
     // dark as a lantern's glass does, and a pane with nobody home behind it.
     WINDOW_LIT        = (120,  84,  46), Solid, 0, glow;
     WINDOW_DARK       = ( 54,  60,  66), Solid, 0;
+    // The fields about settlements (settlements::farmland), added last so existing ids keep
+    // their numbers: ploughed ground, wet and dry; the crops, each modelled as it is ripe
+    // (the seasons show it green before, see farmland::crops); fruit trees, vines and
+    // olives; and what bounds the fields: a hedge's leaves and the stems under them, and
+    // dead thorn piled up in the dry country.
+    PLOUGH            = (104,  76,  52), Solid, 2;
+    PLOUGH_DRY        = (158, 124,  88), Solid, 2;
+    WHEAT             = (214, 178,  92), Foliage, 2;
+    WHEAT_EAR         = (190, 146,  66), Foliage, 2;
+    BARLEY            = (224, 204, 136), Foliage, 2;
+    RYE               = (178, 164, 112), Foliage, 2;
+    STUBBLE           = (206, 190, 138), Foliage, 2;
+    FLAX              = (176, 150,  96), Foliage, 2;
+    FLAX_BLOOM        = (132, 170, 236), Foliage, 1;
+    ROOT_LEAF         = ( 56, 118,  54), Foliage, 2;
+    ROOT_CROWN        = (172, 112, 150), Foliage, 1;
+    VINE_ROW          = ( 76, 126,  52), Foliage, 2;
+    GRAPE             = ( 80,  42,  86), Foliage, 1;
+    ORCHARD_LEAF      = ( 80, 136,  54), Foliage, 3;
+    OLIVE_LEAF        = (112, 128,  98), Foliage, 3;
+    BARK_OLIVE        = (130, 120, 104), Solid, 2;
+    BLOSSOM           = (246, 228, 236), Foliage, 1;
+    APPLE             = (198,  50,  40), Foliage, 1;
+    FRUIT_GOLD        = (216, 186,  66), Foliage, 1;
+    HEDGE             = ( 58, 106,  46), Foliage, 3;
+    HEDGE_WOOD        = ( 92,  76,  58), Solid, 2;
+    THORN             = (124, 108,  88), Foliage, 2;
+    MEADOW_TUFT       = (150, 176,  92), Foliage, 3;
+    // A hedge seen from far off, as the coarse ground draws the line of it across a field.
+    HEDGE_FAR         = ( 50,  86,  42), Solid, 2;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,
@@ -593,4 +623,5 @@ fn classify(m: &mut Materials) {
     }
     // A turf roof is grass, and dries and yellows with the grass round about.
     m.set_plant(ROOF_TURF, pk::GROUND);
+    crate::settlements::farmland::crops::classify(m);
 }

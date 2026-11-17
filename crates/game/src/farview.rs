@@ -794,12 +794,27 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     ground = mix(ground, mix(color(light), color(dark), 0.25), rocky);
     // Nothing flowers on sand, snow or rock.
     washed *= (1.0 - sand) * (1.0 - snow) * (1.0 - rocky);
+    // About a settlement, the fields: plough and crops in their seasons, and the woods
+    // cleared from them (see worldgen::settlements::farmland).
+    let open = (1.0 - sand) * (1.0 - snow) * (1.0 - rocky);
+    let mut cleared = 0.0;
+    let mut wash = wash;
+    if let Some((soil, crop, managed)) = worldgen::settlements::farmland::far_cell(c, centre.x as i32, centre.y as i32) {
+        let share = smoothstep(0.1, 0.45, managed) * open;
+        if let Some(soil) = soil {
+            ground = mix(ground, color(soil), share * 0.85);
+        }
+        if let Some(crop) = crop {
+            (wash, washed) = (crop, share * 0.8);
+        }
+        cleared = share;
+    }
 
     // Trees take no root on rock, on the beach, or where it is too cold.
     let Some(canopy) = canopies[biome as usize].filter(|_| !beach) else {
         return Look { ground, far: ground, plant: 0, lift: 0.0, wash: (wash, washed, 1.0) };
     };
-    let grows = (1.0 - rocky) * smoothstep(0.125, 0.14, c.temperature[i]);
+    let grows = (1.0 - rocky) * smoothstep(0.125, 0.14, c.temperature[i]) * (1.0 - 0.8 * cleared);
     Look {
         ground,
         far: mix(ground, canopy.color, canopy.cover * 0.85 * grows),

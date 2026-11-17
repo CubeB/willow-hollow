@@ -299,7 +299,18 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
                 top = top.min(w - 1);
             }
             let low_corner = four.iter().map(|c| c.top()).min().expect("four corners");
-            let (surface, under) = skin(four[0], (highest - low_corner) as f32 / step as f32);
+            let (mut surface, under) = skin(four[0], (highest - low_corner) as f32 / step as f32);
+            // The fields about a settlement: their soil and crops' colours, and the hedges
+            // and walls between them (see worldgen::settlements::farmland).
+            let (cx_, cz_) = (lx0 + x as i32 * step, lz0 + z as i32 * step);
+            let field = if surface == mat::ground_cover(four[0].biome) {
+                worldgen::settlements::farmland::far(&continent, world.seed(), four[0], cx_, cz_, step)
+            } else {
+                None
+            };
+            if let Some(f) = field {
+                surface = f.surface;
+            }
             let cliff = (four[0].cover == Cover::Cliff).then_some(four[0].biome);
             lo = lo.min(top);
             hi = hi.max(top).max(water.unwrap_or(i32::MIN));
@@ -307,8 +318,12 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // The grass as the full-size ground has it, so it does not change at the
             // ring's edge: from the column at the cell's corner, its slope across the cell.
             let by_rock = four.iter().any(|c| matches!(c.cover, Cover::Cliff | Cover::Scree | Cover::Boulders));
-            let sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
-            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }, sward));
+            let mut sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
+            if let Some(wear) = field.and_then(|f| f.wear) {
+                sward = (sward & 7) | (sward >> 3).max(wear) << 3;
+            }
+            let crop = field.and_then(|f| f.wash);
+            wash.push((top, if grows { crop.unwrap_or_else(|| world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step)) } else { 0 }, sward));
             cells.push(Cell { top, water, surface, under, cliff });
         }
     }

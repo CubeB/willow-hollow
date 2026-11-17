@@ -20,6 +20,7 @@ use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
     scale::{BLOCK, m, m64},
+    settlements::farmland,
     surface::{self, Column, Cover, Sampler, node},
     trails,
 };
@@ -45,6 +46,7 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             let mut c = continent::generate(cell_desc(seed, mx, mz), config);
             c.trails = trails::build(&c, seed);
             c.trails.names = crate::names::survey(&c, seed);
+            c.land = farmland::influence::build(&c, seed);
             Arc::new(c)
         })
         .clone();
@@ -182,6 +184,27 @@ impl GameWorld {
         let c = self.continent(mx, mz);
         let (lx, lz) = (x - mx * MACRO_SIZE, z - mz * MACRO_SIZE);
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
+    }
+
+    /// How managed the land is at world column `(x, z)`: 0 in the wild, 1 in a
+    /// settlement's yards (see [`farmland::influence`]).
+    pub fn managed(&self, x: i32, z: i32) -> f32 {
+        let (mx, mz) = cell_of(x, z);
+        self.continent(mx, mz).land.managed(x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)
+    }
+
+    /// The ring of land use world column `(x, z)` lies in (see [`farmland::Use`]).
+    pub fn land_use(&self, x: i32, z: i32) -> farmland::Use {
+        let (mx, mz) = cell_of(x, z);
+        self.continent(mx, mz).land.land_use(x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)
+    }
+
+    /// The field world column `(x, z)` is in, if it is in one: its use, the way its rows
+    /// run, and whose it is. Says nothing of whether the column's own ground is worked
+    /// (a trail through a field is still in it): see [`farmland::fields::worked`].
+    pub fn field(&self, x: i32, z: i32) -> Option<farmland::Plot> {
+        let (mx, mz) = cell_of(x, z);
+        farmland::plot(&self.continent(mx, mz), self.seed, x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)
     }
 
     /// The small delights left beside the trails (see [`trails::delights`]) within
@@ -760,6 +783,17 @@ impl GameWorld {
             }
         }
 
+        // The fields about a settlement, if any reach this far, and what stands between
+        // them (see settlements::farmland). Worked out over the wide square, as a column's
+        // boundary depends on its neighbours' fields.
+        let fields = farmland::fields::Patch::new(&continent, self.seed, lx0 - 1, lz0 - 1, WIDE, &wide);
+        let mut edges: Vec<Option<farmland::bounds::Edge>> = Vec::new();
+        // An orchard's trees, in their rows.
+        let orchard = farmland::orchard::trees_near(&continent, self.seed, &sampler, lx0, lz0, PAD as i32, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        for t in &orchard {
+            hi = hi.max(t.top());
+        }
+
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         let mut plants = Vec::new();
@@ -791,9 +825,34 @@ impl GameWorld {
                 if let Some((trails::tread::Step::Stone(v), _, _)) = step {
                     skin.0 = v;
                 }
+                // In a field, the crop is on soil where the wild has grass; a boundary keeps a
+                // strip of grass under it.
+                let mut field = None;
+                if !fields.is_empty() && !rocky && skin.0 == mat::ground_cover(col.biome)
+                    && let Some(plot) = fields.at(px + 1, pz + 1)
+                {
+                    if edges.is_empty() {
+                        edges = vec![None; PAD * PAD];
+                    }
+                    let edge = farmland::bounds::edge(&continent.land, &fields, col, px + 1, pz + 1);
+                    edges[px * PAD + pz] = edge;
+                    if edge.is_some() {
+                        hi = hi.max(top + 5);
+                    } else {
+                        field = Some(*plot);
+                        if let Some(ground) = farmland::crops::ground(plot.crop, col) {
+                            skin.0 = ground;
+                        }
+                    }
+                }
                 let mut growing = skin.0;
                 if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
                     && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
+                {
+                    growing = f;
+                }
+                if let Some(plot) = &field
+                    && let Some(f) = farmland::crops::flowers(plot.crop, farmland::crops::roll(self.seed, wx as i32, wz as i32), patch)
                 {
                     growing = f;
                 }
@@ -803,12 +862,20 @@ impl GameWorld {
                 // or scree.
                 let by_rock = skin.0 == mat::TURF
                     || (0..3).any(|i| (0..3).any(|j| matches!(wide[(px + i) * WIDE + pz + j].cover, Cover::Cliff | Cover::Scree | Cover::Boulders)));
-                let sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
-                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }, sward));
+                let mut sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
+                // Grazed short in a pasture.
+                if let Some(wear) = field.and_then(|p| farmland::crops::grazed(p.crop)) {
+                    sward = (sward & 7) | (sward >> 3).max(wear) << 3;
+                }
+                let crop_wash = field.and_then(|p| farmland::crops::wash(p.crop));
+                wash.push((top, if own { crop_wash.unwrap_or_else(|| features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed)) } else { 0 }, sward));
                 if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
-                    features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
-                    if plants.len() == grown {
+                    let cropped = field.is_some_and(|p| farmland::crops::grow(&p, col, wx as i32, wz as i32, self.seed, &mut plants));
+                    if !cropped {
+                        features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
+                    }
+                    if plants.len() == grown && !cropped {
                         features::aquatic::grow(col, wx as i32, wz as i32, self.seed, &mut plants);
                     }
                     if plants.len() == grown {
@@ -1099,6 +1166,22 @@ impl GameWorld {
         }
         for &(q, v) in &rock {
             put(q, v, true);
+        }
+        // The orchards' trees, and the walls, hedges and fences between the fields, after
+        // the wild's trees, so a hedge grows round a hedgerow tree's trunk. The border
+        // columns' too, as the next chunk column builds them: their posts and rails,
+        // blossom and fruit only once, by the column's own chunk.
+        let own = |x: i32, z: i32| (wx0 + 1..=wx0 + CHUNK).contains(&x) && (wz0 + 1..=wz0 + CHUNK).contains(&z);
+        for t in &orchard {
+            farmland::orchard::grow(t, &mut put, planted.then_some(&mut plants), own);
+        }
+        for (i, edge) in edges.iter().enumerate() {
+            let Some(edge) = edge else { continue };
+            let (px, pz) = (i / PAD, i % PAD);
+            let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
+            let own = planted && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz);
+            let farm = &continent.land.farms[edge.owner];
+            farmland::bounds::build(edge, farm, &columns[i], wx, wz, self.seed, &mut put, own.then_some(&mut plants));
         }
         // Built things go last: they clear whatever grew or stood in their way.
         let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
