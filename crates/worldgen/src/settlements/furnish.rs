@@ -120,11 +120,16 @@ pub fn furnish(b: &Building, h: &Household, pal: &Palette, seed: u32) -> Furnish
     let wealth = h.wealth.clamp(0.0, 1.0);
     // Worn or broken: everything in an empty home, and in a lived-in one as it is let go.
     let worn = |rng: &mut Rng, k: f32| !lived || rng.unit() < neglect * k;
+    // A store: kept, but nobody sleeps or works in it and no fire burns there. It is
+    // stacked with what the place keeps by, and its windows are dark at night though none
+    // is broken.
+    let store = lived && h.sleepers == 0 && h.trade.is_none();
+    let lit = lived && !store;
 
     room.beds(h, &mut rng);
     match b.inside.hearth {
-        Some(hearth) if hearth.central => room.hut_hearth(hearth, lived, &mut rng),
-        Some(hearth) => room.fireplace(hearth, lived, &mut rng),
+        Some(hearth) if hearth.central => room.hut_hearth(hearth, lit, &mut rng),
+        Some(hearth) => room.fireplace(hearth, lit, &mut rng),
         None => {}
     }
     // What the trade is worked with, and what any home has; an empty home keeps only some
@@ -144,11 +149,15 @@ pub fn furnish(b: &Building, h: &Household, pal: &Palette, seed: u32) -> Furnish
             }
         }
     }
-    if lived || rng.unit() < 0.5 {
+    if !store && (lived || rng.unit() < 0.5) {
         let decayed = worn(&mut rng, 0.6);
         room.table(decayed, wealth, &mut rng);
     }
     let mut home = vec![(Fitting::Shelf, 0.6), (Fitting::Chest, 0.4)];
+    if store {
+        use Fitting::*;
+        home = [Chest, BasketStack, Shelf, Chest, WithyBundles, BasketStack, WaterJar, Shelf].map(|f| (f, 0.0)).to_vec();
+    }
     if wealth > 0.3 {
         home.push((Fitting::BasketStack, 0.0));
     }
@@ -165,13 +174,13 @@ pub fn furnish(b: &Building, h: &Household, pal: &Palette, seed: u32) -> Furnish
         }
     }
     // Herbs drying from the rafters: the forager's living, and now and then anyone's.
-    if lived {
+    if lit {
         let bunches = if h.trade == Some(Livelihood::Forager) { 2 } else { (rng.unit() < 0.3) as u32 };
         for k in 0..bunches {
             room.hang(Fitting::HerbBunches, false, seed ^ 0xb0c4 ^ k);
         }
     }
-    room.panes(lived, neglect, &mut rng);
+    room.panes(lived, lit, neglect, &mut rng);
     room.out
 }
 
@@ -1094,7 +1103,10 @@ impl<'a> Room<'a> {
     /// Glass in every window: lit where someone is at home (most of them), dark where
     /// nobody is, and broken in a home left long empty. Each pane is four lights between a
     /// cross of glazing bars, a cell in from the outside of the wall.
-    fn panes(&mut self, lived: bool, neglect: f32, rng: &mut Rng) {
+    /// Glass in every window: lit in most where `lit`, broken now and then where the home
+    /// is not `kept`.
+    fn panes(&mut self, kept: bool, lit: bool, neglect: f32, rng: &mut Rng) {
+        let lived = lit;
         let c = CELLS;
         let windows = self.b.inside.windows.clone();
         let mut any_lit = false;
@@ -1118,7 +1130,7 @@ impl<'a> Room<'a> {
                 (lo[1], hi[1]) = (v0, v1);
                 fine.push(PlantBox { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 });
             };
-            let broken = if lived { 0.0 } else { 0.2 + 0.5 * neglect };
+            let broken = if kept { 0.0 } else { 0.2 + 0.5 * neglect };
             for (u, v) in [((w0, wm), (y0, ym)), ((wm + 1, w1), (y0, ym)), ((w0, wm), (ym + 1, y1)), ((wm + 1, w1), (ym + 1, y1))] {
                 if rng.unit() >= broken {
                     push(u, v, glass);
@@ -1130,7 +1142,7 @@ impl<'a> Room<'a> {
             let (mut lo, mut hi) = (o.lo, o.hi + IVec3::ONE);
             lo[a] = outer;
             hi[a] = outer + 1;
-            self.commit(What::Pane { lit }, !lived, Parts { voxels: Vec::new(), fine, hooks: Vec::new() }, lo, hi);
+            self.commit(What::Pane { lit }, !kept, Parts { voxels: Vec::new(), fine, hooks: Vec::new() }, lo, hi);
         }
     }
 }
@@ -1290,7 +1302,12 @@ mod tests {
             let lit = f.items.iter().filter(|i| i.what == What::Pane { lit: true }).count();
             let panes = f.items.iter().filter(|i| matches!(i.what, What::Pane { .. })).count();
             assert_eq!(panes, b.inside.windows.len(), "{}: a window without glass", name(&s));
-            if h.lived_in {
+            let store = h.lived_in && h.sleepers == 0 && h.trade.is_none();
+            if store {
+                // Kept, but nobody there at night and no fire in it.
+                assert_eq!(lit, 0, "{}: a light in a store", name(&s));
+                assert!(f.fire.is_none() && f.sleepers.is_empty(), "{}: someone in a store", name(&s));
+            } else if h.lived_in {
                 assert!(panes == 0 || lit > 0, "{}: every window dark in a lived-in home", name(&s));
                 assert_eq!(f.fire.is_some(), b.inside.hearth.is_some(), "{}: the fire", name(&s));
             } else {

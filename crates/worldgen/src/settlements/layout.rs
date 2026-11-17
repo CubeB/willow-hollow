@@ -1242,7 +1242,8 @@ impl<'a> Town<'a> {
             },
             wealth: want.wealth,
             neglect: self.neglect,
-            lived_in: want.residents > 0,
+            // A store is kept, though nobody lives in it (`furnish` stocks it).
+            lived_in: want.residents > 0 || want.purpose == Purpose::Store,
         };
         let inside = furnish::furnish(b, &household, &self.pal, want.seed);
         let mut voxels: Vec<(IVec3, Voxel)> = b.voxels.iter().chain(&inside.voxels).map(|&(q, v)| (origin + rotate(q, t), v)).collect();
