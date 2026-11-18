@@ -1,0 +1,74 @@
+# What the people of the settlements say when greeted (#204).
+#
+# Each [section] is a list of lines, one to a line, and one is picked by the person and
+# how often they have met you. A greeting is an opening and then a remark. Slots are
+# filled from the place they live:
+#   {town}       their own settlement
+#   {neighbour}  the nearest other settlement
+#   {river}      the river or lake nearest them
+#   {season}     spring, summer, autumn or winter
+#   {time}       morning, afternoon or evening
+#   {trade}      their work, in a word
+# A line with a slot the place has nothing for (a town on no river) is never picked.
+
+[open first]
+Good {time} to you. You're not from {town}, are you?
+Well met, traveller. Welcome to {town}.
+Good {time}. Don't often see a new face in {town}.
+Oh, hello. Mind the lane, it's a bit uneven. Welcome to {town}.
+A good {time} to you, stranger. {town} is glad of the company.
+
+[open again]
+Back again? Good {time} to you.
+Good {time}! I hoped we'd see you in {town} again.
+Ah, it's you. Good {time}.
+Hello again. You've found your way round {town} by now, I expect.
+
+[open often]
+Good {time}, friend. You're nearly one of us now.
+There you are! {town} wouldn't be the same without you wandering about.
+Good {time}. Sit a while, if you've the time.
+
+[open child]
+Hello! Who are you?
+Good {time}! Are you a traveller? Have you been to {neighbour}?
+Hello! I'm not supposed to talk to strangers. But you seem nice.
+
+[remark river]
+The {river} has been kind to us this {season}.
+If you're walking on, follow the {river}. It's the gentlest way.
+Fish are rising in the {river} this {season}, they say.
+Folk say the {river} was here before {town} was, and it'll be here after.
+
+[remark neighbour]
+If you're headed to {neighbour}, it's not far. Give them my regards.
+My cousin lives over in {neighbour}. Fine folk, if a little proud.
+They make good bread in {neighbour}, but don't tell anyone here I said so.
+You'll find a bed in {neighbour} if you walk on before dark.
+
+[remark tree]
+Have you seen the village tree on the green? It's older than any of us.
+We meet under the village tree when there's news. Not often, mind.
+My grandmother planted acorns by the village tree. One of them took.
+
+[remark season]
+{season} suits {town}, I always think.
+It's a fair {season} in {town} this year.
+We'll have a long {season} of it yet, in {town}.
+Nothing like {season} in {town}. You picked a good time to come.
+
+[remark trade]
+Work as a {trade} keeps me busy in {town}, but there's always time for a word.
+Plenty to do for a {trade} in {town} this {season}.
+Mind how you go. And if you need a {trade} in {town}, you know where I am.
+
+[remark child]
+I'm going to the green to play. All the children of {town} play there.
+Have you seen the village tree? I can nearly reach the lowest branch.
+When I'm grown I'm going to walk all the way to {neighbour}.
+
+[remark elder]
+I've seen a good many {season}s in {town}. This one's a kind one.
+When I was young, {town} was half the size. Now look at it.
+The {river} froze right over one winter, when I was small. You could walk to the far bank.
+Sit with me a moment. My knees don't walk to {neighbour} any more.

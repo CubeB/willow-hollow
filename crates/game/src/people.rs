@@ -686,9 +686,33 @@ enum Shape {
 /// A household: who lives under one roof, sharing a family name, the children taking
 /// after their parents. The first adult works at `trade`; the rest as suits it.
 pub fn household(seed: u32, region: Region, tongue: &str, wealth: f32, trade: Trade) -> Vec<Person> {
+    make_household(seed, region, tongue, wealth, trade, None)
+}
+
+/// A household of exactly `size`, as [`household`] makes one: the beds of a home in a
+/// settlement are made for so many (#204). One alone is an elder or a single adult, two
+/// a couple or a parent and child, more a family, with a grandparent in some.
+pub fn household_of(seed: u32, region: Region, tongue: &str, wealth: f32, trade: Trade, size: usize) -> Vec<Person> {
+    make_household(seed, region, tongue, wealth, trade, Some(size))
+}
+
+fn make_household(seed: u32, region: Region, tongue: &str, wealth: f32, trade: Trade, size: Option<usize>) -> Vec<Person> {
+    if size == Some(0) {
+        return Vec::new();
+    }
     let mut d = Dice::new(seed, 40);
     let family = folk::family_name(seed, tongue);
-    let shape = d.pick(&[(Shape::LoneElder, 0.08), (Shape::Single, 0.1), (Shape::Couple, 0.14), (Shape::Family, 0.5), (Shape::Generations, 0.18)]);
+    let picked = d.pick(&[(Shape::LoneElder, 0.08), (Shape::Single, 0.1), (Shape::Couple, 0.14), (Shape::Family, 0.5), (Shape::Generations, 0.18)]);
+    // The shape picked, as near as a household of the size asked for can come to it.
+    let shape = match size {
+        None => picked,
+        Some(1) if picked == Shape::LoneElder => Shape::LoneElder,
+        Some(1) => Shape::Single,
+        Some(2) if picked == Shape::Single => Shape::Single,
+        Some(2) => Shape::Couple,
+        Some(n) if n >= 4 && picked == Shape::Generations => Shape::Generations,
+        Some(_) => Shape::Family,
+    };
     let mut people: Vec<Person> = Vec::new();
     let mut taken: Vec<String> = Vec::new();
     let mut n = 0;
@@ -733,9 +757,10 @@ pub fn household(seed: u32, region: Region, tongue: &str, wealth: f32, trade: Tr
         add(&mut people, &mut taken, s, w, Age::Adult, work, Some(other_sex), None);
         Some(people.len() - 1)
     };
-    let children = match shape {
-        Shape::Family | Shape::Generations => 1 + d.below(4),
-        Shape::Single if d.chance(0.5) => 1 + d.below(2),
+    let children = match (size, shape) {
+        (Some(n), _) => n.saturating_sub(people.len()),
+        (None, Shape::Family | Shape::Generations) => 1 + d.below(4),
+        (None, Shape::Single) if d.chance(0.5) => 1 + d.below(2),
         _ => 0,
     };
     if children > 0 {

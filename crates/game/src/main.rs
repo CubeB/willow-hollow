@@ -34,6 +34,7 @@ mod weather;
 mod terrain;
 mod threads;
 mod vehicles;
+mod villagers;
 
 use std::{
     collections::HashSet,
@@ -151,6 +152,9 @@ struct Options {
     shot_hotbar: bool,
     /// A line of words to show along the foot of a screenshot, as a prompt is shown.
     shot_prompt: Option<String>,
+    /// Greet whoever of a settlement is nearest the figure (or the camera) on a
+    /// screenshot (the `greet` command): they turn to it, and what they say is the prompt.
+    shot_greet: bool,
     /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
     /// How far ahead that camp is made, in metres.
@@ -227,6 +231,7 @@ impl Default for Options {
             shot_pack: false,
             shot_hotbar: false,
             shot_prompt: None,
+            shot_greet: false,
             shot_camp: None,
             camp_ahead: CAMP_AHEAD,
             shot_chimneys: 0,
@@ -1093,6 +1098,8 @@ struct Running {
     chimneys: chimneys::Chimneys,
     /// The guest beds of the taverns near the player: the middle of each, on its boards.
     beds: Vec<DVec3>,
+    /// The people of the settlements near the player (#204).
+    villagers: villagers::Villagers,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1368,6 +1375,7 @@ impl Running {
             embers: Vec::new(),
             chimneys,
             beds: Vec::new(),
+            villagers: villagers::Villagers::new(),
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -1956,9 +1964,23 @@ impl Running {
         } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
             let boat = self.fleet.take(i);
             self.player.board(boat.pos, boat.heading);
-        } else if !self.make_camp() {
+        } else if !self.greet() && !self.make_camp() {
             self.gather();
         }
+    }
+
+    /// Greets whoever of the settlement is near enough (#204): they stop and turn, and
+    /// say a word, and the journal counts the meeting. False with nobody near.
+    fn greet(&mut self) -> bool {
+        let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+        let Some((who, name)) = self.villagers.within_reach(feet) else { return false };
+        let (key, name) = (who.key(), name.to_string());
+        let met = self.journal.met(&key, &name);
+        let Some(said) = self.villagers.greet(who, feet, met, self.env.time, self.env.date) else { return false };
+        self.journal.meet(&key, &said.name, &said.town);
+        log::info!("{} of {}: {}", said.name, said.town, said.line);
+        self.notice = Some((format!("{}:  {}", said.name, said.line), 7.0));
+        true
     }
 
     /// Counts the steps taken, one each stride, playing a footstep for each and a
@@ -2214,6 +2236,7 @@ impl Running {
         let mut fires = self.placed.smoking(self.camera.pos, m64(particles::SMOKE_SIGHT), (SMOULDERS / self.settings.year_days.max(1.0)) as f64);
         fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
         self.chimneys.update(dt, &self.world, self.camera.pos, self.env.time);
+        self.villagers.update(dt, &self.world, self.camera.pos, self.env.time, self.env.date, self.env.year, self.settings.year_days);
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -2304,6 +2327,10 @@ impl Running {
                 }
             }
         }
+        // The settlements' people last, so that if ever the props overflow it is some of
+        // them that go, not the player's figure.
+        let feet = if self.walking { self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0) } else { self.camera.pos };
+        self.villagers.draw(feet, self.camera.pos, self.env.time, &mut self.props);
 
         self.sub.lap(9);
         self.map.corner = self.settings.minimap;
@@ -2392,7 +2419,11 @@ impl Running {
             Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail".into()),
             Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat".into()),
             _ if self.notice.is_some() => self.notice.as_ref().map(|n| n.0.clone()),
-            _ => self.camp_prompt().or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name))),
+            _ => {
+                let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+                let greet = self.villagers.within_reach(feet).map(|(_, name)| format!("E to greet {name}"));
+                greet.or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
+            }
         };
         // What has just come to hand, and what it is for, fading out.
         let hand_word = self.pack.in_hand().filter(|_| self.hand_word > 0.0).map(|s| (format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)), (self.hand_word / 0.6).min(1.0)));
@@ -2862,7 +2893,7 @@ fn main() -> Result<()> {
         // made of them. One that fails stops the shot: it would not show what was asked.
         let mut console = commands::Console::default();
         for line in std::mem::take(&mut opts.commands) {
-            let reply = console.run(&line, &mut Shot { opts: &mut opts, world: &world, seed: settings.seed });
+            let reply = console.run(&line, &mut Shot { opts: &mut opts, world: &world, seed: settings.seed, year_days: settings.year_days });
             Running::log_reply(&line, &reply);
             if let Err(wrong) = reply {
                 bail!("--command '{line}': {wrong}");
@@ -3069,6 +3100,29 @@ fn main() -> Result<()> {
         if let Some(animals) = &animals {
             animals.draw(camera.pos, &mut props);
         }
+        // The people of the settlements about, where they are at this hour (#204); the
+        // nearest greeted, if asked, turned to the figure and saying their word.
+        let mut folk = villagers::Villagers::new();
+        let foot = figure.as_ref().map_or(camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), |(feet, _)| *feet);
+        folk.settle(&world, camera.pos, env.time, env.date, env.year, settings.year_days);
+        let before = props.len();
+        folk.draw(foot, camera.pos, env.time, &mut props);
+        let mut greeted = None;
+        if opts.shot_greet {
+            let nearest = folk.seen().iter().filter(|f| f.task != Some(character::Task::Lie)).min_by(|a, b| a.feet.distance(foot).total_cmp(&b.feet.distance(foot))).map(|f| f.who);
+            match nearest.and_then(|who| folk.greet(who, foot, 0, env.time, env.date)) {
+                Some(said) => {
+                    log::info!("greeted {} of {}: {}", said.name, said.town, said.line);
+                    greeted = Some(format!("{}:  {}", said.name, said.line));
+                    props.truncate(before);
+                    folk.draw(foot, camera.pos, env.time, &mut props);
+                }
+                None => log::warn!("greet: nobody of a settlement in sight"),
+            }
+        }
+        if folk.towns().next().is_some() {
+            log::info!("the settlements' people: {:?}, {} in sight", folk.drawn, folk.seen().len());
+        }
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
@@ -3173,7 +3227,7 @@ fn main() -> Result<()> {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
             }
-            if text && let Some(line) = &prompt {
+            if text && let Some(line) = prompt.as_ref().or(greeted.as_ref()) {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
             if text && console.open {
@@ -3490,6 +3544,23 @@ impl commands::Game for Running {
         self.third = !self.third;
         Ok(if self.third { "the view from behind".into() } else { "the view through the eyes".into() })
     }
+
+    fn people(&mut self, all: bool) -> commands::Reply {
+        let at = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.villagers.settle(&self.world, at, self.env.time, self.env.date, self.env.year, self.settings.year_days);
+        Ok(self.villagers.report(at, self.env.time, all))
+    }
+
+    fn greet(&mut self) -> commands::Reply {
+        if !self.walking {
+            return Err("walk first: greeting is done on foot".into());
+        }
+        if self.greet() {
+            Ok(self.notice.as_ref().map_or_else(String::new, |n| n.0.clone()))
+        } else {
+            Err(format!("nobody is near enough to greet (within {:.0} m)", villagers::GREET_REACH))
+        }
+    }
 }
 
 /// A screenshot being set up, for the console's commands: each sets what its flag would.
@@ -3497,6 +3568,7 @@ struct Shot<'a> {
     opts: &'a mut Options,
     world: &'a GameWorld,
     seed: u32,
+    year_days: f32,
 }
 
 impl Shot<'_> {
@@ -3615,5 +3687,18 @@ impl commands::Game for Shot<'_> {
             Some(false) => "no northern lights".into(),
             None => "the northern lights come out as the night has them".into(),
         })
+    }
+
+    fn people(&mut self, all: bool) -> commands::Reply {
+        let (eye, (hour, date)) = (self.eye(), self.clock());
+        let mut v = villagers::Villagers::new();
+        v.settle(self.world, eye, hour, date, self.year(), self.year_days);
+        v.draw(eye - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), eye, hour, &mut Vec::new());
+        Ok(v.report(eye, hour, all))
+    }
+
+    fn greet(&mut self) -> commands::Reply {
+        self.opts.shot_greet = true;
+        Ok("greeting whoever is nearest: what they say is the shot's prompt".into())
     }
 }

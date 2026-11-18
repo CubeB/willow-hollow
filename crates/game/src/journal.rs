@@ -193,6 +193,18 @@ pub struct Journal {
     now: Stamp,
     here: String,
     last_pos: Option<DVec3>,
+    /// The people of the settlements met (#204): who each is (see `villagers::Who`),
+    /// their name, and how many times they have been greeted.
+    met: Vec<Met>,
+}
+
+/// Someone of a settlement the player has greeted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Met {
+    /// Which settlement, and which of its people: `villagers::Who::key`.
+    pub key: String,
+    pub name: String,
+    pub times: u32,
 }
 
 fn clean(s: &str) -> String {
@@ -266,6 +278,39 @@ impl Journal {
     /// The find of the thing called `id`, if one has been made.
     pub fn find(&self, id: &str) -> Option<&Find> {
         self.finds.iter().find(|f| f.item.id == id)
+    }
+
+    /// How many times the person known by `key` has been greeted, if they are the one
+    /// called `name` (a world made since may have someone else there).
+    pub fn met(&self, key: &str, name: &str) -> u32 {
+        self.met.iter().find(|m| m.key == key && m.name == name).map_or(0, |m| m.times)
+    }
+
+    /// Everyone greeted so far.
+    #[cfg(test)]
+    pub fn people_met(&self) -> &[Met] {
+        &self.met
+    }
+
+    /// Writes down a greeting of `name` (known by `key`) of `town`, and returns how many
+    /// times they have now been greeted. The first meeting goes in the notes.
+    pub fn meet(&mut self, key: &str, name: &str, town: &str) -> u32 {
+        self.unsaved = true;
+        match self.met.iter_mut().find(|m| m.key == key) {
+            Some(m) if m.name == name => {
+                m.times += 1;
+                m.times
+            }
+            found => {
+                let m = Met { key: key.into(), name: name.into(), times: 1 };
+                match found {
+                    Some(old) => *old = m,
+                    None => self.met.push(m),
+                }
+                self.note(format!("Met {name} of {town}."));
+                1
+            }
+        }
     }
 
     /// Seasons that have turned since the walk began.
@@ -501,6 +546,9 @@ impl Journal {
         for n in &self.notes {
             out += &format!("note = {}|{}\n", n.when.to_text(), clean(&n.text));
         }
+        for m in &self.met {
+            out += &format!("met = {}|{}|{}\n", clean(&m.key), m.times, clean(&m.name));
+        }
         out
     }
 
@@ -560,6 +608,16 @@ impl Journal {
                         && !name.trim().is_empty()
                     {
                         j.rivers.push(River { name: name.trim().into(), far: far as f32, followed: Stamp::from_text(followed) });
+                    }
+                }
+                "met" => {
+                    let parts: Vec<&str> = value.splitn(3, '|').collect();
+                    if let [key, times, name] = parts[..]
+                        && let Ok(times) = times.trim().parse::<u32>()
+                        && !key.trim().is_empty()
+                        && !j.met.iter().any(|m| m.key == key.trim())
+                    {
+                        j.met.push(Met { key: key.trim().into(), name: name.trim().into(), times });
                     }
                 }
                 "note" => {

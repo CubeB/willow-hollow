@@ -125,6 +125,14 @@ pub trait Game {
     fn third(&mut self) -> Reply {
         cannot("the view")
     }
+    /// Who lives in the settlement nearest, and where they all are now (#204).
+    fn people(&mut self, _all: bool) -> Reply {
+        cannot("looking for the people of a settlement")
+    }
+    /// Greets whoever of a settlement is nearest, as E does.
+    fn greet(&mut self) -> Reply {
+        cannot("greeting")
+    }
 }
 
 fn cannot(what: &str) -> Reply {
@@ -147,6 +155,10 @@ fn none() -> Vec<&'static str> {
     Vec::new()
 }
 
+fn here_words() -> Vec<&'static str> {
+    vec!["here", "all"]
+}
+
 /// Every command, in the order `help` lists them.
 pub const COMMANDS: &[Spec] = &[
     Spec { name: "help", also: &["?"], usage: "help [command]", about: "list the commands, or say more of one", words: command_names, run: help },
@@ -161,6 +173,8 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "pos", also: &["where"], usage: "pos", about: "say where you are, ready for tp and for --over and --look", words: none, run: pos },
     Spec { name: "places", also: &[], usage: "places [name]", about: "the named places nearest, or those with this in their name", words: none, run: places },
     Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
+    Spec { name: "people", also: &[], usage: "people [here|all]", about: "who lives in the settlement nearest, and where they all are at this hour; all names each of them", words: here_words, run: |args, game| game.people(args.first() == Some(&"all")) },
+    Spec { name: "greet", also: &["hello"], usage: "greet", about: "greet whoever of a settlement is nearest, as E does", words: none, run: |_, game| game.greet() },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
     Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | herd <animal> [n] | pen <animal> | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, bring a herd or a pen of animals, or set things down", words: spawn_words, run: spawn },

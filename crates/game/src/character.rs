@@ -40,6 +40,8 @@ const GREENS: Rgb = [0x5a, 0x7a, 0x34];
 const FLETCH: Rgb = [0xe2, 0xdc, 0xcc];
 /// A beekeeper's veil, pale and fine enough to see through from inside.
 const VEIL: Rgb = [0xe6, 0xe2, 0xd4];
+/// The twigs of a besom.
+const BESOM: Rgb = [0xa8, 0x8a, 0x52];
 
 /// How someone is built: the player's body, taller or shorter, broader or slighter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,11 +208,17 @@ pub enum Carried {
     Bow,
     /// A purse at the belt.
     Purse,
+    /// A wooden pail hung from the right hand, for fetching water (#204).
+    Bucket,
+    /// A besom, over the shoulder or swept along the ground before the feet.
+    Broom,
+    /// A bundle of firewood held in both arms before the chest.
+    Load,
 }
 
 impl Carried {
     #[cfg(test)]
-    pub const ALL: [Carried; 13] = [
+    pub const ALL: [Carried; 16] = [
         Carried::None,
         Carried::Axe,
         Carried::Hoe,
@@ -224,6 +232,9 @@ impl Carried {
         Carried::Stick,
         Carried::Bow,
         Carried::Purse,
+        Carried::Bucket,
+        Carried::Broom,
+        Carried::Load,
     ];
 }
 
@@ -549,12 +560,16 @@ struct Frame {
     yaw: f32,
     /// One cell of this figure, in voxels.
     cell: f32,
+    /// How far the whole figure is laid back about the axis through its feet, as a part
+    /// is pitched about its joint: a quarter turn back for someone lying in bed. Only the
+    /// settlements' people lie down; for the player it is always 0.
+    lie: f32,
 }
 
 impl Frame {
     fn new(feet: DVec3, cam: DVec3, facing: f32, lift: f32, cell: f32) -> Self {
         // The figure looks along its own z; a camera at yaw 0 looks along x.
-        Frame { base: (feet - cam).as_vec3() + Vec3::Y * lift, yaw: facing - std::f32::consts::FRAC_PI_2, cell }
+        Frame { base: (feet - cam).as_vec3() + Vec3::Y * lift, yaw: facing - std::f32::consts::FRAC_PI_2, cell, lie: 0.0 }
     }
 
     /// Boxes of a part hung from `joint` (cells, in the figure's frame), the part turned
@@ -574,15 +589,26 @@ impl Frame {
             let tipped = Vec3::new(mid.x, mid.y * cp - mid.z * sp, mid.y * sp + mid.z * cp);
             // The joint turns with the body; the part about its joint with its own turn.
             let (by, bx) = yaw.sin_cos();
-            let at = Vec3::new(joint.x * bx - joint.z * by, joint.y, joint.x * by + joint.z * bx)
-                + Vec3::new(tipped.x * cy - tipped.z * sy, tipped.y, tipped.x * sy + tipped.z * cy);
+            let (at, tilt) = if self.lie == 0.0 {
+                let at = Vec3::new(joint.x * bx - joint.z * by, joint.y, joint.x * by + joint.z * bx)
+                    + Vec3::new(tipped.x * cy - tipped.z * sy, tipped.y, tipped.x * sy + tipped.z * cy);
+                (at, pitch)
+            } else {
+                // Laid back whole about the feet, which is one more pitch of every part about
+                // the same axis (a lying figure's head is not turned, so the turn is none).
+                let (st, ct) = turn.sin_cos();
+                let local = joint + Vec3::new(tipped.x * ct - tipped.z * st, tipped.y, tipped.x * st + tipped.z * ct);
+                let (sl, cl) = self.lie.sin_cos();
+                let laid = Vec3::new(local.x, local.y * cl - local.z * sl, local.y * sl + local.z * cl);
+                (Vec3::new(laid.x * bx - laid.z * by, laid.y, laid.x * by + laid.z * bx), pitch + self.lie)
+            };
             out.push(ParticleInstance {
                 pos: (self.base + at * self.cell).into(),
                 yaw: yaw + turn,
                 size: (size * self.cell).into(),
                 glow: 0.0,
                 color: linear(*color),
-                tilt: [pitch, roll],
+                tilt: [tilt, roll],
                 dissolve: 0.0,
             });
         }
@@ -613,7 +639,7 @@ const SHOULDERED: (f32, f32, f32) = (-0.45, -1.9, -1.06);
 fn holding(carried: Carried, pose: &Pose) -> Pose {
     let mut p = *pose;
     match carried {
-        Carried::Axe | Carried::Hoe | Carried::Rod => {
+        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom => {
             p.arm[0] = SHOULDERED.0;
             p.fore[0] = SHOULDERED.1;
         }
@@ -666,9 +692,27 @@ fn shins(look: &Look) -> Rgb {
 /// the glider carried as a rod: 0 strapped upright to the back beside the pack, up to 1
 /// swung overhead to where the wing opens from; None once the wing is out.
 pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f32>, cam: DVec3, out: &mut Vec<ParticleInstance>) {
-    let pose = &holding(look.carried, pose);
+    draw_doing(look, feet, facing, pose, furled, None, cam, out);
+}
+
+/// Draws someone of the settlements at `task` (#204), as [`draw`] does: in the pose
+/// [`task_pose`] gives (or any other), with what the task is done with in their hands
+/// rather than on the shoulder, and laid back in bed for [`Task::Lie`], when `feet` is
+/// where their soles are and `facing` the way from their head to them.
+pub fn draw_at(look: &Look, feet: DVec3, facing: f32, pose: &Pose, task: Task, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+    draw_doing(look, feet, facing, pose, None, Some(task), cam, out);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f32>, task: Option<Task>, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+    // A tool being worked with is in the hands, which go where the task puts them.
+    let in_use = task.is_some_and(|t| t.in_use(look.carried));
+    let pose = &if in_use { *pose } else { holding(look.carried, pose) };
     let b = look.build;
-    let frame = Frame::new(feet, cam, facing, pose.lift * b.scale, CELL * b.scale);
+    let mut frame = Frame::new(feet, cam, facing, pose.lift * b.scale, CELL * b.scale);
+    if task == Some(Task::Lie) {
+        frame.lie = -std::f32::consts::FRAC_PI_2;
+    }
     let mut part = |joint: Vec3, pitch: f32, turn: f32, pieces: &[Piece]| frame.part(out, joint, pitch, turn, 0.0, pieces);
     let lean = pose.lean + b.stoop;
     let leant = |p: Vec3| leaning(p, lean);
@@ -869,11 +913,53 @@ pub fn draw(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option<f
     };
     let dark = shade(WOOD, 0.75);
     match look.carried {
-        Carried::Axe | Carried::Hoe | Carried::Rod => {
+        // Worked with: gripped near the end of the haft, in line with the forearm, so it
+        // swings as the arms do; the rod held out over the water with its line hanging.
+        Carried::Axe | Carried::Hoe | Carried::Broom if in_use => {
+            let tool: &[Piece] = match look.carried {
+                Carried::Axe => &[([-0.17, -8.0, -0.17], [0.34, 8.8, 0.34], WOOD), ([-0.12, -8.2, -1.5], [0.24, 1.4, 1.45], IRON)],
+                Carried::Hoe => &[([-0.15, -11.0, -0.15], [0.3, 12.2, 0.3], WOOD), ([-0.75, -11.2, -1.6], [1.5, 0.35, 1.6], IRON)],
+                _ => &[([-0.15, -10.0, -0.15], [0.3, 11.0, 0.3], WOOD), ([-0.8, -11.6, -0.55], [1.6, 1.8, 1.1], BESOM)],
+            };
+            // The broom's head is held down to the ground before the feet, swept from side
+            // to side; the others swing with the forearm.
+            let (pitch, turn) = match look.carried {
+                Carried::Broom => (-0.5, pose.head),
+                _ => (pose.arm[0] + pose.fore[0], 0.0),
+            };
+            part(hand(0), pitch, turn, tool);
+        }
+        Carried::Rod if in_use => {
+            let h = hand(0);
+            let pitch = 1.1 + pose.jiggle[1];
+            part(h, pitch, 0.0, &[([-0.1, -1.5, -0.1], [0.2, 15.5, 0.2], dark), ([-0.18, -0.5, -0.18], [0.36, 1.4, 0.36], shade(LEATHER, 0.7))]);
+            // The line from the tip straight down, to below the feet.
+            let tip = along(h, pitch, -14.0);
+            part(tip, 0.0, 0.0, &[([-0.04, -tip.y - 3.0, -0.04], [0.08, tip.y + 3.0, 0.08], FLETCH)]);
+        }
+        Carried::Bucket => {
+            part(
+                hand(0) + Vec3::new(-0.4, 0.0, 0.0),
+                0.0,
+                0.0,
+                &[([-0.9, -3.2, -0.9], [1.8, 1.9, 1.8], shade(WOOD, 1.08)), ([-0.95, -2.2, -0.95], [1.9, 0.25, 1.9], IRON), ([-0.08, -1.3, -0.08], [0.16, 1.3, 0.16], IRON)],
+            );
+        }
+        Carried::Load => {
+            // Split logs across the arms, held to the chest.
+            part(
+                hips,
+                lean,
+                0.0,
+                &[([-1.8 * g, 1.3, deep + 0.15], [3.6 * g, 1.0, 2.8], WOOD), ([-1.6 * g, 2.3, deep + 0.3], [3.2 * g, 0.9, 2.5], shade(WOOD, 0.82))],
+            );
+        }
+        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom => {
             // Held by the haft before the shoulder, the head behind.
             let tool: &[Piece] = match look.carried {
                 Carried::Axe => &[([-0.17, -1.2, -0.17], [0.34, 8.6, 0.34], WOOD), ([-0.12, 6.1, -1.5], [0.24, 1.4, 1.45], IRON)],
                 Carried::Hoe => &[([-0.15, -1.5, -0.15], [0.3, 12.5, 0.3], WOOD), ([-0.75, 10.6, -1.6], [1.5, 0.35, 1.6], IRON)],
+                Carried::Broom => &[([-0.15, -1.5, -0.15], [0.3, 11.0, 0.3], WOOD), ([-0.8, 9.5, -0.55], [1.6, 1.8, 1.1], BESOM)],
                 _ => &[([-0.1, -1.5, -0.1], [0.2, 15.5, 0.2], dark), ([-0.18, 0.5, -0.18], [0.36, 1.4, 0.36], shade(LEATHER, 0.7))],
             };
             part(hand(0), SHOULDERED.2, 0.0, tool);
@@ -1056,6 +1142,190 @@ pub fn draw_far(look: &Look, feet: DVec3, facing: f32, pose: &Pose, cam: DVec3, 
     } else if look.pack {
         part(HIPS, lean, &[([-1.75, 1.2, -2.5 - (deep - 1.0)], [3.0, 4.1, 1.5], LEATHER)]);
     }
+}
+
+/// What someone of the settlements is busy at (#204): the pose it holds them in, and
+/// what is in their hands for it. The player is never drawn at any of them.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Task {
+    /// At ease, looking about.
+    Stand,
+    /// An axe swung up overhead and down onto the block.
+    Chop,
+    /// A hoe worked into a garden bed.
+    Hoe,
+    /// A hammer on the anvil, the other hand holding the work in tongs.
+    Hammer,
+    /// A rod held out over the water.
+    Fish,
+    /// Firewood held in both arms.
+    Carry,
+    /// A pail of water in the hand.
+    Fetch,
+    /// A besom swept from side to side before the feet.
+    Sweep,
+    /// On a seat a stool high (see [`SEAT`]).
+    Sit,
+    /// On the ground, legs out before them, leaning back on their hands.
+    SitLow,
+    /// Talking with someone, a hand going as they speak.
+    Talk,
+    /// Bent to a hive or a rack, hands busy at it.
+    Tend,
+    /// On their back in bed.
+    Lie,
+}
+
+/// How high a seat is, in metres: a stool's, and about a bench's.
+pub const SEAT: f32 = 0.5;
+
+impl Task {
+    #[cfg(test)]
+    pub const ALL: [Task; 13] = [
+        Task::Stand,
+        Task::Chop,
+        Task::Hoe,
+        Task::Hammer,
+        Task::Fish,
+        Task::Carry,
+        Task::Fetch,
+        Task::Sweep,
+        Task::Sit,
+        Task::SitLow,
+        Task::Talk,
+        Task::Tend,
+        Task::Lie,
+    ];
+
+    /// What it is, in words, for logs and the console.
+    pub fn word(self) -> &'static str {
+        match self {
+            Task::Stand => "standing",
+            Task::Chop => "chopping",
+            Task::Hoe => "hoeing",
+            Task::Hammer => "hammering",
+            Task::Fish => "fishing",
+            Task::Carry => "carrying wood",
+            Task::Fetch => "fetching water",
+            Task::Sweep => "sweeping",
+            Task::Sit => "sitting",
+            Task::SitLow => "sitting on the ground",
+            Task::Talk => "talking",
+            Task::Tend => "tending",
+            Task::Lie => "asleep",
+        }
+    }
+
+    /// What it is done with, for someone who would otherwise carry `own`; their own
+    /// thing where the task needs nothing in particular, and nothing on the shoulder to
+    /// sit or lie down with.
+    pub fn carried(self, own: Carried) -> Carried {
+        match self {
+            Task::Chop => Carried::Axe,
+            Task::Hoe => Carried::Hoe,
+            Task::Hammer => Carried::Hammer,
+            Task::Fish => Carried::Rod,
+            Task::Carry => Carried::Load,
+            Task::Fetch => Carried::Bucket,
+            Task::Sweep => Carried::Broom,
+            Task::Tend if own == Carried::Smoker => own,
+            Task::Tend | Task::Sit | Task::SitLow | Task::Lie => match own {
+                Carried::Purse | Carried::Bow => own,
+                _ => Carried::None,
+            },
+            Task::Stand | Task::Talk => own,
+        }
+    }
+
+    /// Whether `carried` is being worked with, and so held in the hands.
+    fn in_use(self, carried: Carried) -> bool {
+        matches!((self, carried), (Task::Chop, Carried::Axe) | (Task::Hoe, Carried::Hoe) | (Task::Fish, Carried::Rod) | (Task::Sweep, Carried::Broom))
+    }
+}
+
+/// The pose for `task` at `clock` seconds, for someone of `build`; `phase` (0 to 1) puts
+/// each person at their own point of the work, so that two at it are not in step.
+pub fn task_pose(task: Task, build: &Build, clock: f32, phase: f32) -> Pose {
+    let tau = std::f32::consts::TAU;
+    let wave = |rate: f32, k: f32| (clock * rate + (phase + k) * tau).sin();
+    // How far through a stroke: up slowly, then down fast.
+    let stroke = |rate: f32, high: f32, low: f32| {
+        let u = (clock * rate + phase).rem_euclid(1.0);
+        if u < 0.62 {
+            let s = u / 0.62;
+            low + (high - low) * s * s * (3.0 - 2.0 * s)
+        } else {
+            let s = (u - 0.62) / 0.38;
+            high + (low - high) * s * s
+        }
+    };
+    // Seated with the hips at `height` metres above the soles.
+    let seated = |height: f32| m(height) / build.scale - 9.0 * CELL;
+    let breath = wave(1.7, 0.0);
+    match task {
+        Task::Stand => Pose { arm: [breath * 0.04, -breath * 0.04], fore: [-0.1; 2], head: wave(0.45, 0.3) * 0.3, lift: breath * m(0.006), ..Default::default() },
+        Task::Chop => {
+            let a = stroke(0.75, -2.9, -1.05);
+            Pose { leg: [-0.18, 0.18], arm: [a; 2], fore: [-0.25; 2], lean: 0.12 + 0.18 * ((a + 2.9) / 1.85), ..Default::default() }
+        }
+        Task::Hoe => {
+            let a = stroke(0.5, -1.7, -0.55);
+            Pose { leg: [-0.25, 0.15], shin: [0.15; 2], arm: [a, a + 0.15], fore: [-0.3; 2], lean: 0.3, ..Default::default() }
+        }
+        Task::Hammer => {
+            let a = stroke(1.3, -1.95, -0.7);
+            Pose { leg: [-0.12, 0.12], arm: [a, -0.75], fore: [-0.8, -0.7], lean: 0.15, ..Default::default() }
+        }
+        Task::Fish => Pose { arm: [-0.95, -0.85], fore: [-0.35, -0.45], lean: 0.05, jiggle: [0.0, wave(0.6, 0.0) * 0.04], ..Default::default() },
+        Task::Carry => Pose { arm: [-0.75; 2], fore: [-0.95; 2], lean: -0.04, lift: breath * m(0.006), ..Default::default() },
+        Task::Fetch => Pose { arm: [0.04, -0.12], fore: [0.0, -0.2], lean: 0.03, ..Default::default() },
+        Task::Sweep => {
+            let s = wave(0.9, 0.0);
+            Pose { leg: [-0.2, 0.15], arm: [-0.7 + 0.12 * s, -0.5 - 0.12 * s], fore: [-0.35, -0.55], head: s * 0.4, lean: 0.22, ..Default::default() }
+        }
+        Task::Sit => {
+            // Hands in the lap, working at something now and then.
+            let busy = wave(1.1, 0.5).max(0.0) * 0.25;
+            Pose { leg: [-1.5; 2], shin: [1.5; 2], arm: [-0.55; 2], fore: [-0.7 - busy, -0.7 + busy * 0.5], head: wave(0.3, 0.2) * 0.25, lift: seated(SEAT), ..Default::default() }
+        }
+        Task::SitLow => Pose { leg: [-1.5, -1.4], shin: [0.1, 0.3], arm: [0.35; 2], fore: [-0.05; 2], head: wave(0.35, 0.1) * 0.3, lean: -0.2, lift: seated(0.1), ..Default::default() },
+        Task::Talk => {
+            let say = wave(2.2, 0.0).max(0.0);
+            Pose { arm: [-0.3 - 0.4 * say, 0.02], fore: [-0.9 - 0.35 * say, -0.15], head: wave(0.8, 0.4) * 0.12, lift: breath * m(0.006), ..Default::default() }
+        }
+        Task::Tend => {
+            let w = wave(0.8, 0.0);
+            Pose { leg: [-0.25, 0.2], shin: [0.3, 0.3], arm: [-1.0 + 0.12 * w, -0.85 - 0.1 * w], fore: [-0.55, -0.75], lean: 0.45, ..Default::default() }
+        }
+        // Flat, the arms along the sides, breathing; a cell up off the mattress.
+        Task::Lie => Pose { arm: [0.05; 2], fore: [-0.25; 2], lift: CELL + breath * m(0.008), ..Default::default() },
+    }
+}
+
+/// How long someone of `build` is from heel to crown lying down, in voxels: how far their
+/// feet are from their head in bed.
+pub fn lying_length(build: &Build) -> f32 {
+    m(build.metres())
+}
+
+/// A stool set under someone sitting where there is no seat of their own, outside their
+/// door or in a yard, with its middle at `at` (the floor beneath it), its seat [`SEAT`]
+/// high. Three boxes.
+pub fn draw_stool(at: DVec3, facing: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+    let frame = Frame::new(at, cam, facing, 0.0, m(0.1));
+    let top = SEAT * 10.0;
+    frame.part(
+        out,
+        Vec3::ZERO,
+        0.0,
+        0.0,
+        0.0,
+        &[
+            ([-1.6, top - 0.5, -1.6], [3.2, 0.5, 3.2], shade(WOOD, 0.92)),
+            ([-1.4, 0.0, -1.4], [0.6, top - 0.5, 2.8], shade(WOOD, 0.8)),
+            ([0.8, 0.0, -1.4], [0.6, top - 0.5, 2.8], shade(WOOD, 0.8)),
+        ],
+    );
 }
 
 /// How near a figure is drawn whole, and how far it is drawn at all, in metres. Beyond,
