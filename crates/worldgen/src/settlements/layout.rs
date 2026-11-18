@@ -36,6 +36,7 @@ use super::{
     furnish::{self, Household},
     kit::{self, AnchorKind, Building, Spec, Step},
     special::{self, Built, Facts, SpecialSpec},
+    years,
 };
 use crate::features::designs::Special;
 use crate::{
@@ -761,7 +762,10 @@ impl<'a> Town<'a> {
         let fin = Sampler::with_network(self.c, self.seed, lo.x.floor() as i32, lo.y.floor() as i32, (2.0 * reach).ceil() as i32 + 2, net);
         let raised = std::mem::take(&mut self.raised);
         for (k, r) in raised.iter().enumerate() {
+            let held = net.held_props.len();
             self.dress(net, r, k);
+            // S8 (#207): what is set about each plot is tagged with it (see `years`).
+            years::tag_yard(net, held, net.plots.len() + k);
         }
         self.raised = raised;
         // Stage 3 (#203): the gates, the old wall, the water side and the park, built
@@ -773,6 +777,9 @@ impl<'a> Town<'a> {
         self.wells(net, &fin);
         self.stalls(net);
         self.lanterns(net);
+        // S8 (#207): what a boon would add, laid last of all so that nothing else is
+        // moved by it, and unseen until the boon is granted (see `boons`).
+        self.boon_sites(net, &fin);
     }
 
     /// Ground kept open beside the green for the village tree, on the side away from
@@ -1385,7 +1392,13 @@ impl<'a> Town<'a> {
         voxels.shrink_to_fit();
         let mut fine = parts::place_fine(&b.fine, origin, t);
         fine.extend(parts::place_fine(&inside.fine, origin, t));
-        net.add_stamp_with(voxels, fine);
+        // S8 (#207): change over the years. The building is laid tagged with its plot,
+        // so that what stands there can be told in any year (see `years`); in year 0 it
+        // is as built.
+        let plot = net.plots.len() + self.plots.len();
+        let inner = turn_rect((b.walls.lo, b.walls.hi), t);
+        let tag = years::Tag::building(plot, &mut voxels, b.voxels.len(), origin.y, (inner.0 + flat(origin), inner.1 + flat(origin)));
+        net.add_stamp_tagged(voxels, fine, tag);
         if let Some(own) = &own {
             net.guest_beds.extend(own.guest_beds_at(origin, t));
             // #207: its board to read, and a guild house's guilds, by the index its plot
@@ -1401,6 +1414,8 @@ impl<'a> Town<'a> {
         if inside.fire.is_some() || own.as_ref().is_some_and(|o| o.fire.is_some()) {
             let q = origin + rotate(b.smoke, t);
             net.chimneys.push(Vec3::new(q.x as f32 + 0.5, q.y as f32, q.z as f32 + 0.5));
+            // S8 (#207): whose chimney it is, for the years it stands cold.
+            net.years.chimney_plot.push(plot as u32);
         }
         let (lo, hi) = turn_rect((b.footprint.lo, b.footprint.hi), t);
         let walls = turn_rect((b.walls.lo, b.walls.hi), t);
@@ -1497,6 +1512,8 @@ impl<'a> Town<'a> {
             self.grid.mark(c, THING);
         }
         net.held_props.push((placed.voxels, fine, foot));
+        // S8 (#207): what it is, for tagging it with its plot (see `years::tag_yard`).
+        net.years.kinds.insert(net.held_props.len() - 1, f.kind);
         self.layout.things.push((f.kind, at, turns));
     }
 
@@ -2027,6 +2044,8 @@ fn awning(f: &Fitted, colour: Voxel) -> Vec<PlantBox> {
 }
 
 // Stage 3's edges (#203): the gates and old walls, the water side and the park.
+// S8 (#207): what the player's boons add to a settlement.
+mod boons;
 mod edges;
 mod gates;
 mod park;

@@ -323,6 +323,18 @@ impl Store {
         self.report(write_whole(&self.dir, &path, text))
     }
 
+    /// The boons the player has granted the settlements of a world, as they were saved
+    /// (#207): none if none were. The settlements are laid out with them, so they are all
+    /// the world's settlements keep of what the player has done for them.
+    pub fn boons(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("boons-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_boons(&self, seed: u32, text: &str) -> bool {
+        let path = PathBuf::from(format!("boons-{seed}.txt"));
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
     /// How the player has made their figure look, as it was saved: empty if they never
     /// have (#204). It is the player's own, as the settings are, and goes with them into
     /// every world: a plain run is a new world each time.

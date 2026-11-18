@@ -1989,9 +1989,15 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
         if !on_way {
-            net.add_stamp_with(voxels, fine);
+            // What was set about a plot keeps its tag for the years (#207).
+            match net.years.held.remove(&n) {
+                Some(tag) => net.add_stamp_tagged(voxels, fine, tag),
+                None => net.add_stamp_with(voxels, fine),
+            }
         }
     }
+    net.years.held.clear();
+    net.years.kinds.clear();
 
     // Trail markers, likewise.
     for marker in std::mem::take(&mut net.held_markers) {

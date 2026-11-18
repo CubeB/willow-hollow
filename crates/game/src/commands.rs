@@ -144,6 +144,11 @@ pub trait Game {
     }
     /// Turns the view to look along `yaw` (radians), as after a `tp` to something to see.
     fn face(&mut self, _yaw: f32) {}
+    /// Grants the settlement nearest a boon this year, or with None says which it has
+    /// been granted (#207).
+    fn boon(&mut self, _boon: Option<worldgen::settlements::years::Boon>) -> Reply {
+        cannot("granting boons")
+    }
 }
 
 fn cannot(what: &str) -> Reply {
@@ -195,7 +200,22 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "speed", also: &[], usage: "speed [times]", about: "walk, run and swim this many times faster (1 is usual)", words: none, run: speed },
     Spec { name: "seed", also: &[], usage: "seed", about: "say which world this is", words: none, run: |_, game| Ok(format!("world seed {0} (run with --seed {0} to come back to it)", game.seed())) },
     Spec { name: "travellers", also: &["travelers"], usage: "travellers [camper|settlers|riverboat|fishingboat|quay]", about: "who is on the road or the water nearest, and what they are doing, or the quays: tp goes to them by the same words", words: traveller_words, run: travellers },
+    Spec { name: "boon", also: &["grant"], usage: "boon [second-well|guild-hall]", about: "grant the settlement nearest a boon this year (a second well, its guild hall opened), or say which it has", words: boon_words, run: boon },
 ];
+
+/// The boons `boon` grants (#207).
+fn boon_words() -> Vec<&'static str> {
+    worldgen::settlements::years::Boon::ALL.iter().map(|b| b.name()).collect()
+}
+
+fn boon(args: &[&str], game: &mut dyn Game) -> Reply {
+    use worldgen::settlements::years::Boon;
+    let words = args.join(" ");
+    match words.trim() {
+        "" => game.boon(None),
+        w => game.boon(Some(Boon::by_name(w).ok_or_else(|| format!("'{w}' is no boon: {}", boon_words().join(", ")))?)),
+    }
+}
 
 /// The words `travellers` and `tp` take for the travellers (#205).
 fn traveller_words() -> Vec<&'static str> {

@@ -514,12 +514,13 @@ cannot be done says why and how it is used.
 | `give <thing> [n]` | Put n of a thing in the pack (the same things as `spawn`, and the `lantern`) |
 | `speed [times]` | Walk, run and swim this many times faster than usual, 0.1 to 20. Alone, says the speed |
 | `seed` | Say which world this is |
+| `boon [second-well\|guild-hall]` | Grant the settlement nearest a boon in this year, kept in `boons-N.txt` with the world's save: a `second-well` sunk on its green (its empty homes are soon built again), or a great town's `guild-hall` opened, hung with its banners. Only where it was laid out with room for one. Alone, says which it has and could have. On a screenshot it holds for the shot |
 
 `--command "LINE"` runs a line at the start, as if typed, and can be given as often as
 needed; what each says goes in the log and in the console. On a screenshot the commands
 set the shot up as their flags would: `weather`, `time`, `date`, `season`, `year`, `tp` (as
 `--over`), `pos`, `places`, `people`, `greet`, `read`, `spawn camp`, `spawn murmuration`,
-`spawn crows`, `spawn boat` and `aurora`; any other, or one that fails, stops the shot with what was
+`spawn crows`, `spawn boat`, `aurora` and `boon`; any other, or one that fails, stops the shot with what was
 wrong. `--console` draws the console open on a screenshot, with what the commands said,
 and in a run starts with it open.
 
@@ -560,6 +561,21 @@ it cannot yet. The parsing and the console's history and completion have tests t
   whether it is there and what colour it is. `Season::phase` in Rust is the same sum,
   which is how picking and the butterflies know which flowers are out. Change one and
   change the other.
+- **What people build is generated for the year, and the fields for the season** (#207),
+  the one exception to the rule above. Settlements are still laid out once, from the
+  seed; each building and yard stamp carries a tag (`settlements::years::Tag`), and
+  `years::Lives`, a pure function of the seed, the year, the season and the boons
+  granted, says what each home is that year (lived in, freshly thatched, standing
+  empty, being taken down, rising again in scaffolding) and `Lives::view` makes the
+  stamp as it stands. Every reader of stamps (chunks, the far rings, the far boxes, the
+  map, the climbers) goes through `view`, so they agree, and chunk borders with them.
+  Which crop a field is in is `farmland::rotation`. Year 0 is today's world in every
+  season, so the checksums and layout tests hold. `GameWorld::set_now` sets the moment;
+  when it changes anything the world's `epoch` goes up, and the streamer makes again
+  every loaded column a settlement or its fields reach (`changes_with_years`), showing
+  the old meshes until the new are up, while the far boxes and the villagers are made
+  again on their own threads. Nothing of a chunk is ever saved, so there is nothing to
+  undo: the save keeps the year and the boons (`boons-N.txt`), and the rest follows.
 
 ## How work gets in
 

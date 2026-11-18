@@ -85,18 +85,24 @@ pub struct Who {
     pub cell: (i32, i32),
     pub k: usize,
     pub n: usize,
+    /// What the save knows them by (see [`Resident::id`]).
+    pub id: usize,
 }
 
 impl Who {
-    /// How the save knows them.
+    /// How the save knows them: the same from year to year as their settlement changes
+    /// about them (#207).
     pub fn key(self) -> String {
-        format!("{},{},{},{}", self.cell.0, self.cell.1, self.k, self.n)
+        format!("{},{},{},{}", self.cell.0, self.cell.1, self.k, self.id)
     }
 }
 
 /// A settlement near the player, with everyone's day today.
 struct Near {
     town: Arc<Town>,
+    /// The world's epoch it was made for (see `GameWorld::epoch`): made again when the
+    /// year turns or a boon is granted, as its homes may have changed (#207).
+    epoch: u64,
     day: i64,
     plans: Vec<Plan>,
     /// The walks being drawn, by who is walking and from which of their stays.
@@ -166,8 +172,10 @@ pub struct Villagers {
     near: Vec<Near>,
     /// Those being made on threads of their own.
     asked: Vec<((i32, i32), usize)>,
-    sender: mpsc::Sender<Town>,
-    made: mpsc::Receiver<Town>,
+    sender: mpsc::Sender<(Town, u64)>,
+    made: mpsc::Receiver<(Town, u64)>,
+    /// The world's epoch as last seen.
+    epoch: u64,
     timer: f32,
     clock: f32,
     stopped: Option<Stopped>,
@@ -225,6 +233,7 @@ impl Villagers {
             asked: Vec::new(),
             sender,
             made,
+            epoch: 0,
             timer: 0.0,
             clock: 0.0,
             stopped: None,
@@ -264,14 +273,24 @@ impl Villagers {
         self.near.iter().find(|n| n.town.cell == cell && n.town.k == k).map(|n| &n.town.residents[..])
     }
 
-    fn add(&mut self, town: Town, day: i64) {
+    fn add(&mut self, town: Town, day: i64, epoch: u64) {
         self.asked.retain(|&a| a != (town.cell, town.k));
-        if self.near.iter().any(|n| n.town.cell == town.cell && n.town.k == town.k) {
-            return;
+        // A settlement made again for a later year takes the place of what was about.
+        if let Some(i) = self.near.iter().position(|n| n.town.cell == town.cell && n.town.k == town.k) {
+            if self.near[i].epoch >= epoch {
+                return;
+            }
+            self.near.remove(i);
         }
         let plans = day::plans(&town, day);
         log::debug!("the people of {} are about: {}", town.name, town.residents.len());
-        self.near.push(Near { town: Arc::new(town), day, plans, routes: HashMap::new() });
+        self.near.push(Near { town: Arc::new(town), epoch, day, plans, routes: HashMap::new() });
+    }
+
+    /// Whether the people of settlement `k` of continent `cell` are about as the world
+    /// stands now.
+    fn have(&self, cell: (i32, i32), k: usize) -> bool {
+        self.near.iter().any(|n| n.town.cell == cell && n.town.k == k && n.epoch == self.epoch)
     }
 
     /// Looks for the settlements about `at` now and then, making the people of any
@@ -282,22 +301,30 @@ impl Villagers {
         self.clock += dt;
         (self.date, self.year_days) = (date, year_days);
         let today = day_number(hour, date, year, year_days);
-        while let Ok(town) = self.made.try_recv() {
-            self.add(town, today);
+        while let Ok((town, epoch)) = self.made.try_recv() {
+            self.add(town, today, epoch);
+        }
+        // The year has turned or a boon been granted (#207): each settlement about is made
+        // again, its people staying about as they were until it is.
+        if world.epoch() != self.epoch {
+            self.epoch = world.epoch();
+            self.asked.clear();
+            self.timer = 0.0;
         }
         self.timer -= dt;
         if self.timer <= 0.0 {
             self.timer = EVERY;
             for (cell, k, c) in wanted(world, at, false) {
-                if self.asked.contains(&(cell, k)) || self.near.iter().any(|n| n.town.cell == cell && n.town.k == k) {
+                if self.asked.contains(&(cell, k)) || self.have(cell, k) {
                     continue;
                 }
                 self.asked.push((cell, k));
-                let (tx, seed) = (self.sender.clone(), world.seed());
+                let (tx, seed, epoch) = (self.sender.clone(), world.seed(), self.epoch);
+                let lives = world.lives(cell.0, cell.1, &c);
                 let made = std::thread::Builder::new().name("villagers".into()).spawn(move || {
                     crate::threads::background();
-                    if let Some(town) = Town::build(&c, seed, cell, k) {
-                        let _ = tx.send(town);
+                    if let Some(town) = Town::build_in(&c, seed, cell, k, &lives) {
+                        let _ = tx.send((town, epoch));
                     }
                 });
                 if made.is_err() {
@@ -324,12 +351,13 @@ impl Villagers {
     pub fn settle(&mut self, world: &GameWorld, at: DVec3, hour: f32, date: f32, year: u32, year_days: f32) {
         let today = day_number(hour, date, year, year_days);
         (self.date, self.year_days) = (date, year_days);
+        self.epoch = world.epoch();
         for (cell, k, c) in wanted(world, at, true) {
-            if self.near.iter().any(|n| n.town.cell == cell && n.town.k == k) {
+            if self.have(cell, k) {
                 continue;
             }
-            if let Some(town) = Town::build(&c, world.seed(), cell, k) {
-                self.add(town, today);
+            if let Some(town) = Town::build_in(&c, world.seed(), cell, k, &world.lives(cell.0, cell.1, &c)) {
+                self.add(town, today, self.epoch);
             }
         }
         for n in &mut self.near {
@@ -359,7 +387,7 @@ impl Villagers {
             let feet = (player - town.origin).as_vec3();
             let indoors = town.inside(feet);
             for r in &town.residents {
-                let who = Who { cell: town.cell, k: town.k, n: r.n };
+                let who = Who { cell: town.cell, k: town.k, n: r.n, id: r.id };
                 let Some(mut f) = figure(town, &near.plans[r.n], r, hour, eye, &mut near.routes) else { continue };
                 if let Some(s) = self.stopped.as_ref().filter(|s| s.who == who) {
                     let t = clock - s.since;
@@ -393,7 +421,7 @@ impl Villagers {
         let mut drawn = Drawn::default();
         let near_m = m64(character::NEAR as f64);
         for f in &self.seen {
-            let Some(r) = self.near.iter().find(|n| n.town.cell == f.who.cell && n.town.k == f.who.k).map(|n| &n.town.residents[f.who.n]) else { continue };
+            let Some(r) = self.near.iter().find(|n| n.town.cell == f.who.cell && n.town.k == f.who.k).and_then(|n| n.town.residents.get(f.who.n)) else { continue };
             let d = f.feet.distance(cam);
             let whole = d < near_m && drawn.near < MOST_NEAR;
             if whole && out.len() - from + FIGURE_BOXES <= MOST_BOXES {
@@ -610,7 +638,7 @@ impl Villagers {
             out += "\nnearest:";
         }
         for f in nearest {
-            let r = &town.residents[f.who.n];
+            let Some(r) = town.residents.get(f.who.n) else { continue };
             let doing = f.task.map_or("walking", |t| t.word());
             let metres = f.feet.distance(at) / m64(1.0);
             out += &format!("\n  {} ({} {}), {doing}, {metres:.0} m, at {:.0},{:.0}", r.person.name, r.person.age.word(), r.person.trade.word(), f.feet.x, f.feet.z);

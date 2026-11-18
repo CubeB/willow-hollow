@@ -322,10 +322,12 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                 let (ox, oz) = (key.0 * MACRO_SIZE, key.1 * MACRO_SIZE);
                 let (lx0, lz0) = ((req.origin.0 + tx as i32) * step - ox, (req.origin.1 + tz as i32) * step - oz);
                 let span = TILE as i32 * step;
-                // What people built on this square, to stand on it as models.
+                // What people built on this square, to stand on it as models: what stands
+                // in the year it is seen in (#207), as built.
+                let lives = world.lives(key.0, key.1, c);
                 for cz in lz0.div_euclid(voxel::CHUNK)..=(lz0 + span - 1).div_euclid(voxel::CHUNK) {
                     for cx in lx0.div_euclid(voxel::CHUNK)..=(lx0 + span - 1).div_euclid(voxel::CHUNK) {
-                        for stamp in c.trails.stamps_at(cx, cz) {
+                        for stamp in c.trails.stamps_at(cx, cz).filter(|s| lives.shows(s)) {
                             built.entry(stamp as *const Stamp).or_insert((stamp, IVec2::new(ox, oz)));
                         }
                     }

@@ -62,6 +62,7 @@ use winit::{
 use worldgen::{
     World,
     scale::{OLD_VOXEL, m, m64},
+    settlements::years,
     world::GameWorld,
 };
 
@@ -872,6 +873,44 @@ fn nearest_settlements(world: &GameWorld, at: DVec3, kind: Option<worldgen::sett
         .collect()
 }
 
+/// Grants the settlement nearest `at` boon `boon` in year `year`, writing it into
+/// `boons`, or with None says which boons it has and could have (#207).
+fn grant_boon(world: &GameWorld, at: DVec3, year: u32, boons: &mut years::Boons, boon: Option<years::Boon>) -> commands::Reply {
+    use years::Boon;
+    let Some((c, local)) = journal::continent_at(world, at, true) else { return Err("no settlements in this part of the world".into()) };
+    let cell = worldgen::macro_layout::cell_of(at.x.floor() as i32, at.z.floor() as i32);
+    let net = &c.trails;
+    let Some(k) = (0..net.settlements.len()).min_by(|&a, &b| net.settlements[a].at().distance(local).total_cmp(&net.settlements[b].at().distance(local))) else {
+        return Err("no settlements in this part of the world".into());
+    };
+    let name = net.names.settlement(k).map_or_else(|| "The settlement".to_string(), |p| p.name.clone());
+    // Only where the settlement was laid out with room for it.
+    let room = |b: Boon| net.years.sites.iter().any(|s| s.settlement as usize == k && s.boon == b);
+    let Some(boon) = boon else {
+        let mut out = format!("{name}:");
+        for b in Boon::ALL {
+            let state = match boons.year_of(cell, k, b) {
+                Some(y) => format!("granted in year {y}"),
+                None if room(b) => "can be granted".to_string(),
+                None => "no room for it".to_string(),
+            };
+            out += &format!("\n  {}: {state} ({})", b.name(), b.about());
+        }
+        return Ok(out);
+    };
+    if let Some(y) = boons.year_of(cell, k, boon) {
+        return Err(format!("{name} was granted {} in year {y}", boon.name()));
+    }
+    if !room(boon) {
+        return Err(match boon {
+            Boon::SecondWell => format!("{name} has no room on its green for a second well"),
+            Boon::GuildHall => format!("{name} has no guild house to open"),
+        });
+    }
+    boons.grant(years::Granted { cell, settlement: k as u32, boon, year: year.min(i32::MAX as u32) as i32 });
+    Ok(format!("{name} is granted {} in year {year}: {}", boon.name(), boon.about()))
+}
+
 /// Voxel positions with their linear colours.
 type Spots = Vec<(DVec3, [f32; 3])>;
 type Leaves = Vec<particles::LeafSite>;
@@ -1132,6 +1171,11 @@ struct Running {
     villagers: villagers::Villagers,
     /// The campers, settlers and boats about the player, as their timetables have them (#205).
     travellers: travellers::Travellers,
+    /// The boons the player has granted the settlements, whether they have been saved,
+    /// and the moment what is built was last generated for (#207).
+    boons: years::Boons,
+    boons_unsaved: bool,
+    now: years::When,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1307,6 +1351,11 @@ impl Running {
         // A world saved before it kept its year takes it from the journal, which counted
         // the springs; a new one begins in year 0.
         let year = opts.year.or(progress.and_then(|p| p.year.or(journal.year()))).unwrap_or(0);
+        // The settlements as they stand in this year and season, with the boons granted
+        // them (#207), before anything of them is made. A visit given by hand has none.
+        let boons = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(years::Boons::default, |s| years::Boons::from_text(&s.boons(settings.seed)));
+        let now = years::When::of(year, date);
+        world.set_now(now, &boons);
         // What has been seen of this world is kept with the rest of its save; a visit to
         // a place given by hand keeps nothing.
         // A camp asked for by hand, to look at or to time: made where the run begins.
@@ -1423,6 +1472,9 @@ impl Running {
             beds: Vec::new(),
             villagers: villagers::Villagers::new(),
             travellers,
+            boons,
+            boons_unsaved: false,
+            now,
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -1978,6 +2030,9 @@ impl Running {
             if self.travellers.unsaved && store.write_travellers(self.settings.seed, &self.travellers.to_text()) {
                 self.travellers.unsaved = false;
             }
+            if self.boons_unsaved && store.write_boons(self.settings.seed, &self.boons.to_text()) {
+                self.boons_unsaved = false;
+            }
         }
         self.map.save(false);
     }
@@ -2277,6 +2332,16 @@ impl Running {
         if days > 0.0 {
             let (date, year) = season::advance_year(self.env.date, self.env.year, days, self.settings.year_days);
             self.env = Environment::at(self.env.time + days * 24.0, date).in_year(year);
+        }
+        // What is built and what grows in the fields are the year's and the season's
+        // (#207): when either turns, by the days passing or the console, the world says
+        // so, and what it reaches is made again about the player.
+        let now = years::When::of(self.env.year, self.env.date);
+        if now != self.now {
+            self.now = now;
+            if self.world.set_now(now, &self.boons) {
+                log::info!("year {} {}: the settlements and their fields are made again", now.year, ["spring", "summer", "autumn", "winter"][now.season as usize]);
+            }
         }
         self.keep_journal(dt, days);
         // What was gathered a year or two ago has grown back: looked over now and then.
@@ -3028,6 +3093,9 @@ fn main() -> Result<()> {
         }
         console.open = opts.shot_console;
         let opts = opts;
+        // The settlements as they stand in the year and season asked for, with any boons
+        // the commands granted (#207).
+        world.set_now(years::When::of(opts.year.unwrap_or(0), opts.date.unwrap_or(season::DEFAULT_DATE)), &world.boons());
         let mut camera = make_camera(&opts, &world, None);
         // The animals asked for, given their seconds of life before anything else is set
         // out: a walk toward a herd moves the camera.
@@ -3618,6 +3686,17 @@ impl commands::Game for Running {
         (self.camera.yaw, self.camera.pitch) = (yaw, -0.15);
     }
 
+    fn boon(&mut self, boon: Option<years::Boon>) -> commands::Reply {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        let reply = grant_boon(&self.world, eye, self.env.year, &mut self.boons, boon)?;
+        if boon.is_some() {
+            // Kept with the world's save, and the settlement made again with it.
+            self.boons_unsaved = true;
+            self.world.set_now(self.now, &self.boons);
+        }
+        Ok(reply)
+    }
+
     fn fly(&mut self, on: Option<bool>) -> commands::Reply {
         if on.is_none_or(|on| on == self.walking) {
             if self.walking && self.player.mode == Mode::Boat {
@@ -3845,6 +3924,13 @@ impl commands::Game for Shot<'_> {
 
     fn face(&mut self, yaw: f32) {
         self.opts.look = (yaw.to_degrees(), -8.0);
+    }
+
+    fn boon(&mut self, boon: Option<years::Boon>) -> commands::Reply {
+        let mut boons = (*self.world.boons()).clone();
+        let reply = grant_boon(self.world, self.eye(), commands::Game::year(self), &mut boons, boon)?;
+        self.world.set_now(self.world.now(), &boons);
+        Ok(reply)
     }
 
     fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {

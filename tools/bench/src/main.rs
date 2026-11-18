@@ -26,6 +26,10 @@ struct Options {
     at: Vec<(i32, i32)>,
     /// Also count plant faces lying in one plane with another (see `overlaps`).
     overlaps: bool,
+    /// The year and season the settlements are generated for (#207): year 0 is
+    /// today's world, whatever the season.
+    year: i32,
+    season: u8,
 }
 
 const HELP: &str = "\
@@ -36,12 +40,15 @@ Usage: bench [options]
   --at X,Z     also time a patch around this world voxel (may be repeated)
   --overlaps   also count plant faces that lie in one plane with another face turned
                the same way and overlap it, where the two would flicker
+  --year N     generate the settlements as they stand in year N (default 0, today's
+               world), and say how long working that out took
+  --season S   and in season S of it, 0 spring to 3 winter (default 0)
 
 Always times a patch at the spawn point, and one each on a coast, in the hills and
 at sea, found from the continent.";
 
 fn parse() -> Result<Options> {
-    let mut o = Options { seed: 1, size: 12, at: Vec::new(), overlaps: false };
+    let mut o = Options { seed: 1, size: 12, at: Vec::new(), overlaps: false, year: 0, season: 0 };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
@@ -54,6 +61,8 @@ fn parse() -> Result<Options> {
                 o.at.push((x.trim().parse()?, z.trim().parse()?));
             }
             "--overlaps" => o.overlaps = true,
+            "--year" => o.year = value()?.parse()?,
+            "--season" => o.season = value()?.parse()?,
             "--help" | "-h" => {
                 println!("{HELP}");
                 std::process::exit(0);
@@ -194,6 +203,15 @@ fn main() -> Result<()> {
     let t = Instant::now();
     world.library();
     println!("library in {:.2} s", t.elapsed().as_secs_f64());
+    // What a turn of the year costs before any chunk is made again: working out how the
+    // continent's settlements stand then.
+    if o.year > 0 {
+        use worldgen::settlements::years::{Boons, When};
+        world.set_now(When::new(o.year, o.season), &Boons::default());
+        let t = Instant::now();
+        world.lives(0, 0, &c);
+        println!("year {} season {}: the settlements worked out in {:.2} ms", o.year, o.season, t.elapsed().as_secs_f64() * 1000.0);
+    }
 
     // A coast, the hills and open sea, from the continent's own grid: the first cell of
     // each kind found scanning out from the middle.

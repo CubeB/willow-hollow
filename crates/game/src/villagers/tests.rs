@@ -333,7 +333,7 @@ fn a_town_full_of_people_is_drawn_within_its_budget() {
     for town in towns() {
         let mut v = Villagers::new();
         let k = town.k;
-        v.add(Town::build(continent(), SEED, (0, 0), k).unwrap(), WORKDAY);
+        v.add(Town::build(continent(), SEED, (0, 0), k).unwrap(), WORKDAY, 0);
         let centre = town.origin + town.centre.as_dvec3();
         for (hour, eye) in [(12.0, centre + DVec3::Y * m(30.0) as f64), (7.0, centre + DVec3::Y * m(1.7) as f64), (19.5, centre)] {
             let mut out = Vec::new();
@@ -356,7 +356,7 @@ fn a_town_full_of_people_is_drawn_within_its_budget() {
 fn someone_indoors_is_seen_only_from_inside() {
     let town = &towns()[0];
     let mut v = Villagers::new();
-    v.add(Town::build(continent(), SEED, (0, 0), town.k).unwrap(), WORKDAY);
+    v.add(Town::build(continent(), SEED, (0, 0), town.k).unwrap(), WORKDAY, 0);
     let r = &town.residents[0];
     let b = &town.plots[r.home];
     let bed = town.origin + r.bed.at.as_dvec3();
@@ -406,7 +406,7 @@ fn every_line_fills() {
 fn greeting_someone_stops_them_and_the_save_remembers() {
     let town = &towns()[0];
     let mut v = Villagers::new();
-    v.add(Town::build(continent(), SEED, (0, 0), town.k).unwrap(), WORKDAY);
+    v.add(Town::build(continent(), SEED, (0, 0), town.k).unwrap(), WORKDAY, 0);
     // Stand beside someone at work at ten, and greet them.
     let plans = day::plans(town, WORKDAY);
     let (r, stay) = town.residents.iter().zip(&plans).find_map(|(r, p)| matches!(p.now(10.0), Now::At(i) if p.stays[i].spot.inside.is_none()).then(|| (r, *p.bound(10.0)))).expect("nobody out at ten");
@@ -497,7 +497,7 @@ fn the_wayfarers_mark_the_country_about_on_the_map() {
     let forward = (at - eye).normalize();
     let eye = town.origin + eye.as_dvec3();
     let mut v = Villagers::new();
-    v.add(town.clone(), WORKDAY);
+    v.add(town.clone(), WORKDAY, 0);
     let (which, word) = v.board_in_sight(eye, forward).expect("the board is not in sight");
     assert_eq!(word, "the guilds' board");
     assert!(v.board_in_sight(eye, -forward).is_none(), "read with its back to it");
@@ -569,4 +569,44 @@ fn a_day_turns_at_midnight() {
         assert_eq!(d(10.0 + h as f32, start + step * h as f32), base, "at {}", 10 + h);
     }
     assert_eq!(d(0.5, start + step * 14.5), base + 1);
+}
+
+/// Over the years (#207) nobody lives in a home standing empty, taken down or rising
+/// again, a home built again has a new household, and everyone keeps the name the save
+/// knows them by.
+#[test]
+fn nobody_lives_in_a_home_not_standing() {
+    use worldgen::settlements::years::{Boons, Lives, When};
+    let c = continent();
+    let net = &c.trails;
+    let mut empty_seen = 0;
+    let mut anew = 0;
+    for town in towns() {
+        let first = net.layouts[town.k].plots.start;
+        let today = Town::build(c, SEED, (0, 0), town.k).unwrap();
+        // In year 0 everyone is known by their number, as before there were years.
+        assert!(today.residents.iter().all(|r| r.id == r.n));
+        for (year, season) in [(1, 2), (2, 0), (3, 1), (5, 2), (9, 1), (14, 3)] {
+            let lives = Lives::new(net, SEED, (0, 0), When::new(year, season), &Boons::default());
+            let then = Town::build_in(c, SEED, (0, 0), town.k, &lives).unwrap();
+            for r in &then.residents {
+                assert!(lives.standing(first + r.home), "{} lives in a home not standing in year {year}", r.person.name);
+            }
+            let homes: Vec<usize> = (0..then.plots.len()).filter(|&i| net.plots[first + i].sleepers > 0).collect();
+            empty_seen += homes.iter().filter(|&&i| !lives.standing(first + i)).count();
+            // The same people where nothing has changed, known by the same names.
+            for r in &then.residents {
+                match today.residents.iter().find(|q| q.id == r.id) {
+                    Some(q) if lives.generation(first + r.home) == 0 => assert_eq!(q.person.name, r.person.name),
+                    Some(_) => panic!("a new household known by an old one's name"),
+                    None => {
+                        assert!(lives.generation(first + r.home) > 0, "{} unknown in year {year}", r.person.name);
+                        anew += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(empty_seen > 0, "no home ever stood empty");
+    assert!(anew > 0, "no home was ever built again for a new household");
 }

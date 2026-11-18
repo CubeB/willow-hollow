@@ -238,6 +238,8 @@ pub struct Shown {
 /// What the thread sends back: a continent's boxes, by square.
 struct Made {
     cell: (i32, i32),
+    /// The world's epoch it was made in (see `GameWorld::epoch`).
+    epoch: u64,
     boxes: Vec<BoxInstance>,
     squares: Vec<Square>,
 }
@@ -255,6 +257,8 @@ pub struct FarBuilt {
     looked: Option<Instant>,
     /// When a continent last arrived.
     progressed: Instant,
+    /// The world's epoch as last seen: when it moves on, what is shown is made again.
+    epoch: u64,
     /// Boxes held, for statistics.
     pub boxes: u64,
 }
@@ -284,6 +288,7 @@ impl FarBuilt {
             pending: HashSet::new(),
             looked: None,
             progressed: Instant::now(),
+            epoch: 0,
             boxes: 0,
         }
     }
@@ -327,6 +332,17 @@ impl FarBuilt {
             kept
         });
         self.boxes = self.boxes.saturating_sub(dropped);
+        // The year has turned or a boon been granted (#207): each continent shown is made
+        // again, and shown as it was until it is.
+        let epoch = self.world.epoch();
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            for &c in self.shown.keys() {
+                if self.pending.insert(c) {
+                    let _ = self.requests.send(c);
+                }
+            }
+        }
         if self.looked.is_none_or(|t| t.elapsed() >= LOOK_EVERY) {
             self.looked = Some(Instant::now());
             for c in Self::in_sight(camera, SIGHT) {
@@ -341,6 +357,13 @@ impl FarBuilt {
             self.progressed = Instant::now();
             if !keep.contains(&made.cell) {
                 continue;
+            }
+            // Made before the year turned: shown, and made again.
+            if made.epoch != self.epoch && self.pending.insert(made.cell) {
+                let _ = self.requests.send(made.cell);
+            }
+            if let Some(Some(old)) = self.shown.get(&made.cell) {
+                self.boxes = self.boxes.saturating_sub(old.squares.iter().map(|q| q.count as u64).sum::<u64>());
             }
             let shown = if made.boxes.is_empty() {
                 None
@@ -392,7 +415,11 @@ fn make(world: &GameWorld, cell: (i32, i32)) -> Made {
     let mats = world.materials();
     let mut placed: Vec<((i32, i32), BoxInstance)> = Vec::new();
     let mut boxes = Vec::new();
-    for stamp in continent.trails.stamps() {
+    // Each as it stands in the year it is seen in (#207).
+    let epoch = world.epoch();
+    let lives = world.lives(cell.0, cell.1, &continent);
+    for stamp in continent.trails.stamps().filter_map(|s| lives.view(s)) {
+        let stamp = &*stamp;
         boxes.clear();
         stamp_boxes(stamp, origin, mats, &mut boxes);
         if placed.len() + boxes.len() > MAX_BOXES {
@@ -425,7 +452,7 @@ fn make(world: &GameWorld, cell: (i32, i32)) -> Made {
     }
     // A stable sort, so each square's boxes keep the order they were laid in.
     placed.sort_by_key(|(square, _)| *square);
-    let mut out = Made { cell, boxes: Vec::with_capacity(placed.len()), squares: Vec::new() };
+    let mut out = Made { cell, epoch, boxes: Vec::with_capacity(placed.len()), squares: Vec::new() };
     for run in placed.chunk_by(|a, b| a.0 == b.0) {
         let first = out.boxes.len() as u32;
         let (mut lo, mut hi) = (IVec3::MAX, IVec3::MIN);
@@ -462,7 +489,7 @@ mod tests {
         let pane = |voxel| voxel::mesh::PlantBox { lo: [42, 20, 8], hi: [43, 28, 16], voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
         let wall: Vec<(IVec3, Voxel)> = (0..6).flat_map(|y| (0..6).map(move |z| (IVec3::new(10, y, z), worldgen::materials::STONE))).collect();
         let glows = |voxel| {
-            let stamp = Stamp { lo: IVec3::new(10, 0, 0), hi: IVec3::new(10, 5, 5), voxels: wall.clone(), fine: vec![pane(voxel)] };
+            let stamp = Stamp { lo: IVec3::new(10, 0, 0), hi: IVec3::new(10, 5, 5), voxels: wall.clone(), fine: vec![pane(voxel)], tag: None };
             let mut out = Vec::new();
             stamp_boxes(&stamp, IVec3::ZERO, &mats, &mut out);
             out.iter().filter(|b| b.flags & flags::GLOW != 0).count()

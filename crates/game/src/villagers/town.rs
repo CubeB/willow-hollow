@@ -11,7 +11,12 @@ use worldgen::{
     macro_layout::MACRO_SIZE,
     names::PlaceKind,
     noise::{hash2, unit},
-    settlements::{Kind, Livelihood, Region, calendar, layout::Purpose, special::Guild},
+    settlements::{
+        Kind, Livelihood, Region, calendar,
+        layout::Purpose,
+        special::Guild,
+        years::{Boon, Lives},
+    },
     surface::Sampler,
 };
 
@@ -141,8 +146,11 @@ pub enum Role {
 /// One of the settlement's people.
 #[derive(Clone, Debug)]
 pub struct Resident {
-    /// Their number in the settlement: what they are known by in the save.
+    /// Their number among the settlement's people as it is this year.
     pub n: usize,
+    /// What they are known by in the save: their number in year 0, when everyone is as
+    /// the settlement was laid out, or one of their own for a household come since (#207).
+    pub id: usize,
     pub person: Person,
     /// Their home, by index in [`Town::plots`], which of its household they are, and
     /// their bed in it.
@@ -222,8 +230,8 @@ pub struct Town {
     /// The well heads: what each is, its middle on the ground, the way it faces and half
     /// its size across.
     pub well_heads: Vec<(Fitting, Vec3, Vec2, Vec2)>,
-    /// The outside of each building's door, as `plots`: where its wall meets the open
-    /// air, at the level of its floor, and the way out.
+    /// The outside of the door of each building that stands this year: where its wall
+    /// meets the open air, at the level of its floor, and the way out.
     pub doors: Vec<(Vec3, Vec2)>,
     /// The boards to read: the building each is in, the middle of its face and the way
     /// it faces.
@@ -314,7 +322,14 @@ fn tree_foot(c: &Continent, k: usize) -> Option<(Vec2, f32)> {
 impl Town {
     /// Settlement `k` of continent `c` (whose cell is `cell`), with its people, for a world
     /// of `world_seed`.
+    #[cfg(test)]
     pub fn build(c: &Continent, world_seed: u32, cell: (i32, i32), k: usize) -> Option<Town> {
+        Self::build_in(c, world_seed, cell, k, &Lives::today(&c.trails))
+    }
+
+    /// [`Self::build`] as the settlement stands in a year (#207), `lives` saying which of
+    /// its homes are lived in then and by which household.
+    pub fn build_in(c: &Continent, world_seed: u32, cell: (i32, i32), k: usize, lives: &Lives) -> Option<Town> {
         let net = &c.trails;
         let s = net.settlements.get(k)?;
         let layout = net.layouts.get(k)?;
@@ -443,6 +458,19 @@ impl Town {
                 _ => {}
             }
         }
+        // A second well, once the player has had one sunk (#207), fetched from as the
+        // first is.
+        if lives.granted(k, Boon::SecondWell)
+            && let Some(site) = net.years.sites.iter().find(|w| w.settlement as usize == k && w.boon == Boon::SecondWell)
+        {
+            let well = Vec2::new(site.at.x as f32 + 1.0, site.at.z as f32 + 1.0);
+            let toward = (flat(centre) - well).normalize_or(Vec2::X);
+            let at = well + toward * 2.5;
+            if let Some(i) = place(Where::Well, Vec3::new(at.x, site.at.y as f32, at.y), &mut places) {
+                places[i].face = -toward;
+                wells.push(i);
+            }
+        }
         let tree = tree_foot(c, k).and_then(|(at, r)| {
             let toward = (flat(centre) - at).normalize_or(Vec2::X);
             let p = at + toward * (r * 0.75);
@@ -531,7 +559,7 @@ impl Town {
             neighbours: Vec::new(),
         };
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
-        town.dressing(c, k, &things, &mut |p| height(p));
+        town.dressing(c, k, lives, &things, &mut |p| height(p));
         town.near = net
             .settlements
             .iter()
@@ -548,7 +576,7 @@ impl Town {
             .filter(|(_, d)| *d < s.radius + 160.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| p.name.clone());
-        town.people(c, tongue, s, &door_of);
+        town.people(c, tongue, s, &door_of, lives);
         town.keepers();
         Some(town)
     }
@@ -556,7 +584,7 @@ impl Town {
     /// What its festivals and boards need of it (#207): its tree's knots, posts for
     /// lanterns along its lanes, where its boards are and its guilds, and the named places
     /// about it. `things` is every fitting set out about it, as `build` reads them.
-    fn dressing(&mut self, c: &Continent, k: usize, things: &[(Fitting, Vec3, Vec2, Vec2)], height: &mut dyn FnMut(Vec2) -> f32) {
+    fn dressing(&mut self, c: &Continent, k: usize, lives: &Lives, things: &[(Fitting, Vec3, Vec2, Vec2)], height: &mut dyn FnMut(Vec2) -> f32) {
         let net = &c.trails;
         let layout = &net.layouts[k];
         let voxels = |q: &glam::IVec3| q.as_vec3() / CELLS as f32;
@@ -564,7 +592,11 @@ impl Town {
             self.knots = knots.iter().map(voxels).collect();
             self.spare = spare.iter().map(voxels).collect();
         }
-        for p in &net.plots[layout.plots.clone()] {
+        for (i, p) in layout.plots.clone().zip(&net.plots[layout.plots.clone()]) {
+            // S8 (#207): no garland on the door of a home empty or not yet built again.
+            if !lives.standing(i) {
+                continue;
+            }
             let out = p.facing.as_vec2().normalize_or(Vec2::X);
             let face = outside(p, Vec2::new(p.door.x as f32 + 0.5, p.door.z as f32 + 0.5), out);
             self.doors.push((Vec3::new(face.x, p.door.y as f32 + 1.0, face.y), out));
@@ -665,7 +697,7 @@ impl Town {
 
     /// Everyone who lives there: a household for the beds of each home, each with a bed
     /// and a day's work.
-    fn people(&mut self, c: &Continent, tongue: &str, s: &worldgen::settlements::Settlement, door_of: &[Option<usize>]) {
+    fn people(&mut self, c: &Continent, tongue: &str, s: &worldgen::settlements::Settlement, door_of: &[Option<usize>], lives: &Lives) {
         let net = &c.trails;
         let mut n = 0;
         let crafts: Vec<Trade> = s.livelihoods.iter().map(|&l| trade_of(l)).collect();
@@ -673,11 +705,21 @@ impl Town {
         let wanting: Vec<usize> = (0..self.plots.len()).filter(|&i| matches!(self.plots[i].purpose, Purpose::Sawmill | Purpose::Granary) && door_of[i].is_some()).collect();
         let mut sellers = 0;
         let plots = &net.plots[net.layouts[self.k].plots.clone()];
+        // How each would be numbered in year 0, which is what the save knows them by.
+        let (first, mut known) = (net.layouts[self.k].plots.start, 0);
         for (i, p) in plots.iter().enumerate() {
             if p.sleepers == 0 || door_of[i].is_none() {
                 continue;
             }
+            // Over the years (#207): nobody lives in a home standing empty, being taken down
+            // or rising again, and a home built again has a new household.
+            let (stands, rebuilt) = (lives.standing(first + i), lives.generation(first + i));
+            if !stands {
+                known += p.sleepers as usize;
+                continue;
+            }
             let seed = hash2(s.seed ^ 0x9e09_1e5, i as i32, 1);
+            let seed = if rebuilt == 0 { seed } else { hash2(seed, rebuilt as i32, 0x5e8a) };
             let h = |k: i32| unit(hash2(seed, k, 0x7a));
             let trade = match p.purpose {
                 Purpose::Workplace(l) => trade_of(l),
@@ -712,7 +754,9 @@ impl Town {
                     _ => Role::Worker,
                 };
                 let stall = (role == Role::Seller).then_some(sellers - 1);
-                let mut r = Resident { n, person, home: i, member: j, bed, role, jobs: Vec::new(), stall };
+                // A new household is known apart from the one before it.
+                let id = known + j + rebuilt as usize * (1 << 20);
+                let mut r = Resident { n, id, person, home: i, member: j, bed, role, jobs: Vec::new(), stall };
                 // Someone of a craft with no workplace of their own goes to one of its own
                 // kind, or to the sawmill or granary.
                 let mut at = i;
@@ -732,6 +776,7 @@ impl Town {
                 self.residents.push(r);
                 n += 1;
             }
+            known += p.sleepers as usize;
         }
     }
 

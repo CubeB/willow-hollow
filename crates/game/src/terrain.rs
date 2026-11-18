@@ -106,6 +106,13 @@ impl Marks {
 
 /// Whether a column can be built now without waiting on anything: its continent made
 /// and the skylines at its corners worked out. Whatever is not ready is started on.
+/// Whether what is in column `col` can change with the years and seasons: whether a
+/// settlement or its fields reach it (#207).
+fn changes_with_years(world: &GameWorld, (level, x, z): Col) -> bool {
+    let span = CHUNK * (1 << level);
+    world.changes_with_years(x * span, z * span, span)
+}
+
 fn ready_to_build(world: &GameWorld, col: Col) -> bool {
     let size = CHUNK << col.0;
     let (x, z) = (col.1 * size, col.2 * size);
@@ -163,6 +170,9 @@ struct ColumnResult {
     growing: Vec<(IVec3, voxel::Voxel)>,
     gen_ms: f32,
     mesh_ms: f32,
+    /// The world's epoch when the job began (see `GameWorld::epoch`): a column begun
+    /// before the year turned may show the year before.
+    epoch: u64,
 }
 
 impl ColumnResult {
@@ -183,6 +193,7 @@ impl ColumnResult {
             growing: Vec::new(),
             gen_ms: 0.0,
             mesh_ms: 0.0,
+            epoch: 0,
         }
     }
 
@@ -280,6 +291,11 @@ pub struct Streamer {
     /// Loaded columns that were built without their small plants, being too far away
     /// for them to be drawn.
     bare: HashSet<Col>,
+    /// Loaded columns made before the year or season last turned or a boon was granted
+    /// that a settlement or its fields reach (#207): wanted again, their old meshes
+    /// shown until the new are ready. And the world's epoch they are judged by.
+    stale: HashSet<Col>,
+    epoch: u64,
     arena: VertexArena,
     /// Cascade lips in each loaded column, for spray and sound.
     cascades: HashMap<Col, Vec<Cascade>>,
@@ -375,6 +391,8 @@ impl Streamer {
             rx,
             columns: HashMap::new(),
             bare: HashSet::new(),
+            stale: HashSet::new(),
+            epoch: 0,
             arena: VertexArena::new(gpu, "chunk arena", expected, 4 * size_of::<Vertex>() as u64),
             cascades: HashMap::new(),
             springs: HashMap::new(),
@@ -599,6 +617,11 @@ impl Streamer {
             self.prefetch(cam);
         }
         self.requeue();
+        // The year or season has turned, or a boon been granted (#207).
+        if self.world.epoch() != self.epoch {
+            self.epoch = self.world.epoch();
+            self.refresh();
+        }
 
         while self.pending.len() < self.max_in_flight {
             let Some(col) = self.wanted.pop() else { break };
@@ -617,7 +640,9 @@ impl Streamer {
                     return;
                 }
                 CHUNK_WATCH.set(col, watch::BUILD);
-                let result = build_column(&world, &models, &focus, col, plants);
+                let epoch = world.epoch();
+                let mut result = build_column(&world, &models, &focus, col, plants);
+                result.epoch = epoch;
                 CHUNK_WATCH.set(col, watch::SEND);
                 if result.marks.unready {
                     let _ = waits.send(col);
@@ -681,6 +706,12 @@ impl Streamer {
                     } else {
                         self.bare.insert(result.col);
                     }
+                    // Begun before the year turned: shown, and made again.
+                    if result.epoch == self.epoch {
+                        self.stale.remove(&result.col);
+                    } else if changes_with_years(&self.world, result.col) && self.stale.insert(result.col) {
+                        self.wanted.push(result.col);
+                    }
                     if !result.cascades.is_empty() {
                         self.cascades.insert(result.col, result.cascades);
                     }
@@ -735,6 +766,28 @@ impl Streamer {
         if self.columns.contains_key(&col) && !self.wanted.contains(&col) {
             self.wanted.push(col);
         }
+    }
+
+    /// Wants again every loaded column a settlement or its fields reach, at every level,
+    /// as what is built and grown there may have changed with the year or the season
+    /// (#207). What is there stays until the new is ready; they come after anything
+    /// missing, nearest first, as columns wanted again for their plants do.
+    fn refresh(&mut self) {
+        let began = Instant::now();
+        let queued: HashSet<Col> = self.wanted.iter().copied().collect();
+        let world = &self.world;
+        let stale: Vec<Col> = self.columns.keys().copied().filter(|&col| changes_with_years(world, col)).collect();
+        for &col in &stale {
+            // One being made now is judged by the epoch its job began in when it comes.
+            if self.pending.contains(&col) {
+                continue;
+            }
+            if self.stale.insert(col) && !queued.contains(&col) {
+                self.wanted.push(col);
+            }
+        }
+        sort_wanted(&mut self.wanted, &self.columns, &self.focus);
+        log::info!("the year has turned: {} of {} columns to make again, found in {:.2} ms", stale.len(), self.columns.len(), began.elapsed().as_secs_f32() * 1000.0);
     }
 
     /// Blocks until everything in range is loaded (used for screenshots). If loading
@@ -816,6 +869,7 @@ impl Streamer {
         self.lamps.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.growing.retain(|c, _| focus.in_range(*c, UNLOAD_SLACK));
         self.bare.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
+        self.stale.retain(|c| focus.in_range(*c, UNLOAD_SLACK));
         if self.columns.len() != before {
             self.recount();
         }
@@ -836,6 +890,8 @@ impl Streamer {
                     }
                     // A column that has come within reach of its plants is built again with them.
                     let incomplete = !self.columns.contains_key(&col) || (self.bare.contains(&col) && in_plant_range(col, center, PLANT_COLUMNS));
+                    // Or out of date since the year turned (#207).
+                    let incomplete = incomplete || self.stale.contains(&col);
                     if incomplete {
                         self.wanted.push(col);
                     }

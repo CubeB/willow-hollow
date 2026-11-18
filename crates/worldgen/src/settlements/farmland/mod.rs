@@ -16,6 +16,8 @@
 //!   houses.
 //! - [`lanes`]: the lanes out through the fields of the lowlands and the uplands, hedged
 //!   or walled on both sides.
+//! - [`rotation`]: which crop a field carries in a given year and season, as its
+//!   rotation comes round (#207).
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
@@ -27,6 +29,7 @@ pub mod fields;
 pub mod influence;
 pub mod lanes;
 pub mod orchard;
+pub mod rotation;
 pub mod terrace;
 
 pub use fields::{Crop, Plot, plot};

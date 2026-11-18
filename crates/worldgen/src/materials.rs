@@ -400,11 +400,27 @@ palette! {
     PAINT_GREEN       = ( 70, 118,  92), Solid, 1;
     PAINT_RED         = (150,  62,  52), Solid, 1;
     PAINT_OCHRE       = (196, 150,  70), Solid, 1;
+    // Thatch laid fresh (settlements::years), added last so existing ids keep their
+    // numbers: each thatch as it is the season it is laid, and paler the next two, before
+    // it is as thatch is. Palm leaves are laid green and dry to straw.
+    THATCH_NEW        = (222, 192, 104), Solid, 3;
+    THATCH_NEW_2      = (208, 180, 100), Solid, 3;
+    THATCH_NEW_3      = (195, 168,  96), Solid, 3;
+    REED_NEW          = (192, 172, 112), Solid, 3;
+    REED_NEW_2        = (180, 161, 108), Solid, 3;
+    REED_NEW_3        = (168, 150, 104), Solid, 3;
+    PALM_NEW          = (146, 162,  74), Solid, 3;
+    PALM_NEW_2        = (148, 155,  78), Solid, 3;
+    PALM_NEW_3        = (149, 148,  81), Solid, 3;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,
 /// so that moss and lichen leave what is under them alone (features::moss).
-pub const ROOFING: &[Voxel] = &[THATCH, SLATE, ROOF_TILE, THATCH_OLD, REED_THATCH, PALM_THATCH, ROOF_TURF, SHINGLE, SHINGLE_OLD, ROOF_TILE_OLD, ROOF_MUD];
+pub const ROOFING: &[Voxel] = &[
+    THATCH, SLATE, ROOF_TILE, THATCH_OLD, REED_THATCH, PALM_THATCH, ROOF_TURF, SHINGLE, SHINGLE_OLD, ROOF_TILE_OLD, ROOF_MUD,
+    // Thatch laid since (settlements::years).
+    THATCH_NEW, THATCH_NEW_2, THATCH_NEW_3, REED_NEW, REED_NEW_2, REED_NEW_3, PALM_NEW, PALM_NEW_2, PALM_NEW_3,
+];
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.
 pub fn by_name(name: &str) -> Option<Voxel> {

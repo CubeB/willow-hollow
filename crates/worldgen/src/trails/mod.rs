@@ -183,6 +183,7 @@ pub enum Reason {
 }
 
 /// Voxels to write into the world, in continent-local coordinates.
+#[derive(Clone)]
 pub struct Stamp {
     pub lo: IVec3,
     pub hi: IVec3,
@@ -190,6 +191,9 @@ pub struct Stamp {
     /// Fine parts (lantern frames, chains and the like) in continent-local cells of
     /// 1/CELLS voxel. `lo` and `hi` cover these too.
     pub fine: Vec<PlantBox>,
+    /// What it is, if it changes over the years (#207): what reads it sees it through
+    /// `settlements::years::Lives::view`. None for what is the same in every year.
+    pub tag: Option<Box<crate::settlements::years::Tag>>,
 }
 
 /// Where a boat is tied up.
@@ -338,6 +342,8 @@ pub struct Network {
     /// The quays the boats of the settlements tie up at, the river runs between partners'
     /// quays and the fishing grounds off the ports (#205).
     pub waterways: crate::settlements::quay::Waterways,
+    /// What the settlements keep for how they change over the years (#207).
+    pub years: crate::settlements::years::Record,
 }
 
 impl Network {
@@ -381,7 +387,16 @@ impl Network {
                 self.stamp_index.entry((cx, cz)).or_default().push(id);
             }
         }
-        self.stamps.push(Stamp { lo, hi, voxels, fine });
+        self.stamps.push(Stamp { lo, hi, voxels, fine, tag: None });
+    }
+
+    /// [`Self::add_stamp_with`] for what changes over the years (#207), with its `tag`.
+    pub(crate) fn add_stamp_tagged(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>, tag: crate::settlements::years::Tag) {
+        let n = self.stamps.len();
+        self.add_stamp_with(voxels, fine);
+        if let Some(s) = self.stamps.get_mut(n) {
+            s.tag = Some(Box::new(tag));
+        }
     }
 
     /// Trail points and pads that can affect the square from `lo` to `hi`.

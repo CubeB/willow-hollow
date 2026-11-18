@@ -240,7 +240,7 @@ impl Dressing {
             lo = lo.min(IVec3::from_array(b.lo).div_euclid(cells));
             hi = hi.max((IVec3::from_array(b.hi) - 1).div_euclid(cells));
         }
-        Stamp { lo, hi, voxels: Vec::new(), fine: self.fine.clone() }
+        Stamp { lo, hi, voxels: Vec::new(), fine: self.fine.clone(), tag: None }
     }
 }
 

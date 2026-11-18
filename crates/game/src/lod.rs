@@ -256,6 +256,8 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     let (wx0, wz0) = (cx * span - step, cz * span - step);
     let (mx, mz) = cell_of(cx * span, cz * span);
     let continent = world.continent(mx, mz);
+    // How its settlements and fields stand in the year it is seen in (#207).
+    let lives = world.lives(mx, mz, &continent);
     let (lx0, lz0) = (wx0 - mx * MACRO_SIZE, wz0 - mz * MACRO_SIZE);
     let margin = features::MAX_REACH + 1;
     let width = PAD as i32 * step;
@@ -304,7 +306,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // and walls between them (see worldgen::settlements::farmland).
             let (cx_, cz_) = (lx0 + x as i32 * step, lz0 + z as i32 * step);
             let field = if surface == mat::ground_cover(four[0].biome) {
-                worldgen::settlements::farmland::far(&continent, world.seed(), four[0], cx_, cz_, step)
+                worldgen::settlements::farmland::rotation::far(&continent, world.seed(), four[0], cx_, cz_, step, lives.when)
             } else {
                 None
             };
@@ -355,7 +357,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     let mut stamps = Vec::new();
     for dx in 0..step {
         for dz in 0..step {
-            stamps.extend(continent.trails.stamps_at(local.0 + dx, local.1 + dz));
+            stamps.extend(continent.trails.stamps_at(local.0 + dx, local.1 + dz).filter_map(|s| lives.view(s)));
         }
     }
     for s in &stamps {
