@@ -42,6 +42,9 @@ const FLETCH: Rgb = [0xe2, 0xdc, 0xcc];
 const VEIL: Rgb = [0xe6, 0xe2, 0xd4];
 /// The twigs of a besom.
 const BESOM: Rgb = [0xa8, 0x8a, 0x52];
+/// Cut grain bound in a sheaf, and a dressed block of stone (#64).
+const SHEAF: Rgb = [0xc9, 0xa9, 0x5c];
+const STONE: Rgb = [0x9c, 0x98, 0x8e];
 
 /// How someone is built: the player's body, taller or shorter, broader or slighter.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -214,11 +217,18 @@ pub enum Carried {
     Broom,
     /// A bundle of firewood held in both arms before the chest.
     Load,
+    // Out at work in the land (#64): the reaper's scythe and the sawyer's saw, over the
+    // shoulder or in the hands; a sheaf of the harvest, and a dressed stone from the
+    // quarry, held to the chest as the firewood is.
+    Scythe,
+    Saw,
+    Sheaf,
+    Block,
 }
 
 impl Carried {
     #[cfg(test)]
-    pub const ALL: [Carried; 16] = [
+    pub const ALL: [Carried; 20] = [
         Carried::None,
         Carried::Axe,
         Carried::Hoe,
@@ -235,6 +245,10 @@ impl Carried {
         Carried::Bucket,
         Carried::Broom,
         Carried::Load,
+        Carried::Scythe,
+        Carried::Saw,
+        Carried::Sheaf,
+        Carried::Block,
     ];
 }
 
@@ -639,7 +653,7 @@ const SHOULDERED: (f32, f32, f32) = (-0.45, -1.9, -1.06);
 fn holding(carried: Carried, pose: &Pose) -> Pose {
     let mut p = *pose;
     match carried {
-        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom => {
+        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom | Carried::Scythe | Carried::Saw => {
             p.arm[0] = SHOULDERED.0;
             p.fore[0] = SHOULDERED.1;
         }
@@ -950,6 +964,17 @@ fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option
             };
             part(hand(0), pitch, turn, tool);
         }
+        // The scythe's long haft reaching down before the feet, its blade along the
+        // ground, swept from side to side as the broom is (#64).
+        Carried::Scythe if in_use => {
+            part(hand(0), -0.8, pose.head, &[([-0.17, -14.3, -0.17], [0.34, 15.0, 0.34], WOOD), ([-0.2, -14.6, -0.3], [5.6, 0.3, 0.9], IRON), ([-0.15, -7.0, -0.15], [1.6, 0.34, 0.34], WOOD)]);
+        }
+        // The pit saw held upright before the body by its handle, the blade hanging down
+        // through the log into the pit.
+        Carried::Saw if in_use => {
+            let h = (hand(0) + hand(1)) * 0.5;
+            part(h, 0.0, 0.0, &[([-2.0, -0.2, -0.2], [4.0, 0.4, 0.4], WOOD), ([-0.1, -16.0, -0.7], [0.2, 15.8, 1.4], IRON)]);
+        }
         Carried::Rod if in_use => {
             let h = hand(0);
             let pitch = 1.1 + pose.jiggle[1];
@@ -957,6 +982,16 @@ fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option
             // The line from the tip straight down, to below the feet.
             let tip = along(h, pitch, -14.0);
             part(tip, 0.0, 0.0, &[([-0.04, -tip.y - 3.0, -0.04], [0.08, tip.y + 3.0, 0.08], FLETCH)]);
+        }
+        // At the udder the pail stands on the ground under it, before the stool.
+        _ if task == Some(Task::Milk) => {
+            let ground = -pose.lift / CELL;
+            part(
+                Vec3::new(0.0, ground, deep + 4.0),
+                0.0,
+                0.0,
+                &[([-1.0, 0.0, -1.0], [2.0, 2.2, 2.0], shade(WOOD, 1.08)), ([-1.05, 1.4, -1.05], [2.1, 0.25, 2.1], IRON)],
+            );
         }
         Carried::Bucket => {
             part(
@@ -975,12 +1010,22 @@ fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option
                 &[([-1.8 * g, 1.3, deep + 0.15], [3.6 * g, 1.0, 2.8], WOOD), ([-1.6 * g, 2.3, deep + 0.3], [3.2 * g, 0.9, 2.5], shade(WOOD, 0.82))],
             );
         }
-        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom => {
+        Carried::Sheaf => {
+            // A sheaf of the harvest held upright against the chest, bound at its waist.
+            part(hips, lean, 0.0, &[([-1.3 * g, 0.4, deep + 0.15], [2.6 * g, 5.2, 2.2], SHEAF), ([-1.4 * g, 2.4, deep + 0.1], [2.8 * g, 0.5, 2.3], shade(SHEAF, 0.7))]);
+        }
+        Carried::Block => {
+            // A dressed stone held low before the body in both hands.
+            part(hips, lean, 0.0, &[([-1.5 * g, 1.0, deep + 0.15], [3.0 * g, 2.0, 2.4], STONE)]);
+        }
+        Carried::Axe | Carried::Hoe | Carried::Rod | Carried::Broom | Carried::Scythe | Carried::Saw => {
             // Held by the haft before the shoulder, the head behind.
             let tool: &[Piece] = match look.carried {
                 Carried::Axe => &[([-0.17, -1.2, -0.17], [0.34, 8.6, 0.34], WOOD), ([-0.12, 6.1, -1.5], [0.24, 1.4, 1.45], IRON)],
                 Carried::Hoe => &[([-0.15, -1.5, -0.15], [0.3, 12.5, 0.3], WOOD), ([-0.75, 10.6, -1.6], [1.5, 0.35, 1.6], IRON)],
                 Carried::Broom => &[([-0.15, -1.5, -0.15], [0.3, 11.0, 0.3], WOOD), ([-0.8, 9.5, -0.55], [1.6, 1.8, 1.1], BESOM)],
+                Carried::Scythe => &[([-0.17, -1.5, -0.17], [0.34, 15.0, 0.34], WOOD), ([-0.2, 13.2, -5.2], [0.3, 0.9, 5.4], IRON)],
+                Carried::Saw => &[([-0.1, -1.5, -0.7], [0.2, 14.0, 1.4], IRON), ([-1.5, 12.3, -0.2], [3.0, 0.4, 0.4], WOOD)],
                 _ => &[([-0.1, -1.5, -0.1], [0.2, 15.5, 0.2], dark), ([-0.18, 0.5, -0.18], [0.36, 1.4, 0.36], shade(LEATHER, 0.7))],
             };
             part(hand(0), SHOULDERED.2, 0.0, tool);
@@ -1212,6 +1257,21 @@ pub enum Task {
     /// On a seat a stool high, a sketchbook held up in the left hand and the right at work
     /// on it (#205).
     Sketch,
+    // Out at work in the land (#64, #206).
+    /// Seed flung out in an arc from a basket on the left arm, a handful at a time.
+    Sow,
+    /// Grain scattered for the hens from a basket, as seed is sown.
+    Feed,
+    /// A scythe swung low from side to side through the standing crop.
+    Reap,
+    /// Stood on the log over the saw pit, the long saw worked up and down.
+    Saw,
+    /// On a stool beside a cow or a goat, bent to it, the pail on the ground below.
+    Milk,
+    /// A sheaf of the harvest held to the chest.
+    Sheaves,
+    /// A dressed stone from the quarry held before the body.
+    Stone,
 }
 
 /// How high a seat is, in metres: a stool's, and about a bench's.
@@ -1219,7 +1279,7 @@ pub const SEAT: f32 = 0.5;
 
 impl Task {
     #[cfg(test)]
-    pub const ALL: [Task; 15] = [
+    pub const ALL: [Task; 22] = [
         Task::Stand,
         Task::Chop,
         Task::Hoe,
@@ -1235,6 +1295,13 @@ impl Task {
         Task::Lie,
         Task::Row,
         Task::Sketch,
+        Task::Sow,
+        Task::Feed,
+        Task::Reap,
+        Task::Saw,
+        Task::Milk,
+        Task::Sheaves,
+        Task::Stone,
     ];
 
     /// What it is, in words, for logs and the console.
@@ -1255,6 +1322,13 @@ impl Task {
             Task::Lie => "asleep",
             Task::Row => "rowing",
             Task::Sketch => "sketching",
+            Task::Sow => "sowing",
+            Task::Feed => "feeding the hens",
+            Task::Reap => "reaping",
+            Task::Saw => "sawing",
+            Task::Milk => "milking",
+            Task::Sheaves => "carrying sheaves",
+            Task::Stone => "carrying stone",
         }
     }
 
@@ -1276,17 +1350,40 @@ impl Task {
                 _ => Carried::None,
             },
             Task::Stand | Task::Talk => own,
-            // Both hands are busy: with the oars, and with the book and the pencil.
-            Task::Row | Task::Sketch => match own {
+            // Both hands are busy: with the oars, and with the book and the pencil; at the
+            // udder, the pail standing on the ground (see `draw_doing`).
+            Task::Row | Task::Sketch | Task::Milk => match own {
                 Carried::Purse | Carried::Bow => own,
                 _ => Carried::None,
             },
+            Task::Sow | Task::Feed => Carried::Basket,
+            Task::Reap => Carried::Scythe,
+            Task::Saw => Carried::Saw,
+            Task::Sheaves => Carried::Sheaf,
+            Task::Stone => Carried::Block,
+        }
+    }
+
+    /// What is carried away from it, walking: what was worked with, the load, or the
+    /// milk in its pail.
+    pub fn carried_off(self, own: Carried) -> Carried {
+        match self {
+            Task::Fetch | Task::Milk => Carried::Bucket,
+            Task::Carry => Carried::Load,
+            Task::Sheaves => Carried::Sheaf,
+            Task::Stone => Carried::Block,
+            Task::Reap => Carried::Scythe,
+            Task::Saw => Carried::Saw,
+            _ => own,
         }
     }
 
     /// Whether `carried` is being worked with, and so held in the hands.
     fn in_use(self, carried: Carried) -> bool {
-        matches!((self, carried), (Task::Chop, Carried::Axe) | (Task::Hoe, Carried::Hoe) | (Task::Fish, Carried::Rod) | (Task::Sweep, Carried::Broom))
+        matches!(
+            (self, carried),
+            (Task::Chop, Carried::Axe) | (Task::Hoe, Carried::Hoe) | (Task::Fish, Carried::Rod) | (Task::Sweep, Carried::Broom) | (Task::Reap, Carried::Scythe) | (Task::Saw, Carried::Saw)
+        )
     }
 }
 
@@ -1368,6 +1465,38 @@ pub fn task_pose(task: Task, build: &Build, clock: f32, phase: f32) -> Pose {
                 ..Default::default()
             }
         }
+        Task::Sow | Task::Feed => {
+            // The right hand dips into the basket on the left arm and flings its handful
+            // out in an arc, the head following it; grain for hens is thrown lower.
+            let s = stroke(0.55, 1.0, 0.0);
+            let low = if task == Task::Feed { 0.25 } else { 0.0 };
+            Pose {
+                leg: [-0.15, 0.12],
+                arm: [-0.35 - 0.75 * s + low, -0.35],
+                fore: [-1.3 + 0.9 * s, -1.1],
+                head: (s - 0.5) * 0.5,
+                lean: 0.06 + low * 0.6,
+                ..Default::default()
+            }
+        }
+        Task::Reap => {
+            // The scythe swung through the crop from right to left at the height of the
+            // stubble, the body turning with it.
+            let s = wave(0.5, 0.0);
+            Pose { leg: [-0.3, 0.2], shin: [0.2, 0.1], arm: [-0.8 + 0.1 * s, -0.6 - 0.1 * s], fore: [-0.5, -0.75], head: s * 0.65, lean: 0.3, ..Default::default() }
+        }
+        Task::Saw => {
+            // Both hands on the handle before the chest, worked up and down.
+            let s = wave(1.1, 0.0);
+            Pose { leg: [-0.12, 0.12], arm: [-0.65 + 0.3 * s; 2], fore: [-1.15 - 0.3 * s; 2], lean: 0.12 + 0.06 * s, ..Default::default() }
+        }
+        Task::Milk => {
+            // Bent to the udder from a stool, the hands drawing in turn.
+            let w = wave(1.6, 0.0);
+            Pose { leg: [-1.5; 2], shin: [1.4; 2], arm: [-0.95 + 0.12 * w, -0.95 - 0.12 * w], fore: [-0.45; 2], lean: 0.5, lift: seated(SEAT), ..Default::default() }
+        }
+        Task::Sheaves => Pose { arm: [-0.7; 2], fore: [-1.0; 2], lean: -0.05, lift: breath * m(0.006), ..Default::default() },
+        Task::Stone => Pose { arm: [-0.45; 2], fore: [-0.75; 2], lean: -0.1, lift: breath * m(0.006), ..Default::default() },
     }
 }
 

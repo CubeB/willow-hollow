@@ -15,7 +15,7 @@ use worldgen::settlements::calendar;
 
 use super::{
     lanes::flat,
-    town::{Resident, Role, Spot, Town},
+    town::{Resident, Role, Spot, Town, Where},
 };
 use crate::character::Task;
 use crate::people::Trade;
@@ -102,11 +102,48 @@ struct Taken {
     water: usize,
 }
 
-/// The day numbered `day` (from the world's first) for everyone of `town`, in the order
-/// of [`Town::residents`].
-pub fn plans(town: &Town, day: i64) -> Vec<Plan> {
+/// The day numbered `day` (from the world's first, in a year of `year_days` days) for
+/// everyone of `town`, in the order of [`Town::residents`].
+pub fn plans(town: &Town, day: i64, year_days: f32) -> Vec<Plan> {
     let mut taken = Taken { wells: vec![0; town.wells.len()], stalls: vec![0; town.stalls.len()], ..Default::default() };
-    town.residents.iter().map(|r| plan(town, r, day, &mut taken)).collect()
+    let date = (day as f64 / year_days.max(1.0) as f64).rem_euclid(1.0) as f32;
+    town.residents.iter().map(|r| plan(town, r, day, date, &mut taken)).collect()
+}
+
+/// When the sun sets on `date` (0 to 1 from the spring equinox), as `env.rs` has it
+/// ride the sky: at six at the equinoxes, later in summer and sooner in winter.
+pub fn sunset(date: f32) -> f32 {
+    18.0 + (0.3 * crate::season::declination(date)).asin() * 12.0 / std::f32::consts::PI
+}
+
+/// The longest walk out to work in the land and back again the same day, each way, in
+/// hours: further, and the work is let be for the work about the house.
+pub const FURTHEST_OUT: f32 = 4.2;
+
+/// What is done in a field of `crop` at `date` (0 to 1 from the spring equinox), the
+/// `second` thing of the day or the first: sowing in spring, hoeing the rows through the
+/// summer, reaping and carrying the sheaves at harvest, and the ground worked over
+/// through the winter; hay cut in summer; trees and vines tended all year.
+pub fn field_task(crop: worldgen::settlements::farmland::Crop, date: f32, second: bool) -> Task {
+    use worldgen::settlements::farmland::Crop;
+    let date = date.rem_euclid(1.0);
+    let harvest = (0.42..0.6).contains(&date);
+    match crop {
+        Crop::Wheat | Crop::Barley | Crop::Rye | Crop::Flax => match date {
+            _ if harvest => if second { Task::Sheaves } else { Task::Reap },
+            d if d < 0.25 => if second { Task::Hoe } else { Task::Sow },
+            d if (0.6..0.75).contains(&d) => if second { Task::Sow } else { Task::Hoe },
+            _ => Task::Hoe,
+        },
+        Crop::Roots => match date {
+            d if d < 0.25 => if second { Task::Hoe } else { Task::Sow },
+            _ if harvest => if second { Task::Carry } else { Task::Tend },
+            _ => if second { Task::Tend } else { Task::Hoe },
+        },
+        Crop::Hay if (0.3..0.45).contains(&date) => if second { Task::Sheaves } else { Task::Reap },
+        Crop::Orchard | Crop::Olives | Crop::Vines | Crop::Hay => Task::Tend,
+        _ => Task::Hoe,
+    }
 }
 
 /// The day of the week `day` falls on, 0 to 6.
@@ -114,7 +151,7 @@ pub fn weekday(day: i64) -> i64 {
     day.rem_euclid(WEEK)
 }
 
-fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
+fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Plan {
     let seed = r.person.seed ^ (day as u32).wrapping_mul(0x9e37_79b9) ^ ((day >> 32) as u32);
     let d = |k: i32| unit(hash2(seed, k, 0x3d17));
     let dow = weekday(day);
@@ -133,7 +170,12 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
     let inside = Want { place: home, spot: town.inside_spot(r.home, r.member, Task::Stand), start: f32::NEG_INFINITY, stay: LEAST };
     let at = |start: f32, w: Want| Want { start, ..w };
     let for_ = |stay: f32, w: Want| Want { stay, ..w };
-    let mut w: Vec<Want> = vec![Want { place: home, spot: r.bed, start: 0.0, stay: 0.0 }];
+    // Out at a logging camp too far to come home from each day (#64), they sleep out
+    // there from the first working day to the last.
+    let camp_week = keeps.is_none() && r.role == Role::Worker && town.stays_out(r);
+    let camp_bed = r.jobs.get(3).filter(|_| camp_week).map(|j| Want { place: j.place, spot: j.spot, start: 0.0, stay: 0.0 });
+    let slept_out = camp_bed.filter(|_| (1..REST_DAY).contains(&dow));
+    let mut w: Vec<Want> = vec![slept_out.unwrap_or(Want { place: home, spot: r.bed, start: 0.0, stay: 0.0 })];
 
     // Each of these is somewhere to go, and the spot there, as it is taken.
     // Water is fetched from the well nearest home.
@@ -184,7 +226,14 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
         Some(Want { place: p, spot, start: f32::NEG_INFINITY, stay: 0.5 })
     };
     let door_sit = |k: u32| Want { place: home, spot: town.by_door(r.home, k, Task::Sit), start: f32::NEG_INFINITY, stay: 0.5 };
-    let job = |n: usize| r.jobs.get(n % r.jobs.len().max(1)).map(|j| Want { place: j.place, spot: j.spot, start: f32::NEG_INFINITY, stay: 0.5 });
+    // Someone whose work is out in the land and who stays in works about the house.
+    let about_house = Want { place: home, spot: town.by_door(r.home, r.n as u32 + 1, Task::Carry), start: f32::NEG_INFINITY, stay: 0.5 };
+    let job = |n: usize| {
+        if town.works_out(r) {
+            return Some(about_house);
+        }
+        r.jobs.get(n % r.jobs.len().max(1)).map(|j| Want { place: j.place, spot: j.spot, start: f32::NEG_INFINITY, stay: 0.5 })
+    };
 
     // The evening out, for the grown: the tavern, the green, or outside the door.
     let evening = |w: &mut Vec<Want>, taken: &mut Taken, keen: f32| {
@@ -207,7 +256,111 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
     };
     let bed = |start: f32| Want { place: home, spot: r.bed, start, stay: 0.0 };
 
+    // Out in the land (#64, #206): the herder drives the fold's flock every day; those
+    // whose work is out in a field, at the camp or the quarry go on a working day, if it
+    // is near enough to be there and back by dusk. A field's work is the season's.
+    let drove = town.drives(r.n).filter(|_| keeps.is_none());
+    let land_job = |n: usize| -> Option<Want> {
+        let j = r.jobs.get(n)?;
+        let mut spot = j.spot;
+        if let Where::Field(f) = town.places[j.place].what
+            && n < 2
+        {
+            spot.task = field_task(town.fields[f].crop, date, n == 1);
+        }
+        Some(Want { place: j.place, spot, start: f32::NEG_INFINITY, stay: 0.5 })
+    };
+    let far_out = r.jobs.first().map_or(f32::MAX, |j| town.walk_length((home, &inside.spot), (j.place, &j.spot)) / PACE);
+    let goes_out = keeps.is_none() && !rest && drove.is_none() && town.works_out(r) && far_out <= FURTHEST_OUT;
+    // Home before the sun is down.
+    let dusk = (sunset(date) - 0.4).min(18.2);
+
     match role {
+        Role::Worker if drove.is_some() => {
+            let dv = &town.droves[drove.unwrap_or(0)];
+            let hours = dv.herd.hours(day, sunset(date));
+            let local = |p: glam::DVec2| Vec2::new((p.x - town.origin.x) as f32, (p.y - town.origin.z) as f32);
+            let (gate, graze) = (local(dv.herd.gate), local(dv.herd.graze));
+            let out = dv.herd.out.as_vec2();
+            let (side, dir, length) = (out.perp(), (graze - gate).normalize_or(out), graze.distance(gate));
+            let y = town.places[dv.place].at.y;
+            let here = |p: Vec2, face: Vec2, task: Task, start: f32, stay: f32| Want { place: dv.place, spot: Spot::new(Vec3::new(p.x, y, p.y), face, task), start, stay };
+            let by_gate = town.places[dv.place].at;
+            // Behind the flock, this far off its middle.
+            let trail = worldgen::scale::m(2.5);
+            // Up in time to be at the fold as the gate is opened.
+            let wake = (5.4 + 0.5 * d(1)).min(hours.open - 0.4 - town.walk_out(r));
+            w.push(for_(0.3, at(wake, inside)));
+            // To the fold, and the gate opened.
+            w.push(here(flat(by_gate), -side, Task::Stand, hours.open - 0.1, 0.1));
+            // Out behind the flock to the grass, stopping as it stops.
+            let from = hours.open + 0.1;
+            for k in 1..=3 {
+                let s = k as f32 / 3.0;
+                let p = gate + dir * (length * s - trail).max(2.0) + side * 1.4;
+                w.push(here(p, dir, Task::Stand, from + (hours.out - from) * s, LEAST));
+            }
+            // Watching over it through the day; milking one out on the grass, and down
+            // on the ground at midday.
+            let watch = graze - dir * (trail + 2.0) + side * 2.0;
+            if let Some((a, b)) = hours.milk {
+                let (_, _, stool, face) = dv.herd.milking();
+                let mut milk = here(local(stool), face.as_vec2(), Task::Milk, a, b - a);
+                milk.spot.stool = true;
+                w.push(milk);
+            }
+            w.push(here(watch, dir, Task::Stand, f32::NEG_INFINITY, 1.0));
+            w.push(here(watch + side * 0.8, dir, Task::SitLow, 12.0 + 0.4 * d(5), 0.8));
+            w.push(here(watch, dir, Task::Stand, 13.2 + 0.4 * d(6), 0.5));
+            // Round beyond it, and back behind it to the fold, the gate shut on it.
+            w.push(here(graze + dir * (trail + 1.0), -dir, Task::Stand, hours.gather - 0.02, LEAST));
+            let to = hours.shut - 0.1;
+            for k in 1..=2 {
+                let s = k as f32 / 3.0;
+                let p = gate + dir * (length * (1.0 - s) + trail) - side * 1.4;
+                w.push(here(p, -dir, Task::Stand, hours.gather + (to - hours.gather) * s, LEAST));
+            }
+            w.push(here(flat(by_gate), -side, Task::Stand, to, 0.25));
+            w.push(for_(0.8, at(hours.shut + 0.3, inside)));
+            evening(&mut w, taken, if dow >= 5 { 0.45 } else { 0.25 });
+            w.push(bed(22.0 + 0.6 * d(10)));
+        }
+        Role::Worker if camp_week && !rest => {
+            // Up at the camp, or at home on the first working day and out to it; at work
+            // there all day with a bite at midday, and the evening by the lean-to, but on
+            // the last working day, when it is home before dusk for the day of rest.
+            let up = land_job(2).map_or(inside, |x| Want { spot: Spot { task: Task::Stand, ..x.spot }, ..x });
+            let wake = 5.0 + 0.5 * d(1);
+            w.push(for_(0.3, at(wake, if slept_out.is_some() { up } else { inside })));
+            w.extend(land_job(0).map(|x| at(6.8 + 0.4 * d(4), x)));
+            // On the last working day, the afternoon's work only if there is time for it
+            // and the long walk home.
+            let homeward = dow == REST_DAY - 1;
+            if !homeward || 13.4 + town.walk_out(r) <= dusk {
+                w.extend(land_job(2).map(|x| at(11.8 + 0.4 * d(5), for_(0.6, x))));
+                w.extend(land_job(1).map(|x| at(12.6 + 0.3 * d(6), x)));
+            }
+            if homeward {
+                w.push(for_(0.8, at(dusk - 0.3 * d(7), inside)));
+                evening(&mut w, taken, 0.5);
+                w.push(bed(22.0 + 0.6 * d(10)));
+            } else {
+                w.extend(land_job(2).map(|x| at(18.4 + 0.5 * d(8), for_(1.5, x))));
+                w.extend(camp_bed.map(|b| Want { start: 21.0 + 0.6 * d(10), ..b }));
+            }
+        }
+        Role::Worker if goes_out => {
+            // Up early, out to the work in the land, a bite at midday there, and home
+            // before dusk.
+            let wake = 5.0 + 0.5 * d(1);
+            w.push(for_(0.3, at(wake, inside)));
+            w.extend(land_job(0).map(|x| at(7.0 + 0.4 * d(4), x)));
+            w.extend(land_job(2).map(|x| at(11.8 + 0.4 * d(5), for_(0.6, x))));
+            w.extend(land_job(1).map(|x| at(12.6 + 0.3 * d(6), x)));
+            w.push(for_(0.8, at(dusk - 0.3 * d(7), inside)));
+            evening(&mut w, taken, if dow >= 5 { 0.45 } else { 0.22 });
+            w.push(bed(22.0 + 0.6 * d(10)));
+        }
         Role::Worker | Role::Seller if !rest || keeps.is_some() => {
             let wake = 5.6 + d(1);
             w.push(for_(0.3, at(wake, inside)));
@@ -366,6 +519,13 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
             w.push(for_(0.3, at(19.8 + 0.4 * d(17), inside)));
             w.push(bed(20.5 + d(10)));
         }
+    }
+    // The hens fed of a morning, every day (#206), at the hour they gather for it.
+    if let Some(h) = town.hens.iter().find(|h| h.feeder == Some(r.n)) {
+        let (from, until) = crate::animals::herd::feeding(h.key, day);
+        let feed = Want { place: town.plots[h.home].place, spot: h.spot, start: from, stay: until - from };
+        let i = (1..w.len()).find(|&i| w[i].start.is_finite() && w[i].start > from).unwrap_or(w.len());
+        w.insert(i, feed);
     }
     for x in &mut w {
         if x.spot.task == Task::Sit && x.spot.inside.is_none() && x.place == town.green_place {

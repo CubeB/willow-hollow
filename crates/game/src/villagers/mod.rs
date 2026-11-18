@@ -13,6 +13,7 @@
 //! player is in there with them.
 
 pub mod day;
+pub mod land;
 // What a settlement puts out on market days and festivals (#207).
 pub mod dress;
 pub mod lanes;
@@ -215,8 +216,15 @@ fn wanted(world: &GameWorld, at: DVec3, wait: bool) -> Vec<((i32, i32), usize, A
             let c = if wait && (mx, mz) == cell_of(x, z) { Some(world.continent(mx, mz)) } else { world.continent_if_ready(mx, mz) };
             let Some(c) = c else { continue };
             let local = Vec2::new((at.x - (mx * MACRO_SIZE) as f64) as f32, (at.z - (mz * MACRO_SIZE) as f64) as f32);
+            // Near its logging camp or its quarry out in the land, too, where its people
+            // work (#64).
+            let works = |k: usize| {
+                let camps = c.trails.years.camps.iter().filter(|q| q.owner == k).map(|q| q.middle().distance(local));
+                let quarries = c.land.quarries.iter().filter(|q| q.owner == k).map(|q| q.distance(local));
+                camps.chain(quarries).fold(f32::MAX, f32::min)
+            };
             for (k, s) in c.trails.settlements.iter().enumerate() {
-                if k < c.trails.layouts.len() && s.at().distance(local) < s.radius + m(COME) {
+                if k < c.trails.layouts.len() && (s.at().distance(local) < s.radius + m(COME) || works(k) < m(COME * 0.6)) {
                     out.push(((mx, mz), k, c.clone()));
                 }
             }
@@ -282,7 +290,7 @@ impl Villagers {
             }
             self.near.remove(i);
         }
-        let plans = day::plans(&town, day);
+        let plans = day::plans(&town, day, self.year_days);
         log::debug!("the people of {} are about: {}", town.name, town.residents.len());
         self.near.push(Near { town: Arc::new(town), epoch, day, plans, routes: HashMap::new() });
     }
@@ -334,12 +342,12 @@ impl Villagers {
             self.near.retain(|n| {
                 let t = &n.town;
                 let d = (at - t.origin).as_vec3();
-                flat(d).distance(flat(t.centre)) < t.radius + m(GO)
+                flat(d).distance(flat(t.centre)) < t.extent + m(GO)
             });
         }
         for n in &mut self.near {
             if n.day != today {
-                n.plans = day::plans(&n.town, today);
+                n.plans = day::plans(&n.town, today, year_days);
                 n.day = today;
                 n.routes.clear();
             }
@@ -362,7 +370,7 @@ impl Villagers {
         }
         for n in &mut self.near {
             if n.day != today {
-                n.plans = day::plans(&n.town, today);
+                n.plans = day::plans(&n.town, today, year_days);
                 n.day = today;
                 n.routes.clear();
             }
@@ -381,7 +389,7 @@ impl Villagers {
         for near in &mut self.near {
             let town = &near.town;
             let eye = (cam - town.origin).as_vec3();
-            if flat(eye).distance(flat(town.centre)) > town.radius + reach {
+            if flat(eye).distance(flat(town.centre)) > town.extent + reach {
                 continue;
             }
             let feet = (player - town.origin).as_vec3();
@@ -687,11 +695,7 @@ fn figure(town: &Town, plan: &Plan, r: &Resident, hour: f32, eye: Vec3, routes: 
             let walk = &routes[&(r.n, i)];
             let along = t * walk.length();
             let (feet, way) = walk.at(along);
-            let carried = match a.spot.task {
-                Task::Fetch => Carried::Bucket,
-                Task::Carry => Carried::Load,
-                _ => own,
-            };
+            let carried = a.spot.task.carried_off(own);
             // Going from room to room, they are still indoors.
             let inside = a.spot.inside.filter(|_| a.spot.inside == b.spot.inside);
             Some((feet, way.y.atan2(way.x), None, along / m(STEP), carried, false, inside))
@@ -708,8 +712,15 @@ fn pose_of(r: &Resident, f: &Figure, clock: f32) -> character::Pose {
             let mut g = Gait::new(f.facing);
             g.update(Doing::Afoot(STEP_SPEED), f.stride, None, false, None, 0.0, 0.0);
             let mut pose = g.pose();
-            if f.carried == Carried::Load {
-                let held = character::task_pose(Task::Carry, &r.person.look.build, clock, phase);
+            // A load held in both arms keeps them still before the chest.
+            let held = match f.carried {
+                Carried::Load => Some(Task::Carry),
+                Carried::Sheaf => Some(Task::Sheaves),
+                Carried::Block => Some(Task::Stone),
+                _ => None,
+            };
+            if let Some(t) = held {
+                let held = character::task_pose(t, &r.person.look.build, clock, phase);
                 (pose.arm, pose.fore) = (held.arm, held.fore);
             }
             pose

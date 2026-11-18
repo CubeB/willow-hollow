@@ -7,12 +7,14 @@ use glam::{DVec3, IVec2, Vec2, Vec3};
 use voxel::{Voxel, mesh::CELLS};
 use worldgen::{
     continent::Continent,
+    fauna,
     features::fittings::{self, Fitting},
     macro_layout::MACRO_SIZE,
     names::PlaceKind,
     noise::{hash2, unit},
     settlements::{
         Kind, Livelihood, Region, calendar,
+        farmland::{self, Crop, rotation},
         layout::Purpose,
         special::Guild,
         years::{Boon, Lives},
@@ -20,8 +22,12 @@ use worldgen::{
     surface::Sampler,
 };
 
-use super::lanes::{Lanes, Walk, flat};
+use super::{
+    land::{self, Country, Keep},
+    lanes::{Lanes, Walk, flat},
+};
 use crate::{
+    animals::herd,
     character::Task,
     people::{self, Age, Person, Trade},
 };
@@ -43,6 +49,47 @@ pub enum Where {
     Shrine,
     /// The water's edge.
     Water,
+    // Out in the land (#64, #206): reached from the lanes by a way found across it (see
+    // `land.rs`), and walked about in straight across.
+    /// One of the settlement's fields, by its index in [`Town::fields`].
+    Field(usize),
+    /// The middle of the logging camp's yard.
+    Camp,
+    /// The quarry's yard, before its mouth.
+    Quarry,
+    /// Outside the gate of a fold its flock is kept in by night, by its index in
+    /// [`Town::droves`].
+    Pasture(usize),
+}
+
+impl Where {
+    /// Whether it is out in the land, beyond the lanes.
+    pub fn out(self) -> bool {
+        matches!(self, Where::Field(_) | Where::Camp | Where::Quarry | Where::Pasture(_))
+    }
+}
+
+/// A field worked by the settlement's farmers (#64): which it is, and where they stand
+/// in it, each with the way they face, continent-local, feet level.
+#[derive(Clone, Debug)]
+pub struct Field {
+    pub place: usize,
+    pub plot: worldgen::settlements::farmland::Plot,
+    /// What it carries the year the settlement was made for.
+    pub crop: Crop,
+    pub spots: Vec<(Vec3, Vec2)>,
+}
+
+/// Work out in the land at one place, at a camp or a quarry: where each thing is done,
+/// for its workers to take in turn.
+#[derive(Clone, Debug)]
+pub struct Works {
+    pub place: usize,
+    pub spots: Vec<Spot>,
+    /// Where they sit down to eat at midday.
+    pub rest: Vec<Spot>,
+    /// Where those who stay out there through the week sleep: under a camp's lean-to.
+    pub beds: Vec<Spot>,
 }
 
 /// A place people go to: where they stand on reaching it, and the way to it from the
@@ -245,6 +292,37 @@ pub struct Town {
     /// its notices send letters to, its merchants keep the market days of and its
     /// wayfarers chart.
     pub neighbours: Vec<Neighbour>,
+    // Out in the land (#64, #206).
+    /// How far from its middle the furthest of its places is, beyond the lanes as well.
+    pub extent: f32,
+    pub fields: Vec<Field>,
+    pub camp: Option<Works>,
+    pub quarry: Option<Works>,
+    /// The flocks and herds driven out of their folds each morning and home at evening.
+    pub droves: Vec<Drove>,
+    /// The hens of its yards, fed each morning.
+    pub hens: Vec<Hens>,
+}
+
+/// A yard's hens (#206), and who feeds them of a morning, where.
+#[derive(Clone, Debug)]
+pub struct Hens {
+    /// Their pen's key (see `fauna::Kept`), which says when they are fed.
+    pub key: u64,
+    pub home: usize,
+    pub spot: Spot,
+    pub feeder: Option<usize>,
+}
+
+/// A pasture whose flock or herd is folded by night and driven out to graze by day
+/// (#206), as the settlement's people know it: the herd's own day (`animals::herd`),
+/// in continent-local voxels, and who drives it.
+#[derive(Clone, Debug)]
+pub struct Drove {
+    pub place: usize,
+    pub herd: crate::animals::herd::Drove,
+    /// Who drives it, by their number among the residents.
+    pub herder: Option<usize>,
 }
 
 /// How far about a settlement its neighbours are counted: the country a guild house's
@@ -317,6 +395,222 @@ fn tree_foot(c: &Continent, k: usize) -> Option<(Vec2, f32)> {
     let (kept, r) = c.trails.layouts.get(k).and_then(|l| l.tree)?;
     let trunk = c.trails.village_trees.get(k).copied().flatten().map(|t| Vec2::new(t.x as f32 + 0.5, t.z as f32 + 0.5));
     Some((trunk.unwrap_or(kept), r))
+}
+
+/// What a settlement works out in the land, its places among the rest.
+struct OutInLand {
+    fields: Vec<Field>,
+    camp: Option<Works>,
+    quarry: Option<Works>,
+    droves: Vec<Drove>,
+}
+
+/// The longest walk from a herder's home to the fold, in hours: they must be there as
+/// its gate is opened, up no earlier than a quarter to five.
+const HERDER_WALK: f32 = 2.4;
+
+/// The most who go out to the logging camp and the quarry each day.
+const CAMP_HANDS: usize = 4;
+const QUARRY_HANDS: usize = 3;
+
+/// How many have gone out to each of a settlement's works in the land so far, as its
+/// people are made.
+#[derive(Default)]
+struct Hands {
+    fields: Vec<usize>,
+    camp: usize,
+    quarry: usize,
+}
+
+/// The most fields a settlement's farmers work at once, by its size.
+fn fields_worked(kind: Kind) -> usize {
+    match kind {
+        Kind::Hamlet => 2,
+        Kind::Village => 3,
+        Kind::LargeVillage | Kind::Town => 4,
+        Kind::GreatTown => 5,
+    }
+}
+
+/// Settlement `k`'s work out in the land (#64, #206): a few of its fields near, its
+/// logging camp and its quarry, and the folds of its pastures; each a place reached
+/// from the lane nearest by a way found across the land (`land.rs`), added to `places`.
+/// `walls` and `things` are its buildings' and its yards' things, kept clear of.
+#[allow(clippy::too_many_arguments)]
+fn out_in_land(
+    c: &Continent,
+    seed: u32,
+    cell: (i32, i32),
+    k: usize,
+    lives: &Lives,
+    lanes: &Lanes,
+    reached: &[bool],
+    walls: &[(IVec2, IVec2, bool)],
+    things: &[(Fitting, Vec3, Vec2, Vec2)],
+    places: &mut Vec<Place>,
+) -> OutInLand {
+    let started = std::time::Instant::now();
+    let net = &c.trails;
+    let s = &net.settlements[k];
+    let origin = (cell.0 * MACRO_SIZE, cell.1 * MACRO_SIZE);
+    let centre = s.at();
+    let camp = net.years.camps.iter().find(|q| q.owner == k);
+    let quarry = c.land.quarries.iter().find(|q| q.owner == k);
+    let herds: Vec<herd::Drove> = fauna::kept_about(c, seed, k)
+        .iter()
+        .filter_map(|p| match herd::tending(p) {
+            Some(herd::Tend::Drove(d)) => Some(d),
+            _ => None,
+        })
+        .collect();
+    let local = |p: glam::DVec2| Vec2::new((p.x - origin.0 as f64) as f32, (p.y - origin.1 as f64) as f32);
+
+    // What the ways keep clear of: the buildings and what stands about them, the barns
+    // out in the fields, the camp's works, the quarry's shed and pit, and the folds.
+    let mut keep: Vec<Keep> = walls.iter().map(|&(lo, hi, round)| Keep { lo, hi, round }).collect();
+    keep.extend(things.iter().map(|t| Keep::rect((flat(t.1) - t.3).floor().as_ivec2(), ((flat(t.1) + t.3).ceil() - 1.0).as_ivec2())));
+    keep.extend(c.land.steads.iter().filter(|b| b.owner == k).map(|b| Keep::rect(b.footprint.0, b.footprint.1)));
+    if let Some(q) = camp {
+        keep.extend(land::camp_keep(q));
+    }
+    if let Some(q) = quarry {
+        keep.push(Keep::rect(q.walls.0 - IVec2::ONE, q.walls.1 + IVec2::ONE));
+        keep.push(Keep::rect(q.pit.0, q.pit.1));
+    }
+    for d in &herds {
+        let (lo, hi) = d.fold.bounds();
+        keep.push(Keep::rect(local(lo).floor().as_ivec2() - IVec2::ONE, local(hi).floor().as_ivec2() + IVec2::ONE));
+    }
+    let within = land::Within::new(centre, s.radius + 4.0, &net.layouts[k].lanes);
+    let mut country = Country::new(c, seed, lives.when, origin, keep, Some(within));
+
+    // The way to `to` from whichever lane node near it it is shortest from (the nearest
+    // may be shut in by the houses or the hedges), as a place's path in.
+    let way_to = |country: &mut Country, places: &mut Vec<Place>, what: Where, to: Vec3, face: Vec2| -> Option<usize> {
+        let far = |i: usize| flat(lanes.nodes[i]).distance(flat(to));
+        let nearest = (0..lanes.nodes.len()).filter(|&i| reached[i]).map(far).fold(f32::INFINITY, f32::min);
+        // Only from those out towards its edge: from further in, the way out is along
+        // the lanes anyway.
+        let outer = |i: usize| flat(lanes.nodes[i]).distance(centre) >= s.radius * 0.5;
+        let from: Vec<usize> = (0..lanes.nodes.len()).filter(|&i| reached[i] && far(i) <= nearest + worldgen::scale::m(60.0) && (outer(i) || far(i) <= nearest)).collect();
+        let points: Vec<Vec2> = from.iter().map(|&i| flat(lanes.nodes[i])).collect();
+        let (i, mut spur) = country.way(&points, flat(to))?;
+        let anchor = from[i];
+        spur.remove(0);
+        match spur.last_mut() {
+            Some(last) => *last = to,
+            None => spur.push(to),
+        }
+        places.push(Place { what, at: to, anchor: anchor as u32, spur, face });
+        Some(places.len() - 1)
+    };
+
+    // The fields nearest, ring by ring out from the houses: each well inside one of the
+    // settlement's own, sown or planted or cut for hay, with room in it for a few to work.
+    let mut fields: Vec<Field> = Vec::new();
+    let turn0 = unit(hash2(s.seed ^ 0xf1e1, k as i32, 0)) * std::f32::consts::TAU;
+    let want = fields_worked(s.kind);
+    'rings: for ring in 0..8 {
+        let r = s.radius + worldgen::scale::m(10.0) + ring as f32 * worldgen::scale::m(9.0);
+        let n = 16 + ring * 2;
+        for i in 0..n {
+            if fields.len() >= want {
+                break 'rings;
+            }
+            let p = centre + Vec2::from_angle(turn0 + i as f32 * std::f32::consts::TAU / n as f32) * r;
+            let field_at = |q: Vec2| farmland::plot(c, seed, q.x.floor() as i32, q.y.floor() as i32);
+            let Some(plot) = field_at(p) else { continue };
+            let crop = rotation::crop(&plot, seed, lives.when);
+            if plot.owner != k || fields.iter().any(|f| f.plot.id == plot.id) || !(crop.tilled() || crop.trees() || crop == Crop::Hay) || !country.open(p) {
+                continue;
+            }
+            let y = country.feet(p);
+            let (rows, across) = (plot.rows, plot.rows.perp());
+            let mut spots = Vec::new();
+            for (u, v) in [(-2.5, -1.0), (2.5, 1.0), (-5.5, 1.2), (5.5, -1.2), (0.0, 2.6), (0.0, -2.6)] {
+                let q = p + rows * worldgen::scale::m(u) + across * worldgen::scale::m(v);
+                let here = country.feet(q);
+                if field_at(q).is_some_and(|f| f.id == plot.id) && country.open(q) && (here - y).abs() <= 2.0 {
+                    spots.push((Vec3::new(q.x, here, q.y), if u < 0.0 { rows } else { -rows }));
+                }
+            }
+            if spots.len() < 2 {
+                continue;
+            }
+            let Some(place) = way_to(&mut country, places, Where::Field(fields.len()), Vec3::new(p.x, y, p.y), rows) else { continue };
+            fields.push(Field { place, plot, crop, spots });
+        }
+    }
+
+    // The logging camp: the middle of its yard, between the lean-to and the saw pit.
+    let camp = camp.and_then(|q| {
+        let pt = |x: f32, z: f32| land::in_camp(q, x, z);
+        let dir = |x: f32, z: f32| (pt(x, z) - pt(0.0, 0.0)).normalize_or(Vec2::X);
+        let y = q.at.y as f32;
+        let at = |x: f32, z: f32, up: f32| {
+            let p = pt(x, z);
+            Vec3::new(p.x, y + up, p.y)
+        };
+        let place = way_to(&mut country, places, Where::Camp, at(-3.0, 2.0, 0.0), dir(1.0, 0.0))?;
+        let spots = vec![
+            // At the chopping block, on the log over the saw pit, and at the logs waiting
+            // to be sawn.
+            Spot::new(at(-0.4, -2.0, 0.0), dir(-1.0, 0.0), Task::Chop),
+            Spot::new(at(6.0, 1.0, 3.0), dir(-1.0, 0.0), Task::Saw),
+            Spot::new(at(7.0, 3.6, 0.0), dir(0.0, 1.0), Task::Carry),
+        ];
+        let rest = vec![Spot::new(at(-5.0, -1.0, 0.0), dir(1.0, 0.2), Task::SitLow), Spot::new(at(-5.0, 1.4, 0.0), dir(1.0, -0.2), Task::SitLow)];
+        // Under the lean-to, heads to its back, for those who stay out at the camp
+        // through the week.
+        let beds = [-4.0, -1.5, 1.0, 3.5].map(|z| Spot { inside: None, ..Spot::new(at(-12.0, z, 0.0), dir(1.0, 0.0), Task::Lie) }).to_vec();
+        Some(Works { place, spots, rest, beds })
+    });
+
+    // The quarry: its yard before the mouth, the face at the back of the pit, and the
+    // mason's shed.
+    let quarry = quarry.and_then(|q| {
+        let yard = (q.yard.0.as_vec2() + q.yard.1.as_vec2() + 1.0) * 0.5;
+        let floor = Vec2::new(q.floor.x as f32 + 0.5, q.floor.z as f32 + 0.5);
+        let y = q.floor.y as f32;
+        let out = q.mouth.as_vec2().normalize_or((yard - floor).normalize_or(Vec2::X));
+        let place = way_to(&mut country, places, Where::Quarry, Vec3::new(yard.x, y, yard.y), -out)?;
+        let door = Vec2::new(q.door.x as f32 + 0.5, q.door.z as f32 + 0.5);
+        let from_door = Vec2::new(q.facing.x as f32, q.facing.z as f32).normalize_or(Vec2::X);
+        let shed = door + from_door * 2.5 + from_door.perp() * 1.6;
+        let v = |p: Vec2, y: f32| Vec3::new(p.x, y, p.y);
+        let spots = vec![
+            Spot::new(v(floor - out * 2.0, y), -out, Task::Hammer),
+            Spot::new(v(floor + out * 2.5 + out.perp() * 1.5, y), out, Task::Stone),
+            Spot::new(v(shed, q.door.y as f32 + 1.0), -from_door, Task::Hammer),
+        ];
+        let side = out.perp() * 3.0;
+        let rest = vec![Spot::new(v(yard + side, y), -out, Task::SitLow), Spot::new(v(yard - side, y), -out, Task::SitLow)];
+        let beds = Vec::new();
+        Some(Works { place, spots, rest, beds })
+    });
+
+    // The folds: their herders come and go by the gate.
+    let mut droves = Vec::new();
+    for d in herds {
+        let (gate, out) = (local(d.gate), d.out.as_vec2());
+        let p = gate + out * 2.0 + out.perp() * 1.4;
+        let to = Vec3::new(p.x, country.feet(p), p.y);
+        if let Some(place) = way_to(&mut country, places, Where::Pasture(droves.len()), to, -out.perp()) {
+            droves.push(Drove { place, herd: d, herder: None });
+        }
+    }
+    log::debug!(
+        target: "game::villagers",
+        "{}'s ways out to {} fields, {} camp, {} quarry and {} folds found in {:.0} ms, {} columns looked at",
+        net.names.settlement(k).map_or("?", |p| p.name.as_str()),
+        fields.len(),
+        camp.iter().count(),
+        quarry.iter().count(),
+        droves.len(),
+        started.elapsed().as_secs_f32() * 1000.0,
+        country.looked
+    );
+    OutInLand { fields, camp, quarry, droves }
 }
 
 impl Town {
@@ -500,6 +794,10 @@ impl Town {
             Some(i)
         });
 
+        // Out in the land (#64, #206): its fields, its logging camp and its quarry, and
+        // the folds of its flocks, each reached by a way found across the land once.
+        let out = out_in_land(c, world_seed, cell, k, lives, &lanes, &reached, &walls, &things, &mut places);
+
         // How far it is from every place to every other.
         let mut dist = vec![vec![0.0f32; places.len()]; places.len()];
         let spur_len = |p: &Place| Walk::new(std::iter::once(lanes.nodes[p.anchor as usize]).chain(p.spur.iter().copied()).collect()).length();
@@ -557,7 +855,14 @@ impl Town {
             guilds: None,
             about: Vec::new(),
             neighbours: Vec::new(),
+            extent: 0.0,
+            fields: out.fields,
+            camp: out.camp,
+            quarry: out.quarry,
+            droves: out.droves,
+            hens: Vec::new(),
         };
+        town.extent = town.places.iter().map(|p| flat(p.at).distance(flat(centre))).fold(town.radius, f32::max);
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
         town.dressing(c, k, lives, &things, &mut |p| height(p));
         town.near = net
@@ -578,7 +883,35 @@ impl Town {
             .map(|(p, _)| p.name.clone());
         town.people(c, tongue, s, &door_of, lives);
         town.keepers();
+        town.feeders(c, world_seed);
         Some(town)
+    }
+
+    /// Who feeds the hens of each yard (#206): whoever keeps the house, an elder or a
+    /// child of it, or failing them one whose work is about it.
+    fn feeders(&mut self, c: &Continent, world_seed: u32) {
+        let corner = Vec2::new(self.origin.x as f32, self.origin.z as f32);
+        let v2 = |v: Vec2| glam::DVec2::new(v.x as f64, v.y as f64);
+        for p in fauna::kept_about(c, world_seed, self.k) {
+            let Some(herd::Tend::Fed(key, _)) = herd::tending(&p) else { continue };
+            let home = (key & 0xfff) as usize;
+            let Some(b) = self.plots.get(home) else { continue };
+            let (at, face, _) = herd::feeder(v2(p.middle), v2(p.half), v2(p.gate_toward));
+            let at = Vec2::new(at.x as f32, at.y as f32) - corner;
+            if self.walled(at) {
+                continue;
+            }
+            let rank = |r: &Resident| match r.role {
+                Role::Homemaker => 0,
+                Role::Elder => 1,
+                Role::Child => 2,
+                Role::Worker if !self.works_out(r) => 3,
+                _ => 9,
+            };
+            let feeder = self.residents.iter().filter(|r| r.home == home && rank(r) < 9).min_by_key(|r| (rank(r), r.member)).map(|r| r.n);
+            let y = self.places[b.place].at.y;
+            self.hens.push(Hens { key, home, spot: Spot::new(Vec3::new(at.x, y, at.y), face.as_vec2(), Task::Feed), feeder });
+        }
     }
 
     /// What its festivals and boards need of it (#207): its tree's knots, posts for
@@ -672,7 +1005,7 @@ impl Town {
             let free = |r: &&Resident| !taken.contains(&r.n) && r.stall.is_none();
             let shown: Vec<Trade> = taken.iter().map(|&n| self.residents[n].person.trade).collect();
             let crafter = || {
-                let mut c: Vec<&Resident> = self.residents.iter().filter(|r| r.role == Role::Worker && sells(r.person.trade)).filter(free).collect();
+                let mut c: Vec<&Resident> = self.residents.iter().filter(|r| r.role == Role::Worker && sells(r.person.trade)).filter(free).filter(|r| !self.stays_out(r)).collect();
                 c.sort_by_key(|r| (shown.contains(&r.person.trade), hash2(self.seed ^ 0x6ee9, s as i32, r.n as i32)));
                 c.first().map(|r| r.n)
             };
@@ -707,6 +1040,33 @@ impl Town {
         let plots = &net.plots[net.layouts[self.k].plots.clone()];
         // How each would be numbered in year 0, which is what the save knows them by.
         let (first, mut known) = (net.layouts[self.k].plots.start, 0);
+        // A household of herders for each fold (#206): of the homes with someone else to
+        // stay in, the nearest it, if near enough to be there as the gate is opened
+        // without rising in the dark.
+        let mut herding: Vec<(usize, usize)> = Vec::new();
+        for (d, drove) in self.droves.iter().enumerate() {
+            let fold = (drove.place, Spot::new(self.places[drove.place].at, self.places[drove.place].face, Task::Stand));
+            let far = |i: usize| self.walk_length((self.plots[i].place, &self.inside_spot(i, 0, Task::Stand)), (fold.0, &fold.1));
+            let home = (0..plots.len())
+                .filter(|&i| plots[i].purpose == Purpose::Home && plots[i].sleepers >= 2 && door_of[i].is_some() && lives.standing(first + i) && !herding.iter().any(|h| h.0 == i))
+                .map(|i| (i, far(i)))
+                .filter(|&(_, f)| f / super::day::PACE <= HERDER_WALK)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((i, _)) = home {
+                herding.push((i, d));
+            }
+        }
+        // Where the settlement works a quarry and no mason keeps a yard among its houses,
+        // a household or two of masons, who walk out to it.
+        let mut quarrying: Vec<usize> = Vec::new();
+        if self.quarry.is_some() && !plots.iter().any(|p| p.purpose == Purpose::Workplace(Livelihood::Quarry)) {
+            let mut homes: Vec<usize> = (0..plots.len())
+                .filter(|&i| plots[i].purpose == Purpose::Home && plots[i].sleepers >= 2 && door_of[i].is_some() && lives.standing(first + i) && !herding.iter().any(|h| h.0 == i))
+                .collect();
+            homes.sort_by_key(|&i| hash2(s.seed ^ 0x4a50, i as i32, 0));
+            quarrying.extend(homes.into_iter().take(2));
+        }
+        let mut hands = Hands::default();
         for (i, p) in plots.iter().enumerate() {
             if p.sleepers == 0 || door_of[i].is_none() {
                 continue;
@@ -721,10 +1081,13 @@ impl Town {
             let seed = hash2(s.seed ^ 0x9e09_1e5, i as i32, 1);
             let seed = if rebuilt == 0 { seed } else { hash2(seed, rebuilt as i32, 0x5e8a) };
             let h = |k: i32| unit(hash2(seed, k, 0x7a));
+            let herds = herding.iter().find(|h| h.0 == i).map(|h| h.1);
             let trade = match p.purpose {
                 Purpose::Workplace(l) => trade_of(l),
                 Purpose::Smithy => Trade::Smith,
                 Purpose::Tavern => Trade::Innkeeper,
+                _ if herds.is_some() => Trade::Herder,
+                _ if quarrying.contains(&i) => Trade::Mason,
                 _ => {
                     let u = h(1);
                     if u < 0.32 {
@@ -740,6 +1103,7 @@ impl Town {
             };
             let wealth = (s.prosperity * 0.7 + 0.3 * h(3) + if p.step == worldgen::settlements::kit::Step::Stone { 0.2 } else { 0.0 }).clamp(0.0, 1.0);
             let household = people::household_of(seed, s.region, tongue, wealth, trade, p.sleepers as usize);
+            let mut made: Vec<(Resident, usize)> = Vec::new();
             for (j, person) in household.into_iter().enumerate() {
                 let bed = self.bed(i, j);
                 let role = match (person.age, person.trade) {
@@ -772,10 +1136,28 @@ impl Town {
                         None => i,
                     };
                 }
-                r.jobs = self.jobs(&r, at);
-                self.residents.push(r);
+                // Out in the land (#64, #206): the herder of the fold, or a farmer, a
+                // logger or a mason with work out there to go to.
+                match herds.filter(|&d| role == Role::Worker && r.person.trade == Trade::Herder && self.droves[d].herder.is_none()) {
+                    Some(d) => {
+                        self.droves[d].herder = Some(n);
+                        let place = self.droves[d].place;
+                        r.jobs = vec![Job { place, spot: Spot::new(self.places[place].at, self.places[place].face, Task::Stand) }];
+                    }
+                    None => r.jobs = self.land_jobs(&r, &mut hands).unwrap_or_else(|| self.jobs(&r, at)),
+                }
+                made.push((r, at));
                 n += 1;
             }
+            // Somebody stays at home in every household: failing anyone else, the last of
+            // those who would go out to the land keeps to the work about the house.
+            let home_kept = made.iter().any(|(r, _)| r.role != Role::Child && !self.works_out(r));
+            if !home_kept && let Some(k) = made.iter().rposition(|(r, _)| self.works_out(r) && self.drives(r.n).is_none()) {
+                let (r, at) = &made[k];
+                let jobs = self.jobs(r, *at);
+                made[k].0.jobs = jobs;
+            }
+            self.residents.extend(made.into_iter().map(|(r, _)| r));
             known += p.sleepers as usize;
         }
     }
@@ -946,8 +1328,10 @@ impl Town {
     /// place in a house to another, or from spot to spot of the open green.
     fn across(&self, pa: usize, a: &Spot, pb: usize, b: &Spot) -> bool {
         let indoors = a.inside.is_some() && a.inside == b.inside;
-        let green = pa == pb && pa == self.green_place && a.inside.is_none() && b.inside.is_none();
-        indoors || green
+        let open = pa == pb && a.inside.is_none() && b.inside.is_none();
+        // Out in the land, about a field, the camp, the quarry or the fold, as on the
+        // green.
+        indoors || (open && (pa == self.green_place || self.places[pa].what.out()))
     }
 
     /// The way someone walks from `a` to `b` (each a spot at a place): out of a door if
@@ -1057,6 +1441,86 @@ impl Town {
             Where::Tree => "the village tree".into(),
             Where::Shrine => "the shrine".into(),
             Where::Water => "the water".into(),
+            Where::Field(f) => format!("the {} field", self.fields[f].crop.word()),
+            Where::Camp => "the logging camp".into(),
+            Where::Quarry => "the quarry".into(),
+            Where::Pasture(_) => "the pasture".into(),
+        }
+    }
+
+    /// Whether resident `r`'s work is out in the land.
+    pub fn works_out(&self, r: &Resident) -> bool {
+        r.jobs.first().is_some_and(|j| self.places[j.place].what.out())
+    }
+
+    /// How long resident `r`'s walk out to their work in the land takes, in hours.
+    pub fn walk_out(&self, r: &Resident) -> f32 {
+        let home = self.plots[r.home].place;
+        let inside = self.inside_spot(r.home, r.member, Task::Stand);
+        r.jobs.first().map_or(f32::MAX, |j| self.walk_length((home, &inside), (j.place, &j.spot)) / super::day::PACE)
+    }
+
+    /// Whether resident `r` works at a logging camp too far out to be there and back
+    /// each day, and so stays out there through the working week, sleeping under its
+    /// lean-to, and comes home for the day of rest.
+    pub fn stays_out(&self, r: &Resident) -> bool {
+        r.jobs.len() > 3 && r.jobs.first().is_some_and(|j| self.places[j.place].what == Where::Camp) && self.walk_out(r) > super::day::FURTHEST_OUT
+    }
+
+    /// The fold resident `n` drives, if any.
+    pub fn drives(&self, n: usize) -> Option<usize> {
+        self.droves.iter().position(|d| d.herder == Some(n))
+    }
+
+    /// The jobs of someone of `r`'s trade out in the land, if their settlement works
+    /// there and has room for another: a field, the logging camp or the quarry, each
+    /// with two things to do in turn and somewhere to sit down at midday.
+    fn land_jobs(&self, r: &Resident, hands: &mut Hands) -> Option<Vec<Job>> {
+        if r.role != Role::Worker {
+            return None;
+        }
+        let at_works = |w: &Works, m: usize| -> Vec<Job> {
+            let n = w.spots.len();
+            // More hands than things to do: the next works beside the first.
+            let beside = |s: Spot| {
+                if m < n {
+                    return s;
+                }
+                let side = Vec2::from_angle(s.facing).perp() * 1.8;
+                Spot { at: s.at + Vec3::new(side.x, 0.0, side.y), ..s }
+            };
+            let job = |spot: Spot| Job { place: w.place, spot };
+            let mut jobs = vec![job(beside(w.spots[m % n])), job(beside(w.spots[(m + 1) % n])), job(w.rest[m % w.rest.len()])];
+            jobs.extend(w.beds.get(m % w.beds.len().max(1)).map(|&b| job(b)));
+            jobs
+        };
+        match r.person.trade {
+            Trade::Farmer if !self.fields.is_empty() => {
+                let f = hash2(self.seed ^ 0xfa53, r.home as i32, r.member as i32) as usize % self.fields.len();
+                hands.fields.resize(self.fields.len(), 0);
+                let m = hands.fields[f];
+                hands.fields[f] += 1;
+                let field = &self.fields[f];
+                let spot = |k: usize| {
+                    let (at, face) = field.spots[k % field.spots.len()];
+                    Job { place: field.place, spot: Spot::new(at, face, Task::Hoe) }
+                };
+                let p = &self.places[field.place];
+                let side = p.face.perp() * (m as f32 * 1.6 - 0.8);
+                let rest = Job { place: field.place, spot: Spot::new(p.at + Vec3::new(side.x, 0.0, side.y), p.face, Task::SitLow) };
+                Some(vec![spot(2 * m), spot(2 * m + 1), rest])
+            }
+            Trade::Woodcutter if hands.camp < CAMP_HANDS => {
+                let w = self.camp.as_ref()?;
+                hands.camp += 1;
+                Some(at_works(w, hands.camp - 1))
+            }
+            Trade::Mason if hands.quarry < QUARRY_HANDS => {
+                let w = self.quarry.as_ref()?;
+                hands.quarry += 1;
+                Some(at_works(w, hands.quarry - 1))
+            }
+            _ => None,
         }
     }
 }

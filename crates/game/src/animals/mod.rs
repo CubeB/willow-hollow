@@ -132,6 +132,8 @@ pub struct Herds {
     /// The herds named in the log last, to name them again only when they change.
     named: Vec<Id>,
     report_in: f32,
+    /// The time of day, which the settlements' herds are tended by (#206).
+    time: Option<herd::Time>,
 }
 
 impl Herds {
@@ -154,7 +156,14 @@ impl Herds {
             called: 0,
             named: Vec::new(),
             report_in: 0.0,
+            time: None,
         }
+    }
+
+    /// The time of day: when the
+    /// settlements' flocks are driven out and home, and their hens fed (#206).
+    pub fn set_time(&mut self, time: herd::Time) {
+        self.time = Some(time);
     }
 
     /// Herds for a screenshot: every square decided and all ground read at once, and the
@@ -189,7 +198,8 @@ impl Herds {
         let flat = |v: glam::Vec2| DVec2::new(v.x as f64, v.y as f64);
         for p in wanted {
             let pen = Pen::rect(flat(p.middle), flat(p.half), 0.0, Some(flat(p.gate_toward)));
-            self.keep(p.key, p.kind, p.count, pen);
+            let tend = herd::tending(&p);
+            self.keep_tended(p.key, p.kind, p.count, pen, tend);
         }
     }
 
@@ -211,7 +221,10 @@ impl Herds {
     }
 
     fn landed(&mut self, id: Id, g: Arc<Ground>, ms: f32) {
+        let time = self.time;
         if let Some((_, h)) = self.herds.iter_mut().find(|h| h.0 == id) {
+            // A tended herd stands up where its day has it: out on the grass at noon.
+            h.follow(time);
             h.stand_up(&g);
             log::debug!(target: "game::animals", "{} stood up, {} of them, on {}x{} columns of ground read in {ms:.0} ms", h.kind.word(), h.beasts.len(), g.w, g.d);
             h.ground = Some(g);
@@ -266,7 +279,7 @@ impl Herds {
         }
         for (_, h) in &mut self.herds {
             if let Some(g) = h.ground.clone() {
-                h.update(dt, &Moment { ground: &g, player: (!self.unseen).then_some(player) });
+                h.update(dt, &Moment { ground: &g, player: (!self.unseen).then_some(player), time: self.time });
             }
         }
         self.report_in -= dt;
@@ -345,9 +358,17 @@ impl Herds {
     /// again (the same animals) the next time their pen is handed over near. False when
     /// the pen is beyond reach of the player and nothing was done.
     pub fn keep(&mut self, key: u64, kind: Kind, count: usize, pen: Pen) -> bool {
+        self.keep_tended(key, kind, count, pen, None)
+    }
+
+    /// [`Self::keep`], the animals tended as `tend` has it (#206): a flock folded by night
+    /// and driven out by day, or hens fed of a morning.
+    pub fn keep_tended(&mut self, key: u64, kind: Kind, count: usize, pen: Pen, tend: Option<herd::Tend>) -> bool {
         let id = Id::Kept(key);
         if let Some((_, h)) = self.herds.iter().find(|h| h.0 == id) {
-            if h.kind == kind && h.count == count.max(1) && h.fold == Fold::Pen(pen.clone()) {
+            // A driven herd's fold changes through the day; its drove does not.
+            let same = h.tend == tend && (matches!(tend, Some(herd::Tend::Drove(_))) || h.fold == Fold::Pen(pen.clone()));
+            if h.kind == kind && h.count == count.max(1) && same {
                 return true;
             }
             self.release(key);
@@ -358,8 +379,15 @@ impl Herds {
             return false;
         }
         let seed = hash2(self.world.seed() ^ 0x4e7a, key as i32, (key >> 32) as i32);
-        let reason = format!("kept in a pen of {:.0} square metres", pen.area());
-        self.add(id, Herd::kept(kind, count.max(1), pen, player.y, seed, reason));
+        let reason = match &tend {
+            Some(herd::Tend::Drove(_)) => format!("folded by night and driven out to a pasture of {:.0} square metres", pen.area()),
+            _ => format!("kept in a pen of {:.0} square metres", pen.area()),
+        };
+        let mut herd = Herd::kept(kind, count.max(1), pen, player.y, seed, reason);
+        if let Some(t) = tend {
+            herd = herd.tended(t);
+        }
+        self.add(id, herd);
         true
     }
 
@@ -430,6 +458,13 @@ impl Herds {
         }
         seen.sort_by(|a, b| a.0.total_cmp(&b.0));
         let start = out.len();
+        // The folds of the flocks driven out by day (#206), their gates open from when
+        // the flock is let out until it is shut in again; within the budget.
+        for (_, h) in &self.herds {
+            if let (Some(herd::Tend::Drove(d)), Some(g)) = (&h.tend, &h.ground) {
+                draw_fence(&d.fold, g, cam, !matches!(h.stage, None | Some(herd::Stage::Folded)), out);
+            }
+        }
         for (_, i, j, detail) in seen {
             let used = out.len() - start;
             let detail = if detail == Detail::Near && used + model::NEAR_MOST > BUDGET { Detail::Far } else { detail };
@@ -441,7 +476,7 @@ impl Herds {
         }
         for (id, h) in &self.herds {
             if let (true, Fold::Pen(pen), Some(g)) = (self.fenced.contains(id), &h.fold, &h.ground) {
-                draw_fence(pen, g, cam, out);
+                draw_fence(pen, g, cam, false, out);
             }
         }
     }
@@ -505,8 +540,8 @@ fn pen_size(kind: Kind) -> (usize, f64) {
 }
 
 /// A hurdle fence along a pen's line: a post every couple of metres and two rails, the
-/// gate a little paler.
-fn draw_fence(pen: &Pen, g: &Ground, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+/// gate a little paler, and swung back out of the way if `open`.
+fn draw_fence(pen: &Pen, g: &Ground, cam: DVec3, open: bool, out: &mut Vec<ParticleInstance>) {
     let middle = pen.middle();
     if DVec2::new(cam.x, cam.z).distance(middle) > m64(90.0) {
         return;
@@ -538,6 +573,15 @@ fn draw_fence(pen: &Pen, g: &Ground, cam: DVec3, out: &mut Vec<ParticleInstance>
             let on_gate = gate.is_some_and(|q| q.distance(mid) < len / posts as f64 * 0.6);
             let colour = if on_gate { pale } else { wood };
             let span = (s.distance(e)) as f32;
+            // An open gate swings out on its hinge, the post away from the opening.
+            let (mid, yaw) = match gate.filter(|_| on_gate && open) {
+                Some(q) => {
+                    let outward = DVec2::new(dir.y, -dir.x) * (span as f64 * 0.5);
+                    let hinge = if s.distance(q) > e.distance(q) { s } else { e };
+                    (hinge + outward, yaw + std::f32::consts::FRAC_PI_2)
+                }
+                None => (mid, yaw),
+            };
             for h in [0.4, 0.85] {
                 push(DVec3::new(mid.x, floor(mid) + m64(h), mid.y), [0.05 * v, 0.08 * v, span], yaw, colour);
             }
@@ -752,10 +796,14 @@ impl ShotAnimals {
     /// on the ground `ground` gives, and lives their seconds (`clock` more for motion
     /// between stills). The player walks toward them as `shot.walk` says, and `eye` is
     /// moved with them.
-    pub fn set_out(shot: &Shot, world: Arc<GameWorld>, eye: &mut DVec3, yaw: f32, clock: f32, ground: &dyn Fn(i32, i32) -> f64) -> Self {
+    /// `time` is the day and hour the settlements' herds are tended by (see
+    /// [`Herds::set_time`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_out(shot: &Shot, world: Arc<GameWorld>, eye: &mut DVec3, yaw: f32, clock: f32, time: herd::Time, ground: &dyn Fn(i32, i32) -> f64) -> Self {
         let seed = world.seed();
         let gallery = shot.gallery.as_ref().map(|g| stand_gallery(g, seed, *eye, yaw, clock, ground)).unwrap_or_default();
         let mut herds = Herds::at_once(world, shot.wild);
+        herds.set_time(time);
         herds.far = shot.far;
         // As the crows on a still, they take no notice of the camera, unless the player
         // walks toward them.

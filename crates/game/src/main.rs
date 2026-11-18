@@ -2443,6 +2443,7 @@ impl Running {
         };
         self.crows.update(dt, &around);
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.animals.set_time(animals::herd::Time { day: villagers::day_number(self.env.time, self.env.date, self.env.year, self.settings.year_days), hour: self.env.time, sunset: villagers::day::sunset(self.env.date) });
         self.animals.update(dt, here);
         self.sub.lap(20);
         self.update_footsteps(dt);
@@ -3104,7 +3105,10 @@ fn main() -> Result<()> {
         // out: a walk toward a herd moves the camera.
         let animals = opts.shot_animals.any().then(|| {
             let clock = std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
-            animals::ShotAnimals::set_out(&opts.shot_animals, world.clone(), &mut camera.pos, camera.yaw, clock, &|x, z| surface_height(&world, x, z))
+            let hour = opts.time.unwrap_or(10.0);
+            let date = opts.date.unwrap_or(season::DEFAULT_DATE);
+            let time = animals::herd::Time { day: villagers::day_number(hour, date, opts.year.unwrap_or(0), settings.year_days), hour, sunset: villagers::day::sunset(date) };
+            animals::ShotAnimals::set_out(&opts.shot_animals, world.clone(), &mut camera.pos, camera.yaw, clock, time, &|x, z| surface_height(&world, x, z))
         });
         // The figure stands where the camera was, mid stride, and the camera steps back.
         let figure = opts.third.map(|turned| {

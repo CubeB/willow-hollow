@@ -237,6 +237,19 @@ pub struct Moment<'a> {
     pub ground: &'a Ground,
     /// Where the player is, if anywhere near.
     pub player: Option<DVec3>,
+    /// The time of day, for the herds that are tended; none, and they are left as they
+    /// are.
+    pub time: Option<Time>,
+}
+
+/// The time of day as the tended herds keep it (#206).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Time {
+    /// The day, as `villagers::day_number` counts them.
+    pub day: i64,
+    pub hour: f32,
+    /// When the sun sets that day (see `villagers::day::sunset`).
+    pub sunset: f32,
 }
 
 /// A herd of one kind.
@@ -260,6 +273,14 @@ pub struct Herd {
     /// Why it is here, for the log.
     pub reason: String,
     dice: u32,
+    /// How its people tend it, if they do (#206), and how a driven herd is held now.
+    pub tend: Option<Tend>,
+    pub stage: Option<Stage>,
+    /// How close about its middle it keeps, as a share of its kind's spread: bunched up
+    /// as it is driven, or as hens are fed.
+    tight: f64,
+    /// Where the one being milked is held still, and the way it faces.
+    hold: Option<(DVec2, f32)>,
 }
 
 /// Metres to voxels, for positions.
@@ -284,7 +305,134 @@ impl Herd {
             home_y,
             reason,
             dice: seed | 1,
+            tend: None,
+            stage: None,
+            tight: 1.0,
+            hold: None,
         }
+    }
+
+    /// Holds a tended herd as its day has it at `time`: in the fold or out of it, driven
+    /// along between them, bunched up about the hens' feed, or one of them held still to
+    /// be milked.
+    pub(super) fn follow(&mut self, time: Option<Time>) {
+        self.tight = 1.0;
+        self.hold = None;
+        let Some(Time { day, hour, sunset }) = time else { return };
+        match &self.tend {
+            Some(Tend::Drove(d)) => {
+                let h = d.hours(day, sunset);
+                let (stage, at) = d.now(&h, hour);
+                let changed = self.stage != Some(stage);
+                self.stage = Some(stage);
+                match stage {
+                    Stage::Folded if changed => {
+                        self.fold = Fold::Pen(d.fold.clone());
+                        self.focus = at;
+                    }
+                    Stage::Grazing if changed => {
+                        self.fold = Fold::Pen(d.pasture.clone());
+                        self.focus = at;
+                    }
+                    Stage::Out | Stage::Back => {
+                        self.fold = Fold::Range { home: at, reach: 0.0 };
+                        self.focus = at;
+                        self.tight = 0.35;
+                    }
+                    _ => {}
+                }
+                if let Some((a, b)) = h.milk
+                    && stage == Stage::Grazing
+                    && (a..b).contains(&hour)
+                {
+                    let (beast, out, _, _) = d.milking();
+                    self.hold = Some((beast, out.y.atan2(out.x) as f32));
+                }
+            }
+            Some(Tend::Fed(key, at)) => {
+                let (a, b) = feeding(*key, day);
+                if (a..b + 0.05).contains(&hour) {
+                    self.focus = *at;
+                    self.tight = 0.3;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The fold of a driven herd, if it has one.
+    fn drove(&self) -> Option<&Drove> {
+        match &self.tend {
+            Some(Tend::Drove(d)) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// Whether `p` is on the wrong side of a driven herd's fold for now: out of it once
+    /// it is shut, in it while the herd grazes.
+    fn wrong_side(&self, p: DVec2) -> bool {
+        let Some(d) = self.drove() else { return false };
+        match self.stage.unwrap_or(Stage::Folded) {
+            Stage::Folded => !d.fold.inside(p),
+            Stage::Grazing => d.fold.inside(p) || d.fold.clearance(p) < v64(0.6),
+            _ => false,
+        }
+    }
+
+    /// Where a beast at `from` going to `to` heads for: straight there, or by the gate
+    /// of the fold when one is in it and the other not.
+    fn by_gate(&self, from: DVec2, to: DVec2) -> DVec2 {
+        let Some(d) = self.drove() else { return to };
+        let inside = d.fold.inside(from);
+        if inside == d.fold.inside(to) {
+            return to;
+        }
+        let through = if inside { d.out } else { -d.out };
+        if from.distance(d.gate) < v64(0.8) { d.gate + through * v64(1.5) } else { d.gate - through * v64(0.7) }
+    }
+
+    /// Whether a step from `from` to `to` keeps to a driven herd's fold: off its hurdles
+    /// but at the gate, and in or out through the gate only while it is open.
+    fn through_fold(&self, look: &Look, from: DVec2, to: DVec2) -> bool {
+        let Some(d) = self.drove() else { return true };
+        let at_gate = to.distance(d.gate) < v64(GATE);
+        let margin = v64(look.width * 0.5 + 0.15);
+        let near = d.fold.clearance(to);
+        if !at_gate && near < margin && near < d.fold.clearance(from) {
+            return false;
+        }
+        let (was, will) = (d.fold.inside(from), d.fold.inside(to));
+        if was == will {
+            return true;
+        }
+        let open = match self.stage.unwrap_or(Stage::Folded) {
+            // A straggler may still come in once it is shut, and one left in still get
+            // out to the grass.
+            Stage::Folded => !was,
+            Stage::Grazing => was,
+            _ => true,
+        };
+        open && at_gate
+    }
+
+    /// Holds a beast still at `spot`, facing `yaw`, walking it there first.
+    fn hold_still(&self, b: &mut Beast, spot: DVec2, yaw: f32, dt: f32) {
+        if b.flat().distance(spot) > v64(0.3) {
+            b.act = Act::Walk;
+            b.goal = Some(spot);
+            b.timer = 1.0;
+        } else {
+            let pi = std::f32::consts::PI;
+            b.act = Act::Stand;
+            b.goal = None;
+            b.timer = 1.0;
+            b.facing += ((yaw - b.facing + pi).rem_euclid(2.0 * pi) - pi) * (dt * 2.0).min(1.0);
+        }
+    }
+
+    /// Which of the herd is milked: the first cow or nanny grown.
+    fn milked(&self) -> Option<usize> {
+        self.beasts.iter().position(|b| b.look.role == Role::Female)
     }
 
     /// The wild herd of a site, at home.
@@ -304,9 +452,25 @@ impl Herd {
         Herd::new(kind, count, Fold::Range { home, reach: v64(RANGE * 0.6) }, at.y, seed, reason)
     }
 
+    /// The herd tended as `tend` has it; a driven one in its fold until the hour is
+    /// known.
+    pub fn tended(mut self, tend: Tend) -> Herd {
+        if let Tend::Drove(d) = &tend {
+            self.fold = Fold::Pen(d.fold.clone());
+            self.focus = d.fold.middle();
+        }
+        self.tend = Some(tend);
+        self
+    }
+
     /// The square of ground it needs read: its corner and width each way, in voxels.
     pub fn ground_wanted(&self) -> (i32, i32, i32, i32) {
         let (lo, hi) = match &self.fold {
+            // A driven herd goes all over its pasture, the fold in its corner.
+            _ if self.drove().is_some() => {
+                let (lo, hi) = self.drove().map_or((DVec2::ZERO, DVec2::ZERO), |d| d.pasture.bounds());
+                (lo - DVec2::splat(3.0), hi + DVec2::splat(3.0))
+            }
             Fold::Range { home, reach } => {
                 let r = reach + v64(self.habits.spread + 6.0);
                 (*home - DVec2::splat(r), *home + DVec2::splat(r))
@@ -390,9 +554,15 @@ impl Herd {
 
     /// Whether the middle of a beast may be at `p`: inside its pen, if it has one.
     fn allowed(&self, look: &Look, p: DVec2) -> bool {
+        let margin = v64(look.width * 0.5 + look.length * 0.25 + 0.1);
+        // A driven herd keeps to its pasture, the fold's own hurdles kept to step by
+        // step (see `through_fold`).
+        if let Some(d) = self.drove() {
+            return d.pasture.holds(p, margin);
+        }
         match &self.fold {
             Fold::Range { .. } => true,
-            Fold::Pen(pen) => pen.holds(p, v64(look.width * 0.5 + look.length * 0.25 + 0.1)),
+            Fold::Pen(pen) => pen.holds(p, margin),
         }
     }
 
@@ -474,7 +644,7 @@ impl Herd {
                 let level = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)]
                     .iter()
                     .all(|&(dx, dz)| ground.at(p + DVec2::new(dx, dz)).is_some_and(|n| self.passes(&look, c, n)));
-                if self.stands(&look, c) && level && self.allowed(&look, p) && (c.floor as i32 - home_floor).abs() <= 12 {
+                if self.stands(&look, c) && level && self.allowed(&look, p) && !self.wrong_side(p) && (c.floor as i32 - home_floor).abs() <= 12 {
                     placed = Some((p, c));
                     break;
                 }
@@ -488,6 +658,7 @@ impl Herd {
 
     /// Moves the herd on by `dt` seconds.
     pub fn update(&mut self, dt: f32, m: &Moment) {
+        self.follow(m.time);
         if dt <= 0.0 || self.beasts.is_empty() {
             return;
         }
@@ -515,7 +686,8 @@ impl Herd {
         }
         // At peace, the middle drifts slowly over the range, turning back from its edge
         // and from ground it cannot go on; driven out of it, it drifts back.
-        if self.calm > 12.0 {
+        // Driven, or gathered to be fed, it goes where it is put instead.
+        if self.calm > 12.0 && self.tight >= 1.0 {
             self.drift += (self.unit() - 0.5) * 0.6 * dt;
             let pace = v64(0.07) * dt as f64;
             let home = self.fold.keep(self.focus, v64(1.0));
@@ -525,7 +697,7 @@ impl Herd {
             }
             let next = self.focus + DVec2::new(self.drift.cos() as f64, self.drift.sin() as f64) * pace;
             let kept = if home.distance(self.focus) > 1.0 { next } else { self.fold.keep(next, v64(1.0)) };
-            let footing = ground.at(next).is_some_and(|c| c.water == 0 || h.swims);
+            let footing = ground.at(next).is_some_and(|c| c.water == 0 || h.swims) && !self.wrong_side(next);
             if kept.distance(next) > 1e-6 || !footing {
                 self.drift += std::f32::consts::PI * (0.5 + self.unit() * 0.5);
             } else {
@@ -533,9 +705,13 @@ impl Herd {
             }
         }
         let others: Vec<DVec2> = self.beasts.iter().map(Beast::flat).collect();
+        let milked = self.hold.and(self.milked());
         for k in 0..self.beasts.len() {
             let mut b = self.beasts[k].clone();
-            self.think(&mut b, dt, near, ground);
+            match self.hold.filter(|_| milked == Some(k)) {
+                Some((spot, yaw)) => self.hold_still(&mut b, spot, yaw, dt),
+                None => self.think(&mut b, dt, near, ground),
+            }
             self.go(&mut b, dt, ground);
             // Keep from crowding the rest: a step aside from any too close.
             let mine = b.flat();
@@ -609,12 +785,16 @@ impl Herd {
                 if arrived || b.timer <= -20.0 {
                     b.goal = None;
                     b.act = Act::Graze;
-                    b.timer = b.range(3.0, 12.0);
+                    // Driven, it hardly stops before it is moved on again.
+                    b.timer = if self.tight < 1.0 { b.range(0.3, 1.5) } else { b.range(3.0, 12.0) };
                 }
             }
             Act::Graze | Act::Stand => {
+                let spread = v64(h.spread) * self.tight;
+                if self.tight < 1.0 && mine.distance(self.focus) > spread {
+                    b.timer = 0.0;
+                }
                 if b.timer <= 0.0 {
-                    let spread = v64(h.spread);
                     let off = mine.distance(self.focus);
                     let u = b.unit();
                     if off > spread || u < 0.4 {
@@ -636,7 +816,7 @@ impl Herd {
     /// A spot near the herd's middle for a beast to go to: on water, mostly, for
     /// those that swim.
     fn spot_for(&mut self, b: &mut Beast, ground: &Ground, player: Option<DVec3>) -> DVec2 {
-        let spread = v64(self.habits.spread);
+        let spread = v64(self.habits.spread) * self.tight;
         let shy = v64(self.habits.flight * 1.5).max(v64(3.0));
         let mut best = None;
         for _ in 0..8 {
@@ -650,7 +830,7 @@ impl Herd {
                 let t = ((q - from).dot(ab) / ab.length_squared().max(1e-9)).clamp(0.0, 1.0);
                 q.distance(from + ab * t) < shy.min(q.distance(from))
             });
-            if !self.stands(&b.look, c) || !self.allowed(&b.look, p) || near_player {
+            if !self.stands(&b.look, c) || !self.allowed(&b.look, p) || self.wrong_side(p) || near_player {
                 continue;
             }
             best = Some(p);
@@ -678,7 +858,7 @@ impl Herd {
             }
             Act::Walk => match b.goal {
                 Some(g) if g.distance(mine) > v64(0.2) => {
-                    let d = g - mine;
+                    let d = self.by_gate(mine, g) - mine;
                     (d.y.atan2(d.x) as f32, h.walk * b.pace)
                 }
                 _ => (b.facing, 0.0),
@@ -734,7 +914,7 @@ impl Herd {
         let to = mine + by;
         let Some(here) = ground.at(mine) else { return false };
         let Some(there) = ground.at(to) else { return false };
-        if !self.passes(&b.look, here, there) || !self.allowed(&b.look, to) {
+        if !self.passes(&b.look, here, there) || !self.allowed(&b.look, to) || !self.through_fold(&b.look, mine, to) {
             return false;
         }
         let ahead = by.normalize_or_zero() * v64(b.look.reach() * 0.45);
@@ -837,6 +1017,167 @@ fn stride_length(l: &Look, speed: f32, h: Habits) -> f32 {
     (leg * by).max(0.15)
 }
 
+// The settlements' animals tended (#206). Each of these is a pure function of the pen
+// as `fauna::kept_about` hands it over and the day, so that the animals here and the
+// people who tend them (`villagers`) keep to the same hours in the same places without
+// a word passing between them.
+
+/// How long a driven herd takes to come to its gate once it is opened, in hours.
+const TO_GATE: f32 = 0.1;
+/// How fast a herd is driven, metres a second, at the default length of day (a game hour
+/// of a hundred seconds).
+const DRIVEN: f32 = 0.5;
+/// Half the width of a fold's gate, in metres.
+const GATE: f32 = 0.9;
+
+/// A flock or a herd that its settlement folds by night and drives out to graze by day:
+/// its fold, a hurdle pen in the corner of its pasture toward the houses with its gate
+/// toward the grass; the pasture, the settlement's square of a grazed field; and where
+/// on it the herd grazes. World voxels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drove {
+    pub key: u64,
+    pub kind: Kind,
+    pub fold: Pen,
+    pub pasture: Pen,
+    pub gate: DVec2,
+    /// The way out of the gate, toward the grass.
+    pub out: DVec2,
+    pub graze: DVec2,
+}
+
+/// The hours of a drove's day: when its gate is opened, when the herd is out on the
+/// pasture, when it is gathered to go back and when the gate is shut on it; and, for
+/// cattle and goats, when one of them is milked out on the pasture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hours {
+    pub open: f32,
+    pub out: f32,
+    pub gather: f32,
+    pub shut: f32,
+    pub milk: Option<(f32, f32)>,
+}
+
+/// How a driven herd is held at an hour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// In the fold, the gate shut.
+    Folded,
+    /// Driven out through the gate to the grass.
+    Out,
+    /// Grazing the pasture.
+    Grazing,
+    /// Driven back in.
+    Back,
+}
+
+impl Drove {
+    /// The drove of a settlement's pasture, `half` either way about `middle`, the
+    /// settlement toward `toward`.
+    pub fn of(key: u64, kind: Kind, middle: DVec2, half: DVec2, toward: DVec2) -> Drove {
+        let d = toward - middle;
+        let ax = if d.x.abs() > d.y.abs() { DVec2::new(d.x.signum(), 0.0) } else { DVec2::new(0.0, if d.y < 0.0 { -1.0 } else { 1.0 }) };
+        let (deep, wide) = match kind {
+            Kind::Cattle | Kind::Ox | Kind::Pony | Kind::Donkey | Kind::Reindeer => (v64(3.2), v64(4.0)),
+            _ => (v64(2.6), v64(3.2)),
+        };
+        let reach = half.dot(ax.abs());
+        let mid = middle + ax * (reach - deep - v64(0.8));
+        let size = if ax.x != 0.0 { DVec2::new(deep, wide) } else { DVec2::new(wide, deep) };
+        let fold = Pen::rect(mid, size, 0.0, Some(middle));
+        let gate = fold.gate_at().unwrap_or(mid - ax * deep);
+        Drove { key, kind, fold, pasture: Pen::rect(middle, half, 0.0, None), gate, out: -ax, graze: middle - ax * reach * 0.3 }
+    }
+
+    pub fn milked(&self) -> bool {
+        matches!(self.kind, Kind::Cattle | Kind::Goat)
+    }
+
+    /// Its hours on day `day` (as `villagers::day_number` counts them), when the sun sets
+    /// at `sunset`.
+    pub fn hours(&self, day: i64, sunset: f32) -> Hours {
+        let seed = (self.key as u32) ^ ((self.key >> 32) as u32) ^ (day as u32).wrapping_mul(0x9e37_79b9);
+        let d = |k: i32| unit(hash2(seed, k, 0xd40e));
+        let metres = (self.graze.distance(self.gate) / VOXELS_PER_METRE as f64) as f32;
+        let drive = TO_GATE + metres / DRIVEN / 100.0;
+        // Late enough in the morning for a herder from the far side of the houses to be
+        // there, out over the dew.
+        let open = 7.5 + 0.5 * d(1);
+        // Home in good time for its herder to be home before dark: early in winter.
+        let gather = (15.8 + 0.5 * d(2)).min(sunset - 3.15 + 0.15 * d(2));
+        let out = open + drive;
+        Hours { open, out, gather, shut: gather + drive, milk: self.milked().then_some((out + 0.25, out + 0.8)) }
+    }
+
+    /// How the herd is held at `hour`, and where its middle is to be.
+    pub fn now(&self, h: &Hours, hour: f32) -> (Stage, DVec2) {
+        let home = self.fold.middle();
+        let along = |a: DVec2, b: DVec2, from: f32, to: f32| a.lerp(b, ((hour - from) / (to - from).max(1e-3)).clamp(0.0, 1.0) as f64);
+        if hour < h.open || hour >= h.shut {
+            (Stage::Folded, home)
+        } else if hour < h.open + TO_GATE {
+            (Stage::Out, along(home, self.gate, h.open, h.open + TO_GATE))
+        } else if hour < h.out {
+            (Stage::Out, along(self.gate, self.graze, h.open + TO_GATE, h.out))
+        } else if hour < h.gather {
+            (Stage::Grazing, self.graze)
+        } else if hour < h.shut - TO_GATE {
+            (Stage::Back, along(self.graze, self.gate, h.gather, h.shut - TO_GATE))
+        } else {
+            (Stage::Back, along(self.gate, home, h.shut - TO_GATE, h.shut))
+        }
+    }
+
+    /// Where the milked beast stands and the way it faces, and where the milker's stool
+    /// stands beside it and the way they face.
+    pub fn milking(&self) -> (DVec2, DVec2, DVec2, DVec2) {
+        let side = self.out.perp();
+        let beast = self.graze + side * v64(2.5);
+        (beast, self.out, beast - side * v64(1.0) - self.out * v64(0.3), side)
+    }
+}
+
+/// When the hens of the pen `key` are fed on day `day`: from and until, in hours.
+pub fn feeding(key: u64, day: i64) -> (f32, f32) {
+    let seed = (key as u32) ^ ((key >> 32) as u32) ^ (day as u32).wrapping_mul(0x85eb_ca6b);
+    let from = 7.3 + 0.9 * unit(hash2(seed, 1, 0xfeed));
+    (from, from + 0.25)
+}
+
+/// Where whoever feeds the hens of a yard `half` either way about `middle` stands, the
+/// house toward `toward`, and the way they face; and where the hens gather to peck at
+/// what is thrown, before them.
+pub fn feeder(middle: DVec2, half: DVec2, toward: DVec2) -> (DVec2, DVec2, DVec2) {
+    let to = (toward - middle).normalize_or(DVec2::X);
+    let at = middle + to * (half.min_element() * 0.45);
+    (at, -to, at - to * v64(1.4))
+}
+
+/// What a kept herd is tended with.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tend {
+    /// Folded by night and driven out to graze by day.
+    Drove(Drove),
+    /// Hens fed each morning: their pen's key, and where they gather to be fed.
+    Fed(u64, DVec2),
+}
+
+/// How the animals a settlement keeps in pen `p` are tended: the flock or herd of each
+/// pasture is folded and driven, and the fowl of each yard fed; the pigs and a byre's
+/// cattle are let be. Its slot is the low bits of its key (see `fauna::kept_about`).
+pub fn tending(p: &worldgen::fauna::Kept) -> Option<Tend> {
+    let slot = p.key & 0xfff;
+    let flat = |v: glam::Vec2| DVec2::new(v.x as f64, v.y as f64);
+    match p.kind {
+        Kind::Chicken | Kind::Duck | Kind::Goose if slot < 1000 => {
+            let (_, _, hens) = feeder(flat(p.middle), flat(p.half), flat(p.gate_toward));
+            Some(Tend::Fed(p.key, hens))
+        }
+        _ if (1000..2000).contains(&slot) => Some(Tend::Drove(Drove::of(p.key, p.kind, flat(p.middle), flat(p.half), flat(p.gate_toward)))),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,7 +1195,7 @@ mod tests {
     fn run(herd: &mut Herd, g: &Ground, player: Option<DVec3>, seconds: f32, mut each: impl FnMut(&Herd)) {
         let dt = 1.0 / 30.0;
         for _ in 0..(seconds / dt) as u32 {
-            herd.update(dt, &Moment { ground: g, player });
+            herd.update(dt, &Moment { ground: g, player, time: None });
             each(herd);
         }
     }
@@ -932,7 +1273,7 @@ mod tests {
             for _ in 0..(90.0 / dt) as u32 {
                 t += dt;
                 let player = DVec3::new(-60.0 + (t as f64 * 3.0) % 80.0, 10.0, 30.0 - (t as f64 * 1.5) % 40.0);
-                herd.update(dt, &Moment { ground: &g, player: Some(player) });
+                herd.update(dt, &Moment { ground: &g, player: Some(player), time: None });
                 for b in &herd.beasts {
                     let (x, z) = (b.pos.x.floor() as i32, b.pos.z.floor() as i32);
                     assert!(!trunk(x, z), "{} walked into a trunk", kind.word());
@@ -958,13 +1299,54 @@ mod tests {
                 t += dt as f64;
                 // Someone walking round and through it.
                 let player = DVec3::new(4.0 + (t * 0.7).cos() * 12.0, 10.0, 2.0 + (t * 0.7).sin() * 9.0);
-                herd.update(dt, &Moment { ground: &g, player: Some(player) });
+                herd.update(dt, &Moment { ground: &g, player: Some(player), time: None });
                 for b in &herd.beasts {
                     assert!(pen.inside(b.flat()), "a {} got out of its pen at {:?}", kind.word(), b.pos);
                 }
             }
             // They do move about in it.
             assert!(herd.beasts.iter().any(|b| b.pose.stride != 0.0), "{} never moved", kind.word());
+        }
+    }
+
+    #[test]
+    fn a_driven_herd_is_out_on_its_pasture_by_mid_morning_and_folded_by_evening() {
+        // A pasture 18 m across, the settlement off to the east.
+        let g = ground(200, |_, _| None);
+        let (middle, half) = (DVec2::new(0.0, 0.0), DVec2::splat(v64(9.0)));
+        for kind in [Kind::Sheep, Kind::Cattle, Kind::Goat] {
+            let drove = Drove::of(0x1234_5678_0000_03e9, kind, middle, half, DVec2::new(400.0, 10.0));
+            let (day, sunset) = (40, 18.6);
+            let h = drove.hours(day, sunset);
+            let pen = drove.pasture.clone();
+            let mut herd = Herd::kept(kind, 6, pen, 10.0, 5, String::new()).tended(Tend::Drove(drove.clone()));
+            let mut hour = 6.0f32;
+            let dt = 1.0 / 30.0;
+            // At dawn, in the fold.
+            herd.follow(Some(Time { day, hour, sunset }));
+            herd.stand_up(&g);
+            assert!(herd.beasts.len() >= 4, "only {} {} stood up", herd.beasts.len(), kind.word());
+            let step = |herd: &mut Herd, hour: &mut f32, until: f32| {
+                while *hour < until {
+                    herd.update(dt, &Moment { ground: &g, player: None, time: Some(Time { day, hour: *hour, sunset }) });
+                    // An hour of the game's day goes by in a hundred seconds.
+                    *hour += dt / 100.0;
+                }
+            };
+            step(&mut herd, &mut hour, 6.2);
+            assert!(herd.beasts.iter().all(|b| drove.fold.inside(b.flat())), "{}: out of the fold at dawn", kind.word());
+            // Driven out through the gate, and by mid-morning all out on the grass.
+            hour = h.open - 0.05;
+            step(&mut herd, &mut hour, 10.0);
+            for b in &herd.beasts {
+                assert!(!drove.fold.inside(b.flat()) && drove.pasture.inside(b.flat()), "{}: one not out at mid-morning, at {:?}", kind.word(), b.pos);
+            }
+            // Gathered and driven home, the gate shut on them by evening.
+            hour = h.gather - 0.05;
+            step(&mut herd, &mut hour, h.shut + 0.4);
+            for b in &herd.beasts {
+                assert!(drove.fold.inside(b.flat()), "{}: one not folded in the evening, at {:?}", kind.word(), b.pos);
+            }
         }
     }
 

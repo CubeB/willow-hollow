@@ -49,6 +49,11 @@ fn towns() -> &'static Vec<Town> {
 /// (see `market_day_fills_the_stalls_and_other_days_leave_them_bare`).
 const WORKDAY: i64 = 7 * 40 + 1;
 
+/// Everyone's day `day` in `town`, in a year of the default length.
+fn plans_of(town: &Town, day: i64) -> Vec<day::Plan> {
+    day::plans(town, day, crate::season::DEFAULT_YEAR_DAYS)
+}
+
 #[test]
 fn market_day_fills_the_stalls_and_other_days_leave_them_bare() {
     let mut seen = false;
@@ -58,7 +63,7 @@ fn market_day_fills_the_stalls_and_other_days_leave_them_bare() {
         let market = days.clone().find(|&d| town.market_on(d)).unwrap_or_else(|| panic!("{}: no market in a fortnight", town.name));
         let ordinary = days.clone().find(|&d| !town.market_on(d) && day::weekday(d) != day::REST_DAY).unwrap();
         let at_stalls = |plans: &[day::Plan], hour: f32| plans.iter().filter(|p| matches!(p.now(hour), Now::At(i) if town.stalls.contains(&p.stays[i].place))).count();
-        let plans = day::plans(town, market);
+        let plans = plans_of(town, market);
         // Every stall that has a keeper has them behind it through the market's hours.
         let kept: Vec<usize> = town.market.iter().filter_map(|m| m.keeper).collect();
         assert!(!kept.is_empty(), "{}: nobody keeps a stall", town.name);
@@ -76,7 +81,7 @@ fn market_day_fills_the_stalls_and_other_days_leave_them_bare() {
         let who = |hour: f32| -> Vec<usize> { (0..plans.len()).filter(|&n| !kept.contains(&n) && matches!(plans[n].now(hour), Now::At(i) if town.stalls.contains(&plans[n].stays[i].place))).collect() };
         assert_ne!(who(9.5), who(12.0), "{}: the same buyers all morning", town.name);
         // On another day nobody goes to them, nor before the market opens or after it shuts.
-        let other = day::plans(town, ordinary);
+        let other = plans_of(town, ordinary);
         assert_eq!((0..48).map(|k| at_stalls(&other, k as f32 * 0.5)).max(), Some(0), "{}", town.name);
         assert_eq!(at_stalls(&plans, 6.0) + at_stalls(&plans, 18.0), 0, "{}", town.name);
     }
@@ -92,7 +97,7 @@ fn the_same_people_are_in_the_same_places_every_time() {
         let key = |t: &Town| t.residents.iter().map(|r| (r.person.name.clone(), r.person.trade, r.home, r.member, r.role)).collect::<Vec<_>>();
         assert_eq!(key(town), key(&again));
         for day in [WORKDAY, WORKDAY + 2, WORKDAY + 5] {
-            let (a, b) = (day::plans(town, day), day::plans(&again, day));
+            let (a, b) = (plans_of(town, day), plans_of(&again, day));
             for hour in [3.0, 7.0, 8.5, 12.3, 19.7, 22.9] {
                 for (p, q) in a.iter().zip(&b) {
                     assert_eq!(p.now(hour), q.now(hour));
@@ -101,7 +106,7 @@ fn the_same_people_are_in_the_same_places_every_time() {
             }
         }
         // And from one day to the next people keep their own hours.
-        let (a, b) = (day::plans(town, WORKDAY), day::plans(town, WORKDAY + 1));
+        let (a, b) = (plans_of(town, WORKDAY), plans_of(town, WORKDAY + 1));
         let differ = a.iter().zip(&b).filter(|(p, q)| p.stays.len() != q.stays.len() || p.stays.iter().zip(&q.stays).any(|(x, y)| x.arrive != y.arrive)).count();
         assert!(differ * 2 > a.len(), "{}: only {differ} of {} have a day of their own", town.name, a.len());
     }
@@ -132,14 +137,18 @@ fn every_household_fills_its_beds() {
 fn at_night_everyone_is_indoors() {
     for town in towns() {
         for day in WORKDAY..WORKDAY + 7 {
-            let plans = day::plans(town, day);
+            let plans = plans_of(town, day);
             for (r, plan) in town.residents.iter().zip(&plans) {
                 for hour in [0.0, 2.5, 4.5, 23.1, 23.9] {
                     match plan.now(hour) {
                         Now::At(i) => {
                             let s = &plan.stays[i];
                             assert_eq!(s.spot.task, Task::Lie, "{} ({:?}) at {hour} on day {day}: {:?}", r.person.name, r.role, s);
-                            assert_eq!(s.spot.inside, Some(r.home));
+                            // Abed at home, or under the lean-to of a camp too far out to
+                            // come home from each day (#64).
+                            if !(town.stays_out(r) && town.places[s.place].what == town::Where::Camp) {
+                                assert_eq!(s.spot.inside, Some(r.home));
+                            }
                         }
                         now => panic!("{} ({:?}) is out at {hour} on day {day}: {now:?}", r.person.name, r.role),
                     }
@@ -163,11 +172,11 @@ fn the_tavern_is_fuller_in_the_evening_than_at_noon() {
     let mut seen = false;
     for town in towns().iter().filter(|t| t.tavern.is_some()) {
         seen = true;
-        let plans = day::plans(town, WORKDAY);
+        let plans = plans_of(town, WORKDAY);
         let (noon, evening) = (at_tavern(town, &plans, 12.0), at_tavern(town, &plans, 20.5));
         assert!(evening > noon && evening >= 2, "{}: {noon} at noon, {evening} in the evening", town.name);
         // And fuller still at the end of the week.
-        let weekend = day::plans(town, WORKDAY - day::weekday(WORKDAY) + 5);
+        let weekend = plans_of(town, WORKDAY - day::weekday(WORKDAY) + 5);
         assert!(at_tavern(town, &weekend, 20.5) >= evening, "{}", town.name);
     }
     assert!(seen, "none of the towns looked at has a tavern");
@@ -176,7 +185,7 @@ fn the_tavern_is_fuller_in_the_evening_than_at_noon() {
 #[test]
 fn the_well_is_busy_in_the_morning_and_work_in_the_day() {
     for town in towns().iter().filter(|t| !t.wells.is_empty()) {
-        let plans = day::plans(town, WORKDAY);
+        let plans = plans_of(town, WORKDAY);
         let at = |hour: f32, test: &dyn Fn(&day::Stay) -> bool| plans.iter().filter(|p| matches!(p.now(hour), Now::At(i) if test(&p.stays[i]))).count();
         let mut well = 0;
         for k in 0..40 {
@@ -216,7 +225,7 @@ fn walking_keeps_to_the_lanes_and_paths() {
             ways.push((flat(b.doorway), flat(town.places[b.place].at)));
         }
         let mut checked = 0;
-        let plans = day::plans(town, WORKDAY);
+        let plans = plans_of(town, WORKDAY);
         // What anyone does is done near where it is reached from: the last steps off the
         // way are few.
         for (r, plan) in town.residents.iter().zip(&plans) {
@@ -232,6 +241,9 @@ fn walking_keeps_to_the_lanes_and_paths() {
                 let len = walk.length();
                 // From room to room indoors there are no lanes to keep to.
                 let indoors = a.spot.inside.is_some() && a.spot.inside == b.spot.inside;
+                // Out in the land, about a field, the camp, the quarry or a fold, they cross
+                // it as they like, as on the green (#64).
+                let in_land = a.place == b.place && town.places[a.place].what.out() && a.spot.inside.is_none();
                 let steps = (len / 2.0).ceil() as usize;
                 for k in (0..=steps).filter(|_| !indoors) {
                     let (p, _) = walk.at(len * k as f32 / steps.max(1) as f32);
@@ -251,7 +263,7 @@ fn walking_keeps_to_the_lanes_and_paths() {
                     let near_end = last(a) || last(b);
                     let on_green = p2.distance(flat(town.centre)) < town.green * 0.5 + 1.0;
                     let d = off(&ways, p2);
-                    assert!(d < 1.5 || near_end || on_green, "{}: a walk strays {d:.1} voxels from the lanes at {p}", town.name);
+                    assert!(d < 1.5 || near_end || on_green || in_land, "{}: a walk strays {d:.1} voxels from the lanes at {p}", town.name);
                     // And never through a wall: into a building only by its door.
                     for x in &town.plots {
                         let within = x.within(p2, -0.3);
@@ -408,7 +420,7 @@ fn greeting_someone_stops_them_and_the_save_remembers() {
     let mut v = Villagers::new();
     v.add(Town::build(continent(), SEED, (0, 0), town.k).unwrap(), WORKDAY, 0);
     // Stand beside someone at work at ten, and greet them.
-    let plans = day::plans(town, WORKDAY);
+    let plans = plans_of(town, WORKDAY);
     let (r, stay) = town.residents.iter().zip(&plans).find_map(|(r, p)| matches!(p.now(10.0), Now::At(i) if p.stays[i].spot.inside.is_none()).then(|| (r, *p.bound(10.0)))).expect("nobody out at ten");
     let feet = town.origin + (stay.spot.at + Vec3::new(1.5, 0.0, 0.0)).as_dvec3();
     let mut out = Vec::new();
@@ -609,4 +621,104 @@ fn nobody_lives_in_a_home_not_standing() {
     }
     assert!(empty_seen > 0, "no home ever stood empty");
     assert!(anew > 0, "no home was ever built again for a new household");
+}
+
+/// Whose plan takes them out to work at a place out in the land, and to which.
+fn out_at(town: &Town, plan: &day::Plan) -> Option<usize> {
+    plan.stays.iter().find(|s| town.places[s.place].what.out()).map(|s| s.place)
+}
+
+#[test]
+fn farmers_go_out_to_a_field_of_their_own_and_are_home_by_dusk() {
+    let mut out = 0;
+    for town in towns() {
+        for f in &town.fields {
+            assert_eq!(f.plot.owner, town.k, "{}: a field of another settlement's", town.name);
+        }
+        // A summer's working day, and a winter's.
+        for day in [WORKDAY, WORKDAY + 7 * 9] {
+            let date = (day as f32 / crate::season::DEFAULT_YEAR_DAYS).rem_euclid(1.0);
+            let dusk = day::sunset(date);
+            let plans = plans_of(town, day);
+            for (r, plan) in town.residents.iter().zip(&plans) {
+                let Some(place) = out_at(town, plan) else { continue };
+                if let town::Where::Field(f) = town.places[place].what {
+                    assert!(town.fields.get(f).is_some(), "{}: {} goes to a field not of theirs", town.name, r.person.name);
+                    assert_eq!(r.person.trade, crate::people::Trade::Farmer, "{}: {} in the fields", town.name, r.person.name);
+                }
+                // At work there through the middle of the day.
+                assert!(town.places[plan.bound(11.0).place].what.out(), "{}: {} not out at work at 11", town.name, r.person.name);
+                out += 1;
+                // Home before the sun is down, and in by the evening; but those who stay
+                // out at a camp too far for that sleep under its lean-to until the last
+                // working day.
+                if town.stays_out(r) && day::weekday(day) < day::REST_DAY - 1 {
+                    let night = plan.stays.last().unwrap();
+                    assert!(town.places[night.place].what == town::Where::Camp && night.spot.task == Task::Lie, "{}: {} not abed at the camp", town.name, r.person.name);
+                    continue;
+                }
+                let home = town.plots[r.home].place;
+                let back = plan.stays.iter().rev().find(|s| town.places[s.place].what.out()).map_or(0.0, |s| s.leave);
+                let next = plan.stays.iter().skip_while(|s| s.leave < back).nth(1);
+                let (to, walk) = next.map_or((usize::MAX, 24.0), |s| (s.place, s.arrive));
+                assert!(to == home && walk <= dusk, "{}: {} home from {} at {walk:.2}, dusk at {dusk:.2}", town.name, r.person.name, town.place_word(place));
+            }
+        }
+        // Those who stay out at the camp come home on the last working day, by dusk.
+        let last = WORKDAY - day::weekday(WORKDAY) + day::REST_DAY - 1;
+        let date = (last as f32 / crate::season::DEFAULT_YEAR_DAYS).rem_euclid(1.0);
+        for (r, plan) in town.residents.iter().zip(&plans_of(town, last)).filter(|(r, _)| town.stays_out(r)) {
+            let home = plan.stays.iter().find(|s| s.place == town.plots[r.home].place && s.spot.inside.is_some()).map_or(24.0, |s| s.arrive);
+            assert!(home <= day::sunset(date), "{}: {} home from the camp at {home:.2}", town.name, r.person.name);
+        }
+        // Nobody's household is left with nobody at home.
+        let plans = plans_of(town, WORKDAY);
+        for home in 0..town.plots.len() {
+            let all: Vec<usize> = town.residents.iter().filter(|r| r.home == home).map(|r| r.n).collect();
+            let grown: Vec<usize> = all.iter().copied().filter(|&n| town.residents[n].role != town::Role::Child).collect();
+            if grown.is_empty() || grown.iter().any(|&n| town.drives(n).is_some()) {
+                continue;
+            }
+            assert!(grown.iter().any(|&n| out_at(town, &plans[n]).is_none()), "{}: the whole household of a {} goes out to the land", town.name, town.plots[home].purpose.word());
+        }
+    }
+    assert!(out > 0, "nobody went out to work in the land");
+}
+
+#[test]
+fn the_flocks_are_driven_out_and_home_and_the_hens_fed() {
+    let mut droves = 0;
+    let mut fed = 0;
+    for town in towns() {
+        let plans = plans_of(town, WORKDAY);
+        for d in &town.droves {
+            let hours = d.herd.hours(WORKDAY, day::sunset((WORKDAY as f32 / crate::season::DEFAULT_YEAR_DAYS).rem_euclid(1.0)));
+            use crate::animals::herd::Stage;
+            assert_eq!(d.herd.now(&hours, 6.0).0, Stage::Folded, "{}: a flock out before dawn", town.name);
+            assert_eq!(d.herd.now(&hours, 10.0).0, Stage::Grazing, "{}: a flock not out by mid-morning", town.name);
+            assert_eq!(d.herd.now(&hours, 19.0).0, Stage::Folded, "{}: a flock not in by evening", town.name);
+            // Its herder by the fold as the gate is opened and as it is shut, out with
+            // the flock in between, and home after.
+            let Some(n) = d.herder else { continue };
+            let plan = &plans[n];
+            for hour in [hours.open, hours.shut - 0.05, 11.0] {
+                assert_eq!(plan.bound(hour).place, d.place, "{}: the herder away from the fold at {hour:.2}", town.name);
+            }
+            assert_eq!(plan.bound(20.0).place, town.plots[town.residents[n].home].place, "{}: the herder not home in the evening", town.name);
+            if let Some((a, b)) = hours.milk {
+                assert_eq!(plan.bound((a + b) * 0.5).spot.task, crate::character::Task::Milk, "{}: nobody milking at {a:.2}..{b:.2}: {:?} {:?}", town.name, hours, plan.stays.iter().map(|s| (s.arrive, s.leave, s.spot.task.word())).collect::<Vec<_>>());
+            }
+            droves += 1;
+        }
+        for h in &town.hens {
+            let Some(n) = h.feeder else { continue };
+            let (from, until) = crate::animals::herd::feeding(h.key, WORKDAY);
+            let s = plans[n].bound((from + until) * 0.5);
+            if s.spot.task == crate::character::Task::Feed {
+                fed += 1;
+            }
+        }
+    }
+    assert!(droves > 0, "no flock driven out");
+    assert!(fed > 0, "no hens fed");
 }
