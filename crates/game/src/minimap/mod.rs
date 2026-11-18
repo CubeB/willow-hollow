@@ -54,6 +54,7 @@ use worldgen::{
     macro_layout::MACRO_SIZE,
     names::PlaceKind,
     scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
+    settlements::years::When,
     world::GameWorld,
 };
 
@@ -130,8 +131,39 @@ struct Known {
     checked: bool,
 }
 
+/// What the map's worker is asked to make of a continent: its sheet (waiting for the
+/// continent to be simulated, or not), or its picture painted again, once the year or
+/// the season has turned and its fields carry other crops (#207).
+enum Ask {
+    Sheet(Key, bool),
+    Paint(Key, Arc<Continent>),
+}
+
+/// What of the world's years the map was last made for (#207): the world's epoch, which
+/// moves when the year or the season turns or a boon is granted, and the year and season.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Seen {
+    epoch: u64,
+    when: When,
+}
+
+impl Seen {
+    /// Takes the world's epoch and moment as they are now, and says whether the models
+    /// want making again (the epoch has moved, so what stands and what the loggers have
+    /// felled may be another year's) and whether the pictures want painting again (the
+    /// year or the season has turned, so the fields carry other crops). Neither while
+    /// nothing has moved, so the map is not made again frame after frame.
+    fn follow(&mut self, epoch: u64, when: When) -> (bool, bool) {
+        let remodel = epoch != self.epoch;
+        let repaint = remodel && when != self.when;
+        *self = Seen { epoch, when };
+        (remodel, repaint)
+    }
+}
+
 enum Answer {
     Sheet(Key, Option<Sheet>),
+    Picture(Key, Arc<Vec<u8>>),
     Reveal(Key, Option<Reveal>),
     Relief(Box<Relief>),
 }
@@ -283,7 +315,7 @@ fn xz(v: DVec3) -> DVec2 {
 
 pub struct Minimap {
     world: Arc<GameWorld>,
-    sheets_ask: Sender<(Key, bool)>,
+    sheets_ask: Sender<Ask>,
     disk: Sender<Disk>,
     answers: Receiver<Answer>,
     pending: HashSet<Key>,
@@ -327,6 +359,8 @@ pub struct Minimap {
     relief_ask: Sender<Request>,
     relief_pending: bool,
     version: u64,
+    /// What of the world's years the models and pictures were made for (#207).
+    seen: Seen,
     relief_gpu: ReliefGpu,
     /// The corner map's model, as the large map's.
     small: Option<Relief>,
@@ -352,13 +386,25 @@ impl Minimap {
     /// `dir` is where this world's masks live; None keeps nothing.
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, world: Arc<GameWorld>, dir: Option<PathBuf>) -> Self {
         let (reply, answers) = channel();
-        let (sheets_ask, sheets) = channel::<(Key, bool)>();
+        let (sheets_ask, sheets) = channel::<Ask>();
         let (w, to_main) = (world.clone(), reply.clone());
         std::thread::Builder::new()
             .name("map".into())
             .spawn(move || {
                 crate::threads::background();
-                while let Ok((key, wait)) = sheets.recv() {
+                while let Ok(ask) = sheets.recv() {
+                    let (key, wait) = match ask {
+                        Ask::Sheet(key, wait) => (key, wait),
+                        Ask::Paint(key, c) => {
+                            let t = std::time::Instant::now();
+                            let picture = Arc::new(picture::flat(&w, &c));
+                            log::debug!("map of continent {key:?} painted again for {:?}, in {:.2} s", w.now(), t.elapsed().as_secs_f32());
+                            if to_main.send(Answer::Picture(key, picture)).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
                     let c = if wait { Some(w.continent(key.0, key.1)) } else { w.continent_if_ready(key.0, key.1) };
                     let t = std::time::Instant::now();
                     let made = c.map(|c| sheet(&w, c));
@@ -416,6 +462,7 @@ impl Minimap {
                 }
             })
             .expect("map disk thread");
+        let seen = Seen { epoch: world.epoch(), when: world.now() };
         Self {
             world,
             sheets_ask,
@@ -446,6 +493,7 @@ impl Minimap {
             relief_ask,
             relief_pending: false,
             version: 0,
+            seen,
             relief_gpu: ReliefGpu::new(gpu, format),
             small: None,
             small_pending: false,
@@ -628,7 +676,7 @@ impl Minimap {
         if self.asked.get(&key).is_some_and(|&t| self.clock - t < RETRY) {
             return;
         }
-        if self.sheets_ask.send((key, wait)).is_ok() {
+        if self.sheets_ask.send(Ask::Sheet(key, wait)).is_ok() {
             self.pending.insert(key);
             self.asked.insert(key, self.clock);
         }
@@ -664,6 +712,12 @@ impl Minimap {
                     self.known.insert(key, Known { sheet, places, visited: vec![false; n], checked: false });
                     self.reveal_mut(key);
                     self.check_visits(key);
+                    self.version += 1;
+                }
+            }
+            Answer::Picture(key, picture) => {
+                if let Some(k) = self.known.get_mut(&key) {
+                    k.sheet.picture = picture;
                     self.version += 1;
                 }
             }
@@ -703,6 +757,25 @@ impl Minimap {
         }
     }
 
+    /// Shows what stands in the year it is now (#207): once the year or the season has
+    /// turned, or a boon been granted, both maps' models are made again, and the pictures
+    /// of the continents with fields, which the large map is coloured from when it is
+    /// zoomed out, are painted again on the map's worker. Shown as they were until then.
+    fn follow_years(&mut self) {
+        let (remodel, repaint) = self.seen.follow(self.world.epoch(), self.world.now());
+        if !remodel {
+            return;
+        }
+        self.version += 1;
+        if repaint {
+            for (&key, k) in &self.known {
+                if !k.sheet.continent.land.farms.is_empty() {
+                    let _ = self.sheets_ask.send(Ask::Paint(key, k.sheet.continent.clone()));
+                }
+            }
+        }
+    }
+
     /// Keeps the map up to date with where the player is: `eye` the camera, `forward`
     /// its direction, `walked` unless flying free.
     pub fn update(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3, walked: bool, dt: f32) {
@@ -715,6 +788,7 @@ impl Minimap {
         while let Ok(a) = self.answers.try_recv() {
             self.take(gpu, a);
         }
+        self.follow_years();
         let here = key_of(xz(eye));
         self.want(here, true);
         let look = if self.open { self.look } else { xz(eye) };
@@ -1425,6 +1499,34 @@ pub fn build(world: &GameWorld, pos: DVec3) -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_map_is_made_again_when_the_year_turns_and_only_then() {
+        use worldgen::settlements::years::{Boon, Boons, Granted};
+        let world = GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
+        let mut seen = Seen { epoch: world.epoch(), when: world.now() };
+        let follow = |seen: &mut Seen| seen.follow(world.epoch(), world.now());
+        // Frame after frame with nothing turning, nothing is made again.
+        for _ in 0..3 {
+            assert_eq!(follow(&mut seen), (false, false));
+        }
+        // Every season of year 0 is the same world.
+        world.set_now(When::new(0, 2), &Boons::default());
+        assert_eq!(follow(&mut seen), (false, false));
+        // The year turns: the models are made again and the pictures painted again, once.
+        assert!(world.set_now(When::new(1, 0), &Boons::default()));
+        assert_eq!(follow(&mut seen), (true, true));
+        assert_eq!(follow(&mut seen), (false, false));
+        // And the season.
+        assert!(world.set_now(When::new(1, 1), &Boons::default()));
+        assert_eq!(follow(&mut seen), (true, true));
+        // A boon changes what stands, not what the fields carry.
+        let mut boons = Boons::default();
+        boons.grant(Granted { cell: (0, 0), settlement: 0, boon: Boon::SecondWell, year: 1 });
+        assert!(world.set_now(When::new(1, 1), &boons));
+        assert_eq!(follow(&mut seen), (true, false));
+        assert_eq!(follow(&mut seen), (false, false));
+    }
 
     fn frame(round: bool) -> Frame {
         Frame {

@@ -23,6 +23,7 @@ use worldgen::{
     macro_layout::MACRO_SIZE,
     scale::OLD_VOXEL,
     materials as mat,
+    settlements::years::When,
     surface::{self, Piece},
     world::GameWorld,
 };
@@ -305,6 +306,8 @@ struct CellMesh {
     tiles: Vec<TileMesh>,
     /// River ribbons as quads (4 vertices each).
     rivers: Vec<FarVertex>,
+    /// The year and season its fields were coloured for (#207).
+    when: When,
 }
 
 pub struct FarTile {
@@ -350,6 +353,10 @@ pub struct FarView {
     view: Arc<Mutex<DVec3>>,
     /// Index buffers for a tile grid at each stride: (stride, buffer, index count).
     grids: Vec<(usize, wgpu::Buffer, u32)>,
+    world: Arc<GameWorld>,
+    /// The year and season the fields are drawn for (#207): when the world's turns, each
+    /// continent drawn with fields on it is made again.
+    when: When,
 }
 
 /// What the far-view thread sends back for a continent asked for.
@@ -428,6 +435,7 @@ impl FarView {
         // Each continent's skylines are worked out by the thread that made it, as soon
         // as it has, so the workers building its columns seldom have to wait for them.
         world.after_made(Skylines::after_made);
+        let (owner, when) = (world.clone(), world.now());
         // One background thread: simulating a continent takes seconds and must never
         // stall rendering or compete with chunk generation for every core.
         std::thread::Builder::new()
@@ -451,7 +459,8 @@ impl FarView {
                     let mut sent = dropped.into_iter().all(|(cell, stride)| result_tx.send(Arrival::Dropped(cell, stride)).is_ok());
                     if let Some((cell, stride)) = next {
                         let continent = world.continent(cell.0, cell.1);
-                        sent &= result_tx.send(Arrival::Built(build_cell(&continent, world.materials(), &canopies, cell, stride))).is_ok();
+                        let when = world.now();
+                        sent &= result_tx.send(Arrival::Built(build_cell(&continent, world.materials(), &canopies, cell, stride, when))).is_ok();
                     }
                     if !sent {
                         break;
@@ -482,6 +491,8 @@ impl FarView {
             results,
             view,
             grids,
+            world: owner,
+            when,
         }
     }
 
@@ -547,6 +558,19 @@ impl FarView {
             let old = self.cells.remove(&c);
             self.retire(old);
         }
+        // The season or the year has turned (#207): the far fields carry other crops, so
+        // each continent drawn with fields on it is made again at the detail it is drawn
+        // in, and shown as it was until it is. Every season of year 0 is the same.
+        let now = self.world.now();
+        if now != self.when {
+            self.when = now;
+            for (&cell, drawn) in &self.cells {
+                if self.pending.get(&cell).is_none_or(|&s| s > drawn.stride) && farmed(&self.world, cell) {
+                    self.pending.insert(cell, drawn.stride);
+                    let _ = self.requests.send((cell, drawn.stride));
+                }
+            }
+        }
 
         let near = |cell: (i32, i32)| (cell.0 - here.0).abs() <= 1 && (cell.1 - here.1).abs() <= 1;
         // A tile the GPU has no room for is simply not drawn.
@@ -594,6 +618,11 @@ impl FarView {
             }
             let Some(Staged { mesh, tiles, .. }) = self.staged.take() else { break };
             settle(&mut self.pending, mesh.cell, mesh.stride);
+            // Made before the season turned: drawn, and made again.
+            if mesh.when != self.when && !self.pending.contains_key(&mesh.cell) && farmed(&self.world, mesh.cell) {
+                self.pending.insert(mesh.cell, mesh.stride);
+                let _ = self.requests.send((mesh.cell, mesh.stride));
+            }
             let rivers = if mesh.rivers.is_empty() {
                 None
             } else {
@@ -662,6 +691,12 @@ fn settle(pending: &mut HashMap<(i32, i32), usize>, cell: (i32, i32), stride: us
     if pending.get(&cell) == Some(&stride) {
         pending.remove(&cell);
     }
+}
+
+/// Whether continent `cell` has fields, whose crops turn with the seasons (#207). Never
+/// blocks: a continent not simulated yet has none drawn either.
+fn farmed(world: &GameWorld, cell: (i32, i32)) -> bool {
+    world.continent_if_ready(cell.0, cell.1).is_some_and(|c| !c.land.farms.is_empty())
 }
 
 fn cell_of(camera: DVec3) -> (i32, i32) {
@@ -762,7 +797,7 @@ struct Look {
 /// The land at a cell as the far surface draws it. The ground is the one the voxel world
 /// gives it (see `world::surface_materials`), each biome with its own soil and rock, the
 /// voxel-to-voxel speckle and ragged edges between them averaged out as distance does.
-fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: usize, slope: f32) -> Look {
+fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: usize, slope: f32, when: When) -> Look {
     let color = |v: voxel::Voxel| mats.get(v).color.map(f32::from);
     if c.ocean[i] {
         // Under the sea plane; only seen through gaps, so keep it sandy.
@@ -794,12 +829,13 @@ fn look(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], i: 
     ground = mix(ground, mix(color(light), color(dark), 0.25), rocky);
     // Nothing flowers on sand, snow or rock.
     washed *= (1.0 - sand) * (1.0 - snow) * (1.0 - rocky);
-    // About a settlement, the fields: plough and crops in their seasons, and the woods
-    // cleared from them (see worldgen::settlements::farmland).
+    // About a settlement, the fields: plough and crops in their seasons, each the crop it
+    // carries in the year and season seen (#207), and the woods cleared from them (see
+    // worldgen::settlements::farmland).
     let open = (1.0 - sand) * (1.0 - snow) * (1.0 - rocky);
     let mut cleared = 0.0;
     let mut wash = wash;
-    if let Some((soil, crop, managed)) = worldgen::settlements::farmland::far_cell(c, centre.x as i32, centre.y as i32) {
+    if let Some((soil, crop, managed)) = worldgen::settlements::farmland::far_cell(c, centre.x as i32, centre.y as i32, when) {
         let share = smoothstep(0.1, 0.45, managed) * open;
         if let Some(soil) = soil {
             ground = mix(ground, color(soil), share * 0.85);
@@ -948,6 +984,7 @@ fn land_y(h: f32) -> f32 {
 pub fn map_land(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
     let canopies = canopies(world);
     let mats = world.materials();
+    let when = world.now();
     let size = c.size;
     let cs = c.cell_size();
     let sea = [32.0, 78.0, 128.0];
@@ -960,7 +997,7 @@ pub fn map_land(world: &GameWorld, c: &Continent) -> Vec<[f32; 3]> {
             let h = |x: usize, z: usize| c.height[z.min(size - 1) * size + x.min(size - 1)] * OLD_VOXEL;
             let gx = (h(x + 1, z) - h(x.saturating_sub(1), z)) / (2.0 * cs);
             let gz = (h(x, z + 1) - h(x, z.saturating_sub(1))) / (2.0 * cs);
-            look(c, mats, &canopies, i, gx.hypot(gz)).far
+            look(c, mats, &canopies, i, gx.hypot(gz), when).far
         })
         .collect()
 }
@@ -1047,7 +1084,7 @@ pub fn hollow_at(world: &GameWorld, x: i32, z: i32) -> u8 {
     })
 }
 
-fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize) -> CellMesh {
+fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>], cell: (i32, i32), stride: usize, when: When) -> CellMesh {
     let cs = c.cell_size();
     let size = c.size;
     let tiles_per_side = size / TILE;
@@ -1080,7 +1117,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
                     let hollow = hollow(c, x as f32, z as f32);
                     let pos = |y: f32| Vec3::new((x as f32 + 0.5) * cs, y, (z as f32 + 0.5) * cs);
                     let (level, depth) = wetness(c, x, z, stride);
-                    let mut land = look(c, mats, canopies, idx, gx.hypot(gz));
+                    let mut land = look(c, mats, canopies, idx, gx.hypot(gz), when);
                     if depth > 0.0 {
                         // Nothing grows in the water.
                         land.far = land.ground;
@@ -1197,6 +1234,7 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
         stride,
         tiles,
         rivers,
+        when,
     }
 }
 

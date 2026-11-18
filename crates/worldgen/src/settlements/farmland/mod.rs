@@ -38,7 +38,7 @@ pub use influence::{Farm, Land, Use};
 
 use voxel::Voxel;
 
-use crate::{continent::Continent, materials as mat, surface::Column};
+use crate::{continent::Continent, materials as mat, settlements::years::When, surface::Column};
 
 /// How the ground of a field looks from too far off for its crops and hedges to be
 /// drawn (see [`far`]).
@@ -87,18 +87,21 @@ pub fn far(c: &Continent, seed: u32, col: &Column, lx: i32, lz: i32, step: i32) 
 /// (see `plants::wash_at`), and how managed it is, which is how much of the wild's woods
 /// has been cleared from it. For the far view, which draws a continent's grid cells, each
 /// some of a field's width: so seen from the hills the land about a town is a soft
-/// patchwork of plough, crops and grass.
-pub fn far_cell(c: &Continent, lx: i32, lz: i32) -> Option<(Option<Voxel>, Option<u8>, f32)> {
+/// patchwork of plough, crops and grass. The field carries the crop it has at `when`, as
+/// the near ground has it (see [`rotation::crop`]): in year 0, its own.
+pub fn far_cell(c: &Continent, lx: i32, lz: i32, when: When) -> Option<(Option<Voxel>, Option<u8>, f32)> {
     let managed = c.land.managed(lx, lz);
     if managed < influence::EDGE {
         return None;
     }
-    let p = plot(c, c.desc.world_seed, lx, lz);
+    let seed = c.desc.world_seed;
+    let p = plot(c, seed, lx, lz);
     let (soil, wash) = p.map_or((None, None), |p| {
+        let crop = rotation::crop(&p, seed, when);
         let cs = c.cell_size();
         let i = ((lz as f32 / cs) as usize).min(c.size - 1) * c.size + ((lx as f32 / cs) as usize).min(c.size - 1);
         let biome = crate::biome::Biome::from_u8(c.biome[i]);
-        (crops::soil(p.crop, biome, c.temperature[i]), crops::wash(p.crop))
+        (crops::soil(crop, biome, c.temperature[i]), crops::wash(crop))
     });
     Some((soil, wash, managed))
 }
@@ -187,6 +190,47 @@ mod tests {
         }
         assert!(farmed > 1000, "only {farmed} columns of plough and hedge");
         assert!(cropped > 500, "only {cropped} columns of crops");
+    }
+
+    /// The far view's cells about the fields agree with the near ground in every year: in
+    /// year 0 each field's own crop, as before there were years, and later the crop its
+    /// rotation has come round to.
+    #[test]
+    fn far_off_fields_carry_the_crop_of_the_year_and_season_seen() {
+        use super::{crops, far_cell, rotation};
+        use crate::settlements::years::When;
+        let w = world();
+        let c = w.continent(0, 0);
+        let seed = c.desc.world_seed;
+        let cs = c.cell_size();
+        let (mut fields, mut turned) = (0, 0);
+        for f in &c.land.farms {
+            for k in 0..64 {
+                let at = f.at + Vec2::from_angle(k as f32 * 0.7) * (f.radius + f.reach * (k % 8) as f32 / 8.0);
+                let (lx, lz) = (at.x as i32, at.y as i32);
+                let Some(p) = super::plot(&c, seed, lx, lz) else { continue };
+                let i = ((lz as f32 / cs) as usize).min(c.size - 1) * c.size + ((lx as f32 / cs) as usize).min(c.size - 1);
+                let biome = crate::biome::Biome::from_u8(c.biome[i]);
+                let of = |crop| (crops::soil(crop, biome, c.temperature[i]), crops::wash(crop));
+                let managed = c.land.managed(lx, lz);
+                if managed < super::influence::EDGE {
+                    continue;
+                }
+                for season in 0..4 {
+                    let (soil, wash) = of(p.crop);
+                    assert_eq!(far_cell(&c, lx, lz, When::new(0, season)), Some((soil, wash, managed)), "field {} in year 0", p.id);
+                }
+                for q in 4..4 + 4 * 5 {
+                    let when = When::new(q / 4, (q % 4) as u8);
+                    let now = rotation::crop(&p, seed, when);
+                    let (soil, wash) = of(now);
+                    assert_eq!(far_cell(&c, lx, lz, when), Some((soil, wash, managed)), "field {} at {when:?}", p.id);
+                    turned += (now != p.crop) as u32;
+                }
+                fields += 1;
+            }
+        }
+        assert!(fields > 50 && turned > 50, "{fields} far cells in fields, {turned} with another crop");
     }
 
     #[test]
