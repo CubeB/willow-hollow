@@ -87,6 +87,58 @@ pub struct Item {
     pub fine: Range<usize>,
 }
 
+impl Furnished {
+    /// Where each sleeper lies, in model cells (as [`Self::sleepers`]): their head, and the
+    /// way along the bed their feet lie from it, a step across the floor. People are put to
+    /// bed here (#204).
+    pub fn lying(&self) -> Vec<(IVec3, IVec2)> {
+        let bed = |i: &&Item| matches!(i.what, What::Fitting(Fitting::StrawPallet | Fitting::BoxBed | Fitting::RopeBed | Fitting::Cradle));
+        self.sleepers
+            .iter()
+            .map(|&head| {
+                let v = head.div_euclid(IVec3::splat(CELLS));
+                let under = self.items.iter().filter(bed).find(|i| v.x >= i.lo.x && v.x < i.hi.x && v.z >= i.lo.z && v.z < i.hi.z);
+                // Along the bed's length, toward its far end from the pillow.
+                let toward = under.map_or(IVec2::X, |b| {
+                    let (size, mid) = (b.hi - b.lo, (b.lo + b.hi) * CELLS);
+                    if size.x >= size.z {
+                        IVec2::new(if mid.x >= 2 * head.x { 1 } else { -1 }, 0)
+                    } else {
+                        IVec2::new(0, if mid.z >= 2 * head.z { 1 } else { -1 })
+                    }
+                });
+                (head, toward)
+            })
+            .collect()
+    }
+
+    /// Where someone can sit: each stool and bench, as the voxel its sitter's feet are in
+    /// on the floor beside the table (model space), and the way they face, toward the
+    /// table where there is one. A stool's seat is 5 cells up, a bench's about as high.
+    pub fn seats(&self) -> Vec<(IVec3, IVec2)> {
+        let table = self.items.iter().find(|i| i.what == What::Fitting(Fitting::Table)).map(|t| (t.lo + t.hi).as_vec3() * 0.5);
+        let mut out = Vec::new();
+        for i in &self.items {
+            if i.decayed || !matches!(i.what, What::Fitting(Fitting::Stool) | What::Bench) {
+                continue;
+            }
+            let mid = (i.lo + i.hi).as_vec3() * 0.5;
+            let toward = table.map_or(IVec2::ZERO, |t| {
+                let d = t - mid;
+                if d.x.abs() >= d.z.abs() { IVec2::new(d.x.signum() as i32, 0) } else { IVec2::new(0, d.z.signum() as i32) }
+            });
+            // A bench seats two, one at either end of it.
+            let long = if (i.hi - i.lo).x >= (i.hi - i.lo).z { IVec3::X } else { IVec3::Z };
+            let n = if i.what == What::Bench { 2 } else { 1 };
+            for k in 0..n {
+                let at = if n == 1 { i.lo } else { i.lo + long * (k * ((i.hi - i.lo).dot(long) - 1)) };
+                out.push((IVec3::new(at.x, i.lo.y, at.z), toward));
+            }
+        }
+        out
+    }
+}
+
 /// What an [`Item`] is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum What {

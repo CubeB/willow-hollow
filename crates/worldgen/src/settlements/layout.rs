@@ -158,6 +158,13 @@ pub struct Plot {
     pub yard: Option<(IVec2, IVec2)>,
     /// Where the hen coop stands in its yard, continent-local, if hens are kept there.
     pub coop: Option<IVec3>,
+    /// Where each who sleeps there lies, for putting people to bed (#204): their head,
+    /// continent-local in voxels (to the nearest cell), and the way along the bed their
+    /// feet lie from it.
+    pub beds: Vec<(Vec3, IVec2)>,
+    /// Where someone can sit inside: the voxel a sitter's feet are in, continent-local,
+    /// and the way they face, toward the table where there is one.
+    pub seats: Vec<(IVec3, IVec2)>,
 }
 
 /// What a settlement is laid out with besides its buildings, for the stages after.
@@ -171,6 +178,13 @@ pub struct Layout {
     /// The foot of each well head and market stall, continent-local.
     pub wells: Vec<IVec3>,
     pub stalls: Vec<IVec3>,
+    /// Every fitting set out about its yards, gardens and green, as it was set: what it
+    /// is, where its model's column 0 stands (continent-local) and its quarter turns. The
+    /// people working there (#204) find their hives, anvils and racks here.
+    pub things: Vec<(Fitting, IVec3, u32)>,
+    /// The nearest open water seen from its middle, continent-local, if any is near: where
+    /// its fishers go, and where water is fetched without a well.
+    pub water: Option<Vec2>,
     /// Its buildings, by index in `Network::plots`.
     pub plots: Range<usize>,
 }
@@ -183,6 +197,7 @@ pub(crate) fn lay_out(c: &Continent, seed: u32, net: &mut Network, first: usize,
     for k in 0..net.settlements.len() {
         let mut town = Town::new(c, seed, net, first, k, ways);
         town.build(net);
+        town.layout.water = town.water;
         let from = net.plots.len();
         net.plots.append(&mut town.plots);
         town.layout.plots = from..net.plots.len();
@@ -1303,6 +1318,10 @@ impl<'a> Town<'a> {
         };
         // Stage 3's own buildings come furnished, their beds and fires among them.
         let inside = if own.is_some() { furnish::Furnished::default() } else { furnish::furnish(b, &household, &self.pal, want.seed) };
+        let (beds, seats) = match &own {
+            Some(o) => (own_beds(o, origin, t), Vec::new()),
+            None => rests(&inside, origin, t),
+        };
         let mut voxels: Vec<(IVec3, Voxel)> = b.voxels.iter().chain(&inside.voxels).map(|&(q, v)| (origin + rotate(q, t), v)).collect();
         voxels.shrink_to_fit();
         let mut fine = parts::place_fine(&b.fine, origin, t);
@@ -1332,6 +1351,8 @@ impl<'a> Town<'a> {
             garden,
             yard,
             coop: None,
+            beds,
+            seats,
         });
         self.raised.push(Raised { want, lot, spot, origin });
     }
@@ -1403,6 +1424,7 @@ impl<'a> Town<'a> {
             self.grid.mark(c, THING);
         }
         net.held_props.push((placed.voxels, fine, foot));
+        self.layout.things.push((f.kind, at, turns));
     }
 
     /// Sets out a plot's garden, its trade's things in its yard, and what stands
@@ -1833,6 +1855,34 @@ impl<'a> Town<'a> {
             }
         }
     }
+}
+
+/// Where people lie and sit in a furnished building whose model origin stands at `origin`,
+/// turned by `turns`: the beds and seats of [`furnish::Furnished`], continent-local. This
+/// is the one place a plot's beds are found (#204): a building furnished another way (a
+/// special building of stage 3) fills `Plot::beds` and `Plot::seats` from its own here.
+fn rests(inside: &furnish::Furnished, origin: IVec3, turns: u32) -> (Vec<(Vec3, IVec2)>, Vec<(IVec3, IVec2)>) {
+    let way = |d: IVec2| flat(rotate(IVec3::new(d.x, 0, d.y), turns));
+    // Cells turn about the middle of model voxel 0, as fine parts do.
+    let c = IVec3::new(CELLS / 2, 0, CELLS / 2);
+    let beds = inside.lying().into_iter().map(|(head, toward)| ((rotate(head - c, turns) + c + origin * CELLS).as_vec3() / CELLS as f32, way(toward))).collect();
+    let seats = inside.seats().into_iter().map(|(at, toward)| (origin + rotate(at, turns), way(toward))).collect();
+    (beds, seats)
+}
+
+/// Where the household of one of stage 3's own buildings lies, as [`rests`] gives it:
+/// each of its beds but the guests', the head at the bed's first end, on top of it.
+fn own_beds(own: &Built, origin: IVec3, turns: u32) -> Vec<(Vec3, IVec2)> {
+    let beds = &own.building.inside.beds;
+    let theirs = beds.len().saturating_sub(own.guest_beds.len());
+    beds[..theirs]
+        .iter()
+        .map(|s| {
+            let (at, along, facing) = (rotate(s.at, turns), rotate(s.along, turns), rotate(s.facing, turns));
+            let head = (origin + at).as_vec3() + Vec3::new(0.5, 1.0, 0.5) + facing.as_vec3() * ((s.wide - 1) as f32 * 0.5);
+            (head, flat(along))
+        })
+        .collect()
 }
 
 /// Whether the way from `a` to `b` passes within `r` of `c`.
