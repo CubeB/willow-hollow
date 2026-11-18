@@ -11,7 +11,7 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use glam::{DVec3, Vec2};
+use glam::{DVec2, DVec3, Vec2};
 use worldgen::{
     continent::Continent,
     features::plants::Flower,
@@ -196,6 +196,34 @@ pub struct Journal {
     /// The people of the settlements met (#204): who each is (see `villagers::Who`),
     /// their name, and how many times they have been greeted.
     met: Vec<Met>,
+    /// The requests read on notice boards (#207), offered to the player: for errands to
+    /// take up (#46).
+    offered: Vec<Offer>,
+    /// The settlements guild houses' wayfarers have marked on the map (#207).
+    charted: Vec<Chart>,
+}
+
+/// A request read on a settlement's notice board (#207).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    /// Which it is: `villagers::notices::Request::key`.
+    pub key: String,
+    /// Who asked, and of where.
+    pub name: String,
+    pub town: String,
+    pub text: String,
+    pub when: Stamp,
+}
+
+/// The settlements about a guild house, marked on the map by its wayfarers (#207).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chart {
+    /// The settlement the guild house is in: `villagers::Town::key`, and its name.
+    pub key: String,
+    pub town: String,
+    /// The middle of the country marked, world x and z, and how far it reaches round.
+    pub at: DVec2,
+    pub reach: f64,
 }
 
 /// Someone of a settlement the player has greeted.
@@ -311,6 +339,38 @@ impl Journal {
                 1
             }
         }
+    }
+
+    /// Writes down a request read on `town`'s notice board, asked by `name`, unless it
+    /// is written already; true if it was new. It goes in the notes too.
+    pub fn offer(&mut self, key: &str, name: &str, town: &str, text: &str) -> bool {
+        if self.offered.iter().any(|o| o.key == key) {
+            return false;
+        }
+        self.offered.push(Offer { key: key.into(), name: name.into(), town: town.into(), text: text.into(), when: self.now });
+        self.note(format!("Read on the notice board at {town}: {text}"));
+        true
+    }
+
+    /// The requests read on notice boards, the first read first.
+    pub fn offered(&self) -> &[Offer] {
+        &self.offered
+    }
+
+    /// Writes down that the wayfarers of `town` (known by `key`) marked the country
+    /// `reach` round `at` on the map, unless they have already; true if it was new.
+    pub fn chart(&mut self, key: &str, town: &str, at: DVec2, reach: f64) -> bool {
+        if self.charted.iter().any(|c| c.key == key) {
+            return false;
+        }
+        self.charted.push(Chart { key: key.into(), town: town.into(), at, reach });
+        self.note(format!("The wayfarers at {town} marked the settlements about on the map."));
+        true
+    }
+
+    /// What the wayfarers have marked on the map.
+    pub fn charted(&self) -> &[Chart] {
+        &self.charted
     }
 
     /// Seasons that have turned since the walk began.
@@ -549,6 +609,12 @@ impl Journal {
         for m in &self.met {
             out += &format!("met = {}|{}|{}\n", clean(&m.key), m.times, clean(&m.name));
         }
+        for o in &self.offered {
+            out += &format!("offered = {}|{}|{}|{}|{}\n", clean(&o.key), o.when.to_text(), clean(&o.town), clean(&o.name), clean(&o.text));
+        }
+        for c in &self.charted {
+            out += &format!("charted = {}|{},{}|{}|{}\n", clean(&c.key), c.at.x, c.at.y, c.reach, clean(&c.town));
+        }
         out
     }
 
@@ -618,6 +684,27 @@ impl Journal {
                         && !j.met.iter().any(|m| m.key == key.trim())
                     {
                         j.met.push(Met { key: key.trim().into(), name: name.trim().into(), times });
+                    }
+                }
+                "offered" => {
+                    let parts: Vec<&str> = value.splitn(5, '|').collect();
+                    if let [key, when, town, name, text] = parts[..]
+                        && let Some(when) = Stamp::from_text(when)
+                        && !key.trim().is_empty()
+                        && !j.offered.iter().any(|o| o.key == key.trim())
+                    {
+                        j.offered.push(Offer { key: key.trim().into(), name: name.trim().into(), town: town.trim().into(), text: text.trim().into(), when });
+                    }
+                }
+                "charted" => {
+                    let parts: Vec<&str> = value.splitn(4, '|').collect();
+                    if let [key, at, reach, town] = parts[..]
+                        && let Some((x, z)) = at.split_once(',')
+                        && let (Ok(x), Ok(z), Some(reach)) = (x.trim().parse::<f64>(), z.trim().parse::<f64>(), number(reach.trim()))
+                        && !key.trim().is_empty()
+                        && !j.charted.iter().any(|c| c.key == key.trim())
+                    {
+                        j.charted.push(Chart { key: key.trim().into(), town: town.trim().into(), at: DVec2::new(x, z), reach });
                     }
                 }
                 "note" => {
@@ -1001,6 +1088,11 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
         0 => "\u{2014}".into(),
         1..=3 => followed.join(", "),
         n => format!("{}, and {} more", followed[..3].join(", "), n - 3),
+    }));
+    // What the settlements' boards have asked (#207), for errands to come (#46).
+    rows.push(("Asked on the boards", match journal.offered() {
+        [] => "\u{2014}".into(),
+        all @ [.., last] => format!("{}, the latest by {} of {}", all.len(), last.name, last.town),
     }));
     ui.spacing_mut().item_spacing.y = 9.0;
     for (what, value) in rows {

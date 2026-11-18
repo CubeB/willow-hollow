@@ -207,6 +207,8 @@ pub(super) struct Frame<'a> {
     pub wheel: Option<Wheel>,
     pub guilds: Vec<Guild>,
     pub sign: Option<IVec3>,
+    /// #207: the board the player reads, as [`Built::board`] has it.
+    pub board: Option<(IVec3, IVec3)>,
     pub smoke: Option<IVec3>,
     pub faults: Vec<String>,
 }
@@ -244,6 +246,7 @@ impl<'a> Frame<'a> {
             wheel: None,
             guilds: Vec::new(),
             sign: None,
+            board: None,
             smoke: None,
             faults: Vec::new(),
         }
@@ -817,6 +820,43 @@ impl<'a> Frame<'a> {
         self.sign = Some(IVec3::new(b.hi.x + 2, y, z));
     }
 
+    /// A notice board (#207) on the inside of the +X wall of `b`, from column `z0` to `z1`
+    /// (inclusive) along it, its foot a metre over the floor: a frame of the place's wood
+    /// about boards, with papers pinned to it, each with a peg in one of `pegs`. It is
+    /// the building's [`Built::board`], which the player reads.
+    pub fn notice_board(&mut self, b: &Block, z0: i32, z1: i32, pegs: &[Voxel]) {
+        let x = b.hi.x * CELLS;
+        let (za, zb) = (z0 * CELLS + 1, (z1 + 1) * CELLS - 1);
+        let (ya, yb) = ((b.feet() + 2) * CELLS + 2, (b.feet() + 4) * CELLS + 2);
+        let board = if self.neglect { mat::PLANK_DARK } else { self.pal.plank };
+        let wood = self.pal.wood;
+        self.bx(IVec3::new(x - 1, ya, za), IVec3::new(x, yb, zb), board);
+        for (lo, hi) in [((za, ya), (zb, ya + 1)), ((za, yb - 1), (zb, yb)), ((za, ya), (za + 1, yb)), ((zb - 1, ya), (zb, yb))] {
+            self.bx(IVec3::new(x - 2, lo.1, lo.0), IVec3::new(x - 1, hi.1, hi.0), wood);
+        }
+        // The papers, in a row or two within the frame, none quite the size of another.
+        let mut z = za + 2;
+        let mut k = 0;
+        while z + 2 <= zb - 2 {
+            let h = hash3(self.spec.seed ^ 0xb0a2_d5, k, z, 0);
+            let wide = 2 + (h % 2) as i32;
+            if z + wide > zb - 2 {
+                break;
+            }
+            let tall = 3 + ((h >> 3) % 2) as i32;
+            let top = yb - 2 - ((h >> 5) % 2) as i32;
+            let paper = if (h >> 7) % 3 == 0 { mat::PLANK_PALE } else { mat::CLOTH_PALE };
+            self.bx(IVec3::new(x - 2, top - tall, z), IVec3::new(x - 1, top, z + wide), paper);
+            if !pegs.is_empty() {
+                let peg = pegs[k as usize % pegs.len()];
+                self.bx(IVec3::new(x - 3, top - 1, z + wide / 2), IVec3::new(x - 2, top, z + wide / 2 + 1), peg);
+            }
+            z += wide + 1;
+            k += 1;
+        }
+        self.board = Some((IVec3::new(x - 2, (ya + yb) / 2, (za + zb) / 2), IVec3::NEG_X));
+    }
+
     /// What a region sets beside a door: on the ground outside the +X wall of `b`, clear of
     /// the doorway from `z0`, `width` wide (and of any steps before it).
     pub fn porch(&mut self, b: &Block, z0: i32, width: i32) {
@@ -1077,6 +1117,7 @@ impl<'a> Frame<'a> {
             wheel: self.wheel,
             guilds: self.guilds,
             sign: self.sign,
+            board: self.board,
         };
         (built, self.faults)
     }

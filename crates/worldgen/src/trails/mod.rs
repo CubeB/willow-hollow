@@ -317,6 +317,11 @@ pub struct Network {
     /// Where each settlement's tree stands, by index in `settlements`: the foot of its
     /// trunk, continent-local, or None where it has none.
     pub village_trees: Vec<Option<IVec3>>,
+    /// Where each settlement's tree has its ribbons tied, and the spare places under its
+    /// limbs a festival hangs its lanterns from (#207; see
+    /// [`crate::settlements::tree::Dressing`]), by index in `settlements`: continent-local
+    /// cells.
+    pub tree_knots: Vec<(Vec<IVec3>, Vec<IVec3>)>,
     /// Every tree planted by hand, for [`crate::features::place`] to grow.
     pub planted: Vec<crate::features::Planted>,
     /// The ground trodden bare round each village tree.
@@ -325,6 +330,11 @@ pub struct Network {
     /// tavern, on its boards, in continent-local voxels (see
     /// [`crate::settlements::special::Built::guest_beds_at`]).
     pub guest_beds: Vec<Vec3>,
+    /// The notice boards on the walls of the taverns and guild houses (#207), the
+    /// player's to read: by index in `plots`, and where.
+    pub boards: Vec<crate::settlements::special::Board>,
+    /// The guilds that share each guild house (#207), by its index in `plots`.
+    pub guild_halls: Vec<(usize, Vec<crate::settlements::special::Guild>)>,
     /// The quays the boats of the settlements tie up at, the river runs between partners'
     /// quays and the fishing grounds off the ports (#205).
     pub waterways: crate::settlements::quay::Waterways,

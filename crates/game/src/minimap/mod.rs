@@ -316,6 +316,9 @@ pub struct Minimap {
     pub camps: Vec<DVec2>,
     /// Where the parties of settlers the player has met have got to, in world voxels.
     pub met: Vec<DVec2>,
+    /// The country a guild house's wayfarers have charted (#207), its middle in world
+    /// voxels and its reach: every settlement in it shows as if it had been visited.
+    pub charted: Vec<(DVec2, f64)>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -437,6 +440,7 @@ impl Minimap {
             hour: 12.0,
             camps: Vec::new(),
             met: Vec::new(),
+            charted: Vec::new(),
             season: None,
             relief: None,
             relief_ask,
@@ -923,6 +927,24 @@ impl Minimap {
         self.update(gpu, eye, forward, false, 0.0);
     }
 
+    /// Shows the land `radius` voxels round each of `places` (world x, z) as seen, not
+    /// walked: what a guild house's wayfarers mark from their charts (#207).
+    pub fn reveal_about(&mut self, places: &[DVec2], radius: f32) {
+        for &at in places {
+            let key = key_of(at);
+            let local = (at - origin(key)).as_vec2();
+            match self.reveal_mut(key) {
+                Some(r) => r.see(local, radius, false),
+                None => {
+                    if let Some(q) = self.loading.get_mut(&key) {
+                        q.push((local, radius, false));
+                    }
+                }
+            }
+        }
+        self.version += 1;
+    }
+
     /// As if the player had walked along `path` (world x, z), for screenshots.
     pub fn walk(&mut self, path: &[DVec2]) {
         for pair in path.windows(2) {
@@ -1199,6 +1221,8 @@ impl Minimap {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
             for ((mark, &visited), known) in k.sheet.marks.iter().zip(&k.visited).zip(&k.places) {
+                // A settlement the wayfarers have charted is known as if it were visited.
+                let visited = visited || (known.is_some_and(|(kind, _)| kind.is_settlement()) && self.charted.iter().any(|&(c, r)| mark.at.distance(c) <= r));
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());

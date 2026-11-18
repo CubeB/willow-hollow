@@ -27,6 +27,7 @@ mod people;
 mod placed;
 mod player;
 mod profile;
+mod reading;
 mod render;
 mod season;
 mod starlings;
@@ -161,6 +162,9 @@ struct Options {
     /// Greet whoever of a settlement is nearest the figure (or the camera) on a
     /// screenshot (the `greet` command): they turn to it, and what they say is the prompt.
     shot_greet: bool,
+    /// Read the board the camera looks at on a screenshot (`--read`, or the `read`
+    /// command): its page is shown over the view (#207).
+    shot_read: bool,
     /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
     /// How far ahead that camp is made, in metres.
@@ -240,6 +244,7 @@ impl Default for Options {
             shot_hotbar: false,
             shot_prompt: None,
             shot_greet: false,
+            shot_read: false,
             shot_camp: None,
             camp_ahead: CAMP_AHEAD,
             shot_chimneys: 0,
@@ -500,6 +505,7 @@ fn parse_args() -> Result<Options> {
             }
             "--bed" => o.bed = true,
             "--lantern" => o.shot_lantern = true,
+            "--read" => o.shot_read = true,
             "--crows" => {
                 let how = value()?;
                 if !commands::CROWS.contains(&how.as_str()) {
@@ -630,6 +636,10 @@ const BUTTERFLY_REACH: f32 = 12.0;
 
 /// How close a boat must be to climb aboard.
 const BOARD_REACH: f64 = m64(4.8);
+
+/// How far round each settlement the wayfarers mark (#207) the land is shown on the map
+/// as seen, in metres: enough for its houses and green.
+const CHARTED_LAND: f32 = 160.0;
 
 /// How far ahead the hands reach to set a thing down.
 const PLACE_REACH: f64 = m64(3.0);
@@ -1106,6 +1116,8 @@ struct Running {
     journal_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
+    /// A board being read (#207), and where the player stood to read it.
+    reading: Option<(reading::Page, DVec3)>,
     /// What has been set down in this world: flowers, sticks, fires.
     placed: placed::Placed,
     /// The thing set down that is within reach, if one is; looked for with `within_reach`.
@@ -1403,6 +1415,7 @@ impl Running {
             within_reach: None,
             reach_timer: 0.0,
             notice: None,
+            reading: None,
             placed,
             thing_near: None,
             embers: Vec::new(),
@@ -2011,6 +2024,10 @@ impl Running {
         if !self.walking {
             return;
         }
+        // E puts down what is being read.
+        if self.reading.take().is_some() {
+            return;
+        }
         if self.player.mode == Mode::Boat {
             let (pos, heading) = self.player.leave_boat(&mut self.voxels);
             self.fleet.leave(pos, heading);
@@ -2018,9 +2035,31 @@ impl Running {
         } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
             let boat = self.fleet.take(i);
             self.player.board(boat.pos, boat.heading);
-        } else if !self.greet() && !self.make_camp() {
+        } else if !self.read_board() && !self.greet() && !self.make_camp() {
             self.gather();
         }
+    }
+
+    /// Reads the board looked at, if one is near enough (#207): its page is shown until
+    /// it is put down, a notice board's requests go in the journal as offered, and at a
+    /// guild house with wayfarers the settlements about are marked on the map. False with
+    /// none in reach.
+    fn read_board(&mut self) -> bool {
+        let Some((which, _)) = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()) else { return false };
+        let journal = &self.journal;
+        let Some(read) = self.villagers.read(which, |key| journal.charted().iter().any(|c| c.key == key)) else { return false };
+        for q in &read.requests {
+            self.journal.offer(&q.key, &q.name, &read.town, &q.text);
+        }
+        if let Some((places, at, reach)) = &read.chart
+            && self.journal.chart(&read.key, &read.town, *at, *reach)
+        {
+            let at: Vec<glam::DVec2> = places.iter().map(|p| p.1).collect();
+            self.map.reveal_about(&at, m(CHARTED_LAND));
+        }
+        log::info!("read: {}", read.page.text());
+        self.reading = Some((read.page, self.player.pos));
+        true
     }
 
     /// Greets whoever of the settlement is near enough (#204): they stop and turn, and
@@ -2195,6 +2234,10 @@ impl Running {
             if *left <= 0.0 {
                 self.notice = None;
             }
+        }
+        // A board being read is put down on walking away from it.
+        if self.reading.as_ref().is_some_and(|r| !self.walking || r.1.distance(self.player.pos) > m64(reading::LEAVE as f64)) {
+            self.reading = None;
         }
         self.cpu.lap(0);
         self.sub.lap(0);
@@ -2390,8 +2433,11 @@ impl Running {
                 }
             }
         }
-        // The settlements' people last, so that if ever the props overflow it is some of
-        // them that go, not the player's figure.
+        // What the settlements have out today, market stalls and festivals (#207), lit
+        // at night; then their people last, so that if ever the props overflow it is
+        // some of them that go, not the player's figure.
+        let festival_lit = if self.env.sun_elevation < 0.06 { candle(clock) } else { 0.0 };
+        self.villagers.dress(self.camera.pos, self.env.time, festival_lit, &mut self.props);
         let feet = if self.walking { self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0) } else { self.camera.pos };
         self.villagers.draw(feet, self.camera.pos, self.env.time, &mut self.props);
 
@@ -2399,6 +2445,7 @@ impl Running {
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
         self.map.met = self.travellers.marks();
+        self.map.charted = self.journal.charted().iter().map(|c| (c.at, c.reach)).collect();
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
         self.sub.lap(10);
@@ -2409,6 +2456,7 @@ impl Running {
         lamps.extend(burning.iter().map(|&heart| firelight(heart, clock)));
         lamps.extend(self.travellers.burning(self.camera.pos).into_iter().map(|heart| firelight(heart, clock)));
         lamps.extend(held_light);
+        lamps.extend(self.villagers.lamps(self.camera.pos, self.env.time, festival_lit));
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         // The northern lights, on the nights they are out where the camera is.
@@ -2483,11 +2531,13 @@ impl Running {
             _ if !self.walking => None,
             Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail".into()),
             Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat".into()),
+            _ if self.reading.is_some() => Some("E to put it down".into()),
             _ if self.notice.is_some() => self.notice.as_ref().map(|n| n.0.clone()),
             _ => {
                 let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
-                let greet = self.villagers.within_reach(feet).map(|(_, name)| format!("E to greet {name}"));
-                greet.or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
+                let read = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()).map(|(_, name)| format!("E to read {name}"));
+                let greet = || self.villagers.within_reach(feet).map(|(_, name)| format!("E to greet {name}"));
+                read.or_else(greet).or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
             }
         };
         // What has just come to hand, and what it is for, fading out.
@@ -2495,6 +2545,7 @@ impl Running {
         let mut let_go = Vec::new();
         let (pack, pack_view, pack_open) = (&mut self.pack, &mut self.pack_view, self.pack_open);
         let (journal, journal_view, journal_open) = (&self.journal, &mut self.journal_view, self.journal_open);
+        let page = self.reading.as_ref().map(|r| &r.0);
         let mut time = self.env.time;
         let mut date = self.env.date;
         let mut settings = self.settings;
@@ -2517,6 +2568,8 @@ impl Running {
                     journal::show(ctx, journal, journal_view);
                 } else if console.open {
                     console.show(ctx);
+                } else if let Some(page) = page.filter(|_| !map_open) {
+                    reading::show(ctx, page);
                 } else if !grabbed && !map_open {
                     overlay::bottom_line(ctx, "hint", "Click the view (or press Tab) to look around", 150.0, egui::Color32::from_gray(220));
                 }
@@ -3193,6 +3246,12 @@ fn main() -> Result<()> {
         let mut folk = villagers::Villagers::new();
         let foot = figure.as_ref().map_or(camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), |(feet, _)| *feet);
         folk.settle(&world, camera.pos, env.time, env.date, env.year, settings.year_days);
+        // And what they have out today (#207).
+        let festival_lit = if env.sun_elevation < 0.06 { candle(0.6) } else { 0.0 };
+        folk.dress(camera.pos, env.time, festival_lit, &mut props);
+        if folk.towns().next().is_some() {
+            log::info!("the settlements' dressing: {} boxes", folk.dressed);
+        }
         let before = props.len();
         folk.draw(foot, camera.pos, env.time, &mut props);
         let mut greeted = None;
@@ -3206,6 +3265,17 @@ fn main() -> Result<()> {
                     folk.draw(foot, camera.pos, env.time, &mut props);
                 }
                 None => log::warn!("greet: nobody of a settlement in sight"),
+            }
+        }
+        // The board the camera looks at, read, its page over the view (#207).
+        let mut read_page = None;
+        if opts.shot_read {
+            match folk.board_in_sight(camera.pos, camera.forward()).and_then(|(which, _)| folk.read(which, |_| false)) {
+                Some(r) => {
+                    log::info!("read: {}", r.page.text());
+                    read_page = Some(r.page);
+                }
+                None => log::warn!("read: no board in reach of the camera and looked at"),
             }
         }
         if folk.towns().next().is_some() {
@@ -3228,6 +3298,7 @@ fn main() -> Result<()> {
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
         lamps.extend(travellers.burning(camera.pos).into_iter().map(|heart| firelight(heart, 0.6)));
+        lamps.extend(folk.lamps(camera.pos, env.time, festival_lit));
         let met = travellers.marks();
         // A lit lantern in the hand: of the figure if there is one, else of whoever's eyes
         // the camera is, standing (seen only by its light).
@@ -3327,6 +3398,9 @@ fn main() -> Result<()> {
             } else if text && let Some(pack) = &hotbar {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
+            }
+            if text && let Some(page) = &read_page {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| reading::show(ctx, page));
             }
             if text && let Some(line) = prompt.as_ref().or(greeted.as_ref()) {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
@@ -3662,6 +3736,17 @@ impl commands::Game for Running {
         Ok(self.villagers.report(at, self.env.time, all))
     }
 
+    fn read(&mut self) -> commands::Reply {
+        if !self.walking {
+            return Err("walk first: reading is done on foot".into());
+        }
+        if self.read_board() {
+            Ok(self.reading.as_ref().map_or_else(String::new, |r| r.0.text()))
+        } else {
+            Err(format!("no board near enough to read and looked at (within {:.1} m)", reading::REACH))
+        }
+    }
+
     fn greet(&mut self) -> commands::Reply {
         if !self.walking {
             return Err("walk first: greeting is done on foot".into());
@@ -3817,6 +3902,11 @@ impl commands::Game for Shot<'_> {
         v.settle(self.world, eye, hour, date, self.year(), self.year_days);
         v.draw(eye - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), eye, hour, &mut Vec::new());
         Ok(v.report(eye, hour, all))
+    }
+
+    fn read(&mut self) -> commands::Reply {
+        self.opts.shot_read = true;
+        Ok("reading the board the camera looks at: its page is drawn over the shot".into())
     }
 
     fn greet(&mut self) -> commands::Reply {

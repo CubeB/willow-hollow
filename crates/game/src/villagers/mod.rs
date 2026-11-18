@@ -13,7 +13,11 @@
 //! player is in there with them.
 
 pub mod day;
+// What a settlement puts out on market days and festivals (#207).
+pub mod dress;
 pub mod lanes;
+// What is pinned on its boards (#207).
+pub mod notices;
 pub mod talk;
 pub mod town;
 #[cfg(test)]
@@ -134,6 +138,21 @@ pub struct Drawn {
     pub boxes: usize,
 }
 
+/// A board read (#207): what is on it, and what of it goes in the journal.
+#[derive(Clone, Debug)]
+pub struct Reading {
+    pub page: crate::reading::Page,
+    /// The settlement it is in: how the journal knows it, and its name.
+    pub key: String,
+    pub town: String,
+    /// The requests on a notice board.
+    pub requests: Vec<notices::Request>,
+    /// For a guild house with wayfarers, the settlements they mark on the map, by name
+    /// and where each is (world x and z), and the middle of the country marked and its
+    /// reach.
+    pub chart: Option<(Vec<(String, glam::DVec2)>, glam::DVec2, f64)>,
+}
+
 /// Someone greeted, and what they said.
 #[derive(Clone, Debug)]
 pub struct Greeting {
@@ -155,6 +174,12 @@ pub struct Villagers {
     /// This frame's figures, nearest the camera first.
     seen: Vec<Figure>,
     pub drawn: Drawn,
+    /// The time of year and the days to a year, as last updated: for what is dressed
+    /// at a festival (#207).
+    date: f32,
+    year_days: f32,
+    /// How many boxes the dressing took last frame.
+    pub dressed: usize,
 }
 
 impl Default for Villagers {
@@ -195,7 +220,38 @@ fn wanted(world: &GameWorld, at: DVec3, wait: bool) -> Vec<((i32, i32), usize, A
 impl Villagers {
     pub fn new() -> Self {
         let (sender, made) = mpsc::channel();
-        Self { near: Vec::new(), asked: Vec::new(), sender, made, timer: 0.0, clock: 0.0, stopped: None, seen: Vec::new(), drawn: Drawn::default() }
+        Self {
+            near: Vec::new(),
+            asked: Vec::new(),
+            sender,
+            made,
+            timer: 0.0,
+            clock: 0.0,
+            stopped: None,
+            seen: Vec::new(),
+            drawn: Drawn::default(),
+            date: 0.0,
+            year_days: 1.0,
+            dressed: 0,
+        }
+    }
+
+    /// Each settlement about, with when it is there (#207).
+    fn whens(&self, hour: f32, lit: f32) -> impl Iterator<Item = (&Town, dress::When)> + '_ {
+        let (date, year_days, clock) = (self.date, self.year_days, self.clock);
+        self.near.iter().map(move |n| (&*n.town, dress::When { day: n.day, date, year_days, hour, lit, clock }))
+    }
+
+    /// Draws what the settlements about have out at `hour` (#207): their stalls on market
+    /// day, and a festival's lanterns and garlands, `lit` as brightly as a lantern burns
+    /// now (0 by day). Keeps to [`dress::BUDGET`] boxes.
+    pub fn dress(&mut self, cam: DVec3, hour: f32, lit: f32, out: &mut Vec<ParticleInstance>) {
+        self.dressed = dress::draw(self.whens(hour, lit), cam, out);
+    }
+
+    /// The festival lanterns burning near `cam`, as lamps.
+    pub fn lamps(&self, cam: DVec3, hour: f32, lit: f32) -> Vec<(DVec3, f32)> {
+        dress::lamps(self.whens(hour, lit), cam)
     }
 
     /// Every settlement whose people are about, nearest `at` first.
@@ -224,6 +280,7 @@ impl Villagers {
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, dt: f32, world: &GameWorld, at: DVec3, hour: f32, date: f32, year: u32, year_days: f32) {
         self.clock += dt;
+        (self.date, self.year_days) = (date, year_days);
         let today = day_number(hour, date, year, year_days);
         while let Ok(town) = self.made.try_recv() {
             self.add(town, today);
@@ -266,6 +323,7 @@ impl Villagers {
     /// screenshot, and the console.
     pub fn settle(&mut self, world: &GameWorld, at: DVec3, hour: f32, date: f32, year: u32, year_days: f32) {
         let today = day_number(hour, date, year, year_days);
+        (self.date, self.year_days) = (date, year_days);
         for (cell, k, c) in wanted(world, at, true) {
             if self.near.iter().any(|n| n.town.cell == cell && n.town.k == k) {
                 continue;
@@ -352,6 +410,51 @@ impl Villagers {
         }
         drawn.boxes = out.len() - from;
         self.drawn = drawn;
+    }
+
+    /// The board looked at along `forward` from `eye`, near enough to read (#207): which
+    /// settlement about it is in and which of its boards, and what it is called.
+    pub fn board_in_sight(&self, eye: DVec3, forward: Vec3) -> Option<((usize, usize), &'static str)> {
+        for (t, n) in self.near.iter().enumerate() {
+            let town = &n.town;
+            let e = (eye - town.origin).as_vec3();
+            for (b, &(plot, at, facing)) in town.boards.iter().enumerate() {
+                if notices::readable(at, facing, e, forward, m(crate::reading::REACH)) {
+                    let guilds = town.guilds.as_ref().is_some_and(|g| g.0 == plot);
+                    return Some(((t, b), if guilds { "the guilds' board" } else { "the notice board" }));
+                }
+            }
+        }
+        None
+    }
+
+    /// Reads board `which` (from [`Villagers::board_in_sight`]): `charted` says whether
+    /// the wayfarers of the settlement known by a key have marked the country about on the
+    /// map already.
+    pub fn read(&self, which: (usize, usize), charted: impl Fn(&str) -> bool) -> Option<Reading> {
+        let n = self.near.get(which.0)?;
+        let town = &n.town;
+        let &(plot, ..) = town.boards.get(which.1)?;
+        let key = format!("{},{},{}", town.cell.0, town.cell.1, town.k);
+        let charted = charted(&key);
+        let world = |p: Vec2| glam::DVec2::new(town.origin.x + p.x as f64, town.origin.z + p.y as f64);
+        match &town.guilds {
+            Some((at, guilds)) if *at == plot => {
+                let chart = guilds.contains(&worldgen::settlements::special::Guild::Wayfarers).then(|| {
+                    let places: Vec<(String, glam::DVec2)> = town.neighbours.iter().map(|nb| (nb.name.clone(), world(nb.at))).collect();
+                    // A little beyond the neighbours' middles, so that the map's mark for
+                    // each, which stands on its green, is within it too.
+                    (places, world(flat(town.centre)), (town::NEIGHBOURS + m(150.0)) as f64)
+                });
+                let newly: Option<Vec<String>> = chart.as_ref().filter(|_| !charted).map(|c| c.0.iter().map(|p| p.0.clone()).collect());
+                let page = notices::guild_page(town, guilds, n.day, newly.as_deref());
+                Some(Reading { page, key, town: town.name.clone(), requests: Vec::new(), chart })
+            }
+            _ => {
+                let (page, requests) = notices::board_page(town, n.day, self.year_days);
+                Some(Reading { page, key, town: town.name.clone(), requests, chart: None })
+            }
+        }
     }
 
     /// Whoever is near enough to `feet` to greet, and in sight: the nearest.
@@ -459,6 +562,28 @@ impl Villagers {
             let inside = town.origin + (b.doorway - Vec3::new(b.out.x, 0.0, b.out.y) * 2.0).as_dvec3();
             let look = (-b.out.y).atan2(-b.out.x).to_degrees().rem_euclid(360.0);
             out += &format!("\n  inside the tavern {:.0},{:.0} looking {look:.0}", inside.x, inside.z);
+        }
+        // #207: its market days, today's festival and its boards, for shots of them.
+        use worldgen::settlements::calendar;
+        let every = calendar::market_every(town.kind);
+        if !town.market.is_empty() && every > 0 {
+            let next = (0..every * 2).find(|&n| town.market_on(near.day + n)).unwrap_or(0);
+            let noon = (near.day + next) as f64 / self.year_days.max(1.0) as f64 + 0.5 / self.year_days.max(1.0) as f64;
+            let when = if next == 0 { "today".to_string() } else { format!("in {next} days") };
+            out += &format!("\n  market every {every} days, next {when}: noon then is --year {} --date {:.4}", noon.floor(), noon.fract());
+        }
+        if let Some(f) = calendar::festival_on(near.day, self.year_days) {
+            out += &format!("\n  {} today", f.name());
+        }
+        for &(plot, at, facing) in &town.boards {
+            let what = match &town.guilds {
+                Some((at, guilds)) if *at == plot => format!("the guilds' board ({})", guilds.iter().map(|g| g.name()).collect::<Vec<_>>().join(", ")),
+                _ => "the notice board".into(),
+            };
+            // A pace and a half before it, looking at it.
+            let feet = town.origin + (at + Vec3::new(facing.x, 0.0, facing.y) * m(1.4)).as_dvec3();
+            let look = (-facing.y).atan2(-facing.x).to_degrees().rem_euclid(360.0);
+            out += &format!("\n  {what} {:.1},{:.1},{:.1}, read from {:.1},{:.1} looking {look:.0}", town.origin.x + at.x as f64, town.origin.y + at.y as f64, town.origin.z + at.z as f64, feet.x, feet.z);
         }
         if all {
             // Everyone, by household, and where each is.

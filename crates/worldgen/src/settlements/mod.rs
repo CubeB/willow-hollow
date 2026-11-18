@@ -13,6 +13,8 @@ pub mod farmland;
 pub mod special;
 pub mod quay;
 pub mod travel;
+// Market days and festivals (#207).
+pub mod calendar;
 
 use glam::Vec2;
 

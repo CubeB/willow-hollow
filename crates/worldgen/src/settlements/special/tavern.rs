@@ -175,6 +175,9 @@ pub(super) fn build(mut f: Frame) -> (Built, Vec<String>) {
     // The sign beside the door, painted with the keeper's colours.
     let paint = [(mat::CLOTH_RED, mat::CLOTH_YELLOW), (mat::CLOTH_GREEN, mat::CLOTH_PALE), (mat::CLOTH_BLUE, mat::CLOTH_YELLOW)][(f.spec.seed % 3) as usize];
     f.hanging_sign(&b, dz + 4, fy + 6, paint);
+    // #207: the notice board inside, on the front wall the other side of the door from
+    // where its leaf stands open, where the settlement's people pin what they want done.
+    f.notice_board(&b, dz - 3, dz - 2, &[paint.0, paint.1]);
     f.porch(&b, dz, 3);
 
     // Keep the stairs and the rooms clear of props.

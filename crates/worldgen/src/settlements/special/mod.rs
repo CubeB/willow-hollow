@@ -228,6 +228,20 @@ pub struct Built {
     pub guilds: Vec<Guild>,
     /// The voxel the board of a hanging sign hangs in, over a tavern's door.
     pub sign: Option<IVec3>,
+    /// #207: a board on a wall the player reads, a tavern's notices or a guild house's
+    /// roll of its guilds: the middle of its face (in cells, a corner of the cell grid,
+    /// as a fitting's hooks are) and the way it faces.
+    pub board: Option<(IVec3, IVec3)>,
+}
+
+/// A board on a wall the player reads (#207), where it stands in the world.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Board {
+    /// The building it is in, by index in `Network::plots`.
+    pub plot: usize,
+    /// The middle of its face, continent-local voxels, and the way it faces.
+    pub at: Vec3,
+    pub facing: IVec3,
 }
 
 impl Built {
@@ -246,7 +260,14 @@ impl Built {
             wheel: self.wheel.map(|w| Wheel { hub: r(w.hub), side: r(w.side), ..w }),
             guilds: self.guilds.clone(),
             sign: self.sign.map(r),
+            board: self.board.map(|(q, d)| (board_turned(q, turns), r(d))),
         }
+    }
+
+    /// Where its board stands once the building is turned by `turns` and its origin set
+    /// at voxel `origin`, continent-local voxels, and the way it faces.
+    pub fn board_at(&self, origin: IVec3, turns: u32) -> Option<(Vec3, IVec3)> {
+        self.board.map(|(q, d)| ((board_turned(q, turns) + origin * CELLS).as_vec3() / CELLS as f32, rotate(d, turns)))
     }
 
     /// Where a traveller lies in each guest bed once the building is turned by `turns`
@@ -256,6 +277,12 @@ impl Built {
         let r = |q: IVec3| rotate(q, turns);
         self.guest_beds.iter().map(|s| lying(&Spot { at: r(s.at), along: r(s.along), facing: r(s.facing), ..*s }) + origin.as_vec3()).collect()
     }
+}
+
+/// A point in cells turned about the middle of voxel column 0, as fine parts turn.
+fn board_turned(q: IVec3, turns: u32) -> IVec3 {
+    let c = IVec3::new(CELLS / 2, 0, CELLS / 2);
+    rotate(q - c, turns) + c
 }
 
 /// The middle of a bed, on the floor under it, in the bed's own voxels.

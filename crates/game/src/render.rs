@@ -395,8 +395,9 @@ struct ImpostorCamera {
 /// which keep to a budget of their own (`animals::BUDGET`, 1536) so that a field of
 /// them never crowds the rest out; and apart from all those the travellers on the roads
 /// and the water (#205) and the settlements' people (#204), each to a budget of their
-/// own, the people drawn last. 60 bytes a box.
-const PROP_CAPACITY: usize = 4096 + crate::travellers::BUDGET + crate::villagers::MOST_BOXES;
+/// own, the people drawn last; and what the settlements have out on market days and at
+/// festivals (#207), to a budget of its own. 60 bytes a box.
+const PROP_CAPACITY: usize = 4096 + crate::travellers::BUDGET + crate::villagers::MOST_BOXES + crate::villagers::dress::BUDGET;
 
 /// Everything one frame draws.
 pub struct Scene<'a> {

@@ -4,13 +4,14 @@
 //! Nothing here changes once it is made, and it is made the same every time.
 
 use glam::{DVec3, IVec2, Vec2, Vec3};
+use voxel::{Voxel, mesh::CELLS};
 use worldgen::{
     continent::Continent,
     features::fittings::{self, Fitting},
     macro_layout::MACRO_SIZE,
     names::PlaceKind,
     noise::{hash2, unit},
-    settlements::{Kind, Livelihood, layout::Purpose},
+    settlements::{Kind, Livelihood, Region, calendar, layout::Purpose, special::Guild},
     surface::Sampler,
 };
 
@@ -155,6 +156,24 @@ pub struct Resident {
     pub stall: Option<usize>,
 }
 
+/// A market stall as it is dressed on market day (#207), from `calendar::Stall`: the
+/// stall stands bare in the world, and its awning and goods are drawn by the game.
+#[derive(Clone, Debug)]
+pub struct Dress {
+    /// The tops of its back and front rails, continent-local voxels: the back left corner,
+    /// high, and the front right, low. None for a stall fallen into disrepair, which is
+    /// left bare.
+    pub awning: Option<(Vec3, Vec3)>,
+    /// The way it faces, toward its customers.
+    pub front: Vec2,
+    /// Its counter's top, the low and the high corner, continent-local voxels.
+    pub counter: (Vec3, Vec3),
+    pub colour: Voxel,
+    pub seed: u32,
+    /// Who keeps it on market day, by their number among the residents.
+    pub keeper: Option<usize>,
+}
+
 /// One settlement, with its people.
 #[derive(Clone, Debug)]
 pub struct Town {
@@ -187,6 +206,54 @@ pub struct Town {
     /// What people say there of where they are (see talk.rs).
     pub near: Option<String>,
     pub river: Option<String>,
+    // #207: its market days, its festivals and its boards.
+    /// The settlement's seed and region: its market days, and what its stalls sell.
+    pub seed: u32,
+    pub region: Region,
+    /// Each of `stalls` as it is dressed on market day, in the same order.
+    pub market: Vec<Dress>,
+    /// Where the village tree's ribbons are tied, and the spare places under its limbs a
+    /// festival hangs its lanterns from (`Network::tree_knots`), continent-local voxels.
+    pub knots: Vec<Vec3>,
+    pub spare: Vec<Vec3>,
+    /// Where a festival's lanterns stand along the lanes: the foot of each post, and the
+    /// way its arm reaches out over the lane.
+    pub posts: Vec<(Vec3, Vec2)>,
+    /// The well heads: what each is, its middle on the ground, the way it faces and half
+    /// its size across.
+    pub well_heads: Vec<(Fitting, Vec3, Vec2, Vec2)>,
+    /// The outside of each building's door, as `plots`: where its wall meets the open
+    /// air, at the level of its floor, and the way out.
+    pub doors: Vec<(Vec3, Vec2)>,
+    /// The boards to read: the building each is in, the middle of its face and the way
+    /// it faces.
+    pub boards: Vec<(usize, Vec3, Vec2)>,
+    /// Its guild house, if it has one, and the guilds that share it.
+    pub guilds: Option<(usize, Vec<Guild>)>,
+    /// The named places about it, nearest first, with what kind each is: what its
+    /// people's notices speak of.
+    pub about: Vec<(String, PlaceKind)>,
+    /// The other settlements of its continent within [`NEIGHBOURS`], nearest first: what
+    /// its notices send letters to, its merchants keep the market days of and its
+    /// wayfarers chart.
+    pub neighbours: Vec<Neighbour>,
+}
+
+/// How far about a settlement its neighbours are counted: the country a guild house's
+/// wayfarers know (#207).
+pub const NEIGHBOURS: f32 = worldgen::scale::m(4000.0);
+
+/// Another settlement near one (#207).
+#[derive(Clone, Debug)]
+pub struct Neighbour {
+    /// Its index in `Network::settlements`.
+    pub k: usize,
+    pub name: String,
+    pub kind: Kind,
+    pub seed: u32,
+    /// Its middle, continent-local, and how far it is.
+    pub at: Vec2,
+    pub far: f32,
 }
 
 /// What a trade of the settlement is to the person working it.
@@ -201,6 +268,12 @@ pub fn trade_of(l: Livelihood) -> Trade {
         Livelihood::Forager => Trade::Forager,
         Livelihood::Smithy => Trade::Smith,
     }
+}
+
+/// A stall facing `front` as the layout recorded it, in continent-local voxels.
+fn dress_of(m: &calendar::Stall, front: Vec2) -> Dress {
+    let voxels = |q: glam::IVec3| q.as_vec3() / CELLS as f32;
+    Dress { awning: m.awning.map(|(a, b)| (voxels(a), voxels(b))), front, counter: (voxels(m.counter.0), voxels(m.counter.1)), colour: m.colour, seed: m.seed, keeper: None }
 }
 
 /// [`Building::within`], for a building whose walls and eaves cover `lo` to `hi`.
@@ -339,10 +412,15 @@ impl Town {
         let mut wells = Vec::new();
         let mut stalls = Vec::new();
         let mut behind = Vec::new();
+        let mut market = Vec::new();
+        let mut well_heads = Vec::new();
+        // The stalls on the green are the layout's, in its order (#207).
+        let mut nth_stall = 0;
         for &(f, mid, front, half) in &things {
             let ground = |p: Vec3| Vec3::new(p.x, height(flat(p)), p.z);
             match f {
                 Fitting::StoneWell | Fitting::Shaduf | Fitting::OasisWell => {
+                    well_heads.push((f, mid, front, half));
                     let at = mid + Vec3::new(front.x, 0.0, front.y) * (half.x.max(half.y) + 1.2);
                     if let Some(i) = place(Where::Well, Vec3::new(at.x, mid.y, at.z), &mut places) {
                         places[i].face = -front;
@@ -350,6 +428,8 @@ impl Town {
                     }
                 }
                 Fitting::MarketStall => {
+                    let dress = layout.market.get(nth_stall).map(|m| dress_of(m, front));
+                    nth_stall += 1;
                     let deep = half.x.min(half.y);
                     let at = mid + Vec3::new(front.x, 0.0, front.y) * (deep + 1.6);
                     if let Some(i) = place(Where::Stall(stalls.len()), Vec3::new(at.x, mid.y, at.z), &mut places) {
@@ -357,6 +437,7 @@ impl Town {
                         stalls.push(i);
                         let back = mid - Vec3::new(front.x, 0.0, front.y) * (deep * 0.35);
                         behind.push(Spot::new(ground(back).with_y(mid.y), front, Task::Talk));
+                        market.push(dress.unwrap_or(Dress { awning: None, front, counter: (mid, mid), colour: worldgen::materials::CLOTH_PALE, seed: 0, keeper: None }));
                     }
                 }
                 _ => {}
@@ -436,8 +517,21 @@ impl Town {
             water,
             near: None,
             river: None,
+            seed: s.seed,
+            region: s.region,
+            market,
+            knots: Vec::new(),
+            spare: Vec::new(),
+            posts: Vec::new(),
+            well_heads,
+            doors: Vec::new(),
+            boards: Vec::new(),
+            guilds: None,
+            about: Vec::new(),
+            neighbours: Vec::new(),
         };
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
+        town.dressing(c, k, &things, &mut |p| height(p));
         town.near = net
             .settlements
             .iter()
@@ -455,7 +549,118 @@ impl Town {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| p.name.clone());
         town.people(c, tongue, s, &door_of);
+        town.keepers();
         Some(town)
+    }
+
+    /// What its festivals and boards need of it (#207): its tree's knots, posts for
+    /// lanterns along its lanes, where its boards are and its guilds, and the named places
+    /// about it. `things` is every fitting set out about it, as `build` reads them.
+    fn dressing(&mut self, c: &Continent, k: usize, things: &[(Fitting, Vec3, Vec2, Vec2)], height: &mut dyn FnMut(Vec2) -> f32) {
+        let net = &c.trails;
+        let layout = &net.layouts[k];
+        let voxels = |q: &glam::IVec3| q.as_vec3() / CELLS as f32;
+        if let Some((knots, spare)) = net.tree_knots.get(k) {
+            self.knots = knots.iter().map(voxels).collect();
+            self.spare = spare.iter().map(voxels).collect();
+        }
+        for p in &net.plots[layout.plots.clone()] {
+            let out = p.facing.as_vec2().normalize_or(Vec2::X);
+            let face = outside(p, Vec2::new(p.door.x as f32 + 0.5, p.door.z as f32 + 0.5), out);
+            self.doors.push((Vec3::new(face.x, p.door.y as f32 + 1.0, face.y), out));
+        }
+        let first = layout.plots.start;
+        for b in net.boards.iter().filter(|b| layout.plots.contains(&b.plot)) {
+            self.boards.push((b.plot - first, b.at, Vec2::new(b.facing.x as f32, b.facing.z as f32)));
+        }
+        self.guilds = net.guild_halls.iter().find(|g| layout.plots.contains(&g.0)).map(|g| (g.0 - first, g.1.clone()));
+        let at = flat(self.centre);
+        let mut about: Vec<(f32, String, PlaceKind)> = net
+            .names
+            .places
+            .iter()
+            .filter(|p| !matches!(p.kind, PlaceKind::Region | PlaceKind::Range | PlaceKind::Rift | PlaceKind::Fault | PlaceKind::Island) && p.settlement != Some(k))
+            .map(|p| (p.distance(at), p.name.clone(), p.kind))
+            .filter(|p| p.0 < worldgen::scale::m(2500.0))
+            .collect();
+        about.sort_by(|a, b| a.0.total_cmp(&b.0));
+        self.about = about.into_iter().take(12).map(|p| (p.1, p.2)).collect();
+        for (j, s) in net.settlements.iter().enumerate() {
+            let far = s.at().distance(at);
+            if j != k && far < NEIGHBOURS
+                && let Some(name) = net.names.settlement(j)
+            {
+                self.neighbours.push(Neighbour { k: j, name: name.name.clone(), kind: s.kind, seed: s.seed, at: s.at(), far });
+            }
+        }
+        self.neighbours.sort_by(|a, b| a.far.total_cmp(&b.far));
+
+        // A lantern on a post every ten metres or so along each lane, either side in
+        // turn, from the edge of the green to the edge of the settlement; clear of the
+        // buildings, the yard things and the lanes themselves.
+        const EVERY: f32 = worldgen::scale::m(10.0);
+        const MOST: usize = 28;
+        let ways: Vec<Vec2> = layout.lanes.iter().flatten().copied().collect();
+        for (n, lane) in layout.lanes.iter().enumerate() {
+            let mut side = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let mut since = EVERY * 0.5;
+            for i in 1..lane.len().saturating_sub(1) {
+                since += lane[i].distance(lane[i - 1]);
+                let from_middle = lane[i].distance(at);
+                if since < EVERY || from_middle < self.green * 0.5 + 4.0 || from_middle > self.radius || self.posts.len() >= MOST {
+                    continue;
+                }
+                let along = (lane[i + 1] - lane[i - 1]).normalize_or(Vec2::X);
+                let out = along.perp() * side;
+                let foot = lane[i] + out * 3.0;
+                let clear = !self.walled(foot)
+                    && ways.iter().all(|w| w.distance(foot) > 2.2)
+                    && things.iter().all(|t| flat(t.1).distance(foot) > t.3.max_element() + 1.5)
+                    && self.posts.iter().all(|q| flat(q.0).distance(foot) > EVERY * 0.6);
+                if !clear {
+                    continue;
+                }
+                self.posts.push((Vec3::new(foot.x, height(foot), foot.y), -out));
+                since = 0.0;
+                side = -side;
+            }
+        }
+    }
+
+    /// Who keeps each stall on market day (#207): its seller, or else someone of the
+    /// settlement's crafts with something to sell, a trade not at another stall first,
+    /// or failing them someone who keeps a garden.
+    fn keepers(&mut self) {
+        let sells = |t: Trade| {
+            matches!(t, Trade::Woodcutter | Trade::Forager | Trade::Fisher | Trade::Hunter | Trade::Smith | Trade::Weaver | Trade::Beekeeper | Trade::Farmer | Trade::Herder | Trade::Mason)
+        };
+        let mut taken: Vec<usize> = Vec::new();
+        for s in 0..self.market.len() {
+            let seller = self.residents.iter().find(|r| r.stall == Some(s)).map(|r| r.n);
+            let free = |r: &&Resident| !taken.contains(&r.n) && r.stall.is_none();
+            let shown: Vec<Trade> = taken.iter().map(|&n| self.residents[n].person.trade).collect();
+            let crafter = || {
+                let mut c: Vec<&Resident> = self.residents.iter().filter(|r| r.role == Role::Worker && sells(r.person.trade)).filter(free).collect();
+                c.sort_by_key(|r| (shown.contains(&r.person.trade), hash2(self.seed ^ 0x6ee9, s as i32, r.n as i32)));
+                c.first().map(|r| r.n)
+            };
+            let gardener = || self.residents.iter().filter(|r| r.role == Role::Homemaker).filter(free).min_by_key(|r| hash2(self.seed ^ 0x6eea, s as i32, r.n as i32)).map(|r| r.n);
+            let keeper = seller.or_else(crafter).or_else(gardener);
+            if let Some(n) = keeper {
+                taken.push(n);
+            }
+            self.market[s].keeper = keeper;
+        }
+    }
+
+    /// Whether day `day` is its market day (#207).
+    pub fn market_on(&self, day: i64) -> bool {
+        !self.market.is_empty() && calendar::is_market_day_of(self.kind, self.seed, day)
+    }
+
+    /// The stall resident `n` keeps on market day, if any.
+    pub fn keeps(&self, n: usize) -> Option<usize> {
+        self.market.iter().position(|m| m.keeper == Some(n))
     }
 
     /// Everyone who lives there: a household for the beds of each home, each with a bed

@@ -4,10 +4,14 @@
 //! settlement at once, so that two at the well or the tavern are never in the same
 //! place, and it is the same every time for the same day: a pure function of the
 //! settlement and which day it is. Each person keeps their own hours, and the day of the
-//! week changes things: the fourth is market day and the seventh a day of rest.
+//! week changes things: the seventh is a day of rest. Market day comes round on the
+//! settlement's own beat (`worldgen::settlements::calendar`, #207): its stalls are kept
+//! from morning to afternoon by their keepers, and its people come and go to them all
+//! morning and at midday; on other days the stalls stand bare and nobody goes to them.
 
 use glam::{Vec2, Vec3};
 use worldgen::noise::{hash2, unit};
+use worldgen::settlements::calendar;
 
 use super::{
     lanes::flat,
@@ -21,9 +25,9 @@ use crate::people::Trade;
 pub const PACE: f32 = worldgen::scale::m(130.0);
 /// By when everyone is in bed.
 pub const BED_BY: f32 = 23.0;
-/// The days of the week, and which of them is market day and which the day of rest.
+/// The days of the week, and which of them is the day of rest. Market days are the
+/// settlement's own ([`Town::market_on`]).
 pub const WEEK: i64 = 7;
-pub const MARKET_DAY: i64 = 3;
 pub const REST_DAY: i64 = 6;
 /// The least anyone stays anywhere, in hours.
 const LEAST: f32 = 0.05;
@@ -115,7 +119,16 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
     let d = |k: i32| unit(hash2(seed, k, 0x3d17));
     let dow = weekday(day);
     let rest = dow == REST_DAY;
-    let market = dow == MARKET_DAY;
+    let market = town.market_on(day);
+    // Whoever keeps a stall on market day works it, rest day or not; a seller with no
+    // market to keep keeps the house.
+    let keeps = if market { town.keeps(r.n) } else { None };
+    let role = match (r.role, keeps) {
+        (Role::Child | Role::Elder, _) => r.role,
+        (_, Some(_)) => Role::Seller,
+        (Role::Seller, None) => Role::Homemaker,
+        (role, None) => role,
+    };
     let home = town.plots[r.home].place;
     let inside = Want { place: home, spot: town.inside_spot(r.home, r.member, Task::Stand), start: f32::NEG_INFINITY, stay: LEAST };
     let at = |start: f32, w: Want| Want { start, ..w };
@@ -130,12 +143,14 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
         taken.wells[i] += 1;
         Some(Want { place: town.wells[i], spot: around(town, town.wells[i], slot, Task::Fetch), start: f32::NEG_INFINITY, stay: 0.2 + 0.15 * d(k + 1) })
     };
+    // A stall to buy at, only on market day, when they are kept. Those at one at once
+    // stand in a few rows before it; those who come later take the places of those gone.
     let stall = |taken: &mut Taken, k: i32| -> Option<Want> {
-        if town.stalls.is_empty() {
+        if town.stalls.is_empty() || !market {
             return None;
         }
         let i = (d(k) * town.stalls.len() as f32) as usize % town.stalls.len();
-        let slot = taken.stalls[i];
+        let slot = taken.stalls[i] % 6;
         taken.stalls[i] += 1;
         Some(Want { place: town.stalls[i], spot: around(town, town.stalls[i], slot, Task::Talk), start: f32::NEG_INFINITY, stay: 0.35 + 0.3 * d(k + 1) })
     };
@@ -192,11 +207,12 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
     };
     let bed = |start: f32| Want { place: home, spot: r.bed, start, stay: 0.0 };
 
-    match r.role {
-        Role::Worker | Role::Seller if !rest => {
+    match role {
+        Role::Worker | Role::Seller if !rest || keeps.is_some() => {
             let wake = 5.6 + d(1);
             w.push(for_(0.3, at(wake, inside)));
-            if d(2) < if r.role == Role::Seller { 0.3 } else { 0.4 } {
+            // A stall's keeper is off to set it up instead of to the well.
+            if keeps.is_none() && d(2) < if r.role == Role::Seller { 0.3 } else { 0.4 } {
                 w.extend(well(taken, 3).map(|x| at(wake + 0.6 + 0.3 * d(20), x)));
                 w.push(for_(0.3, inside));
             }
@@ -204,15 +220,20 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
             let noon = 11.9 + 0.3 * d(5);
             let afternoon = 13.1 + 0.3 * d(6);
             let evening_in = 17.0 + 0.6 * d(7);
-            match (r.role, r.stall) {
-                (Role::Seller, Some(s)) => {
-                    w.push(at(8.8 + 0.4 * d(4), Want { place: town.stalls[s], spot: town.behind[s], start: 0.0, stay: 0.5 }));
-                    w.push(for_(0.6, at(15.0 + 0.4 * d(5), inside)));
+            match keeps {
+                Some(s) => {
+                    // Out to set the stall up before it opens, and behind it until it
+                    // closes (#207).
+                    let open = calendar::MARKET_OPENS - 0.25 + 0.2 * d(4);
+                    let shut = calendar::MARKET_CLOSES + 0.1 + 0.25 * d(5);
+                    w.push(Want { place: town.stalls[s], spot: town.behind[s], start: open, stay: shut - open });
+                    w.push(for_(0.6, inside));
                 }
-                _ => {
+
+                None => {
                     w.extend(job(0).map(|x| at(morning, x)));
-                    // To the market at midday on market day, and some on other days.
-                    match stall(taken, 8).filter(|_| market && d(9) < 0.75 || d(9) < 0.22) {
+                    // To the market at midday on market day.
+                    match stall(taken, 8).filter(|_| d(9) < 0.85) {
                         Some(s) => w.push(at(noon, s)),
                         None => w.push(at(noon, inside)),
                     }
@@ -234,7 +255,11 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
             }
             let u = d(11);
             let out = 9.8 + 0.6 * d(12);
-            let morning = if u < 0.3 {
+            // A day of rest that is market day too takes most of them to the stalls.
+            let shopping = if d(18) < 0.6 { stall(taken, 19) } else { None };
+            let morning = if let Some(s) = shopping {
+                Some(s)
+            } else if u < 0.3 {
                 Some(green(taken, Task::Talk))
             } else if u < 0.5 {
                 haunt(taken, town.tree, Task::SitLow)
@@ -278,14 +303,18 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
             }
             w.extend(job(0).filter(|_| !rest).map(|x| at(8.0 + 0.5 * d(4), for_(0.6, x))));
             w.extend(job(1).filter(|_| !rest && r.jobs.len() > 1).map(|x| at(9.2 + 0.4 * d(5), for_(1.2, x))));
-            match stall(taken, 8).filter(|_| (market && d(9) < 0.85) || d(9) < 0.35) {
-                Some(s) => w.push(at(11.2 + 0.6 * d(16), s)),
+            // To market in the morning, any time from its opening to midday.
+            match stall(taken, 8).filter(|_| d(9) < 0.9) {
+                Some(s) => w.push(at(calendar::MARKET_OPENS + 0.6 + 3.0 * d(16), for_(0.4 + 0.5 * d(17), s))),
                 None if rest && d(9) < 0.6 => w.extend(haunt(taken, town.shrine, Task::Stand).map(|x| at(10.2, x))),
                 None => {}
             }
             w.push(for_(1.0, at(12.4 + 0.3 * d(13), inside)));
             let u = d(14);
-            if u < 0.45 {
+            if let Some(s) = stall(taken, 21).filter(|_| d(22) < 0.35) {
+                // Back to the market in the afternoon, for what was forgotten.
+                w.push(at(14.0 + 1.2 * d(15), for_(0.4, s)));
+            } else if u < 0.45 {
                 w.push(at(15.0 + 0.5 * d(15), for_(1.2, door_sit(r.member as u32))));
             } else if u < 0.65 {
                 w.push(at(15.0 + 0.5 * d(15), for_(1.0, green(taken, Task::Talk))));
@@ -315,8 +344,8 @@ fn plan(town: &Town, r: &Resident, day: i64, taken: &mut Taken) -> Plan {
             let wake = 5.4 + d(1);
             w.push(for_(0.8, at(wake + 0.2, inside)));
             w.push(at(8.0 + 0.6 * d(4), for_(2.5, door_sit(r.member as u32))));
-            if market && d(9) < 0.5 {
-                w.extend(stall(taken, 8).map(|s| at(11.4, s)));
+            if market && d(9) < 0.7 {
+                w.extend(stall(taken, 8).map(|s| at(10.0 + 1.6 * d(19), s)));
             } else if rest && d(9) < 0.7 {
                 w.extend(haunt(taken, town.shrine, Task::Stand).map(|x| at(10.8, x)));
             }

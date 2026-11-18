@@ -133,6 +133,10 @@ pub trait Game {
     fn greet(&mut self) -> Reply {
         cannot("greeting")
     }
+    /// Reads the board looked at, as E does (#207).
+    fn read(&mut self) -> Reply {
+        cannot("reading")
+    }
     /// The travellers nearest, of a kind if one is given, or with `quays` the quays they
     /// tie up at (#205).
     fn travellers(&self, _kind: Option<worldgen::settlements::travel::Kind>, _quays: bool, _n: usize) -> Vec<crate::travellers::Listed> {
@@ -182,6 +186,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
     Spec { name: "people", also: &[], usage: "people [here|all]", about: "who lives in the settlement nearest, and where they all are at this hour; all names each of them", words: here_words, run: |args, game| game.people(args.first() == Some(&"all")) },
     Spec { name: "greet", also: &["hello"], usage: "greet", about: "greet whoever of a settlement is nearest, as E does", words: none, run: |_, game| game.greet() },
+    Spec { name: "read", also: &[], usage: "read", about: "read the notice board or guilds' board looked at, as E does", words: none, run: |_, game| game.read() },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
     Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | herd <animal> [n] | pen <animal> | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, bring a herd or a pen of animals, or set things down", words: spawn_words, run: spawn },

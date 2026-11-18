@@ -754,6 +754,22 @@ pub fn build_with(kind: Fitting, p: &Palette, seed: u32, decayed: bool, herbs: &
     Fitted { kind, decayed, turns: 0, voxels: k.voxels, fine: k.fine, hooks: k.hooks }
 }
 
+/// A market stall as it stands between market days (#207): the [`build`] of
+/// [`Fitting::MarketStall`] of the same seed, its frame and counter as they are, but with
+/// nothing on the counter. It keeps its [`Hook::Awning`], which the game stretches the
+/// awning over on market day. The corners of its counter's top are [`STALL_COUNTER`].
+pub fn bare_stall(p: &Palette, seed: u32, decayed: bool) -> Fitted {
+    let kind = Fitting::MarketStall;
+    let mut k = Kit::new();
+    let mut rng = Rng::new(seed ^ 0x0f17_7e25 ^ (kind as u32).wrapping_mul(0x2545_f491));
+    yard::bare_stall(&mut k, &mut rng, p, decayed);
+    Fitted { kind, decayed, turns: 0, voxels: k.voxels, fine: k.fine, hooks: k.hooks }
+}
+
+/// The top of a kept market stall's counter, in its model cells: the corner at its low x
+/// and z, and the one at its high x and z, both on the top face.
+pub const STALL_COUNTER: (IVec3, IVec3) = (IVec3::new(2, 10, 7), IVec3::new(22, 10, 12));
+
 /// Every fitting laid out on plain ground to be looked at, for the structure editor: each
 /// intact with its decayed form beside it, in rows by [`Group`] (or only `group`'s), all
 /// facing +Z.

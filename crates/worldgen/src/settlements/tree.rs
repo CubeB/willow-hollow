@@ -75,9 +75,11 @@ pub(crate) fn plant_all(c: &Continent, seed: u32, net: &mut Network) {
         Some((tree.pos - IVec3::new(origin.0, 0, origin.1), dress_at(c, seed, net_now, lib, &tree, age)))
     });
     net.village_trees = vec![None; net.settlements.len()];
+    net.tree_knots = vec![Default::default(); net.settlements.len()];
     for (k, d) in dressed.into_iter().enumerate() {
         let Some((at, d)) = d else { continue };
         net.village_trees[k] = Some(at);
+        net.tree_knots[k] = (d.knots, d.spare);
         net.add_stamp_with(Vec::new(), d.fine);
         net.rings.push(d.ring);
     }
@@ -118,6 +120,10 @@ const TIE_HIGHEST: i32 = m(8.0) as i32;
 const GIRDLE: i32 = m(2.0) as i32;
 /// Lowest a ribbon's free end hangs over the ground, in cells: clear of a grown head.
 const END_CLEAR: i32 = m(1.2) as i32 * CELLS;
+/// The most spare places under a tree's limbs kept for a festival (#207), and the room
+/// a lantern hung at one needs below it, in cells.
+const SPARE: usize = 12;
+const LANTERN_ROOM: i32 = 12;
 /// The colours the ribbons are dyed: madder red, woad blue, weld yellow, and undyed.
 const DYES: [Voxel; 4] = [mat::CLOTH_RED, mat::CLOTH_BLUE, mat::CLOTH_YELLOW, mat::CLOTH_PALE];
 /// The flowers left in season: each comes and goes with its own months.
@@ -219,6 +225,10 @@ pub struct Dressing {
     pub ring: WornRing,
     /// Where each ribbon is tied: the corner of its top cell, continent-local cells.
     pub knots: Vec<IVec3>,
+    /// Where more could be tied or hung on a festival (#207), as `knots` are, with room
+    /// below each for a lantern: the next lowest places under its limbs, apart from the
+    /// ribbons and from one another. Nothing is built at them.
+    pub spare: Vec<IVec3>,
 }
 
 impl Dressing {
@@ -283,8 +293,8 @@ pub fn dress(lib: &Library, tree: &Placement, origin: (i32, i32), ground: impl F
     let ring = WornRing { x: centre.x, z: centre.y, trunk: foot, foot: foot + m(1.2), ring: foot + m(2.2), wear };
     let mut fine = Vec::new();
     offerings(&ring, at.y - 1, &ground, &taken, palette, age, seed, salt, &mut fine);
-    let knots = ribbons(lib, tree, shift, &ground, &taken, centre, radius, age, salt, &mut fine);
-    Dressing { fine, ring, knots }
+    let (knots, spare) = ribbons(lib, tree, shift, &ground, &taken, centre, radius, age, salt, &mut fine);
+    Dressing { fine, ring, knots, spare }
 }
 
 /// Lays the offerings at the foot of the tree, on the trodden ground between its roots:
@@ -408,7 +418,7 @@ fn offering(h: u32, corner: IVec3, palette: &Palette, out: &mut Vec<PlantBox>) {
 /// Ties the ribbons on: each from the underside of a limb of the tree's own model, the
 /// lowest there are, never two side by side, in the four dyes. A tree with no limb low
 /// enough has them tied round its trunk instead, hanging down the bark. Returns where each
-/// is tied.
+/// is tied, and the spare places under the limbs left over (see [`Dressing::spare`]).
 #[allow(clippy::too_many_arguments)]
 fn ribbons(
     lib: &Library,
@@ -421,7 +431,7 @@ fn ribbons(
     age: f32,
     salt: u32,
     out: &mut Vec<PlantBox>,
-) -> Vec<IVec3> {
+) -> (Vec<IVec3>, Vec<IVec3>) {
     let want = (RIBBONS_YOUNG + (RIBBONS_ANCIENT - RIBBONS_YOUNG) * age).round() as usize;
     let t = lib.get(tree.species, tree.variant);
     let at = tree.pos - shift;
@@ -480,7 +490,23 @@ fn ribbons(
         tie(IVec3::new(q.x * CELLS + ox, q.y * CELLS, q.z * CELLS + oz), along_x, h, out, &mut knots);
     }
     if !knots.is_empty() {
-        return knots;
+        // The places left under the limbs, for a festival's lanterns: room for one to
+        // hang below each, the lowest first, never beside a ribbon or another.
+        let apart = |k: IVec3, q: IVec3| (k.div_euclid(IVec3::splat(CELLS)) - q).as_vec3().length() < 1.5;
+        let mut spare: Vec<IVec3> = Vec::new();
+        for &(_, q, _) in &under {
+            if spare.len() == SPARE {
+                break;
+            }
+            if knots.iter().chain(&spare).any(|&k| apart(k, q)) {
+                continue;
+            }
+            let knot = IVec3::new(q.x * CELLS + CELLS / 2, q.y * CELLS, q.z * CELLS + CELLS / 2);
+            if room(knot) >= LANTERN_ROOM {
+                spare.push(knot);
+            }
+        }
+        return (knots, spare);
     }
 
     // Round the trunk: from each side in turn, walk in to the bark at about head height and
@@ -506,7 +532,7 @@ fn ribbons(
         let h = hash3(salt ^ 0x41b1, knot.x, knot.y, knot.z);
         tie(knot, along_x, h, out, &mut knots);
     }
-    knots
+    (knots, Vec::new())
 }
 
 #[cfg(test)]

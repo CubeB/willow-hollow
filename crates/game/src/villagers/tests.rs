@@ -15,6 +15,7 @@ use worldgen::{
 
 use super::{
     day::{self, Now},
+    dress, notices,
     lanes::flat,
     talk,
     town::Town,
@@ -44,8 +45,43 @@ fn towns() -> &'static Vec<Town> {
     })
 }
 
-/// A day that is no day in particular: neither market day nor the day of rest.
+/// A day that is not the day of rest. Whether it is market day is the settlement's own
+/// (see `market_day_fills_the_stalls_and_other_days_leave_them_bare`).
 const WORKDAY: i64 = 7 * 40 + 1;
+
+#[test]
+fn market_day_fills_the_stalls_and_other_days_leave_them_bare() {
+    let mut seen = false;
+    for town in towns().iter().filter(|t| !t.stalls.is_empty()) {
+        seen = true;
+        let days = WORKDAY..WORKDAY + 14;
+        let market = days.clone().find(|&d| town.market_on(d)).unwrap_or_else(|| panic!("{}: no market in a fortnight", town.name));
+        let ordinary = days.clone().find(|&d| !town.market_on(d) && day::weekday(d) != day::REST_DAY).unwrap();
+        let at_stalls = |plans: &[day::Plan], hour: f32| plans.iter().filter(|p| matches!(p.now(hour), Now::At(i) if town.stalls.contains(&p.stays[i].place))).count();
+        let plans = day::plans(town, market);
+        // Every stall that has a keeper has them behind it through the market's hours.
+        let kept: Vec<usize> = town.market.iter().filter_map(|m| m.keeper).collect();
+        assert!(!kept.is_empty(), "{}: nobody keeps a stall", town.name);
+        for &n in &kept {
+            let s = town.keeps(n).unwrap();
+            for hour in [9.0, 12.0, 15.5] {
+                let Now::At(i) = plans[n].now(hour) else { panic!("{}: keeper {n} walking at {hour}", town.name) };
+                assert_eq!(plans[n].stays[i].spot.at, town.behind[s].at, "{}: keeper {n} away at {hour}", town.name);
+            }
+        }
+        // Buyers come and go all morning: more than the keepers at the stalls at its
+        // busiest, and different people at different hours.
+        let busiest = (0..24).map(|k| at_stalls(&plans, 8.5 + k as f32 * 0.25)).max().unwrap();
+        assert!(busiest >= kept.len() + town.stalls.len(), "{}: at most {busiest} at {} stalls", town.name, town.stalls.len());
+        let who = |hour: f32| -> Vec<usize> { (0..plans.len()).filter(|&n| !kept.contains(&n) && matches!(plans[n].now(hour), Now::At(i) if town.stalls.contains(&plans[n].stays[i].place))).collect() };
+        assert_ne!(who(9.5), who(12.0), "{}: the same buyers all morning", town.name);
+        // On another day nobody goes to them, nor before the market opens or after it shuts.
+        let other = day::plans(town, ordinary);
+        assert_eq!((0..48).map(|k| at_stalls(&other, k as f32 * 0.5)).max(), Some(0), "{}", town.name);
+        assert_eq!(at_stalls(&plans, 6.0) + at_stalls(&plans, 18.0), 0, "{}", town.name);
+    }
+    assert!(seen, "none of the towns looked at has a stall");
+}
 
 #[test]
 fn the_same_people_are_in_the_same_places_every_time() {
@@ -399,6 +435,126 @@ fn greeting_someone_stops_them_and_the_save_remembers() {
     assert!(back.notes().any(|n| n.text.contains(&name)));
     // Someone else with the same number in a world made since is met afresh.
     assert_eq!(back.met(&who.key(), "Someone Else"), 0);
+}
+
+#[test]
+fn the_notice_board_names_real_people_and_places_and_is_the_same_every_time() {
+    let names = &continent().trails.names;
+    for town in towns() {
+        let mut texts = std::collections::HashSet::new();
+        for week in 40..52 {
+            let board = notices::for_week(town, week);
+            assert_eq!(board, notices::for_week(town, week), "{}", town.name);
+            assert!((1..=2).contains(&board.len()), "{}: {} requests", town.name, board.len());
+            for r in &board {
+                assert_eq!(town.residents[r.who].person.name, r.name);
+                assert!(r.text.contains(&r.name), "{}", r.text);
+                match &r.errand {
+                    notices::Errand::Lost { near, .. } => assert!(names.named(near).is_some() && r.text.contains(near.as_str()), "{}: {near} is no place", r.text),
+                    notices::Errand::Carry { to, town: there, .. } => {
+                        assert_eq!(names.settlement(*to).map(|p| &p.name), Some(there));
+                        assert!(*to != town.k && r.text.contains(there.as_str()));
+                    }
+                    notices::Errand::Gather { count, .. } => assert!((3..=8).contains(count)),
+                }
+                texts.insert(r.text.clone());
+            }
+        }
+        assert!(texts.len() >= 8, "{}: only {} requests in twelve weeks", town.name, texts.len());
+    }
+    // Read, they go in the journal as offered, once each, and the save keeps them.
+    let town = &towns()[0];
+    let mut journal = Journal::new();
+    let board = notices::for_week(town, 40);
+    for r in &board {
+        assert!(journal.offer(&r.key, &r.name, &town.name, &r.text));
+        assert!(!journal.offer(&r.key, &r.name, &town.name, &r.text));
+    }
+    let back = Journal::from_text(&journal.to_text());
+    let said = |j: &Journal| j.offered().iter().map(|o| (o.key.clone(), o.name.clone(), o.town.clone(), o.text.clone())).collect::<Vec<_>>();
+    assert_eq!(said(&back), said(&journal));
+    assert_eq!(back.offered().len(), board.len());
+}
+
+#[test]
+fn the_wayfarers_mark_the_country_about_on_the_map() {
+    use worldgen::settlements::special::Guild;
+    let c = continent();
+    let net = &c.trails;
+    let real = (0..net.layouts.len()).find(|&k| net.guild_halls.iter().any(|g| net.layouts[k].plots.contains(&g.0) && g.1.contains(&Guild::Wayfarers)));
+    let mut town = Town::build(c, SEED, (0, 0), real.unwrap_or(towns()[0].k)).unwrap();
+    if real.is_none() {
+        // The test continent is too small for a guild house: the biggest settlement's
+        // tavern, and its board, stand in for one.
+        let tavern = town.tavern.expect("no tavern");
+        assert!(town.boards.iter().any(|b| b.0 == tavern), "the tavern has no board");
+        town.guilds = Some((tavern, vec![Guild::Merchants, Guild::Wayfarers]));
+    }
+    let (plot, guilds) = town.guilds.clone().expect("the guild house is not known");
+    let &(_, at, facing) = town.boards.iter().find(|b| b.0 == plot).expect("the guild house has no board");
+    // Stood before its board, looking at it.
+    let eye = at + Vec3::new(facing.x, 0.0, facing.y) * m(1.4);
+    let forward = (at - eye).normalize();
+    let eye = town.origin + eye.as_dvec3();
+    let mut v = Villagers::new();
+    v.add(town.clone(), WORKDAY);
+    let (which, word) = v.board_in_sight(eye, forward).expect("the board is not in sight");
+    assert_eq!(word, "the guilds' board");
+    assert!(v.board_in_sight(eye, -forward).is_none(), "read with its back to it");
+    let read = v.read(which, |_| false).unwrap();
+    for g in &guilds {
+        assert!(read.page.lines.iter().any(|l| l.0 == g.name() && l.1.len() > 60), "{} not on the board", g.name());
+    }
+    let (places, middle, reach) = read.chart.clone().expect("no chart from the wayfarers");
+    assert_eq!(places.len(), town.neighbours.len());
+    for (name, p) in &places {
+        assert!(net.names.named(name).is_some_and(|p| p.kind.is_settlement()), "{name}");
+        assert!(p.distance(middle) <= reach, "{name} is beyond the chart");
+        assert!(read.page.text().contains(name.as_str()), "{name} is not said to be marked");
+    }
+    // The journal keeps it, once, and the save with it; read again, the board says the
+    // country is marked already.
+    let mut journal = Journal::new();
+    assert!(journal.chart(&read.key, &read.town, middle, reach));
+    assert!(!journal.chart(&read.key, &read.town, middle, reach));
+    let back = Journal::from_text(&journal.to_text());
+    assert_eq!(back.charted(), journal.charted());
+    let again = v.read(which, |key| back.charted().iter().any(|c| c.key == key)).unwrap();
+    assert!(again.page.text().contains("marked on your map from their charts"), "{}", again.page.text());
+}
+
+#[test]
+fn market_days_and_festivals_are_dressed_within_their_budget() {
+    use worldgen::settlements::calendar::{Festival, festival_on};
+    let year_days = 24.0;
+    let when = |day: i64, hour: f32, lit: f32| dress::When { day, date: ((day as f32 + 0.5) / year_days).fract(), year_days, hour, lit, clock: 1.0 };
+    let town = towns().iter().find(|t| t.market.iter().any(|m| m.keeper.is_some() && m.awning.is_some())).expect("no stall to dress");
+    let plain = |d: i64| festival_on(d, year_days).is_none();
+    let market = (WORKDAY..WORKDAY + 30).find(|&d| town.market_on(d) && plain(d)).unwrap();
+    let ordinary = (WORKDAY..WORKDAY + 30).find(|&d| !town.market_on(d) && plain(d)).unwrap();
+    let stall = town.places[town.stalls[0]].at;
+    let count = |w: dress::When, at: Vec3| {
+        let mut out = Vec::new();
+        let n = dress::draw(std::iter::once((town, w)), town.origin + (at + Vec3::Y * m(1.6)).as_dvec3(), &mut out);
+        assert!(n == out.len() && n <= dress::BUDGET, "{n} boxes");
+        n
+    };
+    // The stalls are dressed through the market's hours on market day, and not before
+    // it opens, nor on another day.
+    let open = count(when(market, 12.0, 0.0), stall);
+    assert!(open > count(when(ordinary, 12.0, 0.0), stall) + 20, "{open} boxes on market day");
+    assert_eq!(count(when(market, 6.0, 0.0), stall), count(when(ordinary, 12.0, 0.0), stall));
+    // At Midwinter lanterns hang, lit at night; at Midsummer garlands go up.
+    let winter = (0..48).find(|&d| festival_on(d, year_days) == Some(Festival::Midwinter)).unwrap();
+    let summer = (0..48).find(|&d| festival_on(d, year_days) == Some(Festival::Midsummer)).unwrap();
+    let ord = (0..48).find(|&d| plain(d) && !town.market_on(d)).unwrap();
+    let middle = town.centre;
+    assert!(count(when(winter, 22.0, 1.0), middle) > count(when(ord, 22.0, 1.0), middle), "no lanterns at Midwinter");
+    assert!(count(when(summer, 12.0, 0.0), middle) > count(when(ord, 12.0, 0.0), middle), "no garlands at Midsummer");
+    let lamps = |w: dress::When| dress::lamps(std::iter::once((town, w)), town.origin + (town.spare.first().copied().or(town.posts.first().map(|p| p.0)).unwrap_or(middle)).as_dvec3());
+    assert!(!town.spare.is_empty() || !town.posts.is_empty(), "{}: nowhere to hang a lantern", town.name);
+    assert!(!lamps(when(winter, 22.0, 1.0)).is_empty(), "no lantern lit at Midwinter");
+    assert!(lamps(when(winter, 12.0, 0.0)).is_empty() && lamps(when(ord, 22.0, 1.0)).is_empty());
 }
 
 #[test]

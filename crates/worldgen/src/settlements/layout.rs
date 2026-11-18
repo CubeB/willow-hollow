@@ -206,6 +206,8 @@ pub struct Layout {
     pub harbour: Option<Harbour>,
     /// A great town's park.
     pub park: Option<Park>,
+    /// #207: each of `stalls` as the game dresses it on market day, in the same order.
+    pub market: Vec<super::calendar::Stall>,
 }
 
 /// Lays out every settlement on the continent, in order. `first` is the index of the
@@ -1386,6 +1388,15 @@ impl<'a> Town<'a> {
         net.add_stamp_with(voxels, fine);
         if let Some(own) = &own {
             net.guest_beds.extend(own.guest_beds_at(origin, t));
+            // #207: its board to read, and a guild house's guilds, by the index its plot
+            // will have in `net.plots` (a settlement's plots go in once it is laid out).
+            let plot = net.plots.len() + self.plots.len();
+            if let Some((at, facing)) = own.board_at(origin, t) {
+                net.boards.push(special::Board { plot, at, facing });
+            }
+            if !own.guilds.is_empty() {
+                net.guild_halls.push((plot, own.guilds.clone()));
+            }
         }
         if inside.fire.is_some() || own.as_ref().is_some_and(|o| o.fire.is_some()) {
             let q = origin + rotate(b.smoke, t);
@@ -1816,6 +1827,27 @@ impl<'a> Town<'a> {
             return false;
         }
         let f = self.fitting(kind, seed);
+        // #207: a stall stands bare between market days, its frame and counter only; the
+        // game stretches its awning and sets out its goods on market day, from what is
+        // recorded here (`calendar::Stall`).
+        if kind == Fitting::MarketStall && f.kind == Fitting::MarketStall {
+            let bare = fittings::bare_stall(&self.pal, seed, f.decayed);
+            let awning = bare.place(at, ft).hooks.iter().find_map(|h| match *h {
+                Hook::Awning { back, front } => Some((back, front)),
+                _ => None,
+            });
+            // The counter's corners turned and moved as the hooks are.
+            let cells = |q: IVec3| {
+                let c = IVec3::new(CELLS / 2, 0, CELLS / 2);
+                rotate(q - c, ft) + c + at * CELLS
+            };
+            let (a, b) = (cells(fittings::STALL_COUNTER.0), cells(fittings::STALL_COUNTER.1));
+            let colour = cloth.unwrap_or(mat::CLOTH_PALE);
+            self.layout.market.push(super::calendar::Stall { at, turns: ft, awning, counter: (a.min(b), a.max(b)), colour, seed });
+            self.hold(net, &bare, at, ft, Vec::new());
+            self.layout.stalls.push(at);
+            return true;
+        }
         let extra = match (kind, cloth) {
             (Fitting::MarketStall, Some(colour)) if !f.decayed => awning(&f, colour),
             _ => Vec::new(),

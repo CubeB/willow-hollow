@@ -308,6 +308,19 @@ pub(super) fn oasis_well(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool)
 /// out on it, and a bench behind with sacks. Decayed, the counter has come down, two
 /// posts have gone, and broken pots lie on the boards.
 pub(super) fn market_stall(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    stall(k, rng, p, decayed, true);
+}
+
+/// A market stall as it stands between market days (#207): the frame and the counter,
+/// without its awning hook's cloth or anything on the counter. The game sets those out on
+/// market day.
+pub(super) fn bare_stall(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    stall(k, rng, p, decayed, false);
+}
+
+/// The market stall, stocked or bare: a stocked one is built as it always was, box for
+/// box, so a market hall's stalls are unchanged.
+fn stall(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool, stocked: bool) {
     let (wood, board) = if decayed { (mat::WOOD_DEAD, mat::PLANK_DARK) } else { (p.wood, p.plank) };
     k.b((1, 0, 1), (2, 22, 2), wood);
     k.b((2, 5, 2), (22, 6, 5), board);
@@ -327,6 +340,9 @@ pub(super) fn market_stall(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: boo
         k.b((2, 1, 11), (22, 9, 12), board);
         for x in [3, 20] {
             k.b((x, 0, 7), (x + 1, 9, 8), wood);
+        }
+        if !stocked {
+            return;
         }
         // Goods along the counter, a different spread on each stall.
         let mut x = 3;

@@ -502,6 +502,7 @@ cannot be done says why and how it is used.
 | `places [name]` | The ten named places nearest, or those with this in their name, with how far, which way and the `tp` to each |
 | `people [here\|all]` | Who lives in the settlement nearest, how many households, how many of them are where at this hour (in bed, at the well, at work, at the tavern...) and where its well, market, tavern and tree are, with the nearest few by name; `all` names every one of them and where each is |
 | `greet` | Greet whoever of a settlement is within 3 m, as E does. On a screenshot, the one nearest the figure (or the camera) turns to it, and what they say is the shot's prompt |
+| `read` | Read the notice board or guild house's board looked at, within 2.4 m, as E does. On a screenshot (or with `--read`), the board the camera looks at, its page drawn over the shot. `people` says where each board of the settlement nearest is read from, and when its next market day is |
 | `fly [on\|off]` | Fly free of the ground, or walk again (F) |
 | `view` | Through the eyes, or from behind the figure (V) |
 | `spawn camp [laid\|lit\|out\|burnt]` | Make camp a few steps ahead, as `--camp` does: a fire (lit if not said) and a few things set down |
@@ -517,7 +518,7 @@ cannot be done says why and how it is used.
 `--command "LINE"` runs a line at the start, as if typed, and can be given as often as
 needed; what each says goes in the log and in the console. On a screenshot the commands
 set the shot up as their flags would: `weather`, `time`, `date`, `season`, `year`, `tp` (as
-`--over`), `pos`, `places`, `people`, `greet`, `spawn camp`, `spawn murmuration`,
+`--over`), `pos`, `places`, `people`, `greet`, `read`, `spawn camp`, `spawn murmuration`,
 `spawn crows`, `spawn boat` and `aurora`; any other, or one that fails, stops the shot with what was
 wrong. `--console` draws the console open on a screenshot, with what the commands said,
 and in a run starts with it open.

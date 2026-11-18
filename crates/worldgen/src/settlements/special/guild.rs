@@ -115,6 +115,9 @@ pub(super) fn build(mut f: Frame) -> (Built, Vec<String>) {
     for (&g, &z) in gs.iter().zip(at) {
         banner(&mut f, face, y, z, g);
     }
+    // #207: the roll of the guilds inside, beside the door, pegged in their colours.
+    let pegs: Vec<_> = gs.iter().flat_map(|g| [g.colours().0, g.colours().1]).collect();
+    f.notice_board(&b, dz - 3, dz - 2, &pegs);
     f.porch(&b, dz, 3);
     f.clear.push((IVec3::new(-1, feet, iz0), IVec3::new(0, up + 5, iz0 + 7)));
     f.finish(Area { lo: b.lo, hi: b.hi }, fy)
