@@ -52,6 +52,7 @@ fn fill(line: &str, town: &Town, r: &Resident, hour: f32, date: f32) -> Option<S
             "neighbour" => town.near.clone()?,
             "river" => town.river.clone()?,
             "season" => season(date).into(),
+            "hamlet" => town.hamlets.get(r.from?)?.name.clone(),
             "time" => part_of_day(hour).into(),
             "trade" => match r.person.trade {
                 Trade::None | Trade::Traveller => return None,
@@ -89,6 +90,7 @@ pub fn greeting(town: &Town, r: &Resident, met: u32, hour: f32, date: f32) -> St
     let h = |k: i32| hash2(r.person.seed, met as i32, k);
     let open = match (r.person.age, met) {
         (Age::Child, _) => "open child",
+        (_, 0) if r.role == Role::Visitor => "open visitor",
         (_, 0) => "open first",
         (_, 1..=3) => "open again",
         _ => "open often",
@@ -100,6 +102,7 @@ pub fn greeting(town: &Town, r: &Resident, met: u32, hour: f32, date: f32) -> St
         Role::Elder => about.extend(["remark elder", "remark elder"]),
         Role::Worker | Role::Seller | Role::Innkeeper => about.push("remark trade"),
         Role::Homemaker => {}
+        Role::Visitor => about = vec!["remark visitor", "remark visitor", "remark season"],
     }
     let start = h(2) as usize % about.len();
     let remark = (0..about.len()).find_map(|k| one(&section(about[(start + k) % about.len()]), h(3), town, r, hour, date));
@@ -112,7 +115,7 @@ pub fn greeting(town: &Town, r: &Resident, met: u32, hour: f32, date: f32) -> St
 
 /// Every section the greetings use, for checking lines.txt.
 #[cfg(test)]
-pub const SECTIONS: [&str; 11] = [
+pub const SECTIONS: [&str; 13] = [
     "open first",
     "open again",
     "open often",
@@ -124,6 +127,8 @@ pub const SECTIONS: [&str; 11] = [
     "remark trade",
     "remark child",
     "remark elder",
+    "open visitor",
+    "remark visitor",
 ];
 
 #[cfg(test)]

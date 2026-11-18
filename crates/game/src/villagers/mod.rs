@@ -555,6 +555,7 @@ impl Villagers {
                 Now::At(i) => {
                     let s = &plan.stays[i];
                     match (s.spot.task, s.spot.inside) {
+                        (_, Some(town::AWAY)) => "away in the hamlets".into(),
                         (Task::Lie, _) => "in bed".into(),
                         (_, Some(b)) if Some(b) == town.tavern && r.home != b => "at the tavern".into(),
                         (_, Some(_)) => "indoors".into(),
@@ -565,12 +566,16 @@ impl Villagers {
             tally(what);
         }
         count.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // Those in from the hamlets for the market are counted apart from its own people.
+        let own = |r: &&Resident| r.role != town::Role::Visitor;
+        let visitors = residents.iter().filter(|r| r.role == town::Role::Visitor).count();
         let mut out = format!(
-            "{}, a {}: {} people in {} households, at {:02}:{:02}",
+            "{}, a {}: {} people in {} households{}, at {:02}:{:02}",
             town.name,
             town.kind.word(),
-            residents.len(),
-            residents.iter().filter(|r| r.member == 0).count(),
+            residents.iter().filter(own).count(),
+            residents.iter().filter(own).filter(|r| r.member == 0).count(),
+            if visitors > 0 { format!(" and {visitors} who come in from the hamlets on market day") } else { String::new() },
             hour as u32,
             ((hour.fract()) * 60.0) as u32
         );

@@ -61,7 +61,7 @@ pub fn for_week(town: &Town, week: i64) -> Vec<Request> {
     let seed = town.seed ^ 0x40b1_ce5d;
     let h = |a: i32, b: i32| hash3(seed, week as i32, a, b);
     // The grown, who would pin something up: not the children.
-    let asking: Vec<usize> = town.residents.iter().filter(|r| r.role != Role::Child).map(|r| r.n).collect();
+    let asking: Vec<usize> = town.residents.iter().filter(|r| !matches!(r.role, Role::Child | Role::Visitor)).map(|r| r.n).collect();
     if asking.is_empty() {
         return Vec::new();
     }

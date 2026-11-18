@@ -154,9 +154,10 @@ fn at_night_everyone_is_indoors() {
                     }
                 }
             }
-            // And in the day most are up and about.
-            let up = plans.iter().filter(|p| p.bound(10.0).spot.task != Task::Lie).count();
-            assert!(up * 10 >= plans.len() * 9, "{}: {up} of {} up at ten", town.name, plans.len());
+            // And in the day most of its own people are up and about.
+            let own: Vec<&day::Plan> = town.residents.iter().zip(&plans).filter(|(r, _)| r.role != town::Role::Visitor).map(|(_, p)| p).collect();
+            let up = own.iter().filter(|p| p.bound(10.0).spot.task != Task::Lie).count();
+            assert!(up * 10 >= own.len() * 9, "{}: {up} of {} up at ten", town.name, own.len());
         }
     }
 }
@@ -596,18 +597,19 @@ fn nobody_lives_in_a_home_not_standing() {
     for town in towns() {
         let first = net.layouts[town.k].plots.start;
         let today = Town::build(c, SEED, (0, 0), town.k).unwrap();
-        // In year 0 everyone is known by their number, as before there were years.
-        assert!(today.residents.iter().all(|r| r.id == r.n));
+        // In year 0 everyone is known by their number, as before there were years; those
+        // in from the hamlets for the market (#207) are not of it.
+        assert!(today.residents.iter().filter(|r| r.role != town::Role::Visitor).all(|r| r.id == r.n));
         for (year, season) in [(1, 2), (2, 0), (3, 1), (5, 2), (9, 1), (14, 3)] {
             let lives = Lives::new(net, SEED, (0, 0), When::new(year, season), &Boons::default());
             let then = Town::build_in(c, SEED, (0, 0), town.k, &lives).unwrap();
-            for r in &then.residents {
+            for r in then.residents.iter().filter(|r| r.role != town::Role::Visitor) {
                 assert!(lives.standing(first + r.home), "{} lives in a home not standing in year {year}", r.person.name);
             }
             let homes: Vec<usize> = (0..then.plots.len()).filter(|&i| net.plots[first + i].sleepers > 0).collect();
             empty_seen += homes.iter().filter(|&&i| !lives.standing(first + i)).count();
             // The same people where nothing has changed, known by the same names.
-            for r in &then.residents {
+            for r in then.residents.iter().filter(|r| r.role != town::Role::Visitor) {
                 match today.residents.iter().find(|q| q.id == r.id) {
                     Some(q) if lives.generation(first + r.home) == 0 => assert_eq!(q.person.name, r.person.name),
                     Some(_) => panic!("a new household known by an old one's name"),
@@ -721,4 +723,35 @@ fn the_flocks_are_driven_out_and_home_and_the_hens_fed() {
     }
     assert!(droves > 0, "no flock driven out");
     assert!(fed > 0, "no hens fed");
+}
+
+#[test]
+fn folk_come_in_from_the_hamlets_only_on_market_day() {
+    let mut markets = 0;
+    for town in towns().iter().filter(|t| !t.stalls.is_empty() && !t.hamlets.is_empty()) {
+        let visitors: Vec<usize> = town.residents.iter().filter(|r| r.role == town::Role::Visitor).map(|r| r.n).collect();
+        assert!(!visitors.is_empty(), "{}: nobody from its hamlets", town.name);
+        let away = |s: &day::Stay| s.spot.inside == Some(town::AWAY);
+        for day in WORKDAY..WORKDAY + 14 {
+            let plans = plans_of(town, day);
+            let came: Vec<usize> = visitors.iter().copied().filter(|&n| plans[n].stays.iter().any(|s| !away(s))).collect();
+            if !town.market_on(day) {
+                assert!(came.is_empty(), "{}: {} in from the hamlets on day {day}, no market day", town.name, came.len());
+                continue;
+            }
+            markets += 1;
+            assert!(came.len() * 4 >= visitors.len() * 3, "{}: only {} of {} in for the market", town.name, came.len(), visitors.len());
+            for &n in &came {
+                let p = &plans[n];
+                let name = &town.residents[n].person.name;
+                // Away in the night, in by the middle of the day, and home by evening.
+                assert!(away(p.bound(6.0)) && away(p.bound(19.0)), "{}: {name} not away at night", town.name);
+                let arrive = p.stays.iter().find(|s| !away(s)).map_or(24.0, |s| s.arrive);
+                assert!(arrive < 12.5, "{}: {name} in at {arrive:.2}", town.name);
+                // At the stalls while they are kept.
+                assert!(p.stays.iter().any(|s| town.stalls.contains(&s.place) && s.arrive < worldgen::settlements::calendar::MARKET_CLOSES), "{}: {name} never at a stall", town.name);
+            }
+        }
+    }
+    assert!(markets > 0, "no market day with folk in from the hamlets");
 }

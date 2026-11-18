@@ -154,6 +154,9 @@ pub fn weekday(day: i64) -> i64 {
 fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Plan {
     let seed = r.person.seed ^ (day as u32).wrapping_mul(0x9e37_79b9) ^ ((day >> 32) as u32);
     let d = |k: i32| unit(hash2(seed, k, 0x3d17));
+    if r.role == Role::Visitor {
+        return visit(town, r, town.market_on(day), &d, taken);
+    }
     let dow = weekday(day);
     let rest = dow == REST_DAY;
     let market = town.market_on(day);
@@ -493,6 +496,8 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
             }
             w.push(bed(19.6 + 0.8 * d(10)));
         }
+        // Their day is `visit`'s.
+        Role::Visitor => {}
         Role::Elder => {
             let wake = 5.4 + d(1);
             w.push(for_(0.8, at(wake + 0.2, inside)));
@@ -531,6 +536,33 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
         if x.spot.task == Task::Sit && x.spot.inside.is_none() && x.place == town.green_place {
             x.spot.stool = true;
         }
+    }
+    settle(town, w)
+}
+
+/// The day of `r`, in from one of the hamlets (#207), `d` their day's dice: away all
+/// day but on `market` day, when they walk in along the trail in the morning, go round
+/// the stalls, stop on the green a while, and walk home in the afternoon.
+fn visit(town: &Town, r: &Resident, market: bool, d: &dyn Fn(i32) -> f32, taken: &mut Taken) -> Plan {
+    let away = Want { place: r.jobs[0].place, spot: r.bed, start: 0.0, stay: 0.0 };
+    let mut w = vec![away];
+    if market && !town.stalls.is_empty() {
+        let mut start = calendar::MARKET_OPENS + 0.4 + 1.6 * d(1);
+        for k in 0..2 + (d(2) < 0.5) as i32 {
+            let i = (d(10 + k) * town.stalls.len() as f32) as usize % town.stalls.len();
+            let slot = taken.stalls[i] % 6;
+            taken.stalls[i] += 1;
+            let stay = 0.3 + 0.35 * d(20 + k);
+            w.push(Want { place: town.stalls[i], spot: around(town, town.stalls[i], slot, Task::Talk), start, stay });
+            start += stay + 0.1;
+        }
+        if d(3) < 0.6 {
+            let k = taken.green;
+            taken.green += 1;
+            w.push(Want { place: town.green_place, spot: talking(town, k, Task::Talk), start: f32::NEG_INFINITY, stay: 0.4 + 0.4 * d(4) });
+        }
+        // Home again in the afternoon, before the stalls are packed away.
+        w.push(Want { start: 13.4 + 1.8 * d(5), ..away });
     }
     settle(town, w)
 }

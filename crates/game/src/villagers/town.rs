@@ -60,6 +60,29 @@ pub enum Where {
     /// Outside the gate of a fold its flock is kept in by night, by its index in
     /// [`Town::droves`].
     Pasture(usize),
+    /// Out along the trail to one of its hamlets, by its index in [`Town::hamlets`],
+    /// beyond sight of the houses: where that hamlet's folk come in from on market day
+    /// (#207), and are taken to be when they are not about.
+    Away(usize),
+}
+
+/// The building of someone not of the settlement, who comes in from one of its hamlets
+/// (#207): none of its own, and they are never seen there.
+pub const AWAY: usize = usize::MAX;
+
+/// What a visitor is known by in the save, above anyone of the settlement.
+const VISITOR_IDS: usize = 1 << 40;
+
+/// How far out beyond a settlement's edge its hamlets' folk are taken to be when not
+/// about, in metres: far enough that they are not seen to come and go.
+const AWAY_OUT: f32 = 110.0;
+
+/// One of the settlement's hamlets, whose folk walk in on market day (#207).
+#[derive(Clone, Debug)]
+pub struct Hamlet {
+    pub name: String,
+    /// The place out along the trail to it.
+    pub away: usize,
 }
 
 impl Where {
@@ -188,6 +211,8 @@ pub enum Role {
     Seller,
     Child,
     Elder,
+    /// In from one of the hamlets for the market (#207).
+    Visitor,
 }
 
 /// One of the settlement's people.
@@ -209,6 +234,9 @@ pub struct Resident {
     pub jobs: Vec<Job>,
     /// Their stall, for a seller.
     pub stall: Option<usize>,
+    /// For a visitor, the hamlet they come in from, by its index in [`Town::hamlets`];
+    /// their home is [`AWAY`].
+    pub from: Option<usize>,
 }
 
 /// A market stall as it is dressed on market day (#207), from `calendar::Stall`: the
@@ -302,6 +330,8 @@ pub struct Town {
     pub droves: Vec<Drove>,
     /// The hens of its yards, fed each morning.
     pub hens: Vec<Hens>,
+    /// Its hamlets, whose folk come in on market day (#207).
+    pub hamlets: Vec<Hamlet>,
 }
 
 /// A yard's hens (#206), and who feeds them of a morning, where.
@@ -403,6 +433,7 @@ struct OutInLand {
     camp: Option<Works>,
     quarry: Option<Works>,
     droves: Vec<Drove>,
+    hamlets: Vec<Hamlet>,
 }
 
 /// The longest walk from a herder's home to the fold, in hours: they must be there as
@@ -599,6 +630,20 @@ fn out_in_land(
             droves.push(Drove { place, herd: d, herder: None });
         }
     }
+    // The ways in from its hamlets (#207), for their folk on market day: from a trail's
+    // point out toward each, beyond sight of the houses.
+    let mut hamlets = Vec::new();
+    for (h, t) in net.settlements.iter().enumerate().filter(|(_, t)| t.parent == Some(k)) {
+        let toward = (t.at() - centre).normalize_or(Vec2::X);
+        let out = s.radius + worldgen::scale::m(AWAY_OUT);
+        let along = |p: Vec2| (p - centre).normalize_or_zero().dot(toward);
+        let best = net.lines.iter().flatten().filter(|p| (p.distance(centre) - out).abs() < worldgen::scale::m(15.0) && along(**p) > 0.5).max_by(|a, b| along(**a).total_cmp(&along(**b)));
+        let Some(&p) = best else { continue };
+        let to = Vec3::new(p.x, country.feet(p), p.y);
+        if let Some(away) = way_to(&mut country, places, Where::Away(hamlets.len()), to, (centre - p).normalize_or(Vec2::X)) {
+            hamlets.push(Hamlet { name: net.names.settlement(h).map_or_else(|| "the hamlet".to_string(), |p| p.name.clone()), away });
+        }
+    }
     log::debug!(
         target: "game::villagers",
         "{}'s ways out to {} fields, {} camp, {} quarry and {} folds found in {:.0} ms, {} columns looked at",
@@ -610,7 +655,7 @@ fn out_in_land(
         started.elapsed().as_secs_f32() * 1000.0,
         country.looked
     );
-    OutInLand { fields, camp, quarry, droves }
+    OutInLand { fields, camp, quarry, droves, hamlets }
 }
 
 impl Town {
@@ -861,6 +906,7 @@ impl Town {
             quarry: out.quarry,
             droves: out.droves,
             hens: Vec::new(),
+            hamlets: out.hamlets,
         };
         town.extent = town.places.iter().map(|p| flat(p.at).distance(flat(centre))).fold(town.radius, f32::max);
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
@@ -884,7 +930,29 @@ impl Town {
         town.people(c, tongue, s, &door_of, lives);
         town.keepers();
         town.feeders(c, world_seed);
+        town.visitors(s, tongue);
         Some(town)
+    }
+
+    /// The folk of its hamlets who come in on market day (#207): a few from each, after
+    /// its own people.
+    fn visitors(&mut self, s: &worldgen::settlements::Settlement, tongue: &str) {
+        for (h, hamlet) in self.hamlets.clone().iter().enumerate() {
+            let seed = hash2(self.seed ^ 0x415e, h as i32, 0);
+            let count = 3 + (unit(hash2(seed, 1, 0)) * 3.0) as usize;
+            let trade = if unit(hash2(seed, 2, 0)) < 0.6 { Trade::Farmer } else { Trade::None };
+            let wealth = (s.prosperity * 0.5 + 0.3 * unit(hash2(seed, 3, 0))).clamp(0.0, 1.0);
+            let place = &self.places[hamlet.away];
+            let (at, face) = (place.at, place.face);
+            for (j, person) in people::household_of(seed, s.region, tongue, wealth, trade, count).into_iter().enumerate() {
+                let n = self.residents.len();
+                // Each somewhere of their own out there, unseen.
+                let side = face.perp() * (j as f32 - count as f32 * 0.5);
+                let bed = Spot { at: at + Vec3::new(side.x, 0.0, side.y), facing: face.y.atan2(face.x), task: Task::Lie, inside: Some(AWAY), stool: false };
+                let jobs = vec![Job { place: hamlet.away, spot: bed }];
+                self.residents.push(Resident { n, id: VISITOR_IDS + h * 256 + j, person, home: AWAY, member: j, bed, role: Role::Visitor, jobs, stall: None, from: Some(h) });
+            }
+        }
     }
 
     /// Who feeds the hens of each yard (#206): whoever keeps the house, an elder or a
@@ -1120,7 +1188,7 @@ impl Town {
                 let stall = (role == Role::Seller).then_some(sellers - 1);
                 // A new household is known apart from the one before it.
                 let id = known + j + rebuilt as usize * (1 << 20);
-                let mut r = Resident { n, id, person, home: i, member: j, bed, role, jobs: Vec::new(), stall };
+                let mut r = Resident { n, id, person, home: i, member: j, bed, role, jobs: Vec::new(), stall, from: None };
                 // Someone of a craft with no workplace of their own goes to one of its own
                 // kind, or to the sawmill or granary.
                 let mut at = i;
@@ -1201,6 +1269,8 @@ impl Town {
         let door = |k: u32, task: Task| job(self.by_door(at, k, task));
         let mut out = Vec::new();
         match r.role {
+            // Nothing to do here but the market.
+            Role::Visitor => {}
             Role::Innkeeper => {
                 out.push(Job { place, spot: Spot { inside: Some(at), ..self.inside_spot(at, b.seats.len(), Task::Stand) } });
                 out.push(door(r.n as u32, Task::Sweep));
@@ -1445,6 +1515,7 @@ impl Town {
             Where::Camp => "the logging camp".into(),
             Where::Quarry => "the quarry".into(),
             Where::Pasture(_) => "the pasture".into(),
+            Where::Away(h) => format!("the way to {}", self.hamlets[h].name),
         }
     }
 

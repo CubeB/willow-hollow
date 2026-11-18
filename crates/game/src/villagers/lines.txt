@@ -9,6 +9,7 @@
 #   {season}     spring, summer, autumn or winter
 #   {time}       morning, afternoon or evening
 #   {trade}      their work, in a word
+#   {hamlet}     the hamlet they have come in from, for those in for the market (#207)
 # A line with a slot the place has nothing for (a town on no river) is never picked.
 
 [open first]
@@ -72,3 +73,15 @@ I've seen a good many {season}s in {town}. This one's a kind one.
 When I was young, {town} was half the size. Now look at it.
 The {river} froze right over one winter, when I was small. You could walk to the far bank.
 Sit with me a moment. My knees don't walk to {neighbour} any more.
+
+[open visitor]
+Good {time}! Not from {town} myself. We're in from {hamlet} for the market.
+Good {time} to you. Walked in from {hamlet} this morning, for the stalls.
+Morning's walk from {hamlet} done, and the market well worth it. Good {time}.
+Hello there. Market day brings all of us in from {hamlet}.
+
+[remark visitor]
+Best to be on the road back to {hamlet} before the light goes.
+You can buy things in {town} that never come out as far as {hamlet}.
+It's a fair walk in from {hamlet}, but there's no market like {town}'s.
+All of {hamlet} comes in for market day, near enough.
