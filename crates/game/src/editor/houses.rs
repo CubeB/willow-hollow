@@ -80,9 +80,10 @@ pub fn palette(region: Region, variant: u32) -> Palette {
 /// What variant `variant` asks of a settlement building's generator (`settlements::special`)
 /// in `region`: its age and wealth, the side of a sawmill's stream (none every fourth
 /// variant, which saws over a pit), and the facts a guild house's guilds come from.
-/// Nothing for a well head or a gate, which have no generator: an empty plot.
+/// Nothing for a well head, which has no generator: an empty plot. The gates, walls,
+/// beacon and pavilion (`special::STRUCTURES`) are shown as the buildings are.
 pub fn special(kind: Special, region: Region, variant: u32) -> Option<SpecialSpec> {
-    if !special::MADE.contains(&kind) {
+    if !special::MADE.contains(&kind) && !special::STRUCTURES.contains(&kind) {
         return None;
     }
     let h = |k: i32| unit(hash2(variant ^ 0x5a1d_57e5, k, 0));

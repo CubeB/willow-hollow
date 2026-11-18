@@ -311,8 +311,9 @@ pub const KINDS: [Landmark; 7] = [
 /// in eleven of its region and step.
 pub const KIT_WEIGHT: u32 = 10;
 
-/// A building a settlement has besides its homes. All but the well head and the gate
-/// have generators of their own (`settlements::special`, #203).
+/// A building a settlement has besides its homes, or what stands at its edges and in its
+/// park. All but the well head have generators of their own (`settlements::special`,
+/// #203).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Special {
     Tavern,
@@ -326,10 +327,22 @@ pub enum Special {
     /// The fishers' boat shed, which is the fisher's home too. Last, so the kinds before
     /// it keep the salt they choose by.
     BoatShed,
+    // What stands at a town's edges and in it without being gone into (#203), after the
+    // rest for the same reason.
+    /// The stone gatehouse where a road passes the old wall of an ancient town.
+    Gatehouse,
+    /// A stretch of the old wall of an ancient town, worn, overgrown and fallen in places.
+    Wall,
+    /// The curving stone wall a coastal great town's boats shelter behind.
+    HarbourWall,
+    /// The fire basket on a stone pillar at the head of a harbour wall.
+    Beacon,
+    /// The open-sided pavilion in a great town's park.
+    Pavilion,
 }
 
 impl Special {
-    pub const ALL: [Special; 9] = [
+    pub const ALL: [Special; 14] = [
         Special::Tavern,
         Special::Smithy,
         Special::Sawmill,
@@ -339,6 +352,11 @@ impl Special {
         Special::BoatShed,
         Special::WellHead,
         Special::Gate,
+        Special::Gatehouse,
+        Special::Wall,
+        Special::HarbourWall,
+        Special::Beacon,
+        Special::Pavilion,
     ];
 
     /// Its word in files and folder names.
@@ -353,6 +371,11 @@ impl Special {
             Special::WellHead => "well-head",
             Special::Gate => "gate",
             Special::BoatShed => "boat-shed",
+            Special::Gatehouse => "gatehouse",
+            Special::Wall => "town-wall",
+            Special::HarbourWall => "harbour-wall",
+            Special::Beacon => "beacon",
+            Special::Pavilion => "pavilion",
         }
     }
 
@@ -368,6 +391,11 @@ impl Special {
             Special::WellHead => "Well head",
             Special::Gate => "Gate",
             Special::BoatShed => "Boat shed",
+            Special::Gatehouse => "Gatehouse",
+            Special::Wall => "Old town wall",
+            Special::HarbourWall => "Harbour wall",
+            Special::Beacon => "Beacon",
+            Special::Pavilion => "Park pavilion",
         }
     }
 }

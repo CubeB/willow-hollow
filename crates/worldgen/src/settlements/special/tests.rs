@@ -45,13 +45,95 @@ fn the_same_spec_builds_the_same_building() {
 }
 
 #[test]
-fn the_well_head_and_the_gate_are_not_made_here() {
-    for which in [Special::WellHead, Special::Gate] {
-        assert!(build(&SpecialSpec::new(which, Region::Temperate, 1), &palette(Region::Temperate, 1)).is_none());
-    }
+fn the_well_head_is_not_made_here() {
+    assert!(build(&SpecialSpec::new(Special::WellHead, Region::Temperate, 1), &palette(Region::Temperate, 1)).is_none());
     for which in Special::ALL {
-        assert_eq!(MADE.contains(&which), build(&SpecialSpec::new(which, Region::Temperate, 1), &palette(Region::Temperate, 1)).is_some(), "{which:?}");
+        let made = MADE.contains(&which) || STRUCTURES.contains(&which);
+        assert_eq!(made, build(&SpecialSpec::new(which, Region::Temperate, 1), &palette(Region::Temperate, 1)).is_some(), "{which:?}");
     }
+}
+
+/// Every gate and gatehouse, of every region and every width, leaves its way through
+/// open from end to end and from the ground to `CLEAR` up, is lit, and builds the same
+/// each time; nothing in it is built into anything else.
+#[test]
+fn every_gate_is_open_and_lit() {
+    for which in [Special::Gate, Special::Gatehouse] {
+        for region in Region::ALL {
+            // Enough seeds that every roof's reach and pitch comes up.
+            for seed in 0..16u32 {
+                for passage in [gate::PASSAGE - 2, gate::PASSAGE, 9, gate::WIDEST] {
+                    let spec = SpecialSpec { age: (seed % 4) as f32 / 3.0, wealth: (seed / 4) as f32 / 3.0, ..SpecialSpec::new(which, region, seed * 31 + 7) };
+                    let pal = palette(region, spec.seed);
+                    let f = frame::Frame::new(&spec, &pal);
+                    let (built, faults) = gate::build(f, passage);
+                    let name = format!("{which:?} of {region:?}, seed {}, {passage} wide", spec.seed);
+                    assert!(faults.is_empty(), "{name}: {faults:?}");
+                    let again = super::gate(&spec, &pal, passage).unwrap();
+                    assert!(again.building == built.building, "{name}: not the same twice");
+                    let b = &built.building;
+                    let h = (passage.clamp(gate::PASSAGE - 2, gate::WIDEST) | 1) / 2;
+                    assert_eq!(b.door.width, 2 * h + 1, "{name}");
+                    let (x0, x1) = (b.footprint.lo.x - 1, b.footprint.hi.x + 1);
+                    for &(q, v) in &b.voxels {
+                        if v != AIR && q.z.abs() <= h && (x0..=x1).contains(&q.x) && (0..gate::CLEAR).contains(&q.y) {
+                            panic!("{name}: {v:?} in the way at {q}");
+                        }
+                    }
+                    for f in &b.fine {
+                        let (lo, hi) = (IVec3::from_array(f.lo).div_euclid(IVec3::splat(CELLS)), (IVec3::from_array(f.hi) - 1).div_euclid(IVec3::splat(CELLS)));
+                        let way = lo.z <= h && hi.z >= -h && lo.y < gate::CLEAR && hi.y >= 0;
+                        assert!(!way, "{name}: a fine part in the way from {lo} to {hi}");
+                    }
+                    let lamps = b.voxels.iter().filter(|(_, v)| *v == mat::LANTERN).count();
+                    assert!(lamps >= 2, "{name}: {lamps} lamps");
+                }
+            }
+        }
+    }
+}
+
+/// The pavilion is stood under: walked into from its open side, right to the middle.
+#[test]
+fn the_pavilion_is_stood_under() {
+    for region in Region::ALL {
+        for seed in 0..3 {
+            let spec = SpecialSpec::new(Special::Pavilion, region, seed);
+            let (built, faults) = make(&spec, &palette(region, seed)).unwrap();
+            assert!(faults.is_empty(), "{region:?}: {faults:?}");
+            let w = kit::walk(&built.building);
+            assert!(w.ok(), "{region:?}: {:?}", w.problems);
+            assert!(w.floor.contains(&IVec3::new(0, 0, 0)), "{region:?}: nobody gets under the middle of it");
+        }
+    }
+}
+
+#[test]
+fn the_beacon_burns() {
+    for region in Region::ALL {
+        let built = build(&SpecialSpec::new(Special::Beacon, region, 3), &palette(region, 3)).unwrap();
+        let fire = built.fire.expect("a beacon has a fire");
+        assert!(built.building.voxels.contains(&(fire, mat::EMBER)), "{region:?}");
+        assert!(fire.y > 10, "{region:?}: its fire is low, at {fire}");
+    }
+}
+
+/// An old wall keeps out of the columns it is told to, and wears the more the older.
+#[test]
+fn an_old_wall_keeps_off_what_it_must_and_falls_with_age() {
+    let pal = palette(Region::Temperate, 5);
+    let path: Vec<glam::IVec2> = (0..200).map(|z| glam::IVec2::new(z / 3, z)).collect();
+    let may = |c: glam::IVec2| c.y % 40 >= 4;
+    let laid = wall::old_wall(&path, 0, (true, false), |_| 10, may, &pal, 5, 0.6);
+    assert!(!laid.voxels.is_empty());
+    assert!(laid.voxels.iter().all(|(q, _)| may(glam::IVec2::new(q.x, q.z))));
+    let again = wall::old_wall(&path, 0, (true, false), |_| 10, may, &pal, 5, 0.6);
+    assert_eq!(laid.voxels, again.voxels);
+    let fallen = |age: f32| (0..2000).filter(|&s| wall::fallen(9, age, s)).count();
+    assert!(fallen(0.1) < fallen(0.9), "{} fallen young, {} old", fallen(0.1), fallen(0.9));
+    // The broken end steps down to the gap.
+    let top = |z: i32| laid.voxels.iter().filter(|(q, _)| q.z == z && q.x == z / 3).map(|(q, _)| q.y).max();
+    assert!(top(0).unwrap_or(0) <= 12, "{:?}", top(0));
 }
 
 /// Every building of every kind and region is walked into through its door, to every

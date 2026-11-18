@@ -16,16 +16,22 @@
 //! the smith lives above the forge, and the fisher in the boat shed. The tavern's keeper
 //! lives over the common room, beside the guests.
 //!
-//! The well head and the gate are not buildings anyone goes into, and are not made here.
+//! The well head is not made here. What stands at a town's edges and in its park without
+//! being gone into, its gates, old wall, harbour wall, beacon and pavilion (see
+//! [`STRUCTURES`]), is built here as well, in the same model space with its way through
+//! or in at +X, so the editor shows each as it shows the buildings; the walls follow the
+//! ground, and the layout lays them along it with [`wall::old_wall`] and [`wall::mole`].
 
 mod boatshed;
 mod frame;
+pub mod gate;
 mod granary;
 mod guild;
 mod market;
 mod sawmill;
 mod smithy;
 mod tavern;
+pub mod wall;
 #[cfg(test)]
 mod tests;
 
@@ -258,8 +264,13 @@ pub fn lying(s: &Spot) -> Vec3 {
     s.at.as_vec3() + Vec3::new(0.5, 0.0, 0.5) + s.along.as_vec3() * mid(s.len) + s.facing.as_vec3() * mid(s.wide)
 }
 
-/// The settlement buildings [`build`] makes: all of them but the well head and the gate.
+/// The settlement buildings [`build`] makes, each walked into and furnished.
 pub const MADE: [Special; 7] = [Special::Tavern, Special::Smithy, Special::Sawmill, Special::Granary, Special::MarketHall, Special::GuildHouse, Special::BoatShed];
+
+/// What [`build`] makes besides the buildings: what stands at a town's edges and in its
+/// park, walked through, along or under rather than into, and not counted among its
+/// buildings (#203).
+pub const STRUCTURES: [Special; 6] = [Special::Gate, Special::Gatehouse, Special::Wall, Special::HarbourWall, Special::Beacon, Special::Pavilion];
 
 /// The most voxels across a building may take, x and z, its eaves, steps and wheel
 /// included: 12 by 16 metres, and 16 by 20 for a market hall.
@@ -271,10 +282,17 @@ pub fn largest(which: Special) -> (i32, i32) {
 }
 
 /// Builds the settlement building `spec` asks for, of the materials of palette `pal`
-/// (taken as it is: vary it for the place first, as landmarks do, if wanted). None for
-/// the well head and the gate, which are not made here.
+/// (taken as it is: vary it for the place first, as landmarks do, if wanted), or one of
+/// the [`STRUCTURES`]. None for the well head, which is not made here.
 pub fn build(spec: &SpecialSpec, pal: &Palette) -> Option<Built> {
     make(spec, pal).map(|(b, _)| b)
+}
+
+/// A gate or gatehouse (`spec.which`) with a way through it `passage` voxels wide, for
+/// the road it stands on (see [`gate::PASSAGE`] and [`gate::WIDEST`]). None for anything
+/// else.
+pub fn gate(spec: &SpecialSpec, pal: &Palette, passage: i32) -> Option<Built> {
+    matches!(spec.which, Special::Gate | Special::Gatehouse).then(|| gate::build(frame::Frame::new(spec, pal), passage).0)
 }
 
 /// [`build`], and whatever the generator put where it should not have: a fitting into a
@@ -289,7 +307,12 @@ pub(crate) fn make(spec: &SpecialSpec, pal: &Palette) -> Option<(Built, Vec<Stri
         Special::MarketHall => market::build(f),
         Special::GuildHouse => guild::build(f),
         Special::BoatShed => boatshed::build(f),
-        Special::WellHead | Special::Gate => return None,
+        Special::Gate | Special::Gatehouse => gate::build(f, gate::PASSAGE),
+        Special::Wall => wall::stretch(f),
+        Special::HarbourWall => wall::harbour(f),
+        Special::Beacon => gate::beacon(f),
+        Special::Pavilion => gate::pavilion(f),
+        Special::WellHead => return None,
     })
 }
 

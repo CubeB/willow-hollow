@@ -415,6 +415,16 @@ fn stick_arm(h: i32) -> i32 {
     h.clamp(5, 6)
 }
 
+/// The fine parts of a lamp hung round the lit voxel `l` (which the caller fills with
+/// [`mat::LANTERN`]) from the underside of the voxel `drop` above it, as a crook's lamp
+/// hangs: its glazing, cap, drip and chain, in cells of the same model space. For a
+/// lamp hung from a gate's beam or a bracket on a wall.
+pub fn hung_lamp(l: IVec3, drop: i32, iron: Voxel) -> Vec<PlantBox> {
+    let mut s = Shape::raw();
+    Fine { s: &mut s, at: IVec3::ZERO, turns: 0 }.hanging(l, drop, iron, iron);
+    s.take_fine()
+}
+
 /// Puts a lantern out: its lamps are cold glass rather than lit voxels, so they neither
 /// shine nor light the ground about them, and the flame under each cap is gone.
 pub fn put_out(voxels: &mut [(IVec3, Voxel)], fine: &mut Vec<PlantBox>) {
