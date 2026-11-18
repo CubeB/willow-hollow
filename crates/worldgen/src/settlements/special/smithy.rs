@@ -2,12 +2,14 @@
 //! the anvil before it, the bellows and the quenching trough of the forge itself, a bench
 //! with the smith's tools hung on the wall over it and a grindstone by the door; and the
 //! smith's home up a flight of stairs above it all, warmed by the chimney going up through
-//! it.
+//! it. The world has no iron ore: in a settlement on the coast or a river the boats work,
+//! the bars brought by water lie stacked in the corner by the forge (#205).
 //!
 //! As built the wide door is in the +X wall, the forge facing it across the floor, so the
 //! glow is seen from the lane. The stairs climb along the low z wall toward the back.
 
 use glam::{IVec2, IVec3};
+use voxel::{Voxel, mesh::PlantBox};
 
 use super::{
     Built, Use,
@@ -62,6 +64,11 @@ pub(super) fn build(mut f: Frame) -> (Built, Vec<String>) {
     // Charcoal in sacks in the corner by the forge.
     f.prop(Prop::Sack, IVec3::new(ix0, feet, iz1 - 1), 0, false);
     f.prop(Prop::Sack, IVec3::new(ix0 + 2, feet, iz1 - 1), 0, false);
+    // Where iron comes by water, bars landed from the boats are stacked in the other
+    // corner by the forge, to hand (#205).
+    if f.spec.facts.water {
+        iron_bars(&mut f, IVec3::new(ix0 * 4, feet * 4, iz0 * 4));
+    }
 
     // The wide door, and a horseshoe nailed over it.
     let dz = -2;
@@ -95,6 +102,34 @@ pub(super) fn build(mut f: Frame) -> (Built, Vec<String>) {
     f.porch(&b, dz, 4);
     f.clear.push((IVec3::new(ix0, feet, iz0), IVec3::new(ix1, feet + 4, iz1)));
     f.finish(Area { lo: b.lo, hi: b.hi }, fy)
+}
+
+/// A stack of iron bars on two timber bearers, from cell `corner` (the inside corner of
+/// the back wall and a side wall, on the floor) along the side wall: four bars at the
+/// foot, three laid in the gaps over them and two over those, the odd one rusted.
+fn iron_bars(f: &mut Frame, corner: IVec3) {
+    let (wood, seed) = (f.pal.wood, f.spec.seed);
+    let mut fine = Vec::new();
+    let mut bx = |lo: IVec3, hi: IVec3, v: Voxel| {
+        let (lo, hi) = (corner + lo, corner + hi);
+        fine.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel: v, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 });
+    };
+    // The bearers, out from the back wall under the bars.
+    for z in [2, 8] {
+        bx(IVec3::new(0, 0, z), IVec3::new(8, 1, z + 1), wood);
+    }
+    for (layer, n) in [4, 3, 2].into_iter().enumerate() {
+        let y = 1 + layer as i32;
+        for k in 0..n {
+            let x = layer as i32 + 2 * k;
+            let r = crate::noise::hash3(seed ^ 0x1e0b, y, k, 0);
+            let v = if (r >> 8) & 7 == 0 { mat::RUST } else { mat::IRON };
+            // Each a metre long, not all laid quite even.
+            let z0 = (r & 1) as i32;
+            bx(IVec3::new(x, y, z0), IVec3::new(x + 1, y + 1, z0 + 10), v);
+        }
+    }
+    f.things(&fine, "stack of iron bars");
 }
 
 /// The smith's tools hung on pegs along a wall whose inside face is at cell `face` (a high

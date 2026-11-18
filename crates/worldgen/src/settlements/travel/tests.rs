@@ -700,3 +700,103 @@ fn probe() {
         }
     }
 }
+
+/// Iron goes by boat only to a settlement with a smithy, on some of the voyages there and
+/// not all; a boat has the same load every day of a voyage, the same each time it is
+/// asked for, and lands its iron on the quay it was bound for, where it lies in a stack
+/// while the boat is tied up there (#205).
+#[test]
+fn boats_bring_iron_only_to_the_smithies_and_keep_their_load_all_voyage() {
+    let (mut voyages, mut iron, mut landed) = (0, 0, 0);
+    for (seed, c, travel) in worlds() {
+        // The same continent with a smithy in every settlement and with none, so that
+        // every run is tried both ways whatever smithies this world happens to have.
+        let mut every = Travel::of(c, *seed);
+        every.smithies.iter_mut().for_each(|s| *s = true);
+        let mut none = Travel::of(c, *seed);
+        none.smithies.iter_mut().for_each(|s| *s = false);
+        for (r, run) in c.trails.waterways.runs.iter().enumerate() {
+            for b in 0..boats_on(run.length(), travel.seed, r) {
+                let mut last: Option<RiverPlan> = None;
+                for day in 0..120 {
+                    let plan = travel.river_boat(c, r, b, day);
+                    assert!(!plan.iron || travel.smithies[plan.to], "seed {seed} run {r}: iron for {}, which has no smithy", plan.to);
+                    let again = travel.river_boat(c, r, b, day);
+                    assert_eq!((plan.cargo, plan.iron, plan.stack), (again.cargo, again.iron, again.stack), "seed {seed} run {r} day {day}");
+                    assert!(!none.river_boat(c, r, b, day).iron, "seed {seed} run {r} day {day}: iron where there is no smithy");
+                    let all = every.river_boat(c, r, b, day);
+                    assert_eq!(all.cargo, plan.cargo, "the load is the voyage's, not the smithy's");
+                    // A voyage runs on while the boat goes the same way.
+                    match &last {
+                        Some(before) if before.down == all.down => assert_eq!((before.cargo, before.iron), (all.cargo, all.iron), "seed {seed} run {r} day {day}: the load changed mid-voyage"),
+                        _ => {
+                            voyages += 1;
+                            iron += all.iron as usize;
+                        }
+                    }
+                    // Its iron is ashore only while it lies at the quay it was bound for,
+                    // and never still aboard there.
+                    let quay = &c.trails.waterways.quays[if all.down { run.to } else { run.from }];
+                    for hour in [7.0, 12.0, 17.0] {
+                        let s = all.at(hour, Water::CALM);
+                        let tied = s.boats[0].at.distance(quay.berth) < 0.01;
+                        if matches!(all.leg, Leg::Moored) || (tied && all.iron) {
+                            assert!(!s.boats[0].iron, "seed {seed} run {r} day {day}: the iron is still aboard at the quay");
+                            assert_eq!(s.iron, all.stack.into_iter().collect::<Vec<_>>(), "seed {seed} run {r} day {day} {hour}h");
+                        } else {
+                            assert!(s.iron.is_empty(), "seed {seed} run {r} day {day} {hour}h: iron ashore while the boat is away");
+                            assert_eq!(s.boats[0].iron, all.iron, "seed {seed} run {r} day {day} {hour}h");
+                        }
+                        if let Some((p, _)) = s.iron.first() {
+                            landed += 1;
+                            assert!(vec2(p.x, p.z).distance(quay.foot) < m(12.0), "seed {seed} run {r}: the iron is stacked far off its quay");
+                        }
+                    }
+                    last = Some(all);
+                }
+            }
+        }
+    }
+    assert!(voyages > 20, "too few voyages to tell: {voyages}");
+    let share = iron as f32 / voyages as f32;
+    assert!((0.15..0.65).contains(&share), "iron on {iron} of {voyages} voyages");
+    assert!(landed > 0, "no iron was ever landed");
+}
+
+/// Prints the boats that carry iron and the quays it is landed on, for aiming shots
+/// (#205): `PROBE_SEED=1 cargo test -p worldgen probe_iron -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_iron() {
+    let seed = std::env::var("PROBE_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let c: Arc<Continent> = GameWorld::new(seed).continent(0, 0);
+    let travel = Travel::of(&c, seed);
+    let net = &c.trails;
+    let name = |k: usize| net.names.settlement(k).map_or_else(|| format!("#{k}"), |p| p.name.clone());
+    for (k, s) in net.settlements.iter().enumerate().filter(|(k, _)| travel.smithies[*k]) {
+        println!("smithy at {} ({:?}) {},{}: coast {} river {:?}", name(k), s.kind, s.x, s.z, s.coast, s.river);
+    }
+    for (plot, guilds) in &net.guild_halls {
+        let k = net.plots[*plot].settlement;
+        let s = &net.settlements[k];
+        let quarries: Vec<String> = c.land.quarries.iter().map(|q| format!("{} at {} {:.0} m", name(q.owner), q.floor, vec2(q.floor.x as f32, q.floor.z as f32).distance(s.at()) / 2.5)).collect();
+        println!("guild house of {} {},{}: {guilds:?}; quarries {quarries:?}", name(k), s.x, s.z);
+    }
+    let ways = &net.waterways;
+    for (r, run) in ways.runs.iter().enumerate() {
+        let (qa, qb) = (&ways.quays[run.from], &ways.quays[run.to]);
+        println!("run {r}: {} -> {}, smithies {} {}, quays at {} / {} (landings {:?} {:?}), {:.0} m", name(run.a), name(run.b), travel.smithies[run.a], travel.smithies[run.b], qa.foot, qb.foot, qa.landing, qb.landing, run.length() / 2.5);
+        for day in 0..48 {
+            for b in 0..boats_on(run.length(), travel.seed, r) {
+                let plan = travel.river_boat(&c, r, b, day);
+                if !plan.iron {
+                    continue;
+                }
+                for hour in [9.0, 12.0, 16.0] {
+                    let s = plan.at(hour, Water::CALM);
+                    println!("  day {day} boat {b} {hour}h at {:.0},{:.0},{:.0}: {} (iron aboard {}, stacks {:?})", s.at.x, s.at.y, s.at.z, s.doing, s.boats[0].iron, s.iron);
+                }
+            }
+        }
+    }
+}

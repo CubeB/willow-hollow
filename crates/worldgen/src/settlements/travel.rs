@@ -27,6 +27,9 @@
 //!   itself. A voyage of more than a day ties up off the bank at evening, the crew camped
 //!   ashore by their fire, and goes on in the morning. When the water turns rough the boat
 //!   makes for the nearest bank, stage or quay it can tie up at, and waits there out the day.
+//!   The world has no iron ore, so iron for the smithies comes this way: on some voyages a
+//!   boat bound for a settlement with a smithy carries bars and blooms in its hold, and
+//!   once it is in they wait stacked on the quay through the day after.
 //! - Fishing boats put out from the ports and fishing settlements at dawn, fish their
 //!   grounds through the morning and are back about midday; not in rough weather, and
 //!   home at once if it turns rough while they are out.
@@ -43,7 +46,8 @@ use glam::{Vec2, Vec3, vec2};
 
 use super::{
     Region,
-    quay::{DRIFT, Portage, along_line, measure, water_ends},
+    layout::Purpose,
+    quay::{DRIFT, Portage, Quay, along_line, measure, water_ends},
 };
 use crate::{
     continent::Continent,
@@ -302,6 +306,9 @@ pub struct Boat {
     pub ashore: bool,
     /// Its goods aboard; not while they are carried round a portage.
     pub laden: bool,
+    /// Iron among its goods, bars and blooms for the smithy of the settlement it is bound
+    /// for (#205), until it is landed on the quay there.
+    pub iron: bool,
 }
 
 /// A fire as it is: burning up, or low, a few embers and a thread of smoke.
@@ -335,6 +342,9 @@ pub struct Scene {
     /// Goods set down on the ground, each pile's middle and the way it lies: a boat's
     /// cargo carried round a portage ahead of it.
     pub goods: Vec<(Vec3, f32)>,
+    /// Iron landed on a quay for the smithy, waiting to be carted up to it (#205): the
+    /// stack's middle on the boards and the way it lies.
+    pub iron: Vec<(Vec3, f32)>,
     /// What they are about, in a few words.
     pub doing: &'static str,
     /// The middle of the party.
@@ -357,6 +367,7 @@ impl Scene {
             beasts: Vec::new(),
             boats: Vec::new(),
             goods: Vec::new(),
+            iron: Vec::new(),
             doing: "",
             at: Vec3::ZERO,
         }
@@ -426,6 +437,8 @@ pub struct Travel {
     /// The region of each settlement, and where each is.
     regions: Vec<Region>,
     towns: Vec<(Vec2, f32, i32)>,
+    /// Whether each settlement has a smithy, which the boats bring iron to (#205).
+    smithies: Vec<bool>,
 }
 
 /// One stretch of the trail graph between two of its nodes.
@@ -662,6 +675,7 @@ impl Travel {
             parties: (n / 3).clamp(2, 10),
             regions: net.settlements.iter().map(|s| s.region).collect(),
             towns: net.settlements.iter().map(|s| (s.at(), s.radius, s.y)).collect(),
+            smithies: (0..n).map(|k| net.plots.iter().any(|p| p.settlement == k && p.purpose == Purpose::Smithy)).collect(),
         }
     }
 
@@ -1143,6 +1157,12 @@ pub struct RiverPlan {
     along: Vec<f32>,
     /// The first quay's berth and heading, and the second's.
     berths: (Vec3, f32, Vec3, f32),
+    /// What it carries on this voyage, by a seed: the same every day of the voyage and
+    /// the day it lies at the quay it came to. Whether that is iron for the smithy there,
+    /// and where on that quay the iron is stacked once it is landed (#205).
+    cargo: u32,
+    iron: bool,
+    stack: Option<(Vec3, f32)>,
     portages: Vec<Portage>,
     /// The voyage it is on, the way it goes.
     voyage: river::Voyage,
@@ -1575,7 +1595,7 @@ impl FishingPlan {
 
     /// `scene` with the boat at `at`, pointing `heading`, and its crew aboard.
     fn crewed(&self, mut scene: Scene, at: Vec3, heading: f32, moving: bool, doing: &'static str) -> Scene {
-        scene.boats.push(Boat { at, heading, sail: self.sail, load: self.seed, moving, ashore: false, laden: true });
+        scene.boats.push(Boat { at, heading, sail: self.sail, load: self.seed, moving, ashore: false, laden: true, iron: false });
         let along = Vec2::from_angle(heading);
         for (k, off) in [(0, m(0.85)), (1, -m(0.8))] {
             let p = flat(at) + along * off;

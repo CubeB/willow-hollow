@@ -14,6 +14,8 @@ const DAY: f32 = BOAT_DAY.1 - BOAT_DAY.0;
 /// When the crew camped ashore turn in for the night, and are up again.
 const BED: f32 = 21.5;
 const UP: f32 = 6.5;
+/// How often a boat bound for a settlement with a smithy carries iron for it (#205).
+const IRON: f32 = 0.4;
 
 /// One part of a trade boat's voyage, from and to voyage hours.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -181,6 +183,8 @@ struct Moment {
     camp: Option<Camp>,
     /// Tied up at a quay.
     quay: bool,
+    /// Its iron landed on the quay, stacked there: where, and the way it lies.
+    iron: Option<(Vec3, f32)>,
     doing: &'static str,
 }
 
@@ -210,11 +214,20 @@ impl Travel {
             (Leg::Moored, false)
         };
         let quays = &c.trails.waterways.quays;
+        // What it carries is the voyage's own, from the round it is on and the way it
+        // goes, so the same boat carries the same goods every day of a voyage and lies at
+        // the quay it came to with them; and on some voyages to a settlement with a
+        // smithy, iron for it.
+        let round = (day + phase).div_euclid(cycle);
+        let cargo = hash2(h ^ 0x1c0a_d5e5, round as i32, down as i32);
+        let to = if down { run.b } else { run.a };
+        let iron = self.smithies.get(to).copied().unwrap_or(false) && unit(cargo.rotate_left(11)) < IRON;
+        let landed = &quays[if down { run.to } else { run.from }];
         let mut plan = RiverPlan {
             id: (3u64 << 60) | ((r as u64) << 8) | b as u64,
             region: self.regions[run.a],
             from: if down { run.a } else { run.b },
-            to: if down { run.b } else { run.a },
+            to,
             seed: h,
             sail,
             speed,
@@ -223,6 +236,9 @@ impl Travel {
             line: run.line.clone(),
             along: run.along.clone(),
             berths: (quays[run.from].berth, quays[run.from].heading, quays[run.to].berth, quays[run.to].heading),
+            cargo,
+            iron,
+            stack: if iron { iron_stack(c, self.world_seed, landed) } else { None },
             portages: run.portages.clone(),
             voyage: Voyage::plan(len, &run.portages, down, speed),
             nights: [None, None],
@@ -361,17 +377,22 @@ impl RiverPlan {
     }
 
     fn boat(&self, at: Vec3, heading: f32, moving: bool) -> Boat {
-        Boat { at, heading, sail: self.sail, load: self.seed, moving, ashore: false, laden: true }
+        Boat { at, heading, sail: self.sail, load: self.cargo, moving, ashore: false, laden: true, iron: self.iron }
     }
 
     fn still(&self, boat: Boat, doing: &'static str) -> Moment {
-        Moment { boat, crew: None, goods: None, camp: None, quay: false, doing }
+        Moment { boat, crew: None, goods: None, camp: None, quay: false, iron: None, doing }
     }
 
-    /// Tied up at quay `which`.
+    /// Tied up at quay `which`. At the one it was bound for, any iron it brought is out
+    /// on the quay, stacked for the smithy.
     fn at_quay(&self, which: usize, doing: &'static str) -> Moment {
         let (at, heading) = self.quay(which);
-        Moment { quay: true, ..self.still(self.boat(at, heading, false), doing) }
+        let mut boat = self.boat(at, heading, false);
+        let landed = which == 1 && self.iron;
+        boat.iron &= !landed;
+        let doing = if landed && doing == "tied up at the quay" { "tied up at the quay, its iron landed for the smithy" } else { doing };
+        Moment { quay: true, iron: if landed { self.stack } else { None }, ..self.still(boat, doing) }
     }
 
     /// Tied up at `m`, the crew camped ashore if there is a camp, the boat pointing on.
@@ -408,7 +429,12 @@ impl RiverPlan {
                     return self.at_quay(1, "tied up at the quay");
                 }
                 let (p, dir) = line(a + (b - a) * f);
-                let doing = if self.down { "carrying goods down the river" } else { "carrying goods up the river" };
+                let doing = match (self.down, self.iron) {
+                    (true, false) => "carrying goods down the river",
+                    (false, false) => "carrying goods up the river",
+                    (true, true) => "carrying iron down the river for the smithy",
+                    (false, true) => "carrying iron up the river for the smithy",
+                };
                 self.still(self.boat(p, self.ahead(dir), !done), doing)
             }
             What::Bank { s, out, .. } => {
@@ -498,7 +524,7 @@ impl RiverPlan {
                     (c, dir, if self.sail { Doing::Hauling } else { Doing::Portaging })
                 });
                 let doing = if self.sail { "hauling the boat round the rough water on rollers" } else { "carrying the boat round the rough water" };
-                Moment { boat, crew: Some(crew), goods: Some(pile(launch_foot, launch_in)), camp: None, quay: false, doing }
+                Moment { boat, crew: Some(crew), goods: Some(pile(launch_foot, launch_in)), camp: None, quay: false, iron: None, doing }
             }
             Step::Launch => {
                 if done {
@@ -612,6 +638,7 @@ impl RiverPlan {
         let at = now.boat.at;
         scene.boats.push(now.boat);
         scene.goods.extend(now.goods);
+        scene.iron.extend(now.iron);
         let asleep = !(UP..BED).contains(&hour);
         let heading = now.boat.heading;
         if let Some(camp) = now.camp {
@@ -646,6 +673,26 @@ impl RiverPlan {
         scene.at = at;
         scene
     }
+}
+
+/// Where iron landed at quay `q` is stacked, and the way the stack lies (#205): on a
+/// jetty's boards a little out from the bank, to one side of the way along them; at a
+/// landing, on the levelled ground behind it, back from where the boats lie. None where
+/// there is no dry ground for it.
+fn iron_stack(c: &Continent, world_seed: u32, q: &Quay) -> Option<(Vec3, f32)> {
+    let out = q.head - q.foot;
+    if out.length() > m(1.6) {
+        let n = out.normalize();
+        let p = q.foot + n * m(1.4) + n.perp() * m(0.32);
+        return Some((Vec3::new(p.x, (q.level + 1) as f32, p.y), n.y.atan2(n.x)));
+    }
+    let site = c.trails.sites.get(q.landing?)?;
+    let o = vec2(site.x as f32 + 0.5, site.z as f32 + 0.5);
+    let back = (o - vec2(q.berth.x, q.berth.z)).try_normalize()?;
+    let p = o + back * m(2.8);
+    let (x, z) = (p.x.floor() as i32, p.y.floor() as i32);
+    let col = Sampler::new(c, world_seed, x, z, 1).column(x, z);
+    col.water_surface().is_none().then(|| (Vec3::new(p.x, (col.top() + 1) as f32, p.y), back.y.atan2(back.x)))
 }
 
 /// A camp for a boat's crew ashore, back from the water's edge at `edge` along `n`

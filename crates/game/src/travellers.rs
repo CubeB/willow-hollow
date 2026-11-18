@@ -372,6 +372,11 @@ const NET: [f32; 3] = [0.20, 0.24, 0.22];
 const WICKER: [f32; 3] = [0.50, 0.38, 0.20];
 const LEATHER: [f32; 3] = [0.16, 0.09, 0.05];
 const ROPE: [f32; 3] = [0.45, 0.38, 0.24];
+/// Iron for the smithies (#205): bar iron, blue-black from the hammer; a bloom from the
+/// furnace, a rough grey lump; and the rust that comes up on either left out in the wet.
+const BAR: [f32; 3] = [0.065, 0.066, 0.075];
+const BLOOM: [f32; 3] = [0.105, 0.095, 0.088];
+const RUSTED: [f32; 3] = [0.21, 0.085, 0.04];
 
 /// Boxes set out in the frame of something standing at `base` (camera-relative, voxels)
 /// and turned to `heading`: x ahead, y up and z across, in metres.
@@ -470,6 +475,12 @@ impl Drawing<'_> {
             }
             self.goods(s.world(at), heading, hash2(scene.id as u32, k as i32, 0x900d));
         }
+        for (k, &(at, heading)) in scene.iron.iter().enumerate() {
+            if self.full() {
+                return;
+            }
+            self.iron_stack(s.world(at), heading, hash2(scene.id as u32, k as i32, 0x1e0b));
+        }
         for boat in &scene.boats {
             if self.full() {
                 return;
@@ -528,6 +539,28 @@ impl Drawing<'_> {
         b.block([0.55, 0.25, -0.35], [0.42, 0.5, 0.42], shade(WOOD_LIGHT, 0.85));
         b.block([0.55, 0.27, -0.35], [0.44, 0.05, 0.44], IRON);
         b.block([-0.45, 0.2, -0.45], [0.45, 0.4, 0.38], shade(WOOD, 1.3));
+    }
+
+    /// Iron landed on a quay for the smithy (#205), lying along `heading`: two bundles of
+    /// bar iron tied with rope on timbers to keep them off the wet boards, the upper laid a
+    /// little askew, and a bloom or two at the end of them.
+    fn iron_stack(&mut self, at: DVec3, heading: f32, salt: u32) {
+        let mut b = self.brush(at, heading);
+        for x in [-0.32f32, 0.32] {
+            b.block([x, 0.03, 0.0], [0.08, 0.06, 0.5], WOOD_DARK);
+        }
+        b.block([0.0, 0.12, 0.0], [0.95, 0.12, 0.42], BAR);
+        b.put([0.02, 0.23, 0.01], [0.88, 0.1, 0.32], shade(BAR, 1.15), 0.05 * (unit(salt) - 0.5), [0.0; 2]);
+        for x in [-0.28f32, 0.26] {
+            b.block([x, 0.17, 0.0], [0.05, 0.2, 0.44], ROPE);
+        }
+        for k in 0..1 + salt % 2 {
+            let z = if k == 0 { 0.1 } else { -0.13 };
+            let r = unit(salt.rotate_left(5 + k));
+            let rough = if r < 0.3 { RUSTED } else { BLOOM };
+            b.put([0.68, 0.08, z], [0.22, 0.16, 0.2], rough, r * 1.4, [0.12 * (r - 0.5), 0.1]);
+            b.put([0.7, 0.18, z + 0.02], [0.12, 0.07, 0.11], shade(BLOOM, 0.9), r * 2.3, [0.0; 2]);
+        }
     }
 
     /// A small tent, its ridge along `heading`, in stepped canvas.
@@ -684,6 +717,21 @@ impl Drawing<'_> {
         if kind == Kind::FishingBoat {
             b.block([-0.35, 0.3, 0.1], [0.8, 0.18, 0.75], NET);
             b.block([0.15, 0.36, -0.35], [0.4, 0.34, 0.4], WICKER);
+        } else if boat.iron {
+            // Iron for a smithy (#205), low between the thwarts as heavy goods are stowed:
+            // two bundles of bar iron, tied, and a pair of blooms before them.
+            for z in [-0.19f32, 0.19] {
+                b.block([-0.15, 0.29, z], [0.8, 0.14, 0.22], BAR);
+                b.block([-0.15, 0.4, z], [0.76, 0.09, 0.15], shade(BAR, 1.2));
+                for x in [-0.45f32, 0.15] {
+                    b.block([x, 0.33, z], [0.05, 0.2, 0.24], ROPE);
+                }
+            }
+            for (k, z) in [(0u32, -0.17f32), (1, 0.17)] {
+                let r = unit(h.rotate_left(3 + k));
+                b.put([0.45, 0.3, z], [0.22, 0.16, 0.2], if r < 0.3 { RUSTED } else { BLOOM }, r * 1.4, [0.1 * (r - 0.5), 0.0]);
+                b.put([0.47, 0.41, z], [0.12, 0.07, 0.11], shade(BLOOM, 0.9), r * 2.3, [0.0; 2]);
+            }
         } else {
             let n = 3 + h % 3;
             for k in 0..n {
@@ -1171,6 +1219,7 @@ mod tests {
             beasts,
             boats: Vec::new(),
             goods: Vec::new(),
+            iron: Vec::new(),
             doing: "",
             at: Vec3::ZERO,
         }

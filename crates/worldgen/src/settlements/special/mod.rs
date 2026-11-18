@@ -91,6 +91,9 @@ pub struct Facts {
     pub trade: bool,
     /// It is old or prosperous enough to keep painters.
     pub colour: bool,
+    /// It stands on the coast or by a river boats work, so iron comes to its smith by
+    /// water and the smithy keeps a stack of bars by the forge (#205).
+    pub water: bool,
 }
 
 impl Facts {
@@ -101,6 +104,7 @@ impl Facts {
             stone: s.has(Livelihood::Quarry),
             trade: s.coast || s.port.is_some() || s.has(Livelihood::Port) || s.partners.len() >= 2,
             colour: s.age == Age::Ancient || s.prosperity > 0.6,
+            water: s.coast || s.river.is_some(),
         }
     }
 }

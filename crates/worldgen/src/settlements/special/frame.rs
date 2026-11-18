@@ -962,6 +962,13 @@ impl<'a> Frame<'a> {
         self.take(&p.voxels, &p.fine, &format!("{prop:?}"));
     }
 
+    /// Lays fine parts made by the building itself rather than as a fitting or a prop
+    /// (the smith's stack of iron bars), held to the same rule: nothing landing in what
+    /// is built already or in a fitting.
+    pub fn things(&mut self, fine: &[PlantBox], what: &str) {
+        self.take(&[], fine, what);
+    }
+
     /// Lays a fitting's or a prop's parts, noting any that land in what is built already
     /// or in another fitting.
     fn take(&mut self, voxels: &[(IVec3, Voxel)], fine: &[PlantBox], what: &str) {
