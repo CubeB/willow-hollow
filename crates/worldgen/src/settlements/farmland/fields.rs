@@ -57,10 +57,14 @@ pub enum Crop {
     Rough,
     /// A managed wood: coppiced stools and standards.
     Coppice,
+    /// Rice standing in water: level paddies held by low earth bunds, on the flat wet
+    /// floor of a warm valley (see [`super::paddy`]). Last, so the kinds before it keep
+    /// their numbers.
+    Paddy,
 }
 
 impl Crop {
-    pub const ALL: [Crop; 14] = [
+    pub const ALL: [Crop; 15] = [
         Crop::Wheat,
         Crop::Barley,
         Crop::Rye,
@@ -75,6 +79,7 @@ impl Crop {
         Crop::Pasture,
         Crop::Rough,
         Crop::Coppice,
+        Crop::Paddy,
     ];
 
     /// Whether its ground is tilled: soil shows between its rows, and it is ploughed in
@@ -109,6 +114,7 @@ impl Crop {
             Crop::Pasture => "pasture",
             Crop::Rough => "rough grazing",
             Crop::Coppice => "coppice",
+            Crop::Paddy => "paddy",
         }
     }
 }
@@ -153,7 +159,7 @@ fn height(c: &Continent, p: Vec2) -> f32 {
 
 /// Which way the ground falls at `p`, as a unit vector (downhill), and how steeply, in
 /// voxels of rise per voxel: measured across a few metres, so it turns smoothly.
-fn fall(c: &Continent, p: Vec2) -> (Vec2, f32) {
+pub(super) fn fall(c: &Continent, p: Vec2) -> (Vec2, f32) {
     let d = m(10.0);
     let g = vec2(height(c, p + vec2(d, 0.0)) - height(c, p - vec2(d, 0.0)), height(c, p + vec2(0.0, d)) - height(c, p - vec2(0.0, d))) / (2.0 * d);
     let slope = g.length();
@@ -168,7 +174,7 @@ fn site(key: u32, i: i32, j: i32) -> Vec2 {
 }
 
 /// A roll of the dice for lattice cell `(i, j)`, with `salt` for each question asked of it.
-fn roll(key: u32, i: i32, j: i32, salt: i32) -> f32 {
+pub(super) fn roll(key: u32, i: i32, j: i32, salt: i32) -> f32 {
     unit(hash3(key ^ 0xf1e1d, i, j, salt))
 }
 
@@ -217,7 +223,7 @@ fn merged(land: &Land, key: u32, i: i32, j: i32) -> (i32, i32) {
 
 /// The use of a field whose middle is at continent-local `at`, managed `managed`, of
 /// `farm`: from its ring, the climate and the region, and a roll of the dice `a`.
-fn crop_for(c: &Continent, farm: &Farm, at: Vec2, managed: f32, a: f32) -> Crop {
+pub(super) fn crop_for(c: &Continent, farm: &Farm, at: Vec2, managed: f32, a: f32) -> Crop {
     use Crop::*;
     let cs = c.cell_size();
     let max = c.size as i32 - 1;
@@ -238,6 +244,15 @@ fn crop_for(c: &Continent, farm: &Farm, at: Vec2, managed: f32, a: f32) -> Crop 
     let dry = farm.region == Region::Desert || biome.arid() || matches!(biome, Biome::Savanna | Biome::Steppe);
     let upland = farm.region == Region::Upland;
     let wooded = crate::features::canopy_tree(biome).is_some() && !matches!(biome, Biome::Steppe | Biome::Moor | Biome::Heath | Biome::Savanna | Biome::Desert);
+    // The flat wet floor of a warm valley is levelled into paddies before anything else
+    // is grown on it; what is left of the dice chooses among the rest.
+    let mut a = a;
+    if managed >= CROPS && super::paddy::valley(c, farm, at, biome, wet) {
+        if a < super::paddy::SHARE {
+            return Paddy;
+        }
+        a = (a - super::paddy::SHARE) / (1.0 - super::paddy::SHARE);
+    }
     let list: &[(Crop, f32)] = if managed >= CROPS {
         if dry && !wet {
             &[(Barley, 3.0), (Wheat, 1.5), (Olives, 2.0), (Ploughed, 2.5), (Fallow, 0.6), (Pasture, 1.0)]
@@ -298,6 +313,39 @@ pub fn worked(col: &Column) -> bool {
 /// It says nothing of the column itself: whether its ground can be worked is
 /// [`worked`]'s to say. `seed` is the world's. In the wild this is one lookup.
 pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
+    locate(c, seed, lx, lz).map(|f| f.plot)
+}
+
+/// Where a column lies among the fields: its field, and what the paddies, the ditches and
+/// the names need to know of how the field was cut.
+#[derive(Clone, Copy, Debug)]
+pub struct Found {
+    pub plot: Plot,
+    /// The field's own number before it was cut into strips: the same on every strip of
+    /// it, and different from every other field's.
+    pub field: u32,
+    /// The column's middle, continent-local; where it lies in the plane the fields are
+    /// cut in; and the field's middle there.
+    pub p: Vec2,
+    pub q: Vec2,
+    pub site: Vec2,
+    /// Roughly how far in from the nearest edge of its field the column lies, in voxels:
+    /// small along every edge, and along each seam where two fields were run together.
+    pub edge: f32,
+}
+
+/// How far the plane the fields are cut in is bent at world column `(wx, wz)`: a slow
+/// noise and a quicker one, so no edge runs straight for long. `seed` is the world's.
+pub fn bend(seed: u32, wx: f64, wz: f64) -> Vec2 {
+    vec2(
+        fbm2(seed ^ 0xf1e2, wx / m64(70.0), wz / m64(70.0), 2, 2.0, 0.5),
+        fbm2(seed ^ 0xf1e3, wx / m64(70.0), wz / m64(70.0), 2, 2.0, 0.5),
+    ) * m(11.0)
+        + vec2(perlin2(seed ^ 0xf1e4, wx / m64(13.0), wz / m64(13.0)), perlin2(seed ^ 0xf1e5, wx / m64(13.0), wz / m64(13.0))) * m(2.2)
+}
+
+/// [`plot`], with how the field was cut (see [`Found`]).
+pub fn locate(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Found> {
     let land = &c.land;
     let managed = land.managed(lx, lz);
     if managed < EDGE {
@@ -308,19 +356,17 @@ pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
     if land.farms[owner].holds(p) {
         return None;
     }
+    // Between the ditches of drained land the fields are the ditches' own.
+    if let Some(found) = super::ditch::field(c, seed, p, owner) {
+        return Some(found);
+    }
     let key = c.desc.seed ^ 0x6f1e_1d5;
-    // The plane the fields are cut in, bent by a slow noise and a quicker one, so no
-    // edge runs straight for long.
-    let (wx, wz) = ((c.desc.mx * MACRO_SIZE + lx) as f64, (c.desc.mz * MACRO_SIZE + lz) as f64);
-    let bend = vec2(
-        fbm2(seed ^ 0xf1e2, wx / m64(70.0), wz / m64(70.0), 2, 2.0, 0.5),
-        fbm2(seed ^ 0xf1e3, wx / m64(70.0), wz / m64(70.0), 2, 2.0, 0.5),
-    ) * m(11.0)
-        + vec2(perlin2(seed ^ 0xf1e4, wx / m64(13.0), wz / m64(13.0)), perlin2(seed ^ 0xf1e5, wx / m64(13.0), wz / m64(13.0))) * m(2.2);
-    let q = p + bend;
+    let q = p + bend(seed, (c.desc.mx * MACRO_SIZE + lx) as f64, (c.desc.mz * MACRO_SIZE + lz) as f64);
     let here = height(c, p);
     let (gi, gj) = ((q.x / LATTICE).floor() as i32, (q.y / LATTICE).floor() as i32);
     let mut best = (f32::MAX, 0, 0);
+    // How far off the next nearest seeded point is, for how near the column is to an edge.
+    let mut second = f32::MAX;
     for dj in -1..=1 {
         for di in -1..=1 {
             let (i, j) = (gi + di, gj + dj);
@@ -328,7 +374,10 @@ pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
             let rise = (height(c, s) - here) * CLIMB;
             let d = s.distance_squared(q) + rise * rise;
             if d < best.0 {
+                second = best.0;
                 best = (d, i, j);
+            } else if d < second {
+                second = d;
             }
         }
     }
@@ -350,6 +399,7 @@ pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
         Vec2::from_angle(roll(key, i, j, 5) * std::f32::consts::PI)
     };
     let mut id = hash3(key, i, j, 0x1d);
+    let field = id | 1;
     // An old place's arable lies in strips along the contour, each of its own crop.
     if crop.arable() && roll(key, i, j, 6) < strip_chance(farm) {
         let across = vec2(-along.y, along.x);
@@ -364,7 +414,8 @@ pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
         };
     }
     let terrace = super::terrace::of(farm, crop, managed, slope);
-    Some(Plot { id: id | 1, crop, rows: along, managed, owner: farm_index, terrace })
+    let edge = (second.sqrt() - best.0.sqrt()) * 0.5;
+    Some(Found { plot: Plot { id: id | 1, crop, rows: along, managed, owner: farm_index, terrace }, field, p, q, site: s, edge })
 }
 
 /// The fields of a square of columns, worked out together for a chunk: the field each
@@ -393,10 +444,12 @@ impl Patch {
         patch.plots = (0..n * n)
             .map(|i| {
                 let col = &columns[i];
-                if !worked(col) {
+                // A paddy's water is worked ground; a ditch's is not.
+                let flooded = super::paddy::flooded(col);
+                if !worked(col) && !flooded {
                     return None;
                 }
-                plot(c, seed, x0 + (i / n) as i32, z0 + (i % n) as i32)
+                plot(c, seed, x0 + (i / n) as i32, z0 + (i % n) as i32).filter(|p| !flooded || p.crop == Crop::Paddy)
             })
             .collect();
         // The lanes hedged through the fields, where any field here is of a place that

@@ -18,21 +18,29 @@
 //!   or walled on both sides.
 //! - [`rotation`]: which crop a field carries in a given year and season, as its
 //!   rotation comes round (#207).
+//! - [`paddy`]: the flat wet floors of warm valleys levelled into paddies of standing
+//!   water, held by low earth bunds.
+//! - [`ditch`]: the straight ditches that drain the wet ground about an old place, with
+//!   plank bridges where the lanes cross them.
+//! - [`water`]: both of those, shaped into the ground column by column.
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
 
 pub mod bounds;
 pub mod crops;
+pub mod ditch;
 pub mod farmstead;
 pub mod fields;
 pub mod fixtures;
 pub mod influence;
 pub mod lanes;
 pub mod orchard;
+pub mod paddy;
 pub mod quarry;
 pub mod rotation;
 pub mod terrace;
+pub mod water;
 
 pub use fields::{Crop, Plot, plot};
 pub use influence::{Farm, Land, Use};
@@ -66,6 +74,8 @@ pub fn far(c: &Continent, seed: u32, col: &Column, lx: i32, lz: i32, step: i32) 
     for (dx, dz) in [(step, 0), (0, step)] {
         if let Some(q) = plot(c, seed, lx + dx, lz + dz)
             && q.id != p.id
+            && p.crop != Crop::Paddy
+            && q.crop != Crop::Paddy
         {
             let surface = match bounds::style(&c.land, &p, &q, col) {
                 bounds::Style::Wall => c.land.farms[p.owner.min(q.owner)].stone,

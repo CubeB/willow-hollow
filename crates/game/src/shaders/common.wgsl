@@ -63,8 +63,8 @@ struct Globals {
     // of the plant's colour.
     // The whole part of the flowers' w also holds, above the kind's three bits, the row
     // of `flowering` they keep (0 for none).
-    wash_body: array<vec4<f32>, 64>,
-    wash_bloom: array<vec4<f32>, 64>,
+    wash_body: array<vec4<f32>, 128>,
+    wash_bloom: array<vec4<f32>, 128>,
     // The seasons of the plants that have their own, by the number their vertices carry:
     // start, length, bud, seed (see season_phase in season.wgsl).
     flowering: array<vec4<f32>, 64>,

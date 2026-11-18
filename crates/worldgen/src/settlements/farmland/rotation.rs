@@ -29,7 +29,8 @@ fn cycle(own: Crop) -> Option<[Crop; 3]> {
         Flax => [Flax, Wheat, Roots],
         Ploughed => [Ploughed, Wheat, Barley],
         // Fallow gone to wildflowers has its scrub (see `orchard`), and the meadows,
-        // pastures, woods and trees stay as they are.
+        // pastures, woods and trees stay as they are. So do the paddies: their levelled
+        // floors and bunds are the work of generations, and rice follows rice in them.
         _ => return None,
     })
 }

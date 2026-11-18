@@ -234,8 +234,9 @@ pub fn fate(c: &Continent, seed: u32, stand: Stand, chosen: Option<Species>, col
         [(d, 0), (-d, 0), (0, d), (0, -d)].iter().any(|&(dx, dz)| plot(c, seed, lx + dx, lz + dz).is_some_and(|p| p.id != field.id))
     };
     match field.crop {
-        // An orchard's own trees stand in it, and nothing else (see [`trees_near`]).
-        Crop::Orchard | Crop::Olives => Fate::Felled,
+        // An orchard's own trees stand in it, and nothing else (see [`trees_near`]); and
+        // nothing stands in a paddy's water or on its bunds.
+        Crop::Orchard | Crop::Olives | Crop::Paddy => Fate::Felled,
         Crop::Rough | Crop::Coppice => {
             // Thinned: the rougher the ground, the more trees, until the wild's own.
             let left = ((PASTURE - managed) / (PASTURE - EDGE)).clamp(0.0, 1.0);

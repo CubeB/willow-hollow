@@ -561,6 +561,9 @@ impl<'a> Sampler<'a> {
         if let Some(stepped) = crate::settlements::farmland::terrace::step(self.c, self.world_seed, lx, lz, &column) {
             column.ground = stepped;
         }
+        // Paddies levelled and flooded, and the ditches of drained land (see
+        // `farmland::water`).
+        crate::settlements::farmland::water::shape(self.c, self.world_seed, lx, lz, &mut column);
         column
     }
 
@@ -1483,6 +1486,24 @@ fn natural_ground(c: &Continent, seed: u32, fx: f32, fz: f32, wx: f64, wz: f64) 
         + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
         + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
     (base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0), slope)
+}
+
+/// The ground at continent-local point `p` of `c` as the land lies before any river,
+/// trail or settlement shaped it, in voxels (see `natural_ground`). With `fine` false,
+/// without the relief finer than some 45 m: the lie of the land a long straight ditch
+/// keeps its water level along (see `settlements::farmland::ditch`).
+pub(crate) fn natural_at(c: &Continent, seed: u32, p: Vec2, fine: bool) -> f32 {
+    let cs = c.cell_size();
+    let max = (c.size - 1) as f32;
+    let (fx, fz) = ((p.x / cs - 0.5).clamp(0.0, max), (p.y / cs - 0.5).clamp(0.0, max));
+    let wx = c.desc.mx as f64 * MACRO_SIZE as f64 + p.x as f64;
+    let wz = c.desc.mz as f64 * MACRO_SIZE as f64 + p.y as f64;
+    if fine {
+        return natural_ground(c, seed, fx, fz, wx, wz).0;
+    }
+    let base = bicubic_slope(c, fx, fz).0 * OLD_VOXEL;
+    let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08);
+    base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0)
 }
 
 /// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid,

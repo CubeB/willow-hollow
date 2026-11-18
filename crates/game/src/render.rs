@@ -187,7 +187,8 @@ fn cloud_edge(edges: &[f32; CLOUD_COVERS], cover: f32) -> f32 {
 }
 /// Entries in the globals' tables of the colours small plants give the ground they stand
 /// on from afar (see `wash` in terrain.wgsl, and `worldgen::features::plants::washes`).
-const WASH_SLOTS: usize = 64;
+/// As `G.wash_body` and `G.wash_bloom` in common.wgsl have them.
+const WASH_SLOTS: usize = 128;
 
 /// Those tables: for the wash numbered `i`, its leaves' colour (linear) and its flowers',
 /// each with its plant kind, which the seasons go by, in the whole part of `w`; in the

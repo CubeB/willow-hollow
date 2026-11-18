@@ -748,6 +748,8 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Dune if matches!(col.biome, crate::biome::Biome::Desert | crate::biome::Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune if col.biome == crate::biome::Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
+        // The mud under a paddy's water or a ditch's (see settlements::farmland::water).
+        Cover::Land if col.water_surface().is_some() => (mat::MUD, mat::MUD),
         // Wet stone and moss around a spring, with a little mud.
         Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
         // Banks take the ground of the land around them: grass with a little bare earth
@@ -1083,11 +1085,16 @@ impl GameWorld {
                 if let Some((trails::tread::Step::Stone(v), _, _)) = step {
                     skin.0 = v;
                 }
+                // A way over a ditch goes on a plank bridge (see farmland::ditch).
+                let bridge = col.cover == Cover::Trail && farmland::ditch::bridged(&continent, lx0 + px as i32, lz0 + pz as i32, col);
+                if bridge {
+                    skin.0 = mat::PLANK;
+                }
                 // In a field, the crop is on soil where the wild has grass; a boundary keeps a
                 // strip of grass under it.
                 let mut field = None;
                 let mut fielded = false;
-                if !fields.is_empty() && !rocky && skin.0 == mat::ground_cover(col.biome)
+                if !fields.is_empty() && !rocky && (skin.0 == mat::ground_cover(col.biome) || farmland::paddy::flooded(col))
                     && let Some(plot) = fields.at(px + 1, pz + 1)
                 {
                     fielded = true;
@@ -1173,6 +1180,12 @@ impl GameWorld {
                     };
                     let foot = step_foot(WIDE, px + 1, pz + 1, nose_at);
                     trails::tread::dress(col, foot, wx as i32, wz as i32, self.seed, &mut plants);
+                    if bridge {
+                        // Its rails, along the edges of the way.
+                        let open = [(2, 1), (0, 1), (1, 2), (1, 0)].map(|(i, j)| wide[(px + i) * WIDE + pz + j].cover != Cover::Trail);
+                        let wood = continent.land.owner(lx0 + px as i32, lz0 + pz as i32).map_or(mat::PLANK_DARK, |o| continent.land.farms[o].wood);
+                        farmland::ditch::rails(wx as i32, top, wz as i32, open, wood, &mut plants);
+                    }
                 }
                 skins.push(skin);
             }
@@ -1331,6 +1344,10 @@ impl GameWorld {
         for px in 1..PAD - 1 {
             for pz in 1..PAD - 1 {
                 let Some(k) = columns[px * PAD + pz].water_surface() else { continue };
+                // A paddy or a ditch stepping down a voxel only stands still.
+                if columns[px * PAD + pz].cover == Cover::Land {
+                    continue;
+                }
                 let (mut total, mut dir) = (0.0f32, Vec3::ZERO);
                 for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                     let n = &columns[(px as i32 + dx) as usize * PAD + (pz as i32 + dz) as usize];

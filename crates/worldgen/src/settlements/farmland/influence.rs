@@ -267,19 +267,19 @@ impl Land {
 }
 
 /// The ground at a point, from the continent's grid: what decides how it can be worked.
-struct Ground {
+pub(super) struct Ground {
     /// Steepness of the smooth land, in voxels of rise per voxel.
-    slope: f32,
-    biome: Biome,
-    temperature: f32,
+    pub slope: f32,
+    pub biome: Biome,
+    pub temperature: f32,
     /// Under the sea or a lake.
-    water: bool,
+    pub water: bool,
     /// The most water running through a grid cell about it (see `Continent::discharge`).
-    river: f32,
+    pub river: f32,
 }
 
 /// The ground at continent-local point `p`, read off the continent's grid.
-fn sample(c: &Continent, p: Vec2) -> Ground {
+pub(super) fn sample(c: &Continent, p: Vec2) -> Ground {
     let cs = c.cell_size();
     let max = (c.size - 1) as f32;
     let (fx, fz) = ((p.x / cs - 0.5).clamp(0.0, max), (p.y / cs - 0.5).clamp(0.0, max));

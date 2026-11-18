@@ -9,8 +9,12 @@
 //! being built again. Which crop a field grows does not change from year to year: the
 //! world is drawn on a date but made without one.
 //!
-//! Plants are kept few: a grain column is three boxes, a root row two, and ploughed
-//! ground, pasture and fallow none beyond what the ground grows anyway.
+//! Plants are kept few: a grain column is three boxes, a root row two, a paddy's rice
+//! two, and ploughed ground, pasture and fallow none beyond what the ground grows anyway.
+//!
+//! Rice keeps the grapes' season: the paddies lie open and shining in spring and early
+//! summer, the rice green over them from July, gold by the end of August and cut through
+//! September, and the water open again from then through the winter.
 
 use voxel::{
     Materials, Voxel,
@@ -70,7 +74,7 @@ pub fn classify(m: &mut Materials) {
         m.set_plant(v, pk::DECIDUOUS);
     }
     m.set_plant(mat::OLIVE_LEAF, pk::EVERGREEN);
-    for v in [mat::MEADOW_TUFT, mat::WHEAT, mat::BARLEY, mat::RYE, mat::STUBBLE, mat::FLAX, mat::ROOT_LEAF] {
+    for v in [mat::MEADOW_TUFT, mat::WHEAT, mat::BARLEY, mat::RYE, mat::STUBBLE, mat::FLAX, mat::ROOT_LEAF, mat::RICE] {
         m.set_plant(v, pk::GRASS);
     }
     for v in [mat::HEDGE_WOOD, mat::THORN, mat::BARK_OLIVE] {
@@ -99,6 +103,8 @@ fn wash_of(crop: Crop) -> Option<Wash> {
         // The trees' heads, close set in their rows, white in blossom in spring.
         Crop::Orchard => w((mat::ORCHARD_LEAF, mat::TUFT_LUSH, 0.35), (mat::BLOSSOM, 0.35), super::orchard::BLOSSOM, 0.6),
         Crop::Olives => w((mat::OLIVE_LEAF, mat::PLOUGH_DRY, 0.45), (voxel::AIR, 0.0), 0, 0.6),
+        // Open water with the sky in it, and the rice over it in its season.
+        Crop::Paddy => w((mat::PADDY_FAR, mat::PADDY_FAR, 0.0), (mat::RICE, 0.85), GRAPES, 0.75),
         _ => None,
     }
 }
@@ -126,8 +132,12 @@ pub fn wash(crop: Crop) -> Option<u8> {
 }
 
 /// The top voxel of a column of a field of `crop`, if the field changes it: tilled
-/// ground is plough the year round, which the crop stands on in its season.
+/// ground is plough the year round, which the crop stands on in its season, and a
+/// paddy's floor is mud under its water (its bunds are grass).
 pub fn ground(crop: Crop, col: &Column) -> Option<Voxel> {
+    if crop == Crop::Paddy {
+        return super::paddy::flooded(col).then_some(mat::MUD);
+    }
     soil(crop, col.biome, col.temperature)
 }
 
@@ -137,6 +147,8 @@ pub fn soil(crop: Crop, biome: Biome, temperature: f32) -> Option<Voxel> {
     let dry = biome.arid() || matches!(biome, Biome::Savanna | Biome::Steppe) || temperature > 0.66;
     match crop {
         Crop::Vines => Some(mat::PLOUGH_DRY),
+        // Seen from far off, a paddy is its water.
+        Crop::Paddy => Some(mat::PADDY_FAR),
         c if c.tilled() => Some(if dry { mat::PLOUGH_DRY } else { mat::PLOUGH }),
         _ => None,
     }
@@ -238,6 +250,20 @@ pub fn grow(plot: &Plot, col: &Column, x: i32, z: i32, seed: u32, out: &mut Vec<
                 let (cx, cz) = (bit(4 + 4 * k, 4), bit(6 + 4 * k, 4));
                 let tall = 5 + bit(16 + 2 * k, 3);
                 add([cx, 0, cz], [cx + 1, tall, cz + 1], mat::MEADOW_TUFT, true, HAY);
+            }
+            true
+        }
+        Crop::Paddy => {
+            // Rice planted out in hills, two rows to the voxel, standing up out of the
+            // water from the mud under it; nothing on the bunds but their grass.
+            if !super::paddy::flooded(col) {
+                return false;
+            }
+            for k in 0..2 {
+                let a = (bit(4, 4) + 2 * k) % CELLS;
+                let height = 8 + bit(8 + 2 * k as u32, 3);
+                let (lo, hi) = rect((2 * k, 2 * k + 1), (a, (a + 2).min(CELLS)), (0, height));
+                add(lo, hi, mat::RICE, true, GRAPES);
             }
             true
         }

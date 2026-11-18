@@ -179,8 +179,8 @@ const FLAG_WASH: u32 = 24u;
 // lie over a far hillside in the same drifts they are found in on it, and the land does
 // not go bare a hundred metres from the camera.
 fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale: f32) -> vec3<f32> {
-    let body = G.wash_body[min(code, 63u)];
-    let bloom = G.wash_bloom[min(code, 63u)];
+    let body = G.wash_body[min(code, 127u)];
+    let bloom = G.wash_bloom[min(code, 127u)];
     let kinds = vec2<u32>(u32(body.a), u32(bloom.a) & 7u);
     // The row of G.flowering the flowers keep, if they have a season of their own.
     let flowering = (u32(bloom.a) >> 3u) & 63u;

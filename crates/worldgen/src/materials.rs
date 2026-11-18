@@ -412,6 +412,11 @@ palette! {
     PALM_NEW          = (146, 162,  74), Solid, 3;
     PALM_NEW_2        = (148, 155,  78), Solid, 3;
     PALM_NEW_3        = (149, 148,  81), Solid, 3;
+    // The paddies (settlements::farmland::paddy), added last so existing ids keep their
+    // numbers: rice as it is ripe (the seasons show it green before), and a paddy's water
+    // as the far view draws it, the sky in it.
+    RICE              = (212, 184, 104), Foliage, 2;
+    PADDY_FAR         = (132, 156, 164), Solid, 1;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,

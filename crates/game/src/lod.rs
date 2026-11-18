@@ -175,6 +175,8 @@ pub(crate) fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
         Cover::Spring => (mat::MOSSY_STONE, mat::STONE),
+        // A paddy's floor or a ditch's, under its water.
+        Cover::Land if col.water_surface().is_some() => (mat::MUD, mat::MUD),
         Cover::Trail => (worldgen::trails::tread::far(col), mat::DIRT),
         // Tidal flats: wet sand where barely above the sea, as the voxel world has them.
         Cover::Bank if !col.biome.arid() && worldgen::surface::flat_is_sand(col.ground, 0.5) => (mat::SAND, mat::SAND),
@@ -295,7 +297,8 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // to it would show a crack where it is cut off.
             let mut top = (lowest + 1).div_euclid(step) - 1;
             // Any water at the corners floods the cell, so narrow rivers stay joined up.
-            let water = four.iter().filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
+            // A ditch is too narrow to show as water once the cells are wider than it.
+            let water = four.iter().filter(|c| step <= 2 || !worldgen::settlements::farmland::ditch::ditched(c)).filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
             // Rounding must not leave the bed poking through its own shallows.
             if let Some(w) = water {
                 top = top.min(w - 1);

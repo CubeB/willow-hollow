@@ -118,7 +118,7 @@ fn kind_by(farm: &Farm, crop: Crop, roll: f32) -> BarnKind {
         Crop::Wheat | Crop::Barley | Crop::Rye | Crop::Roots | Crop::Flax | Crop::Ploughed | Crop::Fallow => {
             if roll < 0.7 { BarnKind::Hay } else { BarnKind::Shed }
         }
-        Crop::Vines | Crop::Olives | Crop::Orchard | Crop::Coppice => BarnKind::Shed,
+        Crop::Vines | Crop::Olives | Crop::Orchard | Crop::Coppice | Crop::Paddy => BarnKind::Shed,
     }
 }
 

@@ -58,8 +58,8 @@ struct VOut {
 // own day: see season_phase), or over and brown. As `wash` in terrain.wgsl colours the
 // ground under each plant nearer to.
 fn far_wash(code: u32, s: f32) -> vec3<f32> {
-    let body = G.wash_body[min(code, 63u)];
-    let bloom = G.wash_bloom[min(code, 63u)];
+    let body = G.wash_body[min(code, 127u)];
+    let bloom = G.wash_bloom[min(code, 127u)];
     var c = body.rgb;
     if (u32(body.a) == PLANT_GRASS) {
         c = season_grass(c, s);

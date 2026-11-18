@@ -21,7 +21,7 @@ use voxel::{
 };
 
 use super::{
-    fields::{Patch, Plot},
+    fields::{Crop, Patch, Plot},
     influence::{CROPS, EDGE, Farm, Land, PASTURE, ROUGH},
     lanes::Lane,
 };
@@ -174,8 +174,9 @@ pub fn edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Opt
             (p, *q, false)
         }
     };
-    // Nothing stands across a trail, nor on its verge.
-    if col.clear < GATEWAY {
+    // Nothing stands across a trail, nor on its verge; and a paddy's bunds are its
+    // boundaries.
+    if col.clear < GATEWAY || p.crop == Crop::Paddy || q.crop == Crop::Paddy {
         return None;
     }
     let style = style(land, &p, &q, col);
