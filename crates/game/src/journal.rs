@@ -780,11 +780,22 @@ pub struct View {
     /// The find being read about, by its id.
     selected: Option<String>,
     catalogue: Vec<Item>,
+    /// Whose journal it is, if the player has given their name on the figure screen
+    /// (#204): it goes on the cover.
+    pub owner: String,
 }
 
 impl View {
     pub fn new(materials: &voxel::Materials) -> Self {
-        Self { page: Page::default(), selected: None, catalogue: catalogue(materials) }
+        Self { page: Page::default(), selected: None, catalogue: catalogue(materials), owner: String::new() }
+    }
+
+    /// What the journal is headed: the journal, or the journal of whoever keeps it.
+    pub fn heading(&self) -> String {
+        match self.owner.trim() {
+            "" => "Journal".into(),
+            name => format!("The journal of {name}"),
+        }
     }
 
     /// Everything there is to find.
@@ -1047,7 +1058,7 @@ pub fn show(ctx: &egui::Context, journal: &Journal, view: &mut View) {
         egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, EDGE)).corner_radius(10).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
             ui.set_width(WIDTH);
             ui.horizontal(|ui| {
-                ui.label(text("Journal", 22.0, INK));
+                ui.label(text(&view.heading(), 22.0, INK));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 18.0;
                     for (page, _, title) in Page::ALL.iter().rev() {

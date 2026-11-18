@@ -164,9 +164,9 @@ fn cloths(region: Region) -> (&'static [(usize, f32)], &'static [(usize, f32)]) 
 }
 
 /// Leather for boots and belts, and what hats are made of.
-const LEATHERS: [Rgb; 4] = [[0x3b, 0x2d, 0x25], [0x5a, 0x40, 0x2c], [0x7a, 0x56, 0x36], [0x8d, 0x5c, 0x37]];
-const STRAW: Rgb = [0xd6, 0xbe, 0x78];
-const FURS: [Rgb; 3] = [[0x6a, 0x52, 0x3c], [0x9c, 0x8c, 0x78], [0x3a, 0x2e, 0x26]];
+pub const LEATHERS: [Rgb; 4] = [[0x3b, 0x2d, 0x25], [0x5a, 0x40, 0x2c], [0x7a, 0x56, 0x36], [0x8d, 0x5c, 0x37]];
+pub const STRAW: Rgb = [0xd6, 0xbe, 0x78];
+pub const FURS: [Rgb; 3] = [[0x6a, 0x52, 0x3c], [0x9c, 0x8c, 0x78], [0x3a, 0x2e, 0x26]];
 /// The smith's leather apron, the mason's dusty one, and oilskins yellow and dark.
 const SMITHY: Rgb = [0x4e, 0x36, 0x26];
 const DUSTY: Rgb = [0x9a, 0x94, 0x88];
@@ -272,7 +272,11 @@ impl Person {
 
     /// Their hair as it is now, greyed by the years.
     pub fn hair_now(base: usize, grey: f32) -> Rgb {
-        let natural = HAIR[base].1;
+        Person::greyed(HAIR[base].1, grey)
+    }
+
+    /// Hair of the colour `natural` as it is `grey` of the way to white (0 to 1).
+    pub fn greyed(natural: Rgb, grey: f32) -> Rgb {
         if grey <= 0.7 {
             blend(natural, GREY, grey / 0.7 * 0.85)
         } else {

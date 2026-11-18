@@ -13,6 +13,7 @@ mod env;
 mod fallen;
 mod farbuilt;
 mod farview;
+mod figure;
 mod gfx;
 mod impostors;
 mod insects;
@@ -100,6 +101,10 @@ struct Options {
     figure_rise: f32,
     /// How far the figure on a screenshot has swung its furled glider up from its back.
     figure_furl: f32,
+    /// The player looks as this roll makes them, for this run only (#204).
+    figure_look: Option<figure::Roll>,
+    /// Show the figure screen on a screenshot, the figure turned this many degrees.
+    shot_figure_screen: Option<f32>,
     /// Generated people standing in rows before a screenshot's camera.
     shot_people: Option<people::Gallery>,
     look: (f32, f32),
@@ -205,6 +210,8 @@ impl Default for Options {
             figure_bank: 0.0,
             figure_rise: -1.5,
             figure_furl: 0.0,
+            figure_look: None,
+            shot_figure_screen: None,
             shot_people: None,
             look: (35.0, -18.0),
             time: None,
@@ -268,6 +275,10 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure-bank DEG     with --figure-glide, the wing banked DEG degrees, right wing down
   --figure-rise V       with --figure-glide, rising V metres a second (default -1.5)
   --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
+  --figure-look SEED[,REGION[,AGE]]  the player looks as the figure screen's roll SEED
+                        makes them (from REGION, a child, adult or elder), for this run only
+  --figure-screen [DEG] on a screenshot, the figure screen open, the figure turned DEG
+                        degrees from facing the view (default -30)
   --people N            on a screenshot, N generated people in rows ahead, facing the camera:
                         a household first, then every trade and age
   --people-region R     their region (temperate, upland, northern, alpine, desert, wetland,
@@ -421,6 +432,8 @@ fn parse_args() -> Result<Options> {
             "--figure-bank" => o.figure_bank = value()?.parse()?,
             "--figure-rise" => o.figure_rise = value()?.parse()?,
             "--figure-furl" => o.figure_furl = value()?.parse()?,
+            "--figure-look" => o.figure_look = Some(figure::Roll::from_flag(&value()?)?),
+            "--figure-screen" => o.shot_figure_screen = Some(args.next_if(|v| !v.starts_with("--")).map_or(Ok(-30.0), |d| d.parse::<f32>())?),
             "--people" => o.shot_people.get_or_insert_default().count = value()?.parse::<usize>()?.min(60),
             "--people-region" => {
                 let word = value()?;
@@ -1073,6 +1086,10 @@ struct Running {
     store: Option<Store>,
     save_timer: f32,
     show_settings: bool,
+    /// How the player looks (#204), and the figure screen while it is open over the
+    /// settings menu.
+    figure: figure::Figure,
+    figure_screen: Option<figure::Screen>,
     /// What the player carries, its window, and whether that is open.
     pack: inventory::Pack,
     pack_view: inventory::View,
@@ -1219,6 +1236,12 @@ impl Running {
         let placed = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(placed::Placed::new, |s| placed::Placed::from_text(&s.placed(settings.seed)));
 
         let journal = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(journal::Journal::new, |s| journal::Journal::from_text(&s.journal(settings.seed)));
+        // Who the player is goes with them into every world; a look given by hand is for
+        // this run only.
+        let figure = match &opts.figure_look {
+            Some(roll) => figure::Figure::rolled(roll),
+            None => store.as_ref().map_or_else(figure::Figure::default, |s| figure::Figure::from_text(&s.figure())),
+        };
 
         // Simulating the continent takes seconds, so it starts now, alongside the window
         // and the GPU, instead of waiting its turn after them.
@@ -1364,11 +1387,17 @@ impl Running {
             store,
             save_timer: AUTOSAVE,
             show_settings: false,
+            figure_screen: None,
             pack,
             pack_view: inventory::View::default(),
             pack_open: false,
             journal,
-            journal_view: journal::View::new(world.materials()),
+            journal_view: {
+                let mut view = journal::View::new(world.materials());
+                view.owner = figure.name.clone();
+                view
+            },
+            figure,
             journal_open: false,
             journal_timer: 0.0,
             within_reach: None,
@@ -1459,6 +1488,23 @@ impl Running {
         self.set_grab(!open);
         if !open {
             self.save_timer = 0.0;
+        }
+    }
+
+    /// Opens the figure screen over the settings menu, or closes it, keeping what was
+    /// chosen there and saving it beside the settings (#204).
+    fn set_figure(&mut self, open: bool) {
+        if open {
+            self.figure_screen = Some(figure::Screen::new(&self.figure));
+            return;
+        }
+        let Some(screen) = self.figure_screen.take() else { return };
+        if screen.figure != self.figure {
+            self.figure = screen.figure;
+            self.journal_view.owner = self.figure.name.clone();
+            if let Some(store) = &self.store {
+                store.write_figure(&self.figure.to_text());
+            }
         }
     }
 
@@ -2329,12 +2375,17 @@ impl Running {
                 let into = if self.third { &mut self.props } else { &mut self.shades };
                 // The glider is a rod on the back until the wing itself is out.
                 let furled = (self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
-                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
+                // As the player has made themselves (#204), hands on the bar and seated
+                // on the thwart whatever their height.
+                let look = &self.figure.look;
+                let hanging = ((self.glider - GLIDER_UP) / (1.0 - GLIDER_UP)).max(0.0);
+                let feet = figure::fitted(look, feet, self.gait.facing, hanging, self.player.mode == Mode::Boat);
+                character::draw(look, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
                 // A lantern in hand lights the way, unless it is shuttered; not with both
                 // hands on the glider's bar.
                 if self.pack.in_hand().is_some_and(|s| s.item.id == "lantern") && self.player.mode != Mode::Glide {
                     let lit = if self.shuttered { 0.0 } else { candle(clock) };
-                    let flame = character::draw_lantern(feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
+                    let flame = character::draw_lantern_by(&look.build, feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
                     held_light = (lit > 0.0).then_some((flame, lit));
                 }
             }
@@ -2452,10 +2503,13 @@ impl Running {
         let (show_debug, show_menu, grabbed) = (settings.show_debug, self.show_settings, self.grabbed);
         let (labels, map_open) = (self.map.labels(), self.map.open);
         let console = &mut self.console;
+        let (figure_screen, mut figure_done) = (&mut self.figure_screen, false);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
                 overlay::map_labels(ctx, labels);
-                if show_menu {
+                if show_menu && let Some(screen) = figure_screen {
+                    figure_done = figure::show(ctx, screen);
+                } else if show_menu {
                     choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
                 } else if pack_open {
                     let_go = inventory::show(ctx, pack, pack_view);
@@ -2528,6 +2582,9 @@ impl Running {
         if choice.resume {
             self.set_menu(false);
         }
+        if choice.figure || figure_done {
+            self.set_figure(choice.figure);
+        }
         for stack in let_go {
             self.set_down(stack);
         }
@@ -2598,6 +2655,8 @@ impl ApplicationHandler for App {
                 r.set_pack(false);
             } else if r.journal_open {
                 r.set_journal(false);
+            } else if r.figure_screen.is_some() {
+                r.set_figure(false);
             } else {
                 r.set_menu(!r.show_settings);
             }
@@ -2860,6 +2919,7 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         if let Some(r) = self.run.as_mut() {
+            r.set_figure(false);
             r.map.save(true);
             r.persist(&self.opts.overrides);
         }
@@ -3018,9 +3078,12 @@ fn main() -> Result<()> {
         for boat in fleet.boats() {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
         }
+        // The player as they look: the wanderer, unless a roll is given (#204).
+        let own = opts.figure_look.as_ref().map_or_else(figure::Figure::default, figure::Figure::rolled);
         if let Some((feet, gait)) = &figure {
             let furled = opts.figure_glide.is_none().then_some(opts.figure_furl);
-            character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
+            let at = figure::fitted(&own.look, *feet, gait.facing, opts.figure_glide.unwrap_or(0.0), false);
+            character::draw(&own.look, at, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
             if let Some(open) = opts.figure_glide {
                 let flight = vehicles::Flight::of(opts.figure_bank.to_radians(), opts.figure_rise, 0.0);
                 vehicles::draw_glider(*feet, gait.facing, open, flight, camera.pos, &mut props);
@@ -3174,7 +3237,7 @@ fn main() -> Result<()> {
                 Some((feet, gait)) => (*feet, gait, &mut props),
                 None => (camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), &standing, &mut unseen),
             };
-            lamps.push((character::draw_lantern(feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
+            lamps.push((character::draw_lantern_by(&own.look.build, feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
         }
         // The map, as the player would have it after walking here.
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -3245,7 +3308,17 @@ fn main() -> Result<()> {
             pack.hold(0);
             pack
         });
+        // The figure screen, open on the player as they look.
+        let mut figure_screen = opts.shot_figure_screen.map(|turn| figure::Screen::new(&own).turned(turn.to_radians()));
+        if let Some((_, journal_view)) = &mut written {
+            journal_view.owner = own.name.clone();
+        }
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
+            if text && let Some(screen) = &mut figure_screen {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| {
+                    figure::show(ctx, screen);
+                });
+            }
             if text && let Some((journal, journal_view)) = &mut written {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| journal::show(ctx, journal, journal_view));
             }

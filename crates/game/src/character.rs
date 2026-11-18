@@ -1356,21 +1356,32 @@ const GLASS: Rgb = [214, 200, 160];
 /// Draws a lantern hung from the right hand of a figure drawn by `draw` with the same
 /// `feet`, `facing` and `pose`, burning `lit` brightly (0 shuttered). Where its flame is,
 /// in the world, for the light it throws.
+// The player's figure is drawn at their own build now (#204), with `draw_lantern_by`;
+// this stays for a figure of the wanderer's.
+#[allow(dead_code)]
 pub fn draw_lantern(feet: DVec3, facing: f32, pose: &Pose, lit: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) -> DVec3 {
+    draw_lantern_by(&Build::PLAYER, feet, facing, pose, lit, cam, out)
+}
+
+/// As [`draw_lantern`], in the hand of a figure of `build`: the player as they have
+/// made themselves (#204), taller or shorter, broader or slighter.
+pub fn draw_lantern_by(build: &Build, feet: DVec3, facing: f32, pose: &Pose, lit: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) -> DVec3 {
     let yaw = facing - std::f32::consts::FRAC_PI_2;
     let (sy, cy) = yaw.sin_cos();
     // The hand, as `draw` puts it: down the arm from the shoulder, and on down the
     // forearm from the elbow, with the body leaning from the hips.
     let hips = Vec3::new(0.0, 9.0, 0.0);
-    let (sl, cl) = pose.lean.sin_cos();
-    let shoulder = Vec3::new(-2.5, 13.5, 0.0) - hips;
+    let (sl, cl) = (pose.lean + build.stoop).sin_cos();
+    let arm = measures(build).1;
+    let shoulder = Vec3::new(-(2.0 * build.girth + 0.5 * arm), 13.5, 0.0) - hips;
     let shoulder = hips + Vec3::new(shoulder.x, shoulder.y * cl - shoulder.z * sl, shoulder.y * sl + shoulder.z * cl);
     let along = |joint: Vec3, pitch: f32, down: f32| joint + Vec3::new(0.0, -down * pitch.cos(), -down * pitch.sin());
     let elbow = along(shoulder, pose.arm[0], 2.5);
     // Held a little out from the side, so it swings clear of the leg.
     let hand = along(elbow, pose.arm[0] + pose.fore[0], 3.0) + Vec3::new(-0.7, 0.0, 0.0);
-    let base = (feet - cam).as_vec3() + Vec3::Y * pose.lift;
-    let world = |p: Vec3| base + Vec3::new(p.x * cy - p.z * sy, p.y, p.x * sy + p.z * cy) * CELL;
+    let base = (feet - cam).as_vec3() + Vec3::Y * pose.lift * build.scale;
+    let cell = CELL * build.scale;
+    let world = |p: Vec3| base + Vec3::new(p.x * cy - p.z * sy, p.y, p.x * sy + p.z * cy) * cell;
     // It hangs from its handle straight down, whatever the arm is doing.
     let pieces: [([f32; 3], [f32; 3], Rgb, f32); 5] = [
         ([0.0, -0.4, 0.0], [0.25, 0.8, 0.25], BRASS, 0.0),

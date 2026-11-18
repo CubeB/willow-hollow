@@ -20,6 +20,7 @@ pub const SENSITIVITY: RangeInclusive<f32> = 0.2..=3.0;
 pub const VOLUME: RangeInclusive<f32> = 0.0..=1.0;
 
 const SETTINGS_FILE: &str = "settings.txt";
+const FIGURE_FILE: &str = "figure.txt";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
@@ -322,6 +323,17 @@ impl Store {
         self.report(write_whole(&self.dir, &path, text))
     }
 
+    /// How the player has made their figure look, as it was saved: empty if they never
+    /// have (#204). It is the player's own, as the settings are, and goes with them into
+    /// every world: a plain run is a new world each time.
+    pub fn figure(&self) -> String {
+        fs::read_to_string(self.dir.join(FIGURE_FILE)).unwrap_or_default()
+    }
+
+    pub fn write_figure(&self, text: &str) -> bool {
+        self.report(write_whole(&self.dir, FIGURE_FILE.as_ref(), text))
+    }
+
     /// Where the map of what has been seen of each world is kept.
     pub fn map_dir(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("map-{seed}"))
@@ -455,6 +467,24 @@ mod tests {
         assert_eq!(store.settings(), settings);
         assert_eq!(store.progress(1), Some(progress()));
         assert!(store.progress(2).is_none(), "worlds keep separate saves");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_players_figure_is_saved_and_read_back() {
+        use crate::figure::{Choice, Figure, Roll};
+        let dir = std::env::temp_dir().join(format!("willow-hollow-figure-{}", std::process::id()));
+        let store = Store { dir: dir.clone() };
+        // Never saved, the player is the wanderer.
+        assert_eq!(Figure::from_text(&store.figure()), Figure::default());
+        let mut figure = Figure::rolled(&Roll { seed: 41, region: worldgen::settlements::Region::Desert, ..Roll::default() });
+        figure.name = "Tam of the Ford".into();
+        figure.choose(Choice::Height(1.68));
+        assert!(store.write_figure(&figure.to_text()));
+        assert_eq!(Figure::from_text(&store.figure()), figure);
+        // It is the player's own, not a world's.
+        assert!(store.write_progress(5, progress()));
+        assert_eq!(Figure::from_text(&store.figure()), figure);
         let _ = fs::remove_dir_all(dir);
     }
 }
