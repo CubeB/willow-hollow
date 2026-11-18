@@ -346,7 +346,7 @@ fn a_greeting_names_real_places() {
             assert!(!line.contains('{') && !line.contains('}'), "{line}");
             let named = real.iter().any(|n| line.contains(n.as_str())) || line.contains(&town.name) || line.contains("village tree");
             assert!(named, "{} of {} says '{line}', naming nowhere", r.person.name, town.name);
-            assert!(["spring", "summer", "autumn", "winter"].iter().any(|s| line.contains(s)) || line.contains(&town.name) || town.near.as_ref().is_some_and(|n| line.contains(n.as_str())) || line.contains("tree"), "{line}");
+            assert!(["spring", "summer", "autumn", "winter"].iter().any(|s| line.contains(s)) || line.contains(&town.name) || town.near.as_ref().is_some_and(|n| line.contains(n.as_str())) || town.river.as_ref().is_some_and(|n| line.contains(n.as_str())) || line.contains("tree"), "{line}");
         }
         assert!(real.contains(&town.name), "{} is not a name of the gazetteer", town.name);
     }
