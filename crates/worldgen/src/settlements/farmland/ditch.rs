@@ -234,13 +234,6 @@ pub fn bridged(c: &Continent, lx: i32, lz: i32, col: &Column) -> bool {
     nearest(c, owner, vec2(lx as f32 + 0.5, lz as f32 + 0.5)).is_some_and(|d| d < HALF + 0.5)
 }
 
-/// Whether continent-local `p` lies on a ditch of the settlement `owner`: for finding
-/// where the ways cross them.
-#[cfg(test)]
-pub(super) fn crossing(c: &Continent, owner: usize, p: Vec2) -> bool {
-    nearest(c, owner, p).is_some_and(|d| d < HALF)
-}
-
 /// The rails of a plank bridge on the column at world `(x, z)`, whose deck is its top
 /// voxel `top`: on each side `open` says the way's edge is on (+x, -x, +z, -z), a post and
 /// a rail along it, as small boxes into `out`. `wood` is the timber of the place.
