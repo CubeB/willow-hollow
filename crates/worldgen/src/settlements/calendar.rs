@@ -17,6 +17,11 @@
 //! frame and counter only), and the game sets out their awnings, goods and keepers on
 //! market day, and the festivals' lanterns and garlands, from what [`Stall`] and the
 //! layout record.
+//!
+//! What is out between market days follows the kind of place (#203): a village's stalls
+//! stand bare until its market, but a large village keeps a couple on its green set out
+//! every day, and a town a few more about its square ([`daily_stalls`]); on market day
+//! every stall is out.
 
 use glam::IVec3;
 use voxel::Voxel;
@@ -28,6 +33,11 @@ use crate::noise::hash2;
 /// the second.
 pub const MARKET_OPENS: f32 = 8.0;
 pub const MARKET_CLOSES: f32 = 16.0;
+
+/// The hours a stall kept every day ([`daily_stalls`]) stands set out: from first light,
+/// for those about early, until dusk.
+pub const DAILY_OPENS: f32 = 5.5;
+pub const DAILY_CLOSES: f32 = 20.5;
 
 /// How often a settlement of `kind` holds its market: one day in this many, or never
 /// (0) for a hamlet.
@@ -64,6 +74,33 @@ pub fn is_market_day(s: &Settlement, day: i64) -> bool {
 pub fn next_market_day(s: &Settlement, day: i64) -> Option<i64> {
     let every = market_every(s.kind);
     (every > 0).then(|| day + (market_offset(s.kind, s.seed) - day).rem_euclid(every))
+}
+
+/// How many of the stalls of a settlement of `kind` are set out every day, not only on
+/// market day: none in a village, a couple on a large village's green, a few about a
+/// town's square. Never all of a place's stalls: market day always brings more out.
+pub fn daily_stalls(kind: Kind) -> usize {
+    match kind {
+        Kind::Hamlet | Kind::Village => 0,
+        Kind::LargeVillage => 2,
+        Kind::Town => 3,
+        Kind::GreatTown => 4,
+    }
+}
+
+/// The bit of a stall's seed that says it is kept every day. It is carried in the seed so
+/// that whatever has a stall's seed can tell, the game's dressing among them.
+pub const DAILY: u32 = 1 << 31;
+
+/// Whether the stall whose seed is `seed` is kept every day (see [`DAILY`]).
+pub fn kept_daily(seed: u32) -> bool {
+    seed & DAILY != 0
+}
+
+/// `seed` made the seed of a stall kept every day if `daily`, or of one kept on market
+/// day only.
+pub fn stall_seed(seed: u32, daily: bool) -> u32 {
+    if daily { seed | DAILY } else { seed & !DAILY }
 }
 
 /// The two festivals of the year.
@@ -116,7 +153,8 @@ pub fn festival_on(day: i64, year_days: f32) -> Option<Festival> {
 
 /// A market stall on a green as the game dresses it on market day. The stall is stamped
 /// bare, its frame and counter only; on market day the game stretches its awning over the
-/// rails and sets out goods along the counter, and its keeper stands behind it.
+/// rails and sets out goods along the counter, and its keeper stands behind it. One kept
+/// every day ([`Stall::daily`]) is set out so from first light to dusk every day.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Stall {
     /// Where its model's column 0 stands, continent-local, and its quarter turns (as a
@@ -132,7 +170,15 @@ pub struct Stall {
     pub counter: (IVec3, IVec3),
     /// The colour of its cloth.
     pub colour: Voxel,
+    /// What it is built and dressed by, with [`DAILY`] in it if it is kept every day.
     pub seed: u32,
+}
+
+impl Stall {
+    /// Whether it is kept every day, not only on market day.
+    pub fn daily(&self) -> bool {
+        kept_daily(self.seed)
+    }
 }
 
 #[cfg(test)]

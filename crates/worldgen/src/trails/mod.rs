@@ -80,6 +80,9 @@ pub struct Pad {
     /// A garden's bed, worked bare: the continent-local columns from the first corner to
     /// the second, inclusive. None on a pad with no garden.
     pub garden: Option<(glam::IVec2, glam::IVec2)>,
+    /// A town's market square (#203): paved all over, so worn all over, the paving
+    /// stamped on it with the settlement.
+    pub paved: bool,
 }
 
 impl Pad {
@@ -100,6 +103,7 @@ impl Pad {
             arrivals: [0.0; 4],
             arrival_count: 0,
             garden: None,
+            paved: false,
         }
     }
 
@@ -112,6 +116,9 @@ impl Pad {
             && (lo.x..=hi.x).contains(&lx)
             && (lo.y..=hi.y).contains(&lz)
         {
+            return true;
+        }
+        if self.paved {
             return true;
         }
         if self.wear <= 0.0 {

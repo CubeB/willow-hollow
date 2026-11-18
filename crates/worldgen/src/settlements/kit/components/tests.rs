@@ -164,8 +164,10 @@ fn public_spaces_are_dressed() {
     assert!(awning.len() > 4, "an awning and its fringe");
     let line = public::strung(Hook::Line { from: IVec3::new(0, 20, 2), to: IVec3::new(40, 20, 2), sag: 3 }, public::Strung::Lanterns { lit: true }, 1);
     assert!(line.iter().any(|p| p.voxel == crate::materials::LANTERN));
-    assert_eq!(public::branch_lantern(IVec3::new(4, 60, 4), 10, &pal, true).len(), 4);
-    let (boards, posts) = public::boardwalk(glam::IVec2::new(0, 0), glam::IVec2::new(8, 0), 2, 1, |_, _| -1, &pal, 0.7, 2);
+    let (lamp, chain) = public::branch_lantern(IVec3::new(4, 10, 4), 2, true);
+    assert!(lamp == vec![(IVec3::new(4, 10, 4), crate::materials::LANTERN)] && chain.iter().any(|b| b.hi[1] == 12 * voxel::mesh::CELLS));
+    assert_eq!(public::branch_lantern(IVec3::new(4, 10, 4), 2, false).0[0].1, crate::materials::LANTERN_COLD);
+    let (boards, posts) = public::boardwalk(glam::IVec2::new(0, 0), glam::IVec2::new(8, 0), 2, |_, _| 1, |_, _| -1, |_, _| true, &pal, 0.7);
     assert_eq!(boards.iter().filter(|(q, _)| q.y == 1).count(), 9 * 2);
     assert!(!posts.is_empty());
     let jar = public::standalone(Component::WaterJar, IVec3::new(10, 3, 10), IVec3::NEG_Z, Region::Desert, &pal, 0.5, 0.2, 9).expect("a jar stands anywhere");

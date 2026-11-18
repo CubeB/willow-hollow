@@ -10,12 +10,12 @@
 use glam::{IVec2, IVec3};
 use voxel::{
     Voxel,
-    mesh::{CELLS, PlantBox, RIBBON_BENDS},
+    mesh::{CELLS, PlantBox},
 };
 
 use super::{Component, Cx, Made, Request, Site, build_one};
 use crate::{
-    features::{cloth, fittings::Hook, landmarks::Palette, shape::Rng},
+    features::{cloth, fittings::Hook, landmarks::Palette, parts, shape::Rng},
     materials as mat,
     settlements::{
         Region,
@@ -148,57 +148,82 @@ pub fn strung(line: Hook, what: Strung, seed: u32) -> Vec<PlantBox> {
     out
 }
 
-/// A lantern hung from a branch: a cord from `knot` (in cells, on the underside of the
-/// branch) `drop` cells down to a lamp in a frame of the place's wood, lit or not.
-/// Glowing, it lights its own glass at night, as a lit window does.
-pub fn branch_lantern(knot: IVec3, drop: i32, pal: &Palette, lit: bool) -> Vec<PlantBox> {
-    let drop = drop.clamp(1, RIBBON_BENDS);
-    let low = knot.y - drop;
-    let c = IVec3::new(knot.x, 0, knot.z);
-    let glass = if lit { mat::LANTERN } else { mat::LANTERN_COLD };
-    vec![
-        fixed(c + IVec3::new(0, low, 0), c + IVec3::new(1, knot.y, 1), mat::ROPE),
-        fixed(c + IVec3::new(-1, low - 1, -1), c + IVec3::new(2, low, 2), pal.wood),
-        fixed(c + IVec3::new(-1, low - 4, -1), c + IVec3::new(2, low - 1, 2), glass),
-        fixed(c + IVec3::new(-1, low - 5, -1), c + IVec3::new(2, low - 4, 2), pal.wood),
-    ]
+/// A lantern hung from a branch as a crook's lamp hangs from its arm: its lamp the voxel
+/// `lamp`, with its glazing, cap and chain about it, hung from the underside of the limb
+/// `drop` voxels above. Lit, its lamp is a lit voxel, so it shines and lights the ground
+/// about it from dusk as every lit lantern does; out, cold glass. Its voxel, and its fine
+/// parts in cells.
+pub fn branch_lantern(lamp: IVec3, drop: i32, lit: bool) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
+    let mut voxels = vec![(lamp, mat::LANTERN)];
+    let mut fine = parts::hung_lamp(lamp, drop.max(1), mat::CHARCOAL);
+    if !lit {
+        parts::put_out(&mut voxels, &mut fine);
+    }
+    (voxels, fine)
 }
 
-/// A boardwalk over wet ground from column `from` to `to` (along x or along z, whichever
-/// they differ in more), `wide` voxels across, its deck in layer `deck`. `ground(x, z)`
-/// is the caller's top solid layer in each column: posts go down to it every third
-/// column along each edge where the deck stands above it, and their tops show a little
-/// above the deck, with a rope between them. Where the place is old some boards are
-/// darker. Its voxels, and its fine parts in cells.
-pub fn boardwalk(from: IVec2, to: IVec2, wide: i32, deck: i32, ground: impl Fn(i32, i32) -> i32, pal: &Palette, age: f32, seed: u32) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
-    let mut rng = Rng::new(seed ^ 0xb0a2);
+/// A boardwalk from column `from` to `to` (along x or along z, whichever they differ in
+/// more), `wide` voxels across. `deck(x, z)` is the layer its boards lie in over each
+/// column, and `ground(x, z)` the caller's top solid layer there: posts go down to the
+/// ground every third column along each edge where the deck stands above it, and their
+/// tops show a little above the deck. Along the edges where `railed(x, z)` says so (over
+/// the water, say), a rope runs between them. Its boards are all of a colour, as a
+/// boardwalk is that was laid at once and weathered together: the place's planks, gone
+/// grey-dark where the place is old. Its voxels, and its fine parts in cells.
+#[allow(clippy::too_many_arguments)]
+pub fn boardwalk(
+    from: IVec2,
+    to: IVec2,
+    wide: i32,
+    deck: impl Fn(i32, i32) -> i32,
+    ground: impl Fn(i32, i32) -> i32,
+    railed: impl Fn(i32, i32) -> bool,
+    pal: &Palette,
+    age: f32,
+) -> (Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
     let along_x = (to.x - from.x).abs() >= (to.y - from.y).abs();
     let (s0, s1) = if along_x { (from.x.min(to.x), from.x.max(to.x)) } else { (from.y.min(to.y), from.y.max(to.y)) };
     let across = if along_x { from.y } else { from.x };
     let (w0, w1) = (across - (wide - 1) / 2, across + wide / 2);
     let col = |s: i32, w: i32| if along_x { IVec2::new(s, w) } else { IVec2::new(w, s) };
+    let board = if age > 0.5 { mat::PLANK_DARK } else { pal.plank };
     let (mut voxels, mut fine) = (Vec::new(), Vec::new());
     for s in s0..=s1 {
         for w in w0..=w1 {
             let q = col(s, w);
-            let board = if age > 0.5 && rng.unit() < age * 0.4 { mat::PLANK_DARK } else { pal.plank };
-            voxels.push((IVec3::new(q.x, deck, q.y), board));
+            let d = deck(q.x, q.y);
+            voxels.push((IVec3::new(q.x, d, q.y), board));
             let edge = w == w0 || w == w1;
             if edge && (s - s0) % 3 == 0 {
-                for y in ground(q.x, q.y) + 1..deck {
+                for y in ground(q.x, q.y) + 1..d {
                     voxels.push((IVec3::new(q.x, y, q.y), pal.wood));
                 }
-                let c = IVec3::new(q.x * CELLS + 1, (deck + 1) * CELLS, q.y * CELLS + 1);
+                let c = IVec3::new(q.x * CELLS + 1, (d + 1) * CELLS, q.y * CELLS + 1);
                 fine.push(fixed(c, c + IVec3::new(2, 6, 2), pal.wood));
             }
         }
     }
+    // The rope along each edge, in a length for each stretch railed at one level.
     for w in [w0, w1] {
-        let a = col(s0, w);
-        let b = col(s1, w);
-        let y = (deck + 1) * CELLS + 4;
-        let (lo, hi) = (IVec3::new(a.x * CELLS + 1, y, a.y * CELLS + 1), IVec3::new(b.x * CELLS + 3, y + 1, b.y * CELLS + 3));
-        fine.push(fixed(lo, hi, mat::ROPE));
+        let mut s = s0;
+        while s <= s1 {
+            let q = col(s, w);
+            if !railed(q.x, q.y) {
+                s += 1;
+                continue;
+            }
+            let d = deck(q.x, q.y);
+            let mut e = s;
+            while e < s1 && railed(col(e + 1, w).x, col(e + 1, w).y) && deck(col(e + 1, w).x, col(e + 1, w).y) == d {
+                e += 1;
+            }
+            if e > s {
+                let (a, b) = (col(s, w), col(e, w));
+                let y = (d + 1) * CELLS + 4;
+                fine.push(fixed(IVec3::new(a.x * CELLS + 1, y, a.y * CELLS + 1), IVec3::new(b.x * CELLS + 3, y + 1, b.y * CELLS + 3), mat::ROPE));
+            }
+            s = e + 1;
+        }
     }
     (voxels, fine)
 }

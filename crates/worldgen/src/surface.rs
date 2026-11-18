@@ -1065,7 +1065,9 @@ impl<'a> Sampler<'a> {
                 *ground += (pad.y - *ground) * w;
             }
             // Bare where people walk about the place.
-            if d < 0.0 && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Bank | Cover::Scree) && pad.worn(self.world_seed, p, lx, lz) {
+            // A town's square (#203) is paved on the sand of a shore as anywhere.
+            let sand = pad.paved && matches!(*cover, Cover::Beach | Cover::Shingle | Cover::Dune);
+            if d < 0.0 && guard > 0.5 && (matches!(*cover, Cover::Land | Cover::Bank | Cover::Scree) || sand) && pad.worn(self.world_seed, p, lx, lz) {
                 // Worn as a well-used footpath is, into whatever ground the place stands on:
                 // midway across it, so neither grassed down the middle nor ragged at the edge.
                 let half_width = m(0.6);
@@ -1078,6 +1080,16 @@ impl<'a> Sampler<'a> {
                     point: hash2(self.world_seed ^ 0x7a12, lx, lz),
                 });
                 *cover = Cover::Trail;
+            }
+            // A town's square (#203) is paved over, the ways across it too, the paving
+            // stamped with the town: worn as faintly as a trace, so no duckboards or log
+            // steps are laid on it.
+            if pad.paved
+                && d < 0.0
+                && *cover == Cover::Trail
+                && let Some(w) = worn.as_mut()
+            {
+                w.half_width = w.half_width.min(m(0.3));
             }
         }
         // The ground trodden bare round a village tree. It clears nothing: the tree stands.

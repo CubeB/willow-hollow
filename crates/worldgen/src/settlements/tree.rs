@@ -31,7 +31,7 @@ use crate::{
     noise::{hash2, hash3, perlin2, unit},
     scale::m,
     surface::{Cover, Sampler, Worn},
-    settlements::Age,
+    settlements::{Age, Region, kit::components::public},
     trails::{Network, Stamp},
 };
 
@@ -83,6 +83,146 @@ pub(crate) fn plant_all(c: &Continent, seed: u32, net: &mut Network) {
         net.add_stamp_with(Vec::new(), d.fine);
         net.rings.push(d.ring);
     }
+}
+
+/// How far beyond a settlement's edge a tree stands that its lanterns hang in (#203).
+const LANTERNS_BY: f32 = m(12.0);
+/// The least reach of a tree big enough to hang lanterns in, in voxels: one whose limbs
+/// spread four metres from its trunk.
+const LANTERN_TREE: i32 = m(4.0) as i32;
+/// The most trees a settlement hangs lanterns in, the lanterns in one tree, and in all;
+/// and the most of its big trees looked over for limbs to hang them from.
+const LANTERN_TREES: usize = 6;
+const LANTERNS_PER_TREE: usize = 3;
+const LANTERNS_MOST: usize = 14;
+const LANTERN_LOOKED: usize = 40;
+/// How high a lantern's limb may be over the ground under it, in voxels, and how much
+/// room is kept clear under the lantern for anyone walking beneath.
+const LANTERN_HIGHEST: i32 = m(12.0) as i32;
+const LANTERN_CLEAR: i32 = m(2.8) as i32;
+/// How far a lantern's limb is out from the trunk, at least, beyond the trunk's own
+/// girth: on a branch, not tucked against the trunk.
+const LANTERN_OUT: f32 = m(1.2);
+
+/// Lanterns in the big trees of each settlement of the old forest (#203), once the
+/// continent is all laid out, its fields worked and its woods logged, so that every tree
+/// they hang in is one left standing. In each of the big trees standing in it or by it,
+/// the nearest first (but its village tree, which has its ribbons and a festival's
+/// lanterns), a few lanterns hang on chains from the undersides of the limbs, the lowest
+/// first, each well over anyone walking under it and clear of every tree. They are lit,
+/// shining and lighting the ground about them from dusk, as a lit lantern does anywhere.
+/// Each is stamped, and recorded in the settlement's layout.
+pub(crate) fn hang_lanterns(c: &mut Continent, seed: u32) {
+    let ks: Vec<usize> = (0..c.trails.settlements.len()).filter(|&k| c.trails.settlements[k].region == Region::OldGrowth && k < c.trails.layouts.len()).collect();
+    if ks.is_empty() {
+        return;
+    }
+    let lib = Library::shared();
+    let continent = &*c;
+    let hung = crate::trails::build::in_parallel(&ks, |&k| lanterns_for(continent, seed, lib, k));
+    for (k, lanterns) in ks.into_iter().zip(hung) {
+        for (lamp, drop, voxels, fine) in lanterns {
+            c.trails.layouts[k].lanterns.push((lamp, drop));
+            c.trails.add_stamp_with(voxels, fine);
+        }
+    }
+}
+
+/// The lanterns settlement `k` of `c` hangs in its trees: where each lamp hangs
+/// (continent-local), how many voxels under its limb, and its voxel and parts.
+fn lanterns_for(c: &Continent, seed: u32, lib: &Library, k: usize) -> Vec<(IVec3, i32, Vec<(IVec3, Voxel)>, Vec<PlantBox>)> {
+    let net = &c.trails;
+    let s = &net.settlements[k];
+    let origin = (c.desc.mx * MACRO_SIZE, c.desc.mz * MACRO_SIZE);
+    let shift = IVec3::new(origin.0, 0, origin.1);
+    let centre = Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5);
+    let reach = s.radius + LANTERNS_BY;
+    let r = reach.ceil() as i32;
+    let (lx0, lz0, span) = (s.x - r, s.z - r, 2 * r + 1);
+    // Everything that grows or lies there as the world has it, the giants, the trees and
+    // the bushes under them, and whatever stands outside that reaches into it.
+    let margin = features::MAX_REACH + 1;
+    let sampler = Sampler::with_network(c, seed, lx0 - 2 * margin, lz0 - 2 * margin, span + 4 * margin, net);
+    let (wx0, wz0, wide) = (lx0 - margin, lz0 - margin, span + 2 * margin);
+    let trees = features::place_only(seed, lib, &sampler, wx0, wz0, wide, origin, |_| true);
+    let away = |p: &Placement| Vec2::new((p.pos.x - origin.0) as f32 + 0.5, (p.pos.z - origin.1) as f32 + 0.5).distance(centre);
+    let village = net.village_trees.get(k).copied().flatten();
+    let mut big: Vec<&Placement> = trees
+        .iter()
+        .filter(|p| p.lie.is_none() && !matches!(p.species, Species::Stump | Species::DeadSnag) && lib.get(p.species, p.variant).reach >= LANTERN_TREE)
+        .filter(|p| away(p) <= reach && Some(p.pos - shift) != village)
+        .collect();
+    big.sort_by(|a, b| away(a).total_cmp(&away(b)).then((a.pos.x, a.pos.z).cmp(&(b.pos.x, b.pos.z))));
+    big.truncate(LANTERN_LOOKED);
+    // Whatever of any tree stands in voxel `q` (continent-local): asking only the trees
+    // whose reach takes in the patch of ground it is over.
+    const PATCH: i32 = 16;
+    let mut patches: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, t) in trees.iter().enumerate() {
+        let (r, at) = (lib.get(t.species, t.variant).reach, t.pos - shift);
+        for pz in (at.z - r).div_euclid(PATCH)..=(at.z + r).div_euclid(PATCH) {
+            for px in (at.x - r).div_euclid(PATCH)..=(at.x + r).div_euclid(PATCH) {
+                patches.entry((px, pz)).or_default().push(i);
+            }
+        }
+    }
+    let taken = |q: IVec3| patches.get(&(q.x.div_euclid(PATCH), q.z.div_euclid(PATCH))).is_some_and(|near| near.iter().any(|&i| features::model_voxel(lib, &trees[i], q + shift).is_some()));
+    // Over a building, a lantern would hang into its roof.
+    let built = |x: i32, z: i32| net.plots.iter().any(|p| x >= p.lo.x - 1 && x <= p.hi.x + 1 && z >= p.lo.y - 1 && z <= p.hi.y + 1);
+    let mut out: Vec<(IVec3, i32, Vec<(IVec3, Voxel)>, Vec<PlantBox>)> = Vec::new();
+    let mut hung = 0;
+    for tree in big {
+        if hung == LANTERN_TREES || out.len() == LANTERNS_MOST {
+            break;
+        }
+        let at = tree.pos - shift;
+        let model = lib.get(tree.species, tree.variant);
+        let (offset, girth) = roots::foot(lib, tree.species, tree.variant, tree.turns).map_or((Vec2::splat(1.0), 1.0), |f| (f.0, f.1));
+        let trunk = Vec2::new(at.x as f32, at.z as f32) + offset;
+        // The undersides of its limbs out from the trunk, low enough to see, the lowest
+        // first.
+        let mut under: Vec<(f32, IVec3, u32)> = Vec::new();
+        for &(p, v) in &model.voxels {
+            if !roots::is_bark(v) {
+                continue;
+            }
+            let q = at + rotate(p, tree.turns);
+            if Vec2::new(q.x as f32 + 0.5, q.z as f32 + 0.5).distance(trunk) < girth + LANTERN_OUT {
+                continue;
+            }
+            let col = sampler.column(q.x, q.z);
+            let g = col.top();
+            if col.water_surface().is_some() || q.y - g > LANTERN_HIGHEST || q.y - g < LANTERN_CLEAR + 3 || built(q.x, q.z) || taken(q - IVec3::Y) {
+                continue;
+            }
+            let h = hash3(seed ^ 0x1a4b, q.x + shift.x, q.y, q.z + shift.z);
+            under.push(((q.y - g) as f32 + unit(h) * 4.0, q, h));
+        }
+        under.sort_by(|a, b| a.0.total_cmp(&b.0).then((a.1.x, a.1.y, a.1.z).cmp(&(b.1.x, b.1.y, b.1.z))));
+        let mut here = 0;
+        for (_, q, h) in under {
+            if here == LANTERNS_PER_TREE || out.len() == LANTERNS_MOST {
+                break;
+            }
+            if out.iter().any(|(l, ..)| (*l - q).abs().max_element() < 4) {
+                continue;
+            }
+            // The lamp a voxel or two below the limb on its chain, nothing of any tree in
+            // the way of either, and under it room to walk, clear of the ground and of
+            // anything growing.
+            let drop = 2 + (h >> 4) as i32 % 2;
+            let lamp = q - IVec3::Y * drop;
+            let g = sampler.column(q.x, q.z).top();
+            if lamp.y < g + 1 + LANTERN_CLEAR || (lamp.y - LANTERN_CLEAR..q.y).any(|y| taken(IVec3::new(q.x, y, q.z))) {
+                continue;
+            }
+            let (voxels, fine) = public::branch_lantern(lamp, drop, true);
+            out.push((lamp, drop, voxels, fine));
+            here += 1;
+        }
+        hung += (here > 0) as usize;
+    }
+    out
 }
 
 /// How far continent-local `p` is from the columns `lo..=hi`, in voxels.
@@ -540,7 +680,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
-    use crate::world::GameWorld;
+    use crate::{continent::Continent, world::GameWorld};
 
     fn world() -> &'static GameWorld {
         static WORLD: OnceLock<GameWorld> = OnceLock::new();
@@ -679,5 +819,67 @@ mod tests {
         // The tree's own column stays as it was, so the tree is still chosen there.
         let at = Vec2::new(p.pos.x as f32 + 0.5, p.pos.z as f32 + 0.5);
         assert!(!ring.worn(w.seed(), at, p.pos.x, p.pos.z));
+    }
+
+    /// The first continent of a small world with villages of the old forest.
+    fn old_forest() -> &'static (GameWorld, std::sync::Arc<Continent>) {
+        static W: OnceLock<(GameWorld, std::sync::Arc<Continent>)> = OnceLock::new();
+        W.get_or_init(|| {
+            let w = GameWorld::with_config(2, crate::continent::SimConfig { size: 256 });
+            let c = w.continent(0, 0);
+            (w, c)
+        })
+    }
+
+    /// In the old forest, lanterns hang in the big trees of each village (and of most
+    /// hamlets: one in a clearing may have no tree with a limb low enough): every one from
+    /// the underside of a limb that is there in the world, its chain and lit lamp hanging
+    /// in the air under it, well over the ground; the same every time. Nowhere else has
+    /// them.
+    #[test]
+    fn branch_lanterns_hang_under_real_branches() {
+        use std::collections::HashMap;
+
+        use voxel::{AIR, CHUNK};
+
+        let (w, c) = old_forest();
+        let net = &c.trails;
+        let mut made: HashMap<(i32, i32), crate::ColumnOutput> = HashMap::new();
+        let mut voxel_at = |q: IVec3| -> Voxel {
+            let key = (q.x.div_euclid(CHUNK), q.z.div_euclid(CHUNK));
+            let column = made.entry(key).or_insert_with(|| w.generate_column_bare(key.0, key.1));
+            let (cy, ly) = (q.y.div_euclid(CHUNK), q.y.rem_euclid(CHUNK));
+            column.chunks.iter().find(|(k, _)| *k == cy).map_or(AIR, |(_, ch)| ch.get((q.x - key.0 * CHUNK + 1) as usize, ly as usize + 1, (q.z - key.1 * CHUNK + 1) as usize))
+        };
+        let (mut villages, mut lit) = (0, 0);
+        for (k, s) in net.settlements.iter().enumerate() {
+            let l = &net.layouts[k];
+            if s.region != Region::OldGrowth {
+                assert!(l.lanterns.is_empty(), "a {:?} {:?} hangs lanterns in its trees", s.region, s.kind);
+                continue;
+            }
+            let at = format!("the {:?} at {},{}", s.kind, s.x, s.z);
+            assert!(!l.lanterns.is_empty() || s.kind == crate::settlements::Kind::Hamlet, "{at}: no lanterns in its trees");
+            villages += 1;
+            lit += (!l.lanterns.is_empty()) as usize;
+            for &(lamp, drop) in &l.lanterns {
+                // Hung from the bark of a limb, its lamp lit, in the air between them.
+                let limb = lamp + IVec3::Y * drop;
+                assert!(roots::is_bark(voxel_at(limb)), "{at}: the lantern at {lamp} hangs from no branch");
+                assert!(Vec2::new(lamp.x as f32, lamp.z as f32).distance(Vec2::new(s.x as f32, s.z as f32)) <= s.radius + LANTERNS_BY + m(8.0), "{at}: a lantern far off at {lamp}");
+                assert_eq!(voxel_at(lamp), mat::LANTERN, "{at}: no lit lamp at {lamp}");
+                for y in lamp.y + 1..limb.y {
+                    assert_eq!(voxel_at(IVec3::new(lamp.x, y, lamp.z)), AIR, "{at}: the chain of the lantern at {lamp} runs through something");
+                }
+                // Over anyone walking under it.
+                for y in lamp.y - LANTERN_CLEAR..lamp.y {
+                    assert_eq!(voxel_at(IVec3::new(lamp.x, y, lamp.z)), AIR, "{at}: the lantern at {lamp} hangs too low, {} over something", lamp.y - y);
+                }
+            }
+            println!("{at}: {} lanterns", l.lanterns.len());
+        }
+        assert!(villages > 0 && lit * 3 >= villages * 2, "lanterns in {lit} of {villages} places of the old forest");
+        let again = GameWorld::with_config(2, crate::continent::SimConfig { size: 256 }).continent(0, 0);
+        assert!(net.layouts.iter().zip(&again.trails.layouts).all(|(a, b)| a.lanterns == b.lanterns), "lanterns hung differently");
     }
 }

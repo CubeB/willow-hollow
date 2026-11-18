@@ -32,7 +32,7 @@ use voxel::{
 };
 
 use super::{
-    Age, Kind, Livelihood, Reason, Region, Settlement,
+    Age, Kind, Livelihood, Reason, Region, Settlement, calendar,
     furnish::{self, Household},
     kit::{self, AnchorKind, Building, Spec, Step},
     special::{self, Built, Facts, SpecialSpec},
@@ -215,6 +215,15 @@ pub struct Layout {
     pub market: Vec<super::calendar::Stall>,
     /// #203: the sail shades across the lanes of a hot country's town (see `shades`).
     pub shades: Vec<Shade>,
+    /// #203: a town's market square, its green paved over (see `square`).
+    pub square: Option<Square>,
+    /// #203: the boardwalks where the homes stand on stilts (see `boardwalks`). The
+    /// crossings among them are among `lanes` too.
+    pub boardwalks: Boardwalks,
+    /// #203: the lanterns hung in the big trees of a settlement of the old forest (see
+    /// `tree::hang_lanterns`): where each lamp hangs, continent-local, and how many voxels
+    /// under the limb it hangs from.
+    pub lanterns: Vec<(IVec3, i32)>,
 }
 
 /// Lays out every settlement on the continent, in order. `first` is the index of the
@@ -558,6 +567,8 @@ struct Town<'a> {
     s: Settlement,
     centre: Vec2,
     green: Pad,
+    /// The green's pad, by index in `Network::pads`.
+    pad: usize,
     pal: Palette,
     /// The ground as it was when the trails were down, before any plot.
     sam: Sampler<'a>,
@@ -574,6 +585,11 @@ struct Town<'a> {
     raised: Vec<Raised>,
     plots: Vec<Plot>,
     layout: Layout,
+    /// #203: for each raised home, by index in `raised`, the column at the foot of its
+    /// steps, the way out and the point of the lane its path goes to.
+    door_ways: Vec<(usize, IVec2, IVec2, Vec2)>,
+    /// #203: the corners of each boardwalk planned to carry a lane over water.
+    crossings: Vec<Vec<IVec2>>,
     /// Stage 3's edges (#203) between keeping their ground and building them.
     edge: edges::Edges,
 }
@@ -608,6 +624,7 @@ impl<'a> Town<'a> {
             k,
             centre,
             green,
+            pad: first + k,
             pal,
             sam,
             worn,
@@ -621,6 +638,8 @@ impl<'a> Town<'a> {
             raised: Vec::new(),
             plots: Vec::new(),
             layout: Layout::default(),
+            door_ways: Vec::new(),
+            crossings: Vec::new(),
             edge: edges::Edges::default(),
             s,
         };
@@ -721,6 +740,11 @@ impl<'a> Town<'a> {
     }
 
     fn build(&mut self, net: &mut Network) {
+        // Stage 3 (#203): a town's green is its market square, paved over, which nothing
+        // grows on once the ground is sampled again.
+        if self.s.kind >= Kind::Town {
+            net.pads[self.pad].paved = true;
+        }
         self.keep_for_tree();
         // Stage 3 (#203): a great town's park kept round the tree, before the lanes go
         // round it.
@@ -783,6 +807,10 @@ impl<'a> Town<'a> {
         self.raise_wall(net, &fin);
         self.harbour(net, &fin);
         self.park(net, &fin);
+        // Stage 3 (#203): the square paved before anything is set on it, and the
+        // boardwalks where homes stand on stilts.
+        self.pave_square(net, &fin);
+        self.boardwalks(net, &fin);
         self.wells(net, &fin);
         self.stalls(net);
         self.lanterns(net);
@@ -917,7 +945,12 @@ impl<'a> Town<'a> {
                     && self.discs.iter().all(|d| d.at == self.centre || d.at.distance(*p) >= d.r + hw + 2.0)
             })
             .collect();
+        // #203: where the homes stand on stilts, a lane goes on over shallow water between
+        // two of its stretches on a boardwalk, rather than breaking off.
+        let wet: Vec<bool> = if self.stilted() { pts.iter().zip(&cols).map(|(p, col)| self.can_cross(*p, col)).collect() } else { vec![false; pts.len()] };
         let mut i = 0;
+        // The last point of the stretch laid before.
+        let mut after: Option<usize> = None;
         while i < pts.len() {
             if !ok[i] {
                 i += 1;
@@ -930,6 +963,13 @@ impl<'a> Town<'a> {
             if i - a < 10 {
                 continue;
             }
+            if let Some(e) = after
+                && a - e <= boardwalks::LONGEST
+                && (e + 1..a).all(|j| ok[j] || wet[j])
+            {
+                self.plan_crossing(pts[e], pts[a]);
+            }
+            after = Some(i - 1);
             let (run, cols) = (&pts[a..i], &cols[a..i]);
             // Drawn to the height of any way it meets, so the two join without a step.
             let pins: Vec<(usize, f32)> = run.iter().enumerate().filter_map(|(j, p)| self.worn.nearest(*p, 4.0).map(|q| (j, q.y))).collect();
@@ -1481,6 +1521,7 @@ impl<'a> Town<'a> {
             let Some((to, pts)) = targets.iter().map(|&to| (to, route::resample(&[step, start, to]))).find(|(to, pts)| to.distance(start) >= 1.0 && clear(pts)) else {
                 continue;
             };
+            self.door_ways.push((i, step.floor().as_ivec2(), out.as_ivec2(), to));
             let to_y = self.worn.nearest(to, 3.0).map_or(self.green.y, |q| q.y);
             let pad_y = spot.y;
             let on_pad = |p: &Vec2| spot.discs.iter().any(|&(c, r)| c.distance(*p) < r);
@@ -1951,7 +1992,9 @@ impl<'a> Town<'a> {
             };
             let (a, b) = (cells(fittings::STALL_COUNTER.0), cells(fittings::STALL_COUNTER.1));
             let colour = cloth.unwrap_or(mat::CLOTH_PALE);
-            self.layout.market.push(super::calendar::Stall { at, turns: ft, awning, counter: (a.min(b), a.max(b)), colour, seed });
+            // Kept on market day only until `stalls` says otherwise.
+            let seed = calendar::stall_seed(seed, false);
+            self.layout.market.push(calendar::Stall { at, turns: ft, awning, counter: (a.min(b), a.max(b)), colour, seed });
             self.hold(net, &bare, at, ft, Vec::new());
             self.layout.stalls.push(at);
             return true;
@@ -1969,32 +2012,55 @@ impl<'a> Town<'a> {
     }
 
     /// Market stalls about the green, facing in across it: a couple in a village, more
-    /// in a town.
+    /// in a large village, and about a town's square a ring of them near its edge, with
+    /// the middle left open for the crowd on market day. The last few set are those kept
+    /// every day (`calendar::daily_stalls`).
     fn stalls(&mut self, net: &mut Network) {
         let want = match self.s.kind {
             Kind::Hamlet => 0,
             Kind::Village => 2,
-            Kind::LargeVillage => 3,
-            Kind::Town => 5,
-            Kind::GreatTown => 7,
+            Kind::LargeVillage => 4,
+            Kind::Town => 8,
+            Kind::GreatTown => 10,
         };
+        let daily = calendar::daily_stalls(self.s.kind);
         let seed = self.s.seed ^ 0x57a1;
         let y = self.green.y as i32 + 1;
         let mut set = 0;
         let start = unit(seed) * std::f32::consts::TAU;
-        for f in [0.68, 0.5] {
-            for j in 0..36 {
+        let first = self.layout.market.len();
+        // About a square a ring further out, so the middle is open for the crowd, and
+        // spread all round it, each tried first at its share of the way round; about a
+        // green they stand together.
+        let square = self.layout.square.is_some();
+        let rings: &[f32] = if square { &[0.78, 0.64, 0.5] } else { &[0.68, 0.5] };
+        let mut order: Vec<i32> = (0..36).collect();
+        if square {
+            let share = (36 / want.max(1)).max(1);
+            order.sort_by_key(|&j| (j % share, j));
+        }
+        'rings: for &f in rings {
+            for &j in &order {
                 if set >= want {
-                    return;
+                    break 'rings;
                 }
                 let a = start + j as f32 / 36.0 * std::f32::consts::TAU;
                 let p = self.centre + Vec2::from_angle(a) * self.green.radius * f;
                 let ft = facing(self.centre - p);
                 let colour = CLOTHS[(hash2(seed, j, 3) % CLOTHS.len() as u32) as usize];
-                if self.set_fitting(net, Fitting::MarketStall, IVec3::new(p.x.floor() as i32, y, p.y.floor() as i32), ft, hash2(seed, j, 2), GREEN, Some(colour)) {
+                let at = IVec3::new(p.x.floor() as i32, y, p.y.floor() as i32);
+                if self.set_fitting(net, Fitting::MarketStall, at, ft, hash2(seed, j, 2), GREEN, Some(colour)) {
                     set += 1;
                 }
             }
+        }
+        // The last few with an awning to put up are kept every day (one fallen into
+        // disrepair is kept on no day), always leaving one or more for market day alone.
+        let sound: Vec<usize> = (first..self.layout.market.len()).filter(|&i| self.layout.market[i].awning.is_some()).collect();
+        let daily = daily.min(sound.len().saturating_sub(1));
+        for &i in &sound[sound.len() - daily..] {
+            let m = &mut self.layout.market[i];
+            m.seed = calendar::stall_seed(m.seed, true);
         }
     }
 
@@ -2136,13 +2202,17 @@ fn awning(f: &Fitted, colour: Voxel) -> Vec<PlantBox> {
 
 // Stage 3's edges (#203): the gates and old walls, the water side and the park.
 // S8 (#207): what the player's boons add to a settlement.
+mod boardwalks;
 mod boons;
 mod edges;
 mod gates;
 mod park;
 mod port;
 mod shades;
+mod square;
+pub use boardwalks::Boardwalks;
 pub use edges::{Gate, Harbour, Park, Shade, Shed};
+pub use square::Square;
 #[cfg(test)]
 mod edge_tests;
 

@@ -682,7 +682,7 @@ impl Town {
         let sam = Sampler::new(c, world_seed, lo.x.floor() as i32, lo.y.floor() as i32, (2.0 * reach).ceil() as i32 + 2);
         let height = |p: Vec2| {
             let col = sam.column(p.x.floor() as i32, p.y.floor() as i32);
-            col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1) as f32
+            layout.walk_height(p, col.water_surface().unwrap_or(col.top() + 1).max(col.top() + 1) as f32)
         };
         let centre = Vec3::new(s.x as f32 + 0.5, s.y as f32, s.z as f32 + 0.5);
         let green = s.kind.green() * 2.0;

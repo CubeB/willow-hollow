@@ -1,5 +1,6 @@
 //! What a settlement puts out on its days (#207): on market day its stalls' awnings and
-//! the goods on their counters, at Midwinter lanterns on the village tree and along the
+//! the goods on their counters (and those of the few stalls a large village or a town
+//! keeps out every day, #203), at Midwinter lanterns on the village tree and along the
 //! lanes, lit at night, at Midsummer garlands on its doors, its well and its stalls; and
 //! all the year the ribbons tied on the tree at the last festival, bright when new and
 //! fading until the next.
@@ -71,6 +72,14 @@ pub fn market_open(town: &Town, w: &When) -> bool {
     town.market_on(w.day) && w.hour > calendar::MARKET_OPENS - 0.3 && w.hour < calendar::MARKET_CLOSES + 0.4
 }
 
+/// Whether stall `d` of `town` is set out at `w`: in the market's hours on market day, as
+/// every stall is, and from first light to dusk every day if it is one of those kept
+/// every day (#203), as the kind of place has it. Only a stall with someone to keep it.
+pub fn stall_open(town: &Town, d: &Dress, w: &When) -> bool {
+    let daily = calendar::kept_daily(d.seed) && w.hour > calendar::DAILY_OPENS && w.hour < calendar::DAILY_CLOSES;
+    d.keeper.is_some() && (daily || market_open(town, w))
+}
+
 /// One thing to dress, for putting them nearest first.
 #[derive(Clone, Copy)]
 enum Piece {
@@ -93,9 +102,8 @@ fn pieces(town: &Town, w: &When, cam: DVec3) -> Vec<(f32, Piece, f32)> {
         }
     };
     let festival = w.festival();
-    let open = market_open(town, w);
     for (s, d) in town.market.iter().enumerate() {
-        let dressed = open && d.keeper.is_some() && d.awning.is_some();
+        let dressed = stall_open(town, d, w) && d.awning.is_some();
         if dressed || festival == Some(Festival::Midsummer) {
             add(d.counter.0, STALL_SIGHT, Piece::Stall(s));
         }
@@ -181,7 +189,7 @@ fn piece_of(town: &Town, w: &When, piece: Piece, b: &mut Boxes) {
     match piece {
         Piece::Stall(s) => {
             let d = &town.market[s];
-            let dressed = market_open(town, w) && d.keeper.is_some();
+            let dressed = stall_open(town, d, w);
             stall(town, d, dressed, summer, b);
         }
         Piece::TreeLantern(k) => {
@@ -668,5 +676,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// What is set out between market days follows the kind of place (#203): a large
+    /// village sets out a few of its stalls every day from first light to dusk, drawn so,
+    /// and on market day all of them; a village sets its out on market day only.
+    #[test]
+    fn a_large_village_sets_out_some_stalls_every_day_and_all_on_market_day() {
+        use worldgen::{continent::SimConfig, settlements::Kind, world::GameWorld};
+
+        let year_days = 24.0;
+        let when = |day: i64, hour: f32| When { day, date: ((day as f32 + 0.5) / year_days).fract(), year_days, hour, lit: 0.0, clock: 1.0 };
+        let plain = |d: i64| calendar::festival_on(d, year_days).is_none();
+        let mut seen = [false; 2];
+        for seed in 1..=8 {
+            if seen == [true; 2] {
+                break;
+            }
+            let c = GameWorld::with_config(seed, SimConfig { size: 256 }).continent(0, 0);
+            for k in 0..c.trails.settlements.len() {
+                let kind = c.trails.settlements[k].kind;
+                let large = kind == Kind::LargeVillage;
+                if !matches!(kind, Kind::Village | Kind::LargeVillage) || seen[large as usize] {
+                    continue;
+                }
+                let Some(town) = Town::build(&c, seed, (0, 0), k) else { continue };
+                let (Some(ordinary), Some(market)) = ((0..60).find(|&d| plain(d) && !town.market_on(d)), (0..60).find(|&d| plain(d) && town.market_on(d))) else {
+                    continue;
+                };
+                let out = |w: When| -> Vec<usize> { (0..town.market.len()).filter(|&s| stall_open(&town, &town.market[s], &w) && town.market[s].awning.is_some()).collect() };
+                let daily: Vec<usize> = (0..town.market.len()).filter(|&s| calendar::kept_daily(town.market[s].seed) && town.market[s].keeper.is_some()).collect();
+                let name = &town.name;
+                if !large {
+                    assert!(daily.is_empty() && out(when(ordinary, 12.0)).is_empty(), "{name}: a village's stall out on an ordinary day");
+                    seen[0] = true;
+                    continue;
+                }
+                assert!(!daily.is_empty(), "{name}: no stall out every day");
+                assert_eq!(out(when(ordinary, 12.0)), daily, "{name}");
+                assert_eq!(out(when(ordinary, 7.0)), daily, "{name}: not out early");
+                assert!(out(when(ordinary, 23.0)).is_empty() && out(when(ordinary, 4.0)).is_empty(), "{name}: out in the dark");
+                assert!(out(when(market, 12.0)).len() > daily.len(), "{name}: no more out on market day");
+                // And drawn: the stall dressed at noon, bare at midnight.
+                let at = town.market[daily[0]].counter.0;
+                let count = |w: When| {
+                    let mut boxes = Vec::new();
+                    draw(std::iter::once((&town, w)), town.origin + (at + Vec3::Y * m(1.6)).as_dvec3(), &mut boxes)
+                };
+                assert!(count(when(ordinary, 12.0)) > count(when(ordinary, 23.5)) + 20, "{name}: the stall kept every day is not dressed");
+                seen[1] = true;
+            }
+        }
+        assert_eq!(seen, [true; 2], "no village or large village with a market to look at");
     }
 }

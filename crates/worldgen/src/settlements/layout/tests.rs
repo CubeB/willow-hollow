@@ -11,7 +11,8 @@ use super::{DOOR_PATH, Plot};
 use crate::{
     continent::{Continent, SimConfig},
     scale::m,
-    settlements::Kind,
+    macro_layout::MACRO_SIZE,
+    settlements::{Kind, Region, calendar},
     surface::Sampler,
     trails::{Network, build::is_wet},
     world::GameWorld,
@@ -328,4 +329,69 @@ fn list_buildings() {
     let voxels: usize = net.stamps().map(|s| s.voxels.len()).sum();
     let fine: usize = net.stamps().map(|s| s.fine.len()).sum();
     println!("{voxels} voxels and {fine} fine boxes in stamps");
+}
+
+/// Prints the settlements of `region` on the continents of a world near its first: the
+/// world's seed from `SEED` (1, 2 and 3 if unset), a small world with `SMALL`, the
+/// continents `SPAN` either way of the first (1 if unset). Coordinates are the world's,
+/// for `--over` and `tp`; with each, a `--date` that is its market day at noon in the
+/// first year (of 24 days) and one that is not.
+fn list_region(region: Region) {
+    let seeds: Vec<u32> = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).map_or(vec![1, 2, 3], |s| vec![s]);
+    let span: i32 = std::env::var("SPAN").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    for seed in seeds {
+        let w = if std::env::var("SMALL").is_ok() { world(seed) } else { GameWorld::new(seed) };
+        for mz in -span..=span {
+            for mx in -span..=span {
+                let c = w.continent(mx, mz);
+                let (ox, oz) = (mx * MACRO_SIZE, mz * MACRO_SIZE);
+                for (k, s) in c.trails.settlements.iter().enumerate() {
+                    if s.region != region {
+                        continue;
+                    }
+                    let l = &c.trails.layouts[k];
+                    let raised = plots_of(&c.trails, k).iter().filter(|p| p.door.y - (p.origin.y - 1) >= 3).count();
+                    // Noon on day n of the first year is the date (n + 0.5) / 24.
+                    let date = |market: bool| (0..24).find(|&n| calendar::is_market_day(s, n) == market).map(|n| (n as f32 + 0.5) / 24.0);
+                    // Where the boards and the lanterns are, in the world, to aim at.
+                    let runs: Vec<String> = l.boardwalks.runs.iter().take(4).map(|r| format!("{},{}", ox + r.0.x, oz + r.0.y)).collect();
+                    let lamps: Vec<String> = l.lanterns.iter().take(4).map(|(q, _)| format!("{},{},{}", ox + q.x, q.y, oz + q.z)).collect();
+                    println!(
+                        "seed {seed} continent {mx},{mz} #{k} {:?} {:?} coast {} at {},{} y {} r {:.0}: {} buildings, {raised} raised, {} lanes, {} boardwalk runs {runs:?}, {} lanterns in its trees {lamps:?}, {} stalls, market --date {:?}, not {:?}",
+                        s.kind,
+                        s.age,
+                        s.coast,
+                        ox + s.x,
+                        oz + s.z,
+                        s.y,
+                        s.radius,
+                        l.plots.len(),
+                        l.lanes.len(),
+                        l.boardwalks.runs.len(),
+                        l.lanterns.len(),
+                        l.stalls.len(),
+                        date(true),
+                        date(false),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The settlements of marsh and mangrove, for aiming screenshots of their boardwalks and
+/// choosing places for the tests: `cargo test -p worldgen list_marsh_settlements --
+/// --ignored --nocapture` (see [`list_region`] for `SEED`, `SMALL` and `SPAN`).
+#[test]
+#[ignore]
+fn list_marsh_settlements() {
+    list_region(Region::Wetland);
+}
+
+/// The settlements of old-growth forest, for aiming screenshots of the lanterns in their
+/// trees: `cargo test -p worldgen list_old_growth_settlements -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn list_old_growth_settlements() {
+    list_region(Region::OldGrowth);
 }

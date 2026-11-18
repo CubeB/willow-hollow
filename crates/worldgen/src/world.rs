@@ -67,6 +67,8 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             farmland::quarry::raise(&mut c, seed);
             // What stands about the fields, clear of all of those (#64, #206).
             farmland::fixtures::raise(&mut c, seed);
+            // The lanterns in the old forest's trees, once every tree to be felled is (#203).
+            crate::settlements::tree::hang_lanterns(&mut c, seed);
             Arc::new(c)
         })
         .clone();
