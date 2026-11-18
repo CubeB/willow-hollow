@@ -135,6 +135,38 @@ fn boat_sheds_back_onto_the_water() {
     println!("{sheds} boat sheds");
 }
 
+/// A harbour wall shelters the town's one landing, which is its fishing quay too, and no
+/// boat putting out from there to its fishing grounds goes through the wall.
+#[test]
+fn harbour_walls_shelter_the_landing_the_boats_put_out_from() {
+    let mut walls = 0;
+    for seed in [1, 2, 3, 4, 5, 6] {
+        let c = world(seed).continent(0, 0);
+        let net = &c.trails;
+        for (k, s) in net.settlements.iter().enumerate() {
+            let Some(h) = &net.layouts[k].harbour else { continue };
+            walls += 1;
+            assert_eq!(s.kind, Kind::GreatTown);
+            assert_eq!(Some(h.landing), s.port, "seed {seed}: the harbour wall shelters another landing");
+            let wall: std::collections::HashSet<IVec2> = h.line.iter().flat_map(|&c| (-3..=3).flat_map(move |z| (-3..=3).map(move |x| c + IVec2::new(x, z)))).collect();
+            let ways = &net.waterways;
+            for (q, quay) in ways.quays.iter().enumerate().filter(|(_, q)| q.settlement == k) {
+                assert!(quay.footprint.iter().all(|c| !wall.contains(c)), "seed {seed}: a jetty stands on the harbour wall");
+                let from = Vec2::new(quay.berth.x, quay.berth.z);
+                for g in ways.grounds_of(q) {
+                    let to = Vec2::new(g.at.x, g.at.z);
+                    let n = (from.distance(to) * 2.0) as i32;
+                    for i in 0..=n {
+                        let p = from.lerp(to, i as f32 / n.max(1) as f32).floor().as_ivec2();
+                        assert!(!h.line.contains(&p), "seed {seed}: a boat from the landing at {from} to its ground at {to} goes through the harbour wall at {p}");
+                    }
+                }
+            }
+        }
+    }
+    println!("{walls} harbour walls");
+}
+
 #[test]
 fn parks_are_clear_of_every_plot() {
     for seed in SEEDS {
@@ -237,10 +269,18 @@ fn list_edges() {
             println!("    wall of {} from {} to {}", line.len(), line[0], line[line.len() - 1]);
         }
         for sh in &l.sheds {
-            println!("    boat shed at {} slip {} out {}", sh.origin, sh.slip, sh.out);
+            let slip = Vec2::new(sh.slip.x as f32, sh.slip.z as f32);
+            let quay = net.waterways.quays.iter().filter(|q| q.settlement == k).map(|q| q.foot.distance(slip).min(q.head.distance(slip))).fold(f32::MAX, f32::min);
+            println!("    boat shed at {} slip {} out {}, the nearest quay {quay:.0} off", sh.origin, sh.slip, sh.out);
         }
         if let Some(h) = &l.harbour {
-            println!("    harbour wall of {} from {} to beacon {}", h.line.len(), h.root, h.beacon);
+            let site = &net.sites[h.landing];
+            println!("    harbour wall of {} from {} to beacon {}, sheltering landing {} at {},{} moored at {:?}", h.line.len(), h.root, h.beacon, h.landing, site.x, site.z, site.mooring.map(|m| m.pos));
+            for (q, quay) in net.waterways.quays.iter().enumerate().filter(|(_, q)| q.settlement == k) {
+                let from = Vec2::new(quay.berth.x, quay.berth.z);
+                let through = net.waterways.grounds_of(q).filter(|g| (0..=200).any(|i| h.line.contains(&from.lerp(Vec2::new(g.at.x, g.at.z), i as f32 / 200.0).floor().as_ivec2()))).count();
+                println!("    quay {q} {:?} landing {:?} berth {}: {} grounds, {through} through the wall", quay.serves, quay.landing, quay.berth, net.waterways.grounds_of(q).count());
+            }
         }
         if let Some(p) = &l.park {
             println!("    park at {} r {:.0}: pond {:?} pavilion {:?} lawn {:?} benches {}", p.at, p.radius, p.pond, p.pavilion, p.lawn, p.benches.len());

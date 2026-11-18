@@ -154,18 +154,21 @@ impl Town<'_> {
         if self.s.kind != Kind::GreatTown || !self.s.coast {
             return;
         }
-        let Some(site) = self.s.port.and_then(|i| net.sites.get(i)).copied() else { return };
+        let Some((landing_at, site)) = self.s.port.and_then(|i| net.sites.get(i).map(|s| (i, *s))) else { return };
         let landing = vec2(site.x as f32 + 0.5, site.z as f32 + 0.5);
         let moor = site.mooring.map(|m| vec2(m.pos.x, m.pos.z)).unwrap_or(landing);
         let sea_dir = (if moor.distance(landing) > 2.0 { moor - landing } else { landing - self.centre }).normalize_or(Vec2::X);
         let across = vec2(-sea_dir.y, sea_dir.x);
+        // Clear of the landing and its mooring, and leaving a mouth open straight out to
+        // sea from the mooring, which the fishing boats put out through.
         let clear_of_landing = |p: Vec2| {
             let ab = moor - landing;
             let t = ((p - landing).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-            (landing + ab * t).distance(p) > m(4.0) && p.distance(moor) > m(5.0)
+            let out = (p - moor).dot(sea_dir).max(0.0);
+            (landing + ab * t).distance(p) > m(7.0) && p.distance(moor) > m(8.0) && (moor + sea_dir * out).distance(p) > m(6.0)
         };
         let wet = |c: IVec2| fin.column(c.x, c.y).water_surface();
-        for (side, off) in [(1.0, 18.0), (-1.0, 18.0), (1.0, 26.0), (-1.0, 26.0), (1.0, 34.0), (-1.0, 34.0)] {
+        for (side, off) in [(1.0, 30.0), (-1.0, 30.0), (1.0, 40.0), (-1.0, 40.0), (1.0, 22.0), (-1.0, 22.0)] {
             // Along a line out to sea beside the landing, the last dry column is the shore.
             let base = landing + across * side * off;
             let Some(k) = (-24..=30).find(|&k| wet((base + sea_dir * k as f32).floor().as_ivec2()).is_some()) else { continue };
@@ -222,7 +225,7 @@ impl Town<'_> {
                 let b = &built.building;
                 net.add_stamp_with(b.voxels.iter().map(|&(q, v)| (q + beacon, v)).collect(), parts::place_fine(&b.fine, beacon, 0));
             }
-            self.layout.harbour = Some(Harbour { root: IVec3::new(line[0].x, top, line[0].y), line, top, beacon });
+            self.layout.harbour = Some(Harbour { root: IVec3::new(line[0].x, top, line[0].y), line, top, beacon, landing: landing_at });
             return;
         }
     }

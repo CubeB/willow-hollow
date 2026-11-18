@@ -57,6 +57,9 @@ pub struct Harbour {
     pub root: IVec3,
     /// The foot of the beacon on its head.
     pub beacon: IVec3,
+    /// The landing it shelters, by index in `Network::sites`: the same landing the
+    /// town's fishing quay is (`quay::Quay::landing`), so the port has the one.
+    pub landing: usize,
 }
 
 /// A great town's park, kept round its old tree.
