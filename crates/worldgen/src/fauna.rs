@@ -11,7 +11,7 @@
 //! Wild animals are shy and never hostile, the boar and the wild cattle included: they
 //! keep their distance and back away from the player (this settles #47 for them).
 
-use glam::{IVec3, Vec2};
+use glam::{IVec2, IVec3, Vec2};
 
 use crate::{
     biome::Biome,
@@ -383,7 +383,13 @@ pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
     let mut out = Vec::new();
     // The yards.
     for (n, p) in net.plots[layout.plots.clone()].iter().enumerate() {
-        let Some((lo, hi)) = p.yard else { continue };
+        // Hens keep to the yard their coop is in, or where it stands beside the house,
+        // about it; walls they cannot pass.
+        let about_coop = p.coop.filter(|c| p.yard.is_none_or(|(lo, hi)| !(lo.x..=hi.x).contains(&c.x) || !(lo.y..=hi.y).contains(&c.z))).map(|c| {
+            let half = m(3.0).round() as i32;
+            (IVec2::new(c.x, c.z) - half, IVec2::new(c.x, c.z) + half)
+        });
+        let Some((lo, hi)) = about_coop.or(p.yard) else { continue };
         let roll = unit(hash2(seed ^ 0x79a2, p.origin.x, p.origin.z));
         let (kind, count) = if p.coop.is_some() {
             let fowl = if has(Kind::Goose) && roll < 0.15 {

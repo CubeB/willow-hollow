@@ -211,6 +211,9 @@ pub struct Built {
     pub guest_beds: Vec<Spot>,
     /// Where each thing in it is used from: the voxel stood on, inside the walls.
     pub uses: Vec<(Use, IVec3)>,
+    /// Where someone may sit: the voxel a sitter's feet are in (a bench's own), and the
+    /// way they face, toward the table.
+    pub seats: Vec<(IVec3, IVec3)>,
     /// The voxel of embers that glows in the smith's forge (or the tavern's hearth): it
     /// lights the room at night and the game's smoke rises from it.
     pub fire: Option<IVec3>,
@@ -232,6 +235,7 @@ impl Built {
             building: self.building.turned(turns),
             guest_beds: self.guest_beds.iter().map(spot).collect(),
             uses: self.uses.iter().map(|&(u, q)| (u, r(q))).collect(),
+            seats: self.seats.iter().map(|&(q, d)| (r(q), r(d))).collect(),
             fire: self.fire.map(r),
             wheel: self.wheel.map(|w| Wheel { hub: r(w.hub), side: r(w.side), ..w }),
             guilds: self.guilds.clone(),

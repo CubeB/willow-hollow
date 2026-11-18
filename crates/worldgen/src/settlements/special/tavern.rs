@@ -168,6 +168,8 @@ pub(super) fn build(mut f: Frame) -> (Built, Vec<String>) {
         f.prop(Prop::Bench, IVec3::new(4, feet, zt - 1), 0, false);
         f.prop(Prop::Bench, IVec3::new(5, feet, zt + 2), 0, false);
         f.uses.push((Use::Table, IVec3::new(3, fy, zt)));
+        // Each bench, three voxels long, seats two, one at either end, facing the table.
+        f.seats.extend([(IVec3::new(4, feet, zt - 1), IVec3::Z), (IVec3::new(6, feet, zt - 1), IVec3::Z), (IVec3::new(5, feet, zt + 2), IVec3::NEG_Z), (IVec3::new(7, feet, zt + 2), IVec3::NEG_Z)]);
     }
 
     // The sign beside the door, painted with the keeper's colours.

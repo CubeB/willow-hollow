@@ -704,16 +704,28 @@ impl<'a> Town<'a> {
         let facts = Facts::of(&self.s);
         // A great town's homes may take what only a great town's do (a wind catcher).
         let how = kit::components::Dress { great_town: self.s.kind == Kind::GreatTown };
-        let home = |spec: &Spec| kit::build_dressed(spec, pal, kit::rules::rules(region), &how);
+        // A home as `kit::build_dressed` builds it, and where a hen coop set beside it
+        // stands, if one was (model space).
+        let home = |spec: &Spec| match crate::features::designs::pick_house(spec.region, spec.step, spec.seed, spec.sleepers).and_then(|d| kit::from_design(d, pal, spec.seed)) {
+            Some(b) => (b, None),
+            None => {
+                let (b, attached) = kit::generate_dressed(spec, pal, kit::rules::rules(region), &how);
+                let coop = attached.iter().find(|a| a.component == kit::components::Component::HenCoop).map(|a| a.anchor.at + a.anchor.normal * 2);
+                (b, coop)
+            }
+        };
         let kits = in_parallel(&wants, |w| {
             let own = w.purpose.which().and_then(|which| special::build(&SpecialSpec { which, region, age: w.age, wealth: w.wealth, seed: w.seed, stream: None, facts }, pal));
             match own {
-                Some(own) => (own.building.clone(), Some(own)),
-                None => (home(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed }), None),
+                Some(own) => (own.building.clone(), Some(own), None),
+                None => {
+                    let (b, coop) = home(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed });
+                    (b, None, coop)
+                }
             }
         });
-        for (want, (built, own)) in wants.into_iter().zip(kits) {
-            self.raise(net, want, built, own);
+        for (want, (built, own, coop)) in wants.into_iter().zip(kits) {
+            self.raise(net, want, built, own, coop);
         }
         self.door_paths(net);
         // The ground as it is now, every plot levelled and every way worn.
@@ -1230,8 +1242,8 @@ impl<'a> Town<'a> {
 
     /// Builds what `want` asks for and finds it a plot, smaller and plainer if it must
     /// be; then levels its pad, furnishes it, stamps it into the world and records it.
-    fn raise(&mut self, net: &mut Network, want: Want, built: Building, own: Option<Built>) {
-        let mut own = own;
+    fn raise(&mut self, net: &mut Network, want: Want, built: Building, own: Option<Built>, coop: Option<IVec3>) {
+        let (mut own, mut coop) = (own, coop);
         let spec = |step: Step, beds: u8| Spec { region: self.s.region, step, age: want.age, wealth: want.wealth, sleepers: beds, seed: want.seed };
         let garden = match want.purpose {
             Purpose::Home => unit(want.seed ^ 0x9a2d) < 0.85,
@@ -1253,7 +1265,7 @@ impl<'a> Town<'a> {
                 _ => {
                     // At the last, a hut with nothing set about it: there was no room for
                     // anything bigger.
-                    own = None;
+                    (own, coop) = (None, None);
                     want.step = Step::Hut;
                     want.beds = want.beds.min(Step::Hut.max_sleepers());
                     want.residents = want.residents.min(want.beds);
@@ -1329,7 +1341,7 @@ impl<'a> Town<'a> {
         // Stage 3's own buildings come furnished, their beds and fires among them.
         let inside = if own.is_some() { furnish::Furnished::default() } else { furnish::furnish(b, &household, &self.pal, want.seed) };
         let (beds, seats) = match &own {
-            Some(o) => (own_beds(o, origin, t), Vec::new()),
+            Some(o) => (own_beds(o, origin, t), o.seats.iter().map(|&(q, d)| (origin + rotate(q, t), flat(rotate(d, t)))).collect()),
             None => rests(&inside, origin, t),
         };
         let mut voxels: Vec<(IVec3, Voxel)> = b.voxels.iter().chain(&inside.voxels).map(|&(q, v)| (origin + rotate(q, t), v)).collect();
@@ -1363,7 +1375,9 @@ impl<'a> Town<'a> {
             pads: spot.discs.clone(),
             garden,
             yard,
-            coop: None,
+            // A coop set beside the home as it was built; the yard's, if any, is found
+            // as it is dressed.
+            coop: coop.map(|q| origin + rotate(q, t)),
             beds,
             seats,
         });
