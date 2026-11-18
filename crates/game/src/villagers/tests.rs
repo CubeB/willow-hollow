@@ -755,3 +755,42 @@ fn folk_come_in_from_the_hamlets_only_on_market_day() {
     }
     assert!(markets > 0, "no market day with folk in from the hamlets");
 }
+
+#[test]
+fn the_grain_is_reaped_while_it_stands_gold_and_the_sheaves_carried_off_the_stubble() {
+    use worldgen::{
+        features::plants::{Phase, Season},
+        settlements::farmland::{Crop, crops},
+    };
+    let season = |row: u8| crops::seasons().into_iter().find(|(r, _)| *r == row).unwrap().1;
+    let (grain, stubble) = (season(crops::GRAIN), season(crops::STUBBLE));
+    // How much of a field shows one of `phases` of `s` on `date`, its plants coming out
+    // a few days apart.
+    let share = |s: &Season, date: f32, phases: &[Phase]| {
+        let n = (0..400).filter(|&i| phases.contains(&s.phase(date, i % 20, i / 20))).count();
+        n as f32 / 400.0
+    };
+    let mut reaped = 0;
+    for i in 0..400 {
+        let date = i as f32 / 400.0;
+        for crop in [Crop::Wheat, Crop::Barley] {
+            for second in [false, true] {
+                match day::field_task(crop, date, second) {
+                    Task::Reap => {
+                        reaped += 1;
+                        assert!(share(&grain, date, &[Phase::Bloom, Phase::Seed]) >= 0.5, "{crop:?} reaped at {date} with the grain not gold");
+                    }
+                    Task::Sheaves if !second => {
+                        assert!(share(&stubble, date, &[Phase::Bloom]) >= 0.5, "{crop:?} sheaves carried at {date} with no stubble");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // With the whole field gold, it is being reaped.
+        if share(&grain, date, &[Phase::Bloom]) == 1.0 {
+            assert_eq!(day::field_task(Crop::Wheat, date, false), Task::Reap, "the wheat stands gold at {date} and nobody reaps it");
+        }
+    }
+    assert!(reaped > 0);
+}

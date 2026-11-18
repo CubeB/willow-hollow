@@ -121,26 +121,29 @@ pub fn sunset(date: f32) -> f32 {
 pub const FURTHEST_OUT: f32 = 4.2;
 
 /// What is done in a field of `crop` at `date` (0 to 1 from the spring equinox), the
-/// `second` thing of the day or the first: sowing in spring, hoeing the rows through the
-/// summer, reaping and carrying the sheaves at harvest, and the ground worked over
-/// through the winter; hay cut in summer; trees and vines tended all year.
+/// `second` thing of the day or the first, as the fields are seen to grow
+/// (`farmland::crops`): sowing in spring, hoeing the rows through early summer, reaping
+/// as the grain turns gold and carrying the sheaves off the stubble after, sowing again
+/// in the autumn, and the ground worked over through the winter; roots lifted in the
+/// autumn; hay mown as it seeds; trees and vines tended all year.
 pub fn field_task(crop: worldgen::settlements::farmland::Crop, date: f32, second: bool) -> Task {
     use worldgen::settlements::farmland::Crop;
     let date = date.rem_euclid(1.0);
-    let harvest = (0.42..0.6).contains(&date);
+    let pick = |a: Task, b: Task| if second { b } else { a };
     match crop {
         Crop::Wheat | Crop::Barley | Crop::Rye | Crop::Flax => match date {
-            _ if harvest => if second { Task::Sheaves } else { Task::Reap },
-            d if d < 0.25 => if second { Task::Hoe } else { Task::Sow },
-            d if (0.6..0.75).contains(&d) => if second { Task::Sow } else { Task::Hoe },
+            d if d < 0.25 => pick(Task::Sow, Task::Hoe),
+            d if (0.36..0.445).contains(&d) => pick(Task::Reap, Task::Sheaves),
+            d if (0.445..0.5).contains(&d) => Task::Sheaves,
+            d if (0.6..0.75).contains(&d) => pick(Task::Hoe, Task::Sow),
             _ => Task::Hoe,
         },
         Crop::Roots => match date {
-            d if d < 0.25 => if second { Task::Hoe } else { Task::Sow },
-            _ if harvest => if second { Task::Carry } else { Task::Tend },
-            _ => if second { Task::Tend } else { Task::Hoe },
+            d if d < 0.25 => pick(Task::Sow, Task::Hoe),
+            d if (0.5..0.62).contains(&d) => pick(Task::Tend, Task::Carry),
+            _ => pick(Task::Hoe, Task::Tend),
         },
-        Crop::Hay if (0.3..0.45).contains(&date) => if second { Task::Sheaves } else { Task::Reap },
+        Crop::Hay if (0.27..0.33).contains(&date) => pick(Task::Reap, Task::Sheaves),
         Crop::Orchard | Crop::Olives | Crop::Vines | Crop::Hay => Task::Tend,
         _ => Task::Hoe,
     }
