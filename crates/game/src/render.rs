@@ -393,9 +393,10 @@ struct ImpostorCamera {
 /// Most cubes of solid moving models drawn in one frame: room for the crows and their
 /// nests as well as the boats, the figure and what is set down, and for the animals,
 /// which keep to a budget of their own (`animals::BUDGET`, 1536) so that a field of
-/// them never crowds the rest out; and apart from all those the settlements' people
-/// (#204), who are drawn last. 60 bytes a box.
-const PROP_CAPACITY: usize = 4096 + crate::villagers::MOST_BOXES;
+/// them never crowds the rest out; and apart from all those the travellers on the roads
+/// and the water (#205) and the settlements' people (#204), each to a budget of their
+/// own, the people drawn last. 60 bytes a box.
+const PROP_CAPACITY: usize = 4096 + crate::travellers::BUDGET + crate::villagers::MOST_BOXES;
 
 /// Everything one frame draws.
 pub struct Scene<'a> {
