@@ -6,7 +6,7 @@ use std::{
 use super::*;
 use crate::{
     continent::SimConfig,
-    settlements::quay::{Serves, calm},
+    settlements::quay::{Run, Serves, calm},
     surface::fall_drop,
     world::GameWorld,
 };
@@ -27,6 +27,8 @@ fn worlds() -> &'static [(u32, Arc<Continent>, Travel)] {
 
 /// Some days through a few years, near and far.
 const DAYS: [i64; 8] = [0, 3, 9, 40, 41, 100, 233, 1000];
+/// Calm water, rough all day, and turning rough in the morning.
+const WATERS: [Water; 3] = [Water::CALM, Water::ROUGH, Water { rough_since: Some(10.0) }];
 
 /// Whether each of `points` holds water or lies in a river's channel, looked at a tile of
 /// the continent at a time. (Where a river meets the sea its channel can run dry, its bed
@@ -84,8 +86,8 @@ fn the_same_travellers_are_in_the_same_places_for_the_same_seed_and_time() {
         assert_eq!(a.len(), b.len(), "day {day}");
         for (a, b) in a.iter().zip(&b) {
             for hour in [2.0, 7.9, 10.0, 12.5, 16.0, 19.0, 23.0] {
-                for calm in [true, false] {
-                    assert_eq!(a.at(hour, 0.3, calm), b.at(hour, 0.3, calm), "day {day} at {hour}");
+                for water in WATERS {
+                    assert_eq!(a.at(hour, 0.3, water), b.at(hour, 0.3, water), "day {day} at {hour}");
                     seen += 1;
                 }
             }
@@ -97,10 +99,10 @@ fn the_same_travellers_are_in_the_same_places_for_the_same_seed_and_time() {
     for day in DAYS {
         let all = travel.near(c, day, Vec2::ZERO, f32::INFINITY);
         for p in all.iter().take(6) {
-            let Some(scene) = p.at(10.0, 0.3, true) else { continue };
+            let Some(scene) = p.at(10.0, 0.3, Water::CALM) else { continue };
             let here = travel.near(c, day, flat(scene.at), m(40.0));
             let found = here.iter().find(|q| q.id() == p.id()).expect("the party is found near where it is");
-            assert_eq!(found.at(10.0, 0.3, true), Some(scene));
+            assert_eq!(found.at(10.0, 0.3, Water::CALM), Some(scene));
         }
     }
 }
@@ -114,7 +116,7 @@ fn campers_stay_a_week_and_are_gone_the_next() {
                 .near(c, day, Vec2::ZERO, f32::INFINITY)
                 .into_iter()
                 .filter(|p| p.kind() == Kind::Camper)
-                .filter_map(|p| p.at(20.0, 0.3, true))
+                .filter_map(|p| p.at(20.0, 0.3, Water::CALM))
                 .map(|s| (s.id, s.fire.expect("a fire").0.to_array().map(f32::to_bits)))
                 .collect()
         };
@@ -141,7 +143,7 @@ fn campers_camp_off_the_trail_on_dry_ground() {
     for (seed, c, travel) in worlds() {
         for day in [0, 70, 140] {
             for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::Camper) {
-                let s = p.at(20.0, 0.3, true).expect("a camper");
+                let s = p.at(20.0, 0.3, Water::CALM).expect("a camper");
                 let (fire, _) = s.fire.expect("a fire");
                 assert!(off_trail(&c.trails, flat(fire)) > m(0.8), "a camper's fire on the trail at {fire}");
                 let props: Vec<Vec2> = std::iter::once(flat(fire)).chain(s.tents.iter().chain(&s.bedrolls).map(|t| flat(t.0))).collect();
@@ -164,7 +166,7 @@ fn settlers_keep_to_the_trails_and_camp_off_them() {
                 // On the road: every walker on the trail, but where they cross a green
                 // or step from one trail to another where two meet.
                 for hour in [8.5, 10.0, 11.9, 12.5, 14.0, 17.0] {
-                    let Some(s) = p.at(hour, 0.3, true) else { continue };
+                    let Some(s) = p.at(hour, 0.3, Water::CALM) else { continue };
                     assert!((5..=8).contains(&s.people.len()), "{} settlers", s.people.len());
                     assert!((1..=2).contains(&s.carts.len()), "{} carts", s.carts.len());
                     for f in &s.people {
@@ -181,7 +183,7 @@ fn settlers_keep_to_the_trails_and_camp_off_them() {
                 }
                 // In camp: the fire, the carts and the tents off the trail and dry.
                 for hour in [3.0, 20.0] {
-                    let Some(s) = p.at(hour, 0.3, true) else { continue };
+                    let Some(s) = p.at(hour, 0.3, Water::CALM) else { continue };
                     let (fire, _) = s.fire.expect("a camp has a fire");
                     assert!(off_trail(net, flat(fire)) > m(3.0), "a settlers' fire on the trail at {fire}");
                     for t in s.carts.iter().map(|c| c.at).chain(s.tents.iter().map(|t| t.0)) {
@@ -206,8 +208,8 @@ fn settlers_walk_on_from_where_they_camped() {
         let mut checked = 0;
         for day in 0..40 {
             for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::Settlers) {
-                let (Some(evening), Some(next)) = (p.at(20.0, 0.3, true), travel.near(c, day + 1, Vec2::ZERO, f32::INFINITY).into_iter().find(|q| q.id() == p.id())) else { continue };
-                let Some(morning) = next.at(3.0, 0.3, true) else { continue };
+                let (Some(evening), Some(next)) = (p.at(20.0, 0.3, Water::CALM), travel.near(c, day + 1, Vec2::ZERO, f32::INFINITY).into_iter().find(|q| q.id() == p.id())) else { continue };
+                let Some(morning) = next.at(3.0, 0.3, Water::CALM) else { continue };
                 assert_eq!(evening.fire.map(|f| f.0), morning.fire.map(|f| f.0), "they woke somewhere other than where they slept");
                 assert_eq!(evening.tents, morning.tents);
                 assert_eq!(evening.carts, morning.carts);
@@ -218,41 +220,75 @@ fn settlers_walk_on_from_where_they_camped() {
     }
 }
 
+/// How far along `run`'s line the point of it nearest `p` is.
+fn nearest_s(run: &Run, p: Vec2) -> f32 {
+    let k = (0..run.line.len()).min_by(|&a, &b| flat(run.line[a]).distance_squared(p).total_cmp(&flat(run.line[b]).distance_squared(p))).unwrap_or(0);
+    run.along[k]
+}
+
+/// Where the river falls on `run`: the middle of each drop.
+fn drops(c: &Continent, run: &Run) -> Vec<Vec2> {
+    run.cells[..run.cells.len().saturating_sub(1)]
+        .iter()
+        .filter(|&&i| fall_drop(c, i) > 0.0)
+        .map(|&i| (crate::surface::node(c, i) + crate::surface::node(c, c.rcv[i] as usize)) * 0.5)
+        .collect()
+}
+
 #[test]
-fn river_boats_keep_to_calm_water_and_stay_in_when_it_is_rough() {
+fn river_boats_keep_off_rough_water_and_tie_up_when_it_turns() {
     let mut runs = 0;
     for (seed, c, travel) in worlds() {
         let ways = &c.trails.waterways;
         for (r, run) in ways.runs.iter().enumerate() {
             runs += 1;
-            // Never over a fall, nor down a stretch too steep to be calm.
-            for &cell in &run.cells[..run.cells.len().saturating_sub(1)] {
-                assert_eq!(fall_drop(c, cell), 0.0, "run {r} goes over a fall");
-                assert!(calm(c, cell), "run {r} runs down rough water");
+            // Never over a fall, nor down a stretch too steep to be calm, but between the
+            // stages of a portage.
+            let falls = drops(c, run);
+            if run.portages.is_empty() {
+                assert!(falls.is_empty(), "run {r} goes over a fall with no portage");
+                for &cell in &run.cells[..run.cells.len().saturating_sub(1)] {
+                    assert!(calm(c, cell), "run {r} runs down rough water with no portage");
+                }
+            }
+            for d in &falls {
+                assert!(run.rough(nearest_s(run, *d)), "run {r} goes over the fall at {d} with no portage round it");
             }
             assert_eq!(ways.quays[run.from].serves, Serves::River);
             assert_eq!(ways.quays[run.to].serves, Serves::River);
-            // The whole way on water.
+            // The whole way on water, but where it is carried.
             let mut pts = Vec::new();
             let mut s = 0.0;
             while s < run.length() {
                 let (p, _) = run.at(s);
-                pts.push(flat(p));
+                if !run.rough(s) {
+                    pts.push(flat(p));
+                }
                 s += m(2.0);
             }
             let w = wet(c, *seed, &pts);
             let dry = w.iter().filter(|w| !**w).count();
             assert!(dry * 50 <= w.len(), "run {r}: {dry} of {} points out of the water", w.len());
-            let berths = [ways.quays[run.from].berth, ways.quays[run.to].berth];
             let mut seen_moving = false;
             for day in 0..30 {
                 for p in travel.near(c, day, flat(run.line[0]), m(10.0)).iter().filter(|p| p.kind() == Kind::RiverBoat) {
                     for hour in [3.0, 7.5, 9.0, 11.0, 13.0, 15.0, 18.5, 22.0] {
-                        seen_moving |= p.at(hour, 0.3, true).expect("a boat").boats[0].moving;
-                        // On rough days, tied up at a quay all day.
-                        let rough = p.at(hour, 0.3, false).expect("a boat");
-                        assert!(!rough.boats[0].moving, "a boat out in rough water");
-                        assert!(berths.iter().any(|q| q.distance(rough.boats[0].at) < 1.0), "a boat away from the quays in rough water");
+                        for water in WATERS {
+                            let boat = p.at(hour, 0.3, water).expect("a boat").boats[0];
+                            seen_moving |= water == Water::CALM && boat.moving;
+                            if !boat.ashore {
+                                // Afloat only off the rough water and well away from a fall.
+                                let s = nearest_s(run, flat(boat.at));
+                                let rough = run.portages.iter().any(|q| s > q.above + m(4.0) && s < q.below - m(4.0));
+                                assert!(!rough, "run {r}: a boat afloat on rough water, {s} along, day {day} at {hour}");
+                                for d in &falls {
+                                    assert!(flat(boat.at).distance(*d) > m(8.0), "run {r}: a boat afloat by the fall at {d}");
+                                }
+                            }
+                            // Tied up all day once it is rough, and by night once it has turned.
+                            let tied = water == Water::ROUGH || (water.rough_at(hour) && hour > 19.0);
+                            assert!(!(tied && boat.moving), "run {r}: a boat out in rough water, day {day} at {hour}");
+                        }
                     }
                 }
             }
@@ -263,6 +299,147 @@ fn river_boats_keep_to_calm_water_and_stay_in_when_it_is_rough() {
 }
 
 #[test]
+fn portages_keep_to_dry_ground_clear_of_the_plots_and_lanes() {
+    let mut portages = 0;
+    for (seed, c, _) in worlds().iter().chain(portage_worlds()) {
+        let net = &c.trails;
+        let lanes: Vec<Vec2> = net.layouts.iter().flat_map(|l| l.lanes.iter().flatten().copied()).collect();
+        for (r, run) in net.waterways.runs.iter().enumerate() {
+            for (k, p) in run.portages.iter().enumerate() {
+                assert!(p.above < p.below && p.above > 0.0 && p.below < run.length(), "run {r} portage {k} out of order");
+                assert!(p.path.len() > 2 && p.length() > m(10.0), "run {r} portage {k}: a path {} long", p.length());
+                // Every step of the path on dry ground, but where it comes down to the stages.
+                let ends = m(1.6);
+                let inner: Vec<Vec2> = p.path.iter().zip(&p.along).filter(|(_, a)| **a > ends && **a < p.length() - ends).map(|(q, _)| flat(*q)).collect();
+                let w = wet(c, *seed, &inner);
+                assert!(w.iter().all(|w| !w), "run {r} portage {k}: the path crosses water at {:?}", inner.iter().zip(&w).find(|(_, w)| **w).map(|(q, _)| *q));
+                for q in &p.path {
+                    let col = q.floor().as_ivec3();
+                    let inside = net.plots.iter().any(|pl| col.x >= pl.lo.x && col.x <= pl.hi.x && col.z >= pl.lo.y && col.z <= pl.hi.y);
+                    assert!(!inside, "run {r} portage {k}: the path on a plot at {q}");
+                    assert!(lanes.iter().all(|l| l.distance(flat(*q)) > m(1.0)), "run {r} portage {k}: the path on a lane at {q}");
+                }
+                // Steady underfoot: no step up or down steeper than a path.
+                for w in p.path.windows(2) {
+                    let (rise, run_) = ((w[1].y - w[0].y).abs(), flat(w[0]).distance(flat(w[1])));
+                    assert!(rise <= run_ * 0.6 + 1.0, "run {r} portage {k}: a step of {rise} in {run_} at {}", w[0]);
+                }
+                for (berth, _) in &p.berths {
+                    assert!(wet(c, *seed, &[flat(*berth)])[0], "run {r} portage {k}: a stage's berth out of the water at {berth}");
+                }
+                for col in &p.footprint {
+                    let inside = net.plots.iter().any(|pl| col.x >= pl.lo.x && col.x <= pl.hi.x && col.y >= pl.lo.y && col.y <= pl.hi.y);
+                    assert!(!inside, "run {r} portage {k}: a stage on a plot at {col}");
+                }
+                portages += 1;
+            }
+        }
+        // No two stages or quays share a column.
+        let mut all = HashSet::new();
+        for col in net.waterways.quays.iter().flat_map(|q| &q.footprint).chain(net.waterways.runs.iter().flat_map(|r| r.portages.iter().flat_map(|p| &p.footprint))) {
+            assert!(all.insert(*col), "two jetties on one column at {col}");
+        }
+    }
+    assert!(portages > 0, "no portages in the worlds tested");
+}
+
+#[test]
+fn boats_go_round_the_portages_by_their_paths() {
+    let mut carried = 0;
+    for (_, c, travel) in portage_worlds() {
+        for (r, run) in c.trails.waterways.runs.iter().enumerate().filter(|(_, r)| !r.portages.is_empty()) {
+            let paths: Vec<&Portage> = run.portages.iter().collect();
+            for day in 0..24 {
+                for p in travel.near(c, day, flat(run.line[0]), m(10.0)).iter().filter(|p| p.kind() == Kind::RiverBoat) {
+                    let mut hour = 7.0;
+                    while hour < 19.0 {
+                        let scene = p.at(hour, 0.3, Water::CALM).expect("a boat");
+                        let boat = scene.boats[0];
+                        if boat.ashore {
+                            // On the path, its crew with it.
+                            let on = paths.iter().any(|q| q.path.iter().any(|x| x.distance(boat.at) < m(1.0)));
+                            assert!(on, "run {r}: a boat ashore off its path at {}", boat.at);
+                            assert!(scene.people.iter().all(|f| f.feet.distance(boat.at) < m(3.0)), "run {r}: a boat carried with nobody under it");
+                            carried += 1;
+                        }
+                        hour += 0.25;
+                    }
+                }
+            }
+        }
+    }
+    assert!(carried > 0, "no boat seen carried round a portage");
+}
+
+#[test]
+fn boats_tie_up_by_the_bank_at_night_on_a_long_voyage() {
+    let mut nights = 0;
+    for (seed, c, travel) in worlds().iter().chain(portage_worlds()) {
+        for day in 0..30 {
+            for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::RiverBoat) {
+                let s = p.at(22.0, 0.3, Water::CALM).expect("a boat");
+                let Some((fire, _)) = s.fire else { continue };
+                // Not out in the middle of the river: off the bank, its crew ashore by a fire,
+                // and in the morning the same.
+                assert!(!s.boats[0].moving);
+                let ashore: Vec<Vec2> = std::iter::once(flat(fire)).chain(s.people.iter().map(|f| flat(f.feet))).chain(s.bedrolls.iter().map(|b| flat(b.0))).collect();
+                assert!(wet(c, *seed, &ashore).iter().all(|w| !w), "a crew camped in the water at {fire}");
+                assert!(off_trail(&c.trails, flat(fire)) > m(0.8), "a crew's fire on a trail at {fire}");
+                assert!(s.people.iter().all(|f| f.doing == Doing::Asleep));
+                if let Some(next) = travel.near(c, day + 1, flat(fire), m(10.0)).into_iter().find(|q| q.id() == p.id()) {
+                    let morning = next.at(5.0, 0.3, Water::CALM).expect("a boat");
+                    assert_eq!(morning.fire.map(|f| f.0), Some(fire), "they woke somewhere other than where they slept");
+                    assert_eq!(morning.boats[0].at, s.boats[0].at);
+                }
+                nights += 1;
+            }
+        }
+    }
+    assert!(nights > 0, "no boat seen tied up by the bank for the night");
+}
+
+#[test]
+fn draught_beasts_walk_in_the_shafts_where_their_country_keeps_them() {
+    let (mut drawn, mut by_hand) = (0, 0);
+    for (seed, c, travel) in worlds() {
+        let net = &c.trails;
+        for day in 0..60 {
+            for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::Settlers) {
+                let Some(s) = p.at(10.0, 0.3, Water::CALM) else { continue };
+                let kept = crate::fauna::kept_by(&net.settlements[s.from.expect("from")]);
+                let keeps = kept.contains(&crate::fauna::Kind::Ox) || kept.contains(&crate::fauna::Kind::Donkey);
+                assert_eq!(s.beasts.len(), if keeps { s.carts.len() } else { 0 }, "settlers from a country {} draught beasts", if keeps { "with" } else { "without" });
+                for cart in &s.carts {
+                    match cart.beast {
+                        Some(b) => {
+                            let beast = s.beasts[b];
+                            assert!(kept.contains(&beast.kind));
+                            // Ahead of its cart, the shafts' length off, and walking.
+                            let d = flat(beast.feet).distance(flat(cart.at));
+                            assert!(d > m(1.2) && d < m(3.0), "a beast {d} from its cart");
+                            assert!(beast.walking);
+                            assert!(off_trail(net, flat(beast.feet)) < JOIN, "a beast off the trail");
+                            drawn += 1;
+                        }
+                        None => by_hand += 1,
+                    }
+                }
+                assert!(s.people.iter().filter(|f| f.doing == Doing::Leading).count() == s.beasts.len(), "a beast with nobody at its head");
+                // Tethered in camp on dry ground, off the trail.
+                for hour in [3.0, 20.0] {
+                    let Some(camp) = p.at(hour, 0.3, Water::CALM) else { continue };
+                    let feet: Vec<Vec2> = camp.beasts.iter().map(|b| flat(b.feet)).collect();
+                    assert!(wet(c, *seed, &feet).iter().all(|w| !w), "a beast tethered in the water");
+                    assert!(camp.beasts.iter().all(|b| !b.walking));
+                }
+            }
+        }
+    }
+    assert!(drawn > 0, "no cart drawn by a beast in the worlds tested");
+    assert!(by_hand > 0, "no cart pulled by hand in the worlds tested");
+}
+
+#[test]
 fn river_boats_are_never_where_there_is_no_water() {
     for (seed, c, travel) in worlds() {
         let mut pts = Vec::new();
@@ -270,8 +447,11 @@ fn river_boats_are_never_where_there_is_no_water() {
             for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| matches!(p.kind(), Kind::RiverBoat | Kind::FishingBoat)) {
                 let mut hour = 0.0;
                 while hour < 24.0 {
-                    for calm in [true, false] {
-                        pts.push(flat(p.at(hour, 0.3, calm).expect("a boat").boats[0].at));
+                    for water in WATERS {
+                        let boat = p.at(hour, 0.3, water).expect("a boat").boats[0];
+                        if !boat.ashore {
+                            pts.push(flat(boat.at));
+                        }
                     }
                     hour += 0.5;
                 }
@@ -290,16 +470,24 @@ fn fishing_boats_are_out_by_mid_morning_and_back_by_afternoon() {
         for day in DAYS {
             for date in [0.0, 0.25, 0.5, 0.75] {
                 for p in travel.near(c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::FishingBoat) {
-                    let at = |hour: f32, calm: bool| p.at(hour, date, calm).expect("a boat").boats[0];
-                    let berth = at(3.0, true).at;
-                    assert!(!at(3.0, true).moving, "out before dawn");
-                    assert!(at(10.0, true).at.distance(berth) > m(30.0), "not out on the water at mid-morning");
+                    let at = |hour: f32, water: Water| p.at(hour, date, water).expect("a boat").boats[0];
+                    let berth = at(3.0, Water::CALM).at;
+                    assert!(!at(3.0, Water::CALM).moving, "out before dawn");
+                    assert!(at(10.0, Water::CALM).at.distance(berth) > m(30.0), "not out on the water at mid-morning");
                     for hour in [13.0, 14.5, 17.0, 21.0] {
-                        assert!(at(hour, true).at.distance(berth) < 1.0, "not back by the afternoon");
+                        assert!(at(hour, Water::CALM).at.distance(berth) < 1.0, "not back by the afternoon");
                     }
                     for hour in [3.0, 8.0, 10.0, 11.0, 14.0] {
-                        assert!(at(hour, false).at.distance(berth) < 1.0, "out in rough weather");
+                        assert!(at(hour, Water::ROUGH).at.distance(berth) < 1.0, "out in rough weather");
                     }
+                    // Caught out at mid-morning, home from where they were, not from the
+                    // ground; and in by midday.
+                    let turned = Water::rough_since(10.0);
+                    let was = at(10.0, Water::CALM).at;
+                    let soon = at(10.1, turned);
+                    assert!(soon.moving && soon.at.distance(was) < m(30.0), "not making for home from where they were");
+                    assert!(soon.at.distance(berth) < was.distance(berth), "not making for home");
+                    assert!(at(12.0, turned).at.distance(berth) < 1.0, "not home out of the weather");
                     boats += 1;
                 }
             }
@@ -343,6 +531,89 @@ fn quays_never_sit_on_a_plot_or_lane_and_never_block_a_river() {
         }
     }
     assert!(quays > 0);
+}
+
+/// A world with a run past rough water, for the portages' tests: the small worlds have
+/// none, their rivers too narrow for quays where they run down cascades, so a full-sized
+/// one. (In the first twenty full-sized worlds no run goes over a fall itself: the
+/// settlements are on the lowland rivers, below their falls. Seeds 10 and 18 have runs
+/// down cascades, each with one portage.)
+const PORTAGE_SEEDS: [u32; 1] = [18];
+
+/// The continents of the worlds of [`PORTAGE_SEEDS`], made once for the tests that need a
+/// run with portages on it.
+fn portage_worlds() -> &'static [(u32, Arc<Continent>, Travel)] {
+    static WORLDS: OnceLock<Vec<(u32, Arc<Continent>, Travel)>> = OnceLock::new();
+    WORLDS.get_or_init(|| {
+        PORTAGE_SEEDS
+            .iter()
+            .map(|&seed| {
+                let c = GameWorld::with_config(seed, SimConfig { size: 1024 }).continent(0, 0);
+                let t = Travel::of(&c, seed);
+                (seed, c, t)
+            })
+            .collect()
+    })
+}
+
+/// Prints the runs with portages of small worlds and of a full-sized one, and the days a
+/// boat is carried round them, for finding a world to look at (`PROBE_SEEDS`, `PROBE_SIZE`).
+#[test]
+#[ignore]
+fn probe_portages() {
+    let size = std::env::var("PROBE_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
+    let seeds: Vec<u32> = std::env::var("PROBE_SEEDS").ok().map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_else(|| (1..=12).collect());
+    for seed in seeds {
+        let c = GameWorld::with_config(seed, SimConfig { size }).continent(0, 0);
+        let ways = &c.trails.waterways;
+        let carried: Vec<_> = ways.runs.iter().filter(|r| !r.portages.is_empty()).collect();
+        println!("seed {seed}: {} runs, {} past falls, {} drops in all on runs", ways.runs.len(), carried.len(), ways.runs.iter().map(|r| drops(&c, r).len()).sum::<usize>());
+        if carried.is_empty() {
+            continue;
+        }
+        let travel = Travel::of(&c, seed);
+        for run in carried {
+            for p in &run.portages {
+                println!("  run {}-{}: portage {:.0}..{:.0} of {:.0}, path {:.0} m from {} to {}", run.a, run.b, p.above, p.below, run.length(), p.length() / m(1.0), p.path[0], p.path[p.path.len() - 1]);
+            }
+            for day in 0..12 {
+                for plan in travel.near(&c, day, flat(run.line[0]), m(10.0)).iter().filter(|p| p.kind() == Kind::RiverBoat) {
+                    let mut hour = 7.0;
+                    while hour < 19.0 {
+                        let s = plan.at(hour, 0.3, Water::CALM).expect("a boat");
+                        if s.boats[0].ashore {
+                            println!("    day {day} at {hour:.2}: {} at {}", s.doing, s.boats[0].at);
+                            break;
+                        }
+                        hour += 0.25;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Prints where the trade boats of a world tie up by the bank for the night, and the days,
+/// for finding one to look at (`PROBE_SEEDS`, `PROBE_SIZE`).
+#[test]
+#[ignore]
+fn probe_moorings() {
+    let size = std::env::var("PROBE_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let seeds: Vec<u32> = std::env::var("PROBE_SEEDS").ok().map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_else(|| vec![1]);
+    for seed in seeds {
+        let c = GameWorld::with_config(seed, SimConfig { size }).continent(0, 0);
+        let longest = c.trails.waterways.runs.iter().map(|r| r.length() / m(1.0)).fold(0.0, f32::max);
+        println!("seed {seed}: {} runs, the longest {longest:.0} m", c.trails.waterways.runs.len());
+        let travel = Travel::of(&c, seed);
+        for day in 0..12 {
+            for plan in travel.near(&c, day, Vec2::ZERO, f32::INFINITY).iter().filter(|p| p.kind() == Kind::RiverBoat) {
+                let s = plan.at(21.0, 0.3, Water::CALM).expect("a boat");
+                if s.doing.contains("bank") {
+                    println!("seed {seed} day {day}: {} {:?}-{:?}, boat at {}, crew at {:?}", s.doing, s.from, s.to, s.boats[0].at, s.people.first().map(|f| f.feet));
+                }
+            }
+        }
+    }
 }
 
 /// Prints the falls of a world nearest the trade boats' runs and the river quays, where
@@ -422,8 +693,8 @@ fn probe() {
         println!("day {day}: {} plans in {:?}", plans.len(), t2.elapsed());
         for p in &plans {
             for hour in [3.0, 10.0, 12.5, 15.0, 20.0] {
-                if let Some(s) = p.at(hour, 0.3, true) {
-                    println!("  {:?} {:>5.1}h at ({:.0}, {:.0}, {:.0}): {} people, {} carts, {} boats: {}", s.kind, hour, s.at.x, s.at.y, s.at.z, s.people.len(), s.carts.len(), s.boats.len(), s.doing);
+                if let Some(s) = p.at(hour, 0.3, Water::CALM) {
+                    println!("  {:?} {:>5.1}h at ({:.0}, {:.0}, {:.0}): {} people, {} carts, {} beasts, {} boats: {}", s.kind, hour, s.at.x, s.at.y, s.at.z, s.people.len(), s.carts.len(), s.beasts.len(), s.boats.len(), s.doing);
                 }
             }
         }

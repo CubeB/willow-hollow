@@ -12,10 +12,11 @@
 //! the player moves and the days turn; where each party is this frame follows from its
 //! plan and the hour, which is a quick sum.
 //!
-//! The people are drawn with `people::draw`, as near or as far as its own detail levels
-//! say. The poses they need that the figures do not have yet (sitting on the ground,
-//! fishing, sketching, rowing, asleep) are made here from the pose's parts, each marked
-//! where a pose of the figures' own should be swapped in.
+//! The people are drawn as the villagers are, near or far as they are from the camera, at
+//! the tasks the figures have poses for (#204): sat on a log, a stool or the ground about
+//! the fire, fishing, sketching, asleep on a bedroll, at the oars, pulling a handcart,
+//! carrying goods or a boat round a portage. The oxen and donkeys that draw some settlers'
+//! carts are drawn as the herds' beasts are (#206), walking in the shafts.
 
 use std::{collections::HashMap, sync::Arc, thread::JoinHandle};
 
@@ -27,16 +28,17 @@ use worldgen::{
     scale::{m, m64},
     settlements::{
         Region,
-        travel::{self, Boat, Cart, Doing, Figure, Fire, Kind, Plan, Scene, Travel, Who, Work},
+        travel::{self, Beast, Boat, Cart, Doing, Figure, Fire, Kind, Plan, Scene, Travel, Water, Who, Work},
     },
     world::GameWorld,
 };
 
 use crate::{
-    character::{self, Gait, Pose},
+    animals::model,
+    character::{self, Carried, Gait, Look, Pose, Task},
     inventory,
-    particles::ParticleInstance,
-    people::{self, Age, Person, Trade},
+    particles::{self, ParticleInstance},
+    people::{Age, Person, Trade},
     placed,
 };
 
@@ -121,6 +123,9 @@ pub struct Travellers {
     /// The met have changed since they were last saved.
     pub unsaved: bool,
     when: When,
+    /// The day the water turned rough and the hour it did, which holds the boats in to the
+    /// end of that day; None while it has been calm all day.
+    rough: Option<(i64, f32)>,
     /// How many boxes were drawn last frame.
     pub drawn: usize,
 }
@@ -137,6 +142,7 @@ impl Travellers {
             met: Vec::new(),
             unsaved: false,
             when: When { hour: 12.0, date: 0.0, year: 0, year_days: 24.0, day_minutes: 40.0 },
+            rough: None,
             drawn: 0,
         }
     }
@@ -164,6 +170,7 @@ impl Travellers {
     /// `calm` is whether the water is fit for boats.
     pub fn update(&mut self, world: &GameWorld, camera: DVec3, when: When, calm: bool) {
         self.when = when;
+        let water = self.water(calm);
         let cell = cell_of(camera.x.floor() as i32, camera.z.floor() as i32);
         // The timetable of the continent the player is on.
         if !self.tables.contains_key(&cell)
@@ -203,7 +210,29 @@ impl Travellers {
             let at = local(camera, cell);
             self.planning = Some((want, std::thread::spawn(move || t.near(&c, want.day, at, PLAN_REACH))));
         }
-        self.place(camera, calm);
+        self.place(camera, water);
+    }
+
+    /// How the water has been for the boats today, `calm` as it is now: once it turns it
+    /// stays rough for them to the day's end, and a day that dawns rough has been rough
+    /// since before anyone was up.
+    fn water(&mut self, calm: bool) -> Water {
+        let day = self.when.day();
+        match self.rough {
+            Some((d, since)) if d == day => Water::rough_since(since),
+            _ if calm => {
+                self.rough = None;
+                Water::CALM
+            }
+            Some((d, _)) if d == day - 1 => {
+                self.rough = Some((day, 0.0));
+                Water::ROUGH
+            }
+            _ => {
+                self.rough = Some((day, self.when.hour));
+                Water::rough_since(self.when.hour)
+            }
+        }
     }
 
     /// Looks for the travellers about `camera` at once, waiting for whatever it needs:
@@ -217,11 +246,14 @@ impl Travellers {
         self.plans = t.near(&c, want.day, local(camera, cell), PLAN_REACH);
         self.planned = Some(want);
         self.tables.insert(cell, Table::Ready(t, c));
-        self.place(camera, calm);
+        // Rough, for a screenshot, since before the day began.
+        self.rough = (!calm).then_some((want.day, 0.0));
+        let water = if calm { Water::CALM } else { Water::ROUGH };
+        self.place(camera, water);
     }
 
     /// Where everyone planned for is this moment, the nearest first, and who is met.
-    fn place(&mut self, camera: DVec3, calm: bool) {
+    fn place(&mut self, camera: DVec3, water: Water) {
         self.seen.clear();
         let Some(planned) = self.planned else { return };
         // Plans for another day are no use: they would put everyone where they were then.
@@ -230,7 +262,7 @@ impl Travellers {
         }
         let origin = DVec3::new((planned.cell.0 * MACRO_SIZE) as f64, 0.0, (planned.cell.1 * MACRO_SIZE) as f64);
         for plan in &self.plans {
-            let Some(scene) = plan.at(self.when.hour, self.when.date, calm) else { continue };
+            let Some(scene) = plan.at(self.when.hour, self.when.date, water) else { continue };
             let distance = (origin + scene.at.as_dvec3()).distance(camera);
             if distance < SEEN {
                 self.seen.push(Seen { scene, origin, distance });
@@ -327,11 +359,6 @@ fn local(p: DVec3, cell: (i32, i32)) -> Vec2 {
     Vec2::new((p.x - (cell.0 * MACRO_SIZE) as f64) as f32, (p.z - (cell.1 * MACRO_SIZE) as f64) as f32)
 }
 
-/// One of the figures' cells, in voxels: a figure is eighteen of them tall.
-const CELL: f32 = m(1.76) / 18.0;
-/// How high the hips are over the feet standing, in the figures' cells.
-const HIPS: f32 = 9.0;
-
 /// Colours, linear.
 const WOOD: [f32; 3] = [0.21, 0.14, 0.085];
 const WOOD_DARK: [f32; 3] = [0.12, 0.08, 0.05];
@@ -343,7 +370,8 @@ const IRON: [f32; 3] = [0.08, 0.08, 0.08];
 const WOOL: [[f32; 3]; 3] = [[0.40, 0.22, 0.14], [0.22, 0.26, 0.34], [0.35, 0.34, 0.22]];
 const NET: [f32; 3] = [0.20, 0.24, 0.22];
 const WICKER: [f32; 3] = [0.50, 0.38, 0.20];
-const PAPER: [f32; 3] = [0.85, 0.82, 0.72];
+const LEATHER: [f32; 3] = [0.16, 0.09, 0.05];
+const ROPE: [f32; 3] = [0.45, 0.38, 0.24];
 
 /// Boxes set out in the frame of something standing at `base` (camera-relative, voxels)
 /// and turned to `heading`: x ahead, y up and z across, in metres.
@@ -427,7 +455,20 @@ impl Drawing<'_> {
                 return;
             }
             let pulled = scene.people.iter().any(|f| f.doing == Doing::Pulling);
-            self.cart(s.world(cart.at), cart, pulled);
+            let beast = cart.beast.and_then(|b| scene.beasts.get(b)).map(|b| (beast_look(b), flat(cart.at).distance(flat(b.feet)) / m(1.0)));
+            self.cart(s.world(cart.at), cart, pulled, beast);
+        }
+        for (k, b) in scene.beasts.iter().enumerate() {
+            if self.full() {
+                return;
+            }
+            self.beast(s.world(b.feet), b, scene.carts.iter().any(|c| c.beast == Some(k)));
+        }
+        for (k, &(at, heading)) in scene.goods.iter().enumerate() {
+            if self.full() {
+                return;
+            }
+            self.goods(s.world(at), heading, hash2(scene.id as u32, k as i32, 0x900d));
         }
         for boat in &scene.boats {
             if self.full() {
@@ -439,9 +480,54 @@ impl Drawing<'_> {
             if self.full() {
                 return;
             }
-            let bob = scene.boats.first().map_or(0.0, |b| bob(s.world(b.at), self.clock));
-            self.figure(f, s.world(f.feet) + DVec3::new(0.0, bob, 0.0), k, scene.kind, scene.fire.is_some());
+            // Sat in the boat, riding the water with it; everyone else is ashore.
+            let boat = scene.boats.first().filter(|b| !b.ashore && flat(b.at).distance(flat(f.feet)) < m(2.4) && (b.at.y - f.feet.y).abs() < 0.5);
+            let bob = boat.map_or(0.0, |b| bob(s.world(b.at), self.clock));
+            self.figure(f, s.world(f.feet) + DVec3::new(0.0, bob, 0.0), k, scene.kind, scene.fire.is_some(), boat.is_some());
         }
+    }
+
+    /// A beast at `feet`: walking in the shafts of a cart (`in_shafts`, with its collar on)
+    /// or tethered, grazing or standing.
+    fn beast(&mut self, feet: DVec3, b: &Beast, in_shafts: bool) {
+        let l = beast_look(b);
+        let detail = model::detail(&l, feet.distance(self.cam));
+        if detail == model::Detail::Gone {
+            return;
+        }
+        let phase = unit(b.seed) * std::f32::consts::TAU;
+        // A walk, its stride going round with the ground the party covers.
+        let stride = ((l.leg + l.depth * 0.3) * 2.4).max(0.15);
+        let swish = (self.clock * 0.7 + phase).sin();
+        let pose = model::Pose {
+            stride: if b.walking { (self.clock * self.pace / stride * std::f32::consts::TAU + phase).rem_euclid(std::f32::consts::TAU) } else { 0.0 },
+            gait: model::Gait::Walk,
+            reach: if b.walking { 1.0 } else { 0.0 },
+            graze: if b.grazing { 0.8 + 0.2 * (self.clock * 0.5 + phase).sin() } else { 0.0 },
+            ears: (self.clock * 1.3 + phase).sin(),
+            tail: if swish > 0.6 { swish } else { 0.0 },
+            ..Default::default()
+        };
+        model::draw_at(&l, detail, feet, b.facing, &pose, self.cam, self.out);
+        if in_shafts && detail == model::Detail::Near {
+            // A collar about the neck at the withers, for the shafts to bear on.
+            let mut br = self.brush(feet, b.facing);
+            let (len, w, d, leg) = (l.length, l.width, l.depth, l.leg);
+            br.block([len * 0.4, leg + d * 0.72, 0.0], [0.12, d * 0.62, w + 0.06], LEATHER);
+            br.block([len * 0.1, leg + d + 0.03, 0.0], [0.3, 0.06, w + 0.04], LEATHER);
+        }
+    }
+
+    /// A boat's goods carried round a portage and set down on the bank: sacks, a cask and
+    /// a crate, in a heap along `heading`.
+    fn goods(&mut self, at: DVec3, heading: f32, salt: u32) {
+        let mut b = self.brush(at, heading);
+        b.put([-0.35, 0.17, 0.0], [0.5, 0.34, 0.4], shade(SACK, 0.9 + 0.2 * unit(salt)), 0.2, [0.0; 2]);
+        b.put([0.2, 0.17, 0.12], [0.5, 0.34, 0.4], shade(SACK, 0.85 + 0.2 * unit(salt.rotate_left(7))), -0.3, [0.0; 2]);
+        b.block([0.05, 0.48, 0.05], [0.4, 0.3, 0.38], shade(SACK, 1.05));
+        b.block([0.55, 0.25, -0.35], [0.42, 0.5, 0.42], shade(WOOD_LIGHT, 0.85));
+        b.block([0.55, 0.27, -0.35], [0.44, 0.05, 0.44], IRON);
+        b.block([-0.45, 0.2, -0.45], [0.45, 0.4, 0.38], shade(WOOD, 1.3));
     }
 
     /// A small tent, its ridge along `heading`, in stepped canvas.
@@ -477,8 +563,10 @@ impl Drawing<'_> {
     }
 
     /// A handcart: a bed on two wheels, its shafts ahead, held up by whoever pulls it or
-    /// let down to the ground; and what it carries.
-    fn cart(&mut self, at: DVec3, cart: &Cart, pulled: bool) {
+    /// let down to the ground; and what it carries. With a beast in its shafts (its look,
+    /// and how far ahead of the cart's middle it is, in metres), longer shafts, set wider,
+    /// reach forward along the beast's flanks to its collar.
+    fn cart(&mut self, at: DVec3, cart: &Cart, pulled: bool, beast: Option<(model::Look, f32)>) {
         let mut b = self.brush(at, cart.heading);
         b.block([0.0, 0.62, 0.0], [1.5, 0.12, 1.0], WOOD);
         for side in [-1.0f32, 1.0] {
@@ -489,9 +577,24 @@ impl Drawing<'_> {
         b.block([-0.74, 0.79, 0.0], [0.06, 0.22, 1.0], WOOD_LIGHT);
         b.block([0.0, 0.38, 0.0], [0.1, 0.1, 1.2], WOOD_DARK);
         // The shafts: up at the puller's hands, or resting on the ground.
-        let (rise, mid) = if pulled { (0.17f32, 0.74) } else { (-0.43f32, 0.36) };
-        for side in [-1.0f32, 1.0] {
-            b.put([1.33, mid, 0.32 * side], [1.25, 0.07, 0.07], WOOD, 0.0, [0.0, rise]);
+        match beast {
+            Some((l, ahead)) => {
+                // From the cart's front to the beast's collar, up its flanks.
+                let (x0, x1) = (0.72f32, ahead + l.length * 0.4);
+                let (y0, y1) = (0.72f32, l.leg + l.depth * 0.6);
+                let long = x1 - x0;
+                let rise = (y1 - y0).atan2(long);
+                for side in [-1.0f32, 1.0] {
+                    let z = (l.width * 0.5 + 0.07).max(0.32) * side;
+                    b.put([(x0 + x1) / 2.0, (y0 + y1) / 2.0, z], [(long * long + (y1 - y0).powi(2)).sqrt(), 0.07, 0.07], WOOD, 0.0, [0.0, rise]);
+                }
+            }
+            None => {
+                let (rise, mid) = if pulled { (0.17f32, 0.74) } else { (-0.43f32, 0.36) };
+                for side in [-1.0f32, 1.0] {
+                    b.put([1.33, mid, 0.32 * side], [1.25, 0.07, 0.07], WOOD, 0.0, [0.0, rise]);
+                }
+            }
         }
         // The load: a covered bundle, or sacks and a barrel or two.
         let h = cart.load;
@@ -513,25 +616,53 @@ impl Drawing<'_> {
         }
     }
 
+    /// A rowing boat's hull, the game's own without its mast, sitting on `at`; or turned
+    /// over, its gunwales `at` and its keel up, as it is carried overhead.
+    fn hull(&mut self, at: DVec3, heading: f32, over: bool) {
+        let mut b = self.brush(at, heading);
+        const O: f32 = 0.8;
+        // Turned over about the top of the gunwales.
+        let top = 0.75 * O;
+        let y = |y: f32| if over { top - y } else { y };
+        b.block([0.0, y(0.05 * O), 0.0], [4.6 * O, 0.3 * O, 1.5 * O], HULL);
+        b.block([0.0, y(0.45 * O), 0.85 * O], [4.6 * O, 0.6 * O, 0.2 * O], WOOD_LIGHT);
+        b.block([0.0, y(0.45 * O), -0.85 * O], [4.6 * O, 0.6 * O, 0.2 * O], WOOD_LIGHT);
+        b.block([-2.3 * O, y(0.45 * O), 0.0], [0.2 * O, 0.6 * O, 1.9 * O], WOOD_LIGHT);
+        b.block([2.65 * O, y(0.3 * O), 0.0], [0.9 * O, 0.5 * O, 1.1 * O], HULL);
+        b.block([3.25 * O, y(0.5 * O), 0.0], [0.5 * O, 0.5 * O, 0.6 * O], WOOD_LIGHT);
+        b.block([-1.0 * O, y(0.4 * O), 0.0], [0.5 * O, 0.12 * O, 1.5 * O], WOOD_LIGHT);
+        b.block([1.1 * O, y(0.4 * O), 0.0], [0.5 * O, 0.12 * O, 1.5 * O], WOOD_LIGHT);
+    }
+
     /// A boat: a sailing boat as the game's own, or a rowing boat, its oars working while
-    /// it is under way; with its cargo, or a fishing boat's nets.
+    /// it is under way; with its cargo, or a fishing boat's nets. Ashore on a portage, a
+    /// rowing boat is held up over its crew's heads, turned over, and a sailing boat is
+    /// hauled along on rollers, its mast down along it.
     fn boat(&mut self, at: DVec3, boat: &Boat, kind: Kind) {
         let clock = self.clock;
+        if boat.ashore {
+            if boat.sail {
+                // Two rollers under it, turning as it goes, the hull on them and the mast
+                // laid along the thwarts.
+                let mut b = self.brush(at, boat.heading);
+                for x in [-1.1f32, 1.0] {
+                    b.put([x, 0.11, 0.0], [0.22, 0.22, 1.7], WOOD_LIGHT, 0.0, [0.0, clock * 1.5 * boat.moving as u8 as f32]);
+                }
+                self.hull(at + DVec3::new(0.0, m64(0.2), 0.0), boat.heading, false);
+                let mut b = self.brush(at, boat.heading);
+                b.block([0.3, 0.2 + 0.7, 0.0], [4.6, 0.12, 0.12], WOOD);
+                b.block([0.3, 0.2 + 0.78, 0.0], [3.2, 0.1, 0.3], shade(CANVAS[0], 1.1));
+            } else {
+                self.hull(at + DVec3::new(0.0, m64(1.95), 0.0), boat.heading, true);
+            }
+            return;
+        }
         let at = at + DVec3::new(0.0, bob(at, clock), 0.0);
         if boat.sail {
             crate::vehicles::draw_boat(at, boat.heading, clock, self.cam, self.out);
         } else {
-            // The game's hull, without its mast.
+            self.hull(at, boat.heading, false);
             let mut b = self.brush(at, boat.heading);
-            const O: f32 = 0.8;
-            b.block([0.0, 0.05 * O, 0.0], [4.6 * O, 0.3 * O, 1.5 * O], HULL);
-            b.block([0.0, 0.45 * O, 0.85 * O], [4.6 * O, 0.6 * O, 0.2 * O], WOOD_LIGHT);
-            b.block([0.0, 0.45 * O, -0.85 * O], [4.6 * O, 0.6 * O, 0.2 * O], WOOD_LIGHT);
-            b.block([-2.3 * O, 0.45 * O, 0.0], [0.2 * O, 0.6 * O, 1.9 * O], WOOD_LIGHT);
-            b.block([2.65 * O, 0.3 * O, 0.0], [0.9 * O, 0.5 * O, 1.1 * O], HULL);
-            b.block([3.25 * O, 0.5 * O, 0.0], [0.5 * O, 0.5 * O, 0.6 * O], WOOD_LIGHT);
-            b.block([-1.0 * O, 0.4 * O, 0.0], [0.5 * O, 0.12 * O, 1.5 * O], WOOD_LIGHT);
-            b.block([1.1 * O, 0.4 * O, 0.0], [0.5 * O, 0.12 * O, 1.5 * O], WOOD_LIGHT);
             // The oars, swept fore and aft and dipped as they pull; shipped along the
             // sides when the boat lies still.
             for side in [-1.0f32, 1.0] {
@@ -547,6 +678,9 @@ impl Drawing<'_> {
         // The cargo between the thwarts, or a fishing boat's nets and baskets.
         let mut b = self.brush(at, boat.heading);
         let h = boat.load;
+        if !boat.laden {
+            return;
+        }
         if kind == Kind::FishingBoat {
             b.block([-0.35, 0.3, 0.1], [0.8, 0.18, 0.75], NET);
             b.block([0.15, 0.36, -0.35], [0.4, 0.34, 0.4], WICKER);
@@ -586,105 +720,185 @@ impl Drawing<'_> {
         })
     }
 
-    /// Draws one of a party at `feet`, the `k`th of them; `by_fire` when they are in camp.
-    fn figure(&mut self, f: &Figure, feet: DVec3, k: usize, kind: Kind, by_fire: bool) {
-        let (clock, pace, cam) = (self.clock, self.pace, self.cam);
+    /// Draws one of a party at `feet`, the `k`th of them; `by_fire` when they are in camp,
+    /// `afloat` when they are in a boat.
+    fn figure(&mut self, f: &Figure, feet: DVec3, k: usize, kind: Kind, by_fire: bool, afloat: bool) {
+        let (clock, pace) = (self.clock, self.pace);
         let phase = unit(f.seed) * 2.0;
-        let afloat = matches!(kind, Kind::RiverBoat | Kind::FishingBoat);
+        let look = self.person(f).look;
+        let build = look.build;
+        // Each at their own point of whatever they are at.
+        let offset = unit(f.seed.rotate_left(5));
         let mut facing = f.facing;
         let mut feet = feet;
-        let pose = match f.doing {
-            Doing::Walking | Doing::Pulling => {
-                // A step is about two thirds of a metre; children take shorter ones.
-                let step = if f.who == Who::Child { 0.5 } else { 0.68 };
-                gait(Doing::Walking, facing, clock * pace / step + phase, pace)
+        // A step is about two thirds of a metre; children take shorter ones.
+        let step = if f.who == Who::Child { 0.5 } else { 0.68 };
+        let face = facing;
+        let walking = move || gait(Doing::Walking, face, clock * pace / step + phase, pace);
+        let (pose, task, look) = match f.doing {
+            Doing::Walking => (walking(), None, look),
+            Doing::Pulling => {
+                // Between the shafts, a hand on each at the hip, leaning into the pull.
+                let mut pose = walking();
+                (pose.arm, pose.fore) = ([0.28; 2], [-0.4; 2]);
+                pose.lean += 0.14;
+                (pose, None, Look { carried: Carried::None, ..look })
             }
-            Doing::Standing => gait(Doing::Standing, facing, 0.0, 0.0),
+            Doing::Leading => {
+                // At the beast's head, the near hand out on its halter.
+                let mut pose = walking();
+                (pose.arm[0], pose.fore[0]) = (-0.55, -0.45);
+                (pose, None, look)
+            }
+            Doing::Laden => {
+                // A sack or a cask held against the chest in both arms.
+                let mut pose = walking();
+                (pose.arm, pose.fore) = ([-0.35; 2], [-1.35; 2]);
+                pose.lean -= 0.06;
+                let mut b = self.brush(feet, facing);
+                b.put([0.3, 1.08, 0.0], [0.34, 0.42, 0.44], shade(SACK, 0.9 + 0.2 * unit(f.seed)), 0.0, [0.0, 0.15]);
+                (pose, None, Look { carried: Carried::None, ..look })
+            }
+            Doing::Portaging => {
+                // Under the boat turned over on their shoulders, both hands up on its
+                // gunwales.
+                let mut pose = walking();
+                (pose.arm, pose.fore) = ([-2.75; 2], [-0.25; 2]);
+                (pose, None, Look { carried: Carried::None, ..look })
+            }
+            Doing::Hauling => {
+                // The one ahead leaning into a rope over the shoulder, the one behind
+                // shoving at the stern.
+                let mut pose = walking();
+                if k % 2 == 0 {
+                    (pose.arm, pose.fore) = ([-0.3, 0.35], [-1.6, -0.3]);
+                    pose.lean += 0.3;
+                    let mut b = self.brush(feet, facing);
+                    b.put([-1.0, 1.0, 0.18], [2.1, 0.04, 0.04], ROPE, 0.0, [0.0, 0.38]);
+                } else {
+                    (pose.arm, pose.fore) = ([-1.25; 2], [-0.2; 2]);
+                    pose.lean += 0.4;
+                }
+                (pose, None, Look { carried: Carried::None, ..look })
+            }
+            Doing::Standing => {
+                // Those standing about a camp talk among themselves.
+                let task = if by_fire && k % 2 == 1 { Task::Talk } else { Task::Stand };
+                (character::task_pose(task, &build, clock, offset), Some(task), look)
+            }
             // In a boat, on its thwart, as the player sits in one.
             Doing::Sitting | Doing::Fishing | Doing::Rowing if afloat => {
-                feet -= DVec3::new(0.0, m64(0.43), 0.0);
-                let mut pose = gait(Doing::Sitting, facing, 0.0, 0.0);
-                if f.doing == Doing::Rowing {
-                    // TODO(P): a rowing pose of the figures' own, when there is one.
-                    let pull = (clock * 2.4).sin();
-                    pose.arm = [-1.25 + 0.5 * pull; 2];
-                    pose.fore = [-0.35 + 0.25 * pull; 2];
-                    pose.lean = 0.25 * pull;
+                feet -= DVec3::new(0.0, m64(BOAT_SEAT), 0.0);
+                match f.doing {
+                    // In time with the oars, which are at the start of their swing at 0.
+                    Doing::Rowing => (character::task_pose(Task::Row, &build, clock, 0.0), Some(Task::Row), look),
+                    Doing::Fishing => {
+                        // Sat turned to fish over the side, each over their own, the rod
+                        // held out over the water.
+                        facing += if k % 2 == 0 { 1.4 } else { -1.4 };
+                        let mut pose = gait(Doing::Sitting, facing, 0.0, 0.0);
+                        let rod = character::task_pose(Task::Fish, &build, clock, offset);
+                        (pose.arm, pose.fore, pose.jiggle) = (rod.arm, rod.fore, rod.jiggle);
+                        (pose, Some(Task::Fish), Look { carried: Task::Fish.carried(look.carried), ..look })
+                    }
+                    _ => (gait(Doing::Sitting, facing, 0.0, 0.0), Some(Task::Sit), Look { carried: Task::Sit.carried(look.carried), ..look }),
                 }
-                if f.doing == Doing::Fishing {
-                    // Turned to fish over the side, each over their own.
-                    facing += if k % 2 == 0 { 1.4 } else { -1.4 };
-                    pose.arm = [-1.1, -0.95];
-                    pose.fore = [-0.4, -0.5];
-                }
-                pose
             }
-            // About a fire, on a log.
-            Doing::Sitting if by_fire => self.seated(feet, facing),
+            // About a fire: some on a log or a stool, some on the ground.
+            Doing::Sitting if by_fire && !(kind == Kind::Settlers && k % 2 == 1) => {
+                self.seat(feet, facing, f.seed);
+                // A stool is lower than a bench: the knees up a little, the shins
+                // straight down, so the tallest keep their feet on the ground.
+                let mut pose = character::task_pose(Task::Sit, &build, clock, offset);
+                (pose.leg, pose.shin) = ([-1.72; 2], [1.72; 2]);
+                (pose, Some(Task::Sit), Look { carried: Task::Sit.carried(look.carried), ..look })
+            }
             Doing::Sitting => {
-                // TODO(P): a pose of the figures' own for sitting on the ground. Until
-                // then: the bench pose, lowered to the ground, legs out before them.
-                Pose { leg: [-1.5, -1.4], shin: [0.1, 0.25], arm: [-0.3, -0.2], fore: [-0.6, -0.5], lift: -HIPS * CELL + m(0.12), ..Default::default() }
+                // On a blanket folded on the ground, so a long coat or skirt lies on it
+                // rather than in the ground; one leg out along it and the other drawn up,
+                // rather than both reaching down into it as the figures' own pose has
+                // them, sat up; a bow and quiver laid down, not leant back on.
+                let mut b = self.brush(feet, facing);
+                b.block([-0.05, BLANKET as f32 / 2.0, 0.0], [0.62, BLANKET as f32, 0.58], WOOL[(f.seed % 3) as usize]);
+                feet += DVec3::new(0.0, m64(BLANKET), 0.0);
+                let mut pose = character::task_pose(Task::SitLow, &build, clock, offset);
+                (pose.leg, pose.shin, pose.lean) = ([-1.62, -1.8], [0.0, 0.35], 0.04);
+                let carried = match Task::SitLow.carried(look.carried) {
+                    Carried::Bow => Carried::None,
+                    c => c,
+                };
+                (pose, Some(Task::SitLow), Look { carried, ..look })
             }
             Doing::Sketching => {
-                // TODO(P): a sketching pose. Until then: sat on a log, a sketchbook held
-                // up in one hand and the other at work on it.
-                let mut pose = self.seated(feet, facing);
-                pose.arm = [-0.9, -1.15];
-                pose.fore = [-1.3, -1.1];
-                pose.head = -0.15;
-                let ahead = DVec3::new(facing.cos() as f64, 0.0, facing.sin() as f64);
-                let mut b = self.brush(feet + ahead * m64(0.38), facing);
-                b.put([0.0, 0.88, 0.0], [0.04, 0.26, 0.2], PAPER, 0.0, [0.0, -0.5]);
-                pose
+                self.seat(feet, facing, f.seed);
+                (character::task_pose(Task::Sketch, &build, clock, offset), Some(Task::Sketch), Look { carried: Task::Sketch.carried(look.carried), ..look })
             }
-            Doing::Fishing => {
-                // TODO(P): a fishing pose. Until then: stood on the bank, both hands on
-                // a rod held out over the water, its line down into it.
-                let pose = Pose { arm: [-1.05, -0.85], fore: [-0.45, -0.6], ..Default::default() };
-                self.rod(feet, facing);
-                pose
-            }
+            // Stood on the bank, the rod held out over the water.
+            Doing::Fishing => (character::task_pose(Task::Fish, &build, clock, offset), Some(Task::Fish), Look { carried: Task::Fish.carried(look.carried), ..look }),
+            // On their back on the bedroll, feet toward its foot: their back on its top and
+            // their head down on the rolled end, as the figures lie a cell up off a bed.
             Doing::Asleep => {
-                // TODO(P): a sleeping pose. Until then: the figure stood as if asleep
-                // and laid down on its back, its feet where it stood (see `lie_down`).
-                let pose = Pose { arm: [0.05, -0.05], fore: [-0.15; 2], ..Default::default() };
-                let person = self.person(f).clone();
-                let from = self.out.len();
-                people::draw(&person, feet, facing, &pose, cam, self.out);
-                lie_down(&mut self.out[from..], (feet - cam).as_vec3(), facing);
-                return;
+                feet += DVec3::new(0.0, m64(SLEEPER), 0.0);
+                (character::task_pose(Task::Lie, &build, clock, offset), Some(Task::Lie), Look { carried: Task::Lie.carried(look.carried), ..look })
             }
             // Only boatmen row.
-            Doing::Rowing => gait(Doing::Sitting, facing, 0.0, 0.0),
+            Doing::Rowing => (character::task_pose(Task::Stand, &build, clock, offset), Some(Task::Stand), look),
         };
-        let person = self.person(f).clone();
-        people::draw(&person, feet, facing, &pose, cam, self.out);
+        self.person_at(&look, feet, facing, &pose, task);
     }
 
-    /// Sat on a log about a fire: the bench pose, lowered so the feet are on the ground,
-    /// and the log under them.
-    fn seated(&mut self, feet: DVec3, facing: f32) -> Pose {
-        // TODO(P): a pose of the figures' own for sitting on a log or a stool, when
-        // there is one; this is the one the player sits on a bench in.
-        let mut pose = gait(Doing::Sitting, facing, 0.0, 0.0);
-        pose.lift = -4.0 * CELL;
-        let mut b = self.brush(feet, facing);
-        b.put([-0.05, 0.2, 0.0], [0.36, 0.4, 0.7], WOOD, 0.0, [0.0; 2]);
-        pose
+    /// Draws someone as near or as far as they are: whole within `character::NEAR`, in a
+    /// few boxes out to `character::SIGHT` (but for someone lying down, who is too low to
+    /// make out from afar), dithering out over the last stretch.
+    fn person_at(&mut self, look: &Look, feet: DVec3, facing: f32, pose: &Pose, task: Option<Task>) {
+        let d = feet.distance(self.cam);
+        let sight = m64(character::SIGHT as f64);
+        if d >= sight {
+            return;
+        }
+        let from = self.out.len();
+        if d < m64(character::NEAR as f64) {
+            match task {
+                Some(t) => character::draw_at(look, feet, facing, pose, t, self.cam, self.out),
+                None => character::draw(look, feet, facing, pose, None, self.cam, self.out),
+            }
+        } else if task != Some(Task::Lie) {
+            character::draw_far(look, feet, facing, pose, self.cam, self.out);
+        }
+        particles::dither_since(self.out, from, particles::dither_edge(d, sight, m64(20.0)));
     }
 
-    /// A fishing rod held out before someone standing at `feet` facing `facing`, its line
-    /// hanging down from its tip.
-    fn rod(&mut self, feet: DVec3, facing: f32) {
-        let mut b = self.brush(feet, facing);
-        let (long, up) = (2.6f32, 0.5f32);
-        let (hx, hy) = (0.45, 0.95);
-        let (dx, dy) = (up.cos(), up.sin());
-        b.put([hx + dx * long * 0.5, hy + dy * long * 0.5, 0.0], [long, 0.04, 0.04], WOOD_DARK, 0.0, [0.0, up]);
-        let (tx, ty) = (hx + dx * long, hy + dy * long);
-        b.block([tx, ty * 0.5 - 0.3, 0.0], [0.015, ty + 0.6, 0.015], PAPER);
+    /// What someone sits on by a fire, under them at `feet`: the stool some carry, or a
+    /// round of log stood on end, either a seat high (`character::SEAT`).
+    fn seat(&mut self, feet: DVec3, facing: f32, seed: u32) {
+        if seed & 0x100 == 0 {
+            character::draw_stool(feet, facing, self.cam, self.out);
+        } else {
+            let mut b = self.brush(feet, facing);
+            let high = character::SEAT;
+            b.block([0.0, (high - 0.03) / 2.0, 0.0], [0.42, high - 0.03, 0.42], WOOD);
+            b.block([0.0, high - 0.015, 0.0], [0.38, 0.03, 0.38], WOOD_LIGHT);
+        }
     }
+}
+
+/// How far below a boat's waterline a figure sat in it has its feet: as the player sits
+/// in one, on a thwart.
+const BOAT_SEAT: f64 = 0.43;
+/// How far over the ground a sleeper's feet are set, so their back lies on the bedroll's
+/// top and their head rests on its rolled end, metres.
+const SLEEPER: f64 = 0.21;
+/// How thick the blanket is, folded over, that someone sits on on the ground, metres.
+const BLANKET: f64 = 0.12;
+
+/// Who a beast is, from its seed: an ox, or a jenny of a donkey, as the herds' are made.
+fn beast_look(b: &Beast) -> model::Look {
+    let role = if b.kind == worldgen::fauna::Kind::Ox { model::Role::Male } else { model::Role::Female };
+    model::Look::new(b.kind, b.seed, role)
+}
+
+fn flat(p: Vec3) -> Vec2 {
+    Vec2::new(p.x, p.z)
 }
 
 /// How a boat at `at` rides the water at `clock`, as the game's own boats do.
@@ -704,25 +918,6 @@ fn gait(doing: Doing, facing: f32, stride: f32, speed: f32) -> Pose {
     // With no time passing, the gait takes up the pose at once.
     g.update(doing, stride, None, false, None, 0.0, 0.0);
     g.pose()
-}
-
-/// Lays a figure drawn standing at `feet` (camera-relative) facing `facing` down on its
-/// back, its feet where they were: every box turned back a quarter about the line across
-/// the feet, and raised so the back is on the ground, as a figure's own boxes are turned
-/// about that line when its legs swing.
-fn lie_down(boxes: &mut [ParticleInstance], feet: Vec3, facing: f32) {
-    let yaw = facing - std::f32::consts::FRAC_PI_2;
-    let (across, ahead) = (Vec3::new(yaw.cos(), 0.0, yaw.sin()), Vec3::new(-yaw.sin(), 0.0, yaw.cos()));
-    let back = -std::f32::consts::FRAC_PI_2;
-    let (sb, cb) = back.sin_cos();
-    let lift = m(0.22);
-    for b in boxes {
-        let v = Vec3::from(b.pos) - feet;
-        let (x, y, z) = (v.dot(across), v.y, v.dot(ahead));
-        let (y2, z2) = (y * cb - z * sb, y * sb + z * cb);
-        b.pos = (feet + across * x + Vec3::Y * (y2 + lift) + ahead * z2).into();
-        b.tilt[0] += back;
-    }
 }
 
 fn shade(c: [f32; 3], by: f32) -> [f32; 3] {
@@ -759,6 +954,20 @@ pub fn listing(world: &GameWorld, at: DVec3, when: When, calm: bool, kind: Optio
             let (stand, look) = quay_stand(q, origin);
             out.push(Listed { what, doing: format!("{boats} boats work from here"), at: foot, stand, look });
         }
+        // The portages, by the middle of each path, seen from the stage above.
+        for run in &ways.runs {
+            for p in &run.portages {
+                let what = format!("the portage on the river from {} to {}", town(run.a), town(run.b));
+                let (mid, _) = p.at(p.length() * 0.5);
+                let at = origin + mid.as_dvec3();
+                let first = p.path[0];
+                let back = (flat(first) - flat(mid)).normalize_or(Vec2::X);
+                let stand = (flat(first) + back * m(4.0)).as_dvec2() + DVec2::new(origin.x, origin.z);
+                let to = DVec2::new(at.x, at.z) - stand;
+                let doing = format!("a path of {:.0} m round the rough water, between two landing stages", p.length() / m(1.0));
+                out.push(Listed { what, doing, at, stand, look: to.y.atan2(to.x) as f32 });
+            }
+        }
     } else {
         let t = Travel::of(&c, world.seed());
         let here = local(at, cell);
@@ -766,24 +975,31 @@ pub fn listing(world: &GameWorld, at: DVec3, when: When, calm: bool, kind: Optio
             if kind.is_some_and(|k| k != plan.kind()) {
                 continue;
             }
-            let Some(s) = plan.at(when.hour, when.date, calm) else { continue };
+            let Some(s) = plan.at(when.hour, when.date, if calm { Water::CALM } else { Water::ROUGH }) else { continue };
             let route = match (s.from, s.to) {
                 (Some(a), Some(b)) => format!(", from {} to {}", town(a), town(b)),
                 (Some(a), None) => format!(", of {}", town(a)),
                 _ => String::new(),
             };
             let many = plan.party().unwrap_or(s.people.len());
-            let what = format!("{}{}{route}", s.kind.word(), if many > 2 { format!(", {many} of them") } else { String::new() });
+            // Settlers with beasts in their carts' shafts say so, to be found by them (#206).
+            let drawn = s.beasts.first().map_or(String::new(), |b| format!(", with {}", b.kind.word()));
+            let what = format!("{}{}{drawn}{route}", s.kind.word(), if many > 2 { format!(", {many} of them") } else { String::new() });
             let p = origin + s.at.as_dvec3();
-            let flat = |v: Vec3| Vec2::new(v.x, v.z);
             // Where to stand to see them: on the trail by a camp, looking across it at the
             // fire with the tents beyond; ahead of walkers on the road, as they come on;
             // abreast of a boat under way, on the bank if it is near; at the foot of the
             // nearest quay for a boat tied up.
             let beyond = s.tents.first().or(s.bedrolls.first()).map(|t| flat(t.0));
             let stand = match (s.kind, s.fire, beyond) {
-                (Kind::RiverBoat | Kind::FishingBoat, _, _) => match s.boats.iter().find(|b| b.moving) {
+                (Kind::RiverBoat | Kind::FishingBoat, _, _) => match s.boats.iter().find(|b| b.moving && !b.ashore) {
                     Some(b) => (flat(b.at) + Vec2::from_angle(b.heading + 1.57) * m(12.0)).as_dvec2() + DVec2::new(origin.x, origin.z),
+                    // Ashore with the crew, a little further from the water than they are.
+                    None if s.people.iter().any(|f| flat(f.feet).distance(flat(s.at)) > m(2.5)) || s.boats.iter().any(|b| b.ashore) => {
+                        let f = s.people.iter().max_by(|a, b| flat(a.feet).distance(flat(s.at)).total_cmp(&flat(b.feet).distance(flat(s.at)))).expect("a crew");
+                        let away = (flat(f.feet) - flat(s.at)).normalize_or(Vec2::X);
+                        (flat(f.feet) + away * m(6.0) + away.perp() * m(2.0)).as_dvec2() + DVec2::new(origin.x, origin.z)
+                    }
                     None => {
                         let quays = &c.trails.waterways.quays;
                         let boat = flat(s.at);
@@ -840,5 +1056,136 @@ mod tests {
         assert!(calm(&sky(0.0, 0.0)));
         assert!(!calm(&sky(0.6, 0.0)));
         assert!(!calm(&sky(0.0, 0.9)));
+    }
+
+    #[test]
+    fn once_the_water_turns_it_stays_rough_to_the_end_of_the_day() {
+        let mut t = Travellers::new();
+        let at = |t: &mut Travellers, day: f32, hour: f32, calm: bool| {
+            t.when = When { hour, date: (day + hour / 24.0) / 24.0, year: 0, year_days: 24.0, day_minutes: 40.0 };
+            t.water(calm)
+        };
+        assert_eq!(at(&mut t, 2.0, 9.0, true), Water::CALM);
+        assert_eq!(at(&mut t, 2.0, 11.0, false), Water::rough_since(11.0));
+        // Calm again in the afternoon, but the boats stay in.
+        assert_eq!(at(&mut t, 2.0, 15.0, true), Water::rough_since(11.0));
+        // Still rough the next morning: rough since before they were up.
+        assert_eq!(at(&mut t, 3.0, 6.0, false), Water::ROUGH);
+        assert_eq!(at(&mut t, 4.0, 8.0, true), Water::CALM);
+    }
+
+    /// The lowest point of every box drawn, turned as the shader turns it.
+    fn lowest(out: &[ParticleInstance]) -> f32 {
+        let turn = |v: Vec3, yaw: f32, tilt: [f32; 2]| {
+            let (sr, cr) = tilt[1].sin_cos();
+            let a = Vec3::new(v.x * cr - v.y * sr, v.x * sr + v.y * cr, v.z);
+            let (sp, cp) = tilt[0].sin_cos();
+            let b = Vec3::new(a.x, a.y * cp - a.z * sp, a.y * sp + a.z * cp);
+            let (s, c) = yaw.sin_cos();
+            Vec3::new(b.x * c - b.z * s, b.y, b.x * s + b.z * c)
+        };
+        let mut low = f32::INFINITY;
+        for p in out {
+            let half = Vec3::from(p.size) * 0.5;
+            for k in 0..8 {
+                let corner = Vec3::new(if k & 1 == 0 { -half.x } else { half.x }, if k & 2 == 0 { -half.y } else { half.y }, if k & 4 == 0 { -half.z } else { half.z });
+                low = low.min(p.pos[1] + turn(corner, p.yaw, p.tilt).y);
+            }
+        }
+        low
+    }
+
+    fn figure(seed: u32, doing: Doing) -> Figure {
+        Figure { seed, who: Who::Adult, work: Work::Settler, feet: Vec3::ZERO, facing: 0.4, doing }
+    }
+
+    #[test]
+    fn every_traveller_keeps_to_its_boxes_and_out_of_the_ground() {
+        let cam = DVec3::new(30.0, 12.0, -20.0);
+        let mut people = HashMap::new();
+        let all = [
+            Doing::Walking,
+            Doing::Pulling,
+            Doing::Standing,
+            Doing::Sitting,
+            Doing::Asleep,
+            Doing::Fishing,
+            Doing::Sketching,
+            Doing::Rowing,
+            Doing::Leading,
+            Doing::Laden,
+            Doing::Portaging,
+            Doing::Hauling,
+        ];
+        let mut most = 0;
+        for seed in 0..40u32 {
+            for doing in all {
+                for (kind, by_fire, afloat) in [(Kind::Settlers, true, false), (Kind::Camper, false, false), (Kind::RiverBoat, false, true), (Kind::RiverBoat, true, false)] {
+                    if afloat && !matches!(doing, Doing::Sitting | Doing::Fishing | Doing::Rowing) {
+                        continue;
+                    }
+                    for clock in [0.0, 0.7, 1.9, 3.3] {
+                        let mut out = Vec::new();
+                        let mut d = Drawing { cam, clock, pace: 1.3, out: &mut out, start: 0, people: &mut people, region: Region::Temperate };
+                        let f = figure(seed.wrapping_mul(0x9e37_79b9), doing);
+                        d.figure(&f, DVec3::ZERO, seed as usize, kind, by_fire, afloat);
+                        most = most.max(out.len());
+                        // Into a boat no deeper than its thwart; on land, nowhere into the
+                        // ground, but for a toe's last sliver as the foot rolls in a stride.
+                        let floor = if afloat { -(BOAT_SEAT * m64(1.0)) as f32 } else { 0.0 } - m(0.04);
+                        // The boxes are drawn about the camera. A fishing line hangs down
+                        // into the water, below the bank, as it should.
+                        let solid: Vec<ParticleInstance> = out.iter().filter(|b| b.size[0].max(b.size[2]) > 0.05).copied().collect();
+                        let low = lowest(&solid) + cam.y as f32;
+                        assert!(low >= floor, "{doing:?} (seed {seed}, at {clock}) reaches {} m into the ground", (floor - low) / m(1.0));
+                    }
+                }
+            }
+        }
+        // Each figure in its own boxes, with no more than a seat, a sack or a rope besides.
+        assert!(most <= crate::villagers::FIGURE_BOXES + 2, "{most} boxes to a traveller");
+    }
+
+    /// A party of settlers as big as they come, close to: eight of them, two carts each
+    /// drawn by an ox, on the road, and in camp at night with their tents and bedrolls.
+    fn biggest_party(camp: bool) -> Scene {
+        let doing = |k: usize| match (camp, k) {
+            (true, _) => if k % 3 == 1 { Doing::Standing } else { Doing::Sitting },
+            (false, 0 | 6) => Doing::Leading,
+            _ => Doing::Walking,
+        };
+        let people = (0..8).map(|k| Figure { feet: Vec3::new(k as f32 * m(1.5), 0.0, 0.0), ..figure(k as u32 * 77, doing(k)) }).collect();
+        let beasts = (0..2).map(|k| Beast { kind: worldgen::fauna::Kind::Ox, seed: k, feet: Vec3::new(k as f32 * m(6.0), 0.0, m(1.0)), facing: 0.0, walking: !camp, grazing: false }).collect();
+        let carts = (0..2).map(|k| Cart { at: Vec3::new(k as f32 * m(6.0) - m(2.0), 0.0, m(1.0)), heading: 0.0, load: k * 31, beast: (!camp).then_some(k as usize) }).collect();
+        Scene {
+            id: 2,
+            kind: Kind::Settlers,
+            region: Region::Temperate,
+            from: None,
+            to: None,
+            people,
+            fire: camp.then_some((Vec3::new(0.0, 0.0, m(3.0)), Fire::Lit)),
+            tents: if camp { vec![(Vec3::new(0.0, 0.0, m(6.0)), 0.0), (Vec3::new(m(3.0), 0.0, m(6.0)), 0.0)] } else { Vec::new() },
+            bedrolls: Vec::new(),
+            carts,
+            beasts,
+            boats: Vec::new(),
+            goods: Vec::new(),
+            doing: "",
+            at: Vec3::ZERO,
+        }
+    }
+
+    #[test]
+    fn the_biggest_party_close_to_is_drawn_within_the_budget() {
+        let mut people = HashMap::new();
+        for camp in [false, true] {
+            let seen = Seen { scene: biggest_party(camp), origin: DVec3::ZERO, distance: 0.0 };
+            let mut out = Vec::new();
+            let mut d = Drawing { cam: DVec3::new(m64(4.0), m64(1.7), m64(-4.0)), clock: 1.1, pace: 1.3, out: &mut out, start: 0, people: &mut people, region: Region::Temperate };
+            d.scene(&seen);
+            println!("the biggest party {}: {} boxes", if camp { "in camp" } else { "on the road" }, out.len());
+            assert!(out.len() < BUDGET, "{} boxes for one party, of {BUDGET}", out.len());
+        }
     }
 }
