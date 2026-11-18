@@ -720,3 +720,93 @@ pub(super) fn hurdle(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
         }
     }
 }
+
+/// A round haystack out in a meadow, as the hay is stacked after mowing: built up in
+/// layers wide at the foot, bellied, and drawn in to a crown with the stack pole standing
+/// out of it, all of one even colour of hay. Decayed, it is the stack as the winter
+/// leaves it: cut down one side to a sheer face by the hay knife, fodder pulled from the
+/// face at its foot, and the pole standing out of what is left.
+pub(super) fn haystack(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    // How wide each layer is, from the ground up, about the middle of its 8 by 8 columns.
+    let radii = [3.4, 3.9, 4.0, 3.9, 3.6, 3.1, 2.5, 1.8, 1.0];
+    let (cut, high) = if decayed { (rng.int(4, 5), 7) } else { (8, radii.len()) };
+    for (y, &r) in radii.iter().enumerate().take(high) {
+        for z in 0..8 {
+            for x in 0..cut {
+                let (dx, dz) = (x as f32 + 0.5 - 4.0, z as f32 + 0.5 - 4.0);
+                if dx * dx + dz * dz < r * r {
+                    k.vox(x, y as i32, z, mat::HAY);
+                }
+            }
+        }
+    }
+    if !decayed {
+        k.b((15, 30, 15), (17, 39, 17), p.wood);
+        return;
+    }
+    for (x, z, w) in [(cut * 4 + 1, 9, 6), (cut * 4 + 2, 17, 5)] {
+        k.b((x, 0, z), (x + w, 2, z + 6), mat::HAY);
+    }
+    k.b((13, 25, 15), (15, 33, 17), mat::WOOD_DEAD);
+}
+
+/// A scarecrow on its stake in a field of grain: a coat on a cross of sticks, its tails
+/// loose in the wind, a sack stuffed with straw for a head under a straw hat, and straw
+/// sticking out of its cuffs. It faces +Z with its arms out along X. Decayed, the hat is
+/// gone, one sleeve hangs torn, and the coat has faded to sacking.
+pub(super) fn scarecrow(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    let coats = [mat::CLOTH_BLUE, mat::CLOTH_RED, mat::CLOTH_GREEN, mat::CLOTH_PALE];
+    let coat = if decayed { mat::SACKCLOTH } else { coats[rng.int(0, 3) as usize] };
+    // The stake, into the ground and up inside the head.
+    k.b((7, 0, 1), (9, 19, 3), if decayed { mat::WOOD_DEAD } else { p.wood });
+    // The coat: fast to the cross at the shoulders, its tails free below.
+    k.b((5, 12, 0), (11, 16, 4), coat);
+    k.hang((5, 8, 0), (11, 12, 4), coat);
+    // The sleeves, out along the arm of the cross, with straw at the cuffs.
+    k.b((11, 14, 1), (15, 16, 3), coat);
+    k.weed((15, 13, 1), (16, 16, 3), mat::HAY);
+    if decayed {
+        k.hang((3, 10, 1), (5, 14, 3), coat);
+        k.weed((3, 9, 1), (5, 10, 3), mat::HAY);
+    } else {
+        k.b((1, 14, 1), (5, 16, 3), coat);
+        k.weed((0, 13, 1), (1, 16, 3), mat::HAY);
+    }
+    // The head, a sack of straw tied at the neck, and the hat.
+    k.b((6, 16, 0), (10, 20, 4), mat::SACKCLOTH);
+    if !decayed {
+        k.b((5, 20, 0), (11, 21, 4), mat::HAY);
+        k.b((6, 21, 1), (10, 23, 3), mat::HAY);
+    }
+}
+
+/// A dovecote on a post at a field's edge or by a barn, out of reach of the rats: a round
+/// loft of whitewashed boards on a platform, a hole on each side with a perch below it,
+/// under a cone of the place's roofing. Decayed, the post is grey, the cone has fallen
+/// in, and a hole or two is boarded over.
+pub(super) fn dovecote(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    let wood = if decayed { mat::WOOD_DEAD } else { p.wood };
+    k.b((7, 0, 7), (9, 25, 9), wood);
+    k.b((1, 25, 1), (15, 26, 15), if decayed { mat::PLANK_DARK } else { p.plank });
+    k.round_xz((8.0, 8.0), 5.6, 0.0, (26, 33), mat::WHITEWASH);
+    // Each hole stands a cell out from the loft's widest row on its side, so that the
+    // two never share a face.
+    let holes = [
+        ((7, 29, 1), (9, 31, 2), (6, 28, 0), (10, 29, 2)),
+        ((7, 29, 14), (9, 31, 15), (6, 28, 14), (10, 29, 16)),
+        ((1, 29, 7), (2, 31, 9), (0, 28, 6), (2, 29, 10)),
+        ((14, 29, 7), (15, 31, 9), (14, 28, 6), (16, 29, 10)),
+    ];
+    for (hole_lo, hole_hi, perch_lo, perch_hi) in holes {
+        if decayed && rng.unit() < 0.4 {
+            continue;
+        }
+        k.b(hole_lo, hole_hi, mat::PLANK_DARK);
+        k.b(perch_lo, perch_hi, wood);
+    }
+    let rings: &[(f32, f32)] = if decayed { &[(7.0, 0.0), (4.2, 2.0)] } else { &[(7.0, 0.0), (5.6, 0.0), (4.2, 0.0), (2.8, 0.0), (1.4, 0.0)] };
+    for (i, &(r, hole)) in rings.iter().enumerate() {
+        let y = 33 + i as i32;
+        k.round_xz((8.0, 8.0), r, hole, (y, y + 1), p.roof);
+    }
+}

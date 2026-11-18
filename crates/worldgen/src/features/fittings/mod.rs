@@ -132,6 +132,12 @@ pub enum Fitting {
     RoundStack,
     /// A wattle hurdle: rods woven between upright sails.
     Hurdle,
+    /// A round haystack in a meadow; decayed, cut into for the winter's fodder.
+    Haystack,
+    /// A scarecrow on its stake in a field of grain.
+    Scarecrow,
+    /// A dovecote on a post.
+    Dovecote,
 }
 
 /// The three kinds of fitting, and the rows of the gallery.
@@ -206,7 +212,7 @@ pub fn front(turns: u32) -> IVec2 {
 }
 
 impl Fitting {
-    pub const ALL: [Fitting; 46] = [
+    pub const ALL: [Fitting; 49] = [
         Fitting::StrawPallet,
         Fitting::BoxBed,
         Fitting::RopeBed,
@@ -253,6 +259,9 @@ impl Fitting {
         Fitting::LogStack,
         Fitting::RoundStack,
         Fitting::Hurdle,
+        Fitting::Haystack,
+        Fitting::Scarecrow,
+        Fitting::Dovecote,
     ];
 
     /// Its name, in plain English.
@@ -305,6 +314,9 @@ impl Fitting {
             LogStack => "Log stack",
             RoundStack => "Round log stack",
             Hurdle => "Wattle hurdle",
+            Haystack => "Haystack",
+            Scarecrow => "Scarecrow",
+            Dovecote => "Dovecote",
         }
     }
 
@@ -369,6 +381,9 @@ impl Fitting {
             LogStack => (5, 4, 2),
             RoundStack => (5, 5, 5),
             Hurdle => (5, 3, 1),
+            Haystack => (8, 10, 8),
+            Scarecrow => (4, 6, 1),
+            Dovecote => (4, 10, 4),
         };
         IVec3::new(x, y, z)
     }
@@ -750,6 +765,9 @@ pub fn build_with(kind: Fitting, p: &Palette, seed: u32, decayed: bool, herbs: &
         LogStack => yard::log_stack(&mut k, r, p, decayed),
         RoundStack => yard::round_stack(&mut k, r, p, decayed),
         Hurdle => yard::hurdle(&mut k, r, p, decayed),
+        Haystack => yard::haystack(&mut k, r, p, decayed),
+        Scarecrow => yard::scarecrow(&mut k, r, p, decayed),
+        Dovecote => yard::dovecote(&mut k, r, p, decayed),
     }
     Fitted { kind, decayed, turns: 0, voxels: k.voxels, fine: k.fine, hooks: k.hooks }
 }

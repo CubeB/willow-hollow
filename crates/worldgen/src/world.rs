@@ -65,6 +65,8 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             crate::settlements::logging::raise(&mut c, seed);
             // The quarries, out in the land as the barns are (#203).
             farmland::quarry::raise(&mut c, seed);
+            // What stands about the fields, clear of all of those (#64, #206).
+            farmland::fixtures::raise(&mut c, seed);
             Arc::new(c)
         })
         .clone();
@@ -451,6 +453,47 @@ impl GameWorld {
             (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
         });
         // A placement cell can be met from both sides of a square; a nest is one nest.
+        out.dedup();
+        out
+    }
+
+    /// The colonies in the hives people keep (#202) whose door is within `reach` voxels
+    /// of the column at `(x, z)`, nearest first: the skeps and the log and box hives of
+    /// the villages' apiaries and yards, and the rows of skeps out by the fields, as they
+    /// stand this year. A hive gone with its apiary, or one standing empty, has none.
+    /// Never blocks, and only from the continent `(x, z)` is on, as
+    /// [`Self::nests_near`]: its bees fly to the flowers as the wild ones do.
+    pub fn hives_near(&self, x: i32, z: i32, reach: i32) -> Vec<features::nests::Nest> {
+        use crate::settlements::years::{Tag, Yard};
+        let (mx, mz) = cell_of(x, z);
+        let Some(c) = self.continent_if_ready(mx, mz) else { return Vec::new() };
+        let lives = self.lives(mx, mz, &c);
+        let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
+        let (lx, lz) = (x - origin.x, z - origin.z);
+        let mut out = Vec::new();
+        for cz in (lz - reach).div_euclid(CHUNK)..=(lz + reach).div_euclid(CHUNK) {
+            for cx in (lx - reach).div_euclid(CHUNK)..=(lx + reach).div_euclid(CHUNK) {
+                for s in c.trails.stamps_at(cx, cz) {
+                    if matches!(s.tag.as_deref(), Some(Tag::Yard { what: Yard::Hive(_), .. })) && lives.shows(s) {
+                        out.extend(features::nests::in_hive(&s.voxels, &s.fine));
+                    }
+                }
+                out.extend(c.land.fixtures.hives_at(cx, cz, self.seed, &lives));
+            }
+        }
+        let mut out: Vec<features::nests::Nest> = out
+            .into_iter()
+            .map(|n| features::nests::Nest { door: n.door + origin, host_at: n.host_at + origin, ..n })
+            .filter(|n| {
+                let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+                dx * dx + dz * dz <= reach as i64 * reach as i64
+            })
+            .collect();
+        out.sort_by_key(|n| {
+            let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+            (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
+        });
+        // A stamp is filed with every chunk it touches; a hive is one hive.
         out.dedup();
         out
     }
@@ -1169,6 +1212,12 @@ impl GameWorld {
         let stood = self.stood_at(cx, cz, IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE));
         // Each as it stands this year (#207).
         let mut stamps: Vec<Cow<trails::Stamp>> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.view(s)).collect();
+        // What stands about the fields, as the season has it, and the ground it keeps
+        // clear of crops and grass (#64).
+        let fixed = continent.land.fixtures.at(local_chunk.0, local_chunk.1, self.seed, &lives);
+        let to_world = glam::IVec2::new(mx, mz) * MACRO_SIZE;
+        let mown: Vec<_> = fixed.iter().map(|&(_, (a, b))| (a + to_world, b + to_world)).collect();
+        stamps.extend(fixed.into_iter().map(|(s, _)| Cow::Borrowed(s)));
         stamps.extend(stood.iter().map(Cow::Borrowed));
         for s in &stamps {
             hi = hi.max(s.hi.y);
@@ -1433,6 +1482,14 @@ impl GameWorld {
             }
         }
         headroom(&out, &self.materials, &columns, wx0, wz0, &mut plants);
+        if !mown.is_empty() {
+            // Only what grows on the ground there: a cave's plants below are left be.
+            plants.retain(|p| {
+                let q = IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS));
+                !mown.iter().any(|(a, b)| q.x >= a.x && q.x <= b.x && q.z >= a.y && q.z <= b.y)
+                    || q.y < columns[(q.x - wx0) as usize * PAD + (q.z - wz0) as usize].top()
+            });
+        }
         if !planted {
             // Whatever the caves grew goes with the rest of the plants.
             plants.clear();

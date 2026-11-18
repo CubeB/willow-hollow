@@ -388,6 +388,7 @@ fn nests_are_found_where_the_chunks_build_them() {
         let as_said = match nest.host {
             Host::Hollow | Host::Crevice => at(nest.door) == Some(voxel::AIR) && at(nest.door - nest.out) == Some(mat::NEST_HOLLOW),
             Host::Branch => at(nest.door) == Some(mat::NEST_HOLLOW) && at(nest.door + glam::IVec3::Y * 2) == Some(mat::WASP_PAPER),
+            Host::Hive => false,
         };
         if as_said {
             built += 1;

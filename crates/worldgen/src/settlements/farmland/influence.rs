@@ -171,6 +171,9 @@ pub struct Land {
     /// The quarries, each with the settlement it serves (see [`super::quarry`]); cut once
     /// the barns are raised (#203).
     pub quarries: Vec<super::quarry::Quarry>,
+    /// What stands about the fields: haystacks, scarecrows, shelters, troughs, wells,
+    /// dovecotes and skeps (see [`super::fixtures`]); set out last (#64, #206).
+    pub fixtures: super::fixtures::Fixtures,
 }
 
 impl Land {
@@ -467,7 +470,7 @@ pub fn build(c: &Continent, seed: u32) -> Land {
             }
         }
     }
-    Land { tiles, farms, steads: Vec::new(), quarries: Vec::new() }
+    Land { tiles, farms, steads: Vec::new(), quarries: Vec::new(), fixtures: Default::default() }
 }
 
 #[cfg(test)]

@@ -12,6 +12,9 @@
 //! - A mason's shed, by a quarry (#203): the banker stones the stone is dressed on, each
 //!   with a stone half squared and the chisel and mallet laid by, a piece half carved,
 //!   the grindstone the chisels are kept sharp on and the tools on the wall.
+//! - A field shelter on a pasture (#64, #206): three walls and a roof, open all along its
+//!   front so the beasts walk in out of the weather, with a manger of hay along the back
+//!   wall and straw on its floor. It has no door to shut: the whole front is the way in.
 //!
 //! The walls, roof and floor are the region's, as the kit's rules choose them for a
 //! timber house (see [`super::frame::Look`]): weatherboard and thatch in the lowlands,
@@ -47,10 +50,12 @@ pub enum BarnKind {
     Shed,
     /// A mason's shed by a quarry, where the stone is dressed.
     Mason,
+    /// An open-fronted shelter for the beasts on a pasture (see `farmland::fixtures`).
+    Shelter,
 }
 
 impl BarnKind {
-    pub const ALL: [BarnKind; 4] = [BarnKind::Hay, BarnKind::Byre, BarnKind::Shed, BarnKind::Mason];
+    pub const ALL: [BarnKind; 5] = [BarnKind::Hay, BarnKind::Byre, BarnKind::Shed, BarnKind::Mason, BarnKind::Shelter];
 
     pub fn word(self) -> &'static str {
         match self {
@@ -58,6 +63,7 @@ impl BarnKind {
             BarnKind::Byre => "byre",
             BarnKind::Shed => "field shed",
             BarnKind::Mason => "mason's shed",
+            BarnKind::Shelter => "field shelter",
         }
     }
 }
@@ -122,6 +128,7 @@ pub(crate) fn make(spec: &BarnSpec, pal: &Palette) -> (Barn, Vec<String>) {
         BarnKind::Byre => byre(f, spec, &mut stalls),
         BarnKind::Shed => shed(f),
         BarnKind::Mason => mason(f),
+        BarnKind::Shelter => shelter(f),
     };
     (Barn { kind: spec.kind, building: built.building, stalls, uses: built.uses }, faults)
 }
@@ -358,6 +365,45 @@ fn shed(mut f: Frame) -> (super::Built, Vec<String>) {
     f.finish(Area { lo: b.lo, hi: b.hi }, fy)
 }
 
+/// A field shelter: a long low shed of the region's walls and roof with the whole of its
+/// +X side open between the corner posts, a manger of hay along the back wall for the
+/// beasts to pull at, and straw strewn on the beaten earth. A person stands up in it.
+fn shelter(mut f: Frame) -> (super::Built, Vec<String>) {
+    earth_floor(&mut f);
+    let fy = 0;
+    let b = Block::new((-2, -4), (2, 4), fy, fy + 6);
+    let feet = b.feet();
+    f.shell(&b);
+    roof(&mut f, &b);
+    // The way in is the middle of the front, and the rest of the front is open as well,
+    // down to the floor, under the plate that carries the roof.
+    f.front_door(&b, -1, 3, 5);
+    let floor = f.floor_voxel(IVec3::new(b.hi.x, fy, 0));
+    for z in b.lo.y + 1..b.hi.y {
+        f.hollow(IVec3::new(b.hi.x, feet, z), IVec3::new(b.hi.x, b.plate - 1, z));
+        f.put(IVec3::new(b.hi.x, fy, z), floor);
+    }
+    // The manger along the back wall, hay heaped in it, and a rail over it.
+    let wood = f.pal.wood;
+    for z in b.lo.y + 1..b.hi.y {
+        f.put(IVec3::new(b.lo.x + 1, feet, z), wood);
+        f.put(IVec3::new(b.lo.x + 1, feet + 1, z), mat::HAY);
+    }
+    let (x, y) = ((b.lo.x + 2) * 4, (feet + 2) * 4 + 2);
+    f.bx(IVec3::new(x, y, (b.lo.y + 1) * 4), IVec3::new(x + 1, y + 1, b.hi.y * 4), wood);
+    // Straw trodden into the floor, in wisps.
+    for z in b.lo.y + 1..b.hi.y {
+        for xc in b.lo.x + 2..b.hi.x {
+            let q = IVec3::new(xc, 0, z);
+            if f.grain(q, 0x57a3) < 0.45 {
+                let (cx, cz) = (xc * 4 + (f.grain(q, 0x57a4) * 2.0) as i32, z * 4 + (f.grain(q, 0x57a5) * 2.0) as i32);
+                f.bx(IVec3::new(cx, feet * 4, cz), IVec3::new(cx + 2, feet * 4 + 1, cz + 2), mat::HAY);
+            }
+        }
+    }
+    f.finish(Area { lo: b.lo, hi: b.hi }, fy)
+}
+
 /// A mason's tools hung on a rail along a wall, as [`tools`] hangs a farm's: a pair of
 /// chisels, a mallet, a square and a straightedge in turn, on a rail `len` columns long
 /// from column `from` at layer `y`, the wall's inner face at cell `face` across it.
@@ -529,6 +575,14 @@ mod tests {
                 BarnKind::Mason => {
                     assert!(barn.building.fine.iter().any(|b| b.voxel == mat::IRON), "{spec:?}: no chisels");
                     assert_eq!(barn.uses.iter().filter(|u| u.0 == Use::Table).count(), 2, "{spec:?}: not two bankers");
+                }
+                BarnKind::Shelter => {
+                    assert!(has(mat::HAY), "{spec:?}: no hay in the manger");
+                    // Open all along its front: no wall between the corner posts at a
+                    // person's height.
+                    let w = barn.building.walls;
+                    let shut = barn.building.voxels.iter().filter(|&&(q, v)| q.x == w.hi.x && q.z > w.lo.y && q.z < w.hi.y && (1..=4).contains(&q.y) && v != voxel::AIR).count();
+                    assert_eq!(shut, 0, "{spec:?}: its front is not open");
                 }
             }
             // The same spec builds the same barn.

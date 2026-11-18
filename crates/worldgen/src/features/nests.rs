@@ -37,6 +37,9 @@ pub enum Host {
     Crevice,
     /// Hanging under a branch.
     Branch,
+    /// A hive someone keeps: a skep, a log hive or a box hive, in a village's apiary or
+    /// at a field's edge (#64, #202). Its door is the hive's own, already built with it.
+    Hive,
 }
 
 /// One nest in the world.
@@ -86,8 +89,49 @@ impl Nest {
                 out.push((self.door, mat::NEST_HOLLOW));
                 out
             }
+            // A kept hive is built whole with its door.
+            Host::Hive => Vec::new(),
         }
     }
+}
+
+/// The colony in a kept hive, from what the hive was built of once placed in the world
+/// (`voxels` and `fine`, in world voxels and cells): its door is the dark of its
+/// entrance (`NEST_HOLLOW`), on the face the entrance looks out of, and the way out is
+/// the way that face looks, away from the middle of the hive. None for a hive left
+/// empty: grey with age (its wood dead), with no dark entrance, or taken over by wasps.
+pub fn in_hive(voxels: &[(IVec3, Voxel)], fine: &[voxel::mesh::PlantBox]) -> Option<Nest> {
+    use voxel::mesh::CELLS;
+    let empty = |v: Voxel| v == mat::WASP_PAPER_DARK || v == mat::WOOD_DEAD;
+    if fine.iter().any(|b| empty(b.voxel)) || voxels.iter().any(|&(_, v)| empty(v)) {
+        return None;
+    }
+    let door = fine.iter().find(|b| b.voxel == mat::NEST_HOLLOW)?;
+    let (lo, hi) = (IVec3::from_array(door.lo), IVec3::from_array(door.hi));
+    // The middle of the whole hive across the ground, in cells.
+    let (mut a, mut b) = (lo, hi);
+    for p in fine {
+        a = a.min(IVec3::from_array(p.lo));
+        b = b.max(IVec3::from_array(p.hi));
+    }
+    for &(q, _) in voxels {
+        a = a.min(q * CELLS);
+        b = b.max((q + 1) * CELLS);
+    }
+    let off = (lo + hi) - (a + b);
+    let out = if off.x.abs() >= off.z.abs() { IVec3::new(off.x.signum(), 0, 0) } else { IVec3::new(0, 0, off.z.signum()) };
+    if out == IVec3::ZERO {
+        return None;
+    }
+    // The entrance's outer face, and the middle of it across.
+    let mid = (lo + hi).div_euclid(IVec3::splat(2));
+    let face = IVec3::new(
+        if out.x > 0 { hi.x } else if out.x < 0 { lo.x } else { mid.x },
+        mid.y,
+        if out.z > 0 { hi.z } else if out.z < 0 { lo.z } else { mid.z },
+    );
+    let door = face.div_euclid(IVec3::splat(CELLS));
+    Some(Nest { kind: NestKind::Bees, host: Host::Hive, door, out, host_at: a.div_euclid(IVec3::splat(CELLS)) })
 }
 
 /// The trees old and big enough to have a hollow a colony of bees could take: the
@@ -255,6 +299,7 @@ mod tests {
                 Host::Hollow => assert!(hollow_tree(*species), "{species:?} has a hollow"),
                 Host::Crevice => assert!(matches!(species, Species::Boulder | Species::MossyBoulder)),
                 Host::Branch => assert!(wasp_tree(*species), "{species:?} has a wasps' nest"),
+                Host::Hive => panic!("a wild nest in a kept hive"),
             }
         }
     }
@@ -291,6 +336,7 @@ mod tests {
                     assert!(host(n.door - IVec3::Y).is_none());
                     assert!(n.door.y - n.host_at.y >= m(2.4) as i32);
                 }
+                Host::Hive => panic!("a wild nest in a kept hive"),
             }
         }
     }
@@ -304,6 +350,33 @@ mod tests {
         for i in 0..20_000 {
             let p = Placement { pos: IVec3::new(i, 0, 0), ..p };
             assert!(of(&lib, &mats, &p, || Biome::Tundra, 1).is_none());
+        }
+    }
+
+    /// A kept hive's colony comes and goes by the hive's own entrance, out the way the
+    /// hive faces, however it is turned; an empty hive has none.
+    #[test]
+    fn a_kept_hives_bees_use_its_door() {
+        use crate::features::{
+            fittings::{Fitting, Hook, build, front},
+            landmarks::Palette,
+        };
+        for biome in [Biome::Deciduous, Biome::Taiga, Biome::Grassland] {
+            let p = Palette::of(biome);
+            for kind in [Fitting::Skep, Fitting::LogHive, Fitting::BoxHive] {
+                for turns in 0..4 {
+                    let at = IVec3::new(40, 7, -13);
+                    let f = build(kind, &p, 5, false).place(at, turns);
+                    let n = in_hive(&f.voxels, &f.fine).unwrap_or_else(|| panic!("{kind:?} turned {turns} has no colony"));
+                    let Some(Hook::Hive(h)) = f.hooks.iter().copied().find(|h| matches!(h, Hook::Hive(_))) else { panic!("{kind:?} has no door") };
+                    let way = front(turns);
+                    assert_eq!(n.out, IVec3::new(way.x, 0, way.y), "{kind:?} turned {turns}");
+                    assert!((n.door - h.div_euclid(IVec3::splat(4))).abs().max_element() <= 1, "{kind:?} turned {turns}: door {} for a hook at {h}", n.door);
+                    assert_eq!((n.kind, n.host), (NestKind::Bees, Host::Hive));
+                }
+                let empty = build(kind, &p, 5, true);
+                assert!(in_hive(&empty.voxels, &empty.fine).is_none(), "{kind:?} left empty has bees");
+            }
         }
     }
 }

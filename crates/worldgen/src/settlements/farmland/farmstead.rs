@@ -282,7 +282,7 @@ fn choose(c: &Continent, seed: u32, k: usize) -> Vec<Chosen> {
 /// Whether the columns `lo` to `hi` of `c` (continent-local, inclusive) are a site for
 /// a barn, and if so the height to level them to: dry, worked ground clear of every
 /// trail, building and river, rising no more than a little across.
-fn site(c: &Continent, seed: u32, (lo, hi): (IVec2, IVec2)) -> Option<i32> {
+pub(super) fn site(c: &Continent, seed: u32, (lo, hi): (IVec2, IVec2)) -> Option<i32> {
     let (lo, hi) = (lo - IVec2::splat(2), hi + IVec2::splat(2));
     let span = (hi - lo).max_element() + 1;
     let sampler = Sampler::new(c, seed, lo.x, lo.y, span);

@@ -26,6 +26,7 @@ pub mod bounds;
 pub mod crops;
 pub mod farmstead;
 pub mod fields;
+pub mod fixtures;
 pub mod influence;
 pub mod lanes;
 pub mod orchard;

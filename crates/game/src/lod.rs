@@ -361,6 +361,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     for dx in 0..step {
         for dz in 0..step {
             stamps.extend(continent.trails.stamps_at(local.0 + dx, local.1 + dz).filter_map(|s| lives.view(s)));
+            stamps.extend(continent.land.fixtures.at(local.0 + dx, local.1 + dz, world.seed(), &lives).into_iter().map(|(s, _)| std::borrow::Cow::Borrowed(s)));
         }
     }
     for s in &stamps {
