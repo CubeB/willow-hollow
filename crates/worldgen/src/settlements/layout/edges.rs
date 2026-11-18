@@ -60,6 +60,10 @@ pub struct Harbour {
     /// The landing it shelters, by index in `Network::sites`: the same landing the
     /// town's fishing quay is (`quay::Quay::landing`), so the port has the one.
     pub landing: usize,
+    /// The stone quay along the shore from beside the landing to the wall's root, which
+    /// the wall is walked out to along: the columns of its deck, continent-local, in
+    /// order from the landing. Empty where the shore left no room for one.
+    pub quay: Vec<IVec2>,
 }
 
 /// A great town's park, kept round its old tree.

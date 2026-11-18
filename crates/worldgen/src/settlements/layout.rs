@@ -180,6 +180,10 @@ pub struct Layout {
     /// Its lanes as lines of points two voxels apart: the trails that arrive, from the
     /// edge of the green outward, then the streets, loops and back lanes laid for it.
     pub lanes: Vec<Vec<Vec2>>,
+    /// How many of `lanes`, from the first, are the trails that arrive, and whether the
+    /// first of them is the main way in (#203: the ways a town's gates stand on).
+    pub arrivals: usize,
+    pub main: bool,
     /// Ground kept open beside the green for the village tree: its middle and radius.
     pub tree: Option<(Vec2, f32)>,
     /// The foot of each well head and market stall, continent-local.
@@ -663,6 +667,9 @@ impl<'a> Town<'a> {
         for l in &found {
             self.layout.lanes.push(l.pts.clone());
         }
+        // Which are the ways in, for the gates (#203).
+        self.layout.arrivals = found.len();
+        self.layout.main = found.first().is_some_and(|l| matches!(l.way, Way::Arrival { main: true }));
         self.lanes = found;
         // The green's edge, which houses face across: drawn round so that its points'
         // normals point outward.

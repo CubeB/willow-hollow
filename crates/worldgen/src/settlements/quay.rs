@@ -208,6 +208,9 @@ const GROUND_NEAR: f32 = m(40.0);
 pub const GROUND_SHORT: f32 = m(20.0);
 /// How far a fishing boat drifts about its ground while the lines are out.
 pub const DRIFT: f32 = m(6.0);
+/// How far from the middle line of a harbour wall, or of the quay along the shore to it,
+/// a boat's way keeps: the wall's half breadth and its round head, and a boat's width.
+const HARBOUR_CLEAR: f32 = m(3.0);
 /// Most cells of rough water in a row a portage carries round, and most portages on one
 /// run: beyond either the goods go by road.
 const ROUGH_CELLS: usize = 2;
@@ -1138,6 +1141,23 @@ fn grounds_for(c: &Continent, seed: u32, net: &Network, quay: &Quay, q: usize) -
     let span = (2.0 * GROUND_FAR + m(20.0)) as i32;
     let sampler = Sampler::with_network(c, seed, from.x as i32 - span / 2, from.y as i32 - span / 2, span, net);
     let boats = if s.has(Livelihood::Port) { 3 } else if s.kind == super::Kind::Hamlet { 1 } else { 2 };
+    // A harbour wall, and the quay along the shore to it, stand where the sampler sees
+    // only the sea, and count as land here, a good boat's width about them, so no boat
+    // puts out across one (#203).
+    let walls: Vec<Vec2> = net
+        .layouts
+        .iter()
+        .filter_map(|l| l.harbour.as_ref())
+        .flat_map(|h| h.line.iter().chain(&h.quay))
+        .map(|c| c.as_vec2() + 0.5)
+        .filter(|c| c.distance(from) < GROUND_FAR + m(30.0))
+        .collect();
+    let water = |p: Vec2| {
+        if walls.iter().any(|c| c.distance_squared(p) < HARBOUR_CLEAR * HARBOUR_CLEAR) {
+            return None;
+        }
+        sampler.column(p.x.floor() as i32, p.y.floor() as i32).water_surface()
+    };
     let mut out = Vec::new();
     for b in 0..boats {
         // Out the way the jetty points, or near it; where that soon meets land, the boat
@@ -1152,7 +1172,7 @@ fn grounds_for(c: &Continent, seed: u32, net: &Network, quay: &Quay, q: usize) -
             let mut level = None;
             while d < want {
                 let p = from + n * d;
-                match sampler.column(p.x.floor() as i32, p.y.floor() as i32).water_surface() {
+                match water(p) {
                     Some(k) => level = Some(k),
                     None => break,
                 }
@@ -1163,7 +1183,7 @@ fn grounds_for(c: &Continent, seed: u32, net: &Network, quay: &Quay, q: usize) -
             let p = from + n * d;
             let open = (0..12).all(|r| {
                 let o = p + Vec2::from_angle(r as f32 / 12.0 * std::f32::consts::TAU) * (DRIFT + m(3.0));
-                sampler.column(o.x.floor() as i32, o.y.floor() as i32).water_surface().is_some()
+                water(o).is_some()
             });
             if let Some(k) = level
                 && d >= GROUND_NEAR

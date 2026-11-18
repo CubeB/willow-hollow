@@ -354,6 +354,22 @@ impl Network {
         }
     }
 
+    /// Takes out one trail point at each of `at` (continent-local x and z, exactly as it
+    /// was laid) and gives back those found: for a stretch of way laid anew, as a town
+    /// does to bring a way in square through its gate (#203).
+    pub(crate) fn take_points(&mut self, at: &[Vec2]) -> Vec<TrailPoint> {
+        let mut out = Vec::new();
+        for p in at {
+            let key = ((p.x as i32).div_euclid(TILE), (p.y as i32).div_euclid(TILE));
+            if let Some(tile) = self.tiles.get_mut(&key)
+                && let Some(k) = tile.iter().position(|t| t.x == p.x && t.z == p.y)
+            {
+                out.push(tile.remove(k));
+            }
+        }
+        out
+    }
+
     fn add_stamp(&mut self, voxels: Vec<(IVec3, Voxel)>) {
         self.add_stamp_with(voxels, Vec::new());
     }

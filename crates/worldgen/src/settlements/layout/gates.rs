@@ -9,14 +9,23 @@
 //! and a stone gatehouse where each main way passes it, which the town has in places
 //! grown out past.
 //!
+//! A gate stands square to the world, so its way must run along a row or a column where
+//! it stands. Where a way in comes slantwise all about the ring, a stretch of it near
+//! the ring is laid anew: swinging gently off its old line onto a straight that runs
+//! square through where the gate will be, and back. Where even that cannot be done
+//! (water, a bridge, another way joining), the gate goes wherever further in the way
+//! runs square of itself.
+//!
 //! The ground is kept before any plot is chosen ([`Town::keep_for_gates`]); the gates
 //! and the wall are built once every plot and path is down ([`Town::raise_gates`],
 //! [`Town::raise_wall`]), the wall routed between whatever stands on its line.
 
+use std::ops::Range;
+
 use glam::{IVec2, IVec3, Vec2};
 use voxel::{AIR, Voxel, mesh::PlantBox};
 
-use super::{Disc, GREEN, KEEP, PLOT, THING, Town, WAY, Way, edges::Gate, turn_rect, world};
+use super::{Disc, GREEN, Grid, KEEP, PLOT, Point, THING, Town, WAY, WIDEST, Way, Worn, edges::Gate, turn_rect, world};
 use crate::{
     features::{designs::Special, parts, shape::rotate},
     materials as mat,
@@ -28,13 +37,30 @@ use crate::{
         special::{self, Built, Facts, SpecialSpec, gate, wall},
     },
     surface::Sampler,
-    trails::{Network, build::turns_toward},
+    trails::{
+        Network, TrailPoint,
+        build::{is_wet, profile, sample, turns_toward},
+    },
 };
 
 /// How far out past the ring a gate wanting to stand on it may be, and a third as far
 /// in: the way is followed until it runs straight along a row or column of the world,
 /// on dry ground with nothing else on it.
 const BAND: f32 = 12.0;
+/// The band a gate is looked for in first, out from its ring and in.
+const NEAR_BAND: (f32, f32) = (-3.0 * BAND, BAND);
+/// And where none stands in that, the further band a way may be laid anew to pass
+/// square through one (see [`Town::squared_site`]): a little further out, or anywhere
+/// in to the green, the nearest the ring the best. A way in over a marsh or an
+/// estuary, or slantwise across a slope, may have nowhere nearer.
+const WIDE_BAND: (f32, f32) = (f32::NEG_INFINITY, 2.0 * BAND);
+/// How far beyond a gate's own depth a way laid anew through it runs straight before
+/// swinging back to its old line, either side.
+const STRAIGHT: i32 = 3;
+/// The least run over which it swings across, either side of its straight.
+const SWING: f32 = 8.0;
+/// How many places along a way are tried for laying it anew.
+const TRIES: usize = 16;
 /// How far an old wall's line may stray in or out of its ring to get round what stands
 /// on it, in columns.
 const STRAY: i32 = 4;
@@ -66,7 +92,7 @@ impl Town<'_> {
     /// town), where it comes in a little inside the edge; in an ancient town, for a
     /// gatehouse where the way passes the old wall instead. Each is built now and kept
     /// for [`Self::raise_gates`]; its columns are kept from every plot.
-    pub(super) fn keep_for_gates(&mut self, net: &Network) {
+    pub(super) fn keep_for_gates(&mut self, net: &mut Network) {
         if self.s.kind < Kind::Town {
             return;
         }
@@ -77,7 +103,16 @@ impl Town<'_> {
             if !(main || great) {
                 continue;
             }
-            if let Some((built, g)) = self.gate_site(li, which, net) {
+            // Where the way runs nearly square to the world near the ring, as it is; else
+            // a stretch of it laid anew to; else wherever further in it runs so.
+            let site = match self.gate_site(li, which, net, NEAR_BAND, None) {
+                Some(found) => Some(found),
+                None => match self.squared_site(li, which, net) {
+                    Some(found) => Some(found),
+                    None => self.gate_site(li, which, net, WIDE_BAND, None),
+                },
+            };
+            if let Some((built, g)) = site {
                 // All of it kept, what stands at walking height taken.
                 for z in g.lo.y..=g.hi.y {
                     for x in g.lo.x..=g.hi.x {
@@ -100,7 +135,9 @@ impl Town<'_> {
     /// its way through, turned square to the world, holds the road; with a way through
     /// just wide enough that nothing of it at walking height stands on any worn ground,
     /// on ground nothing else stands on.
-    fn gate_site(&self, li: usize, which: Special, net: &Network) -> Option<(Built, Gate)> {
+    /// `band` is how far out past its ring and in a gate may stand; `span`, if given,
+    /// the points of the way it may stand at.
+    fn gate_site(&self, li: usize, which: Special, net: &Network, band: (f32, f32), span: Option<Range<usize>>) -> Option<(Built, Gate)> {
         let lane = &self.lanes[li];
         let n = lane.pts.len();
         if n < 20 {
@@ -121,11 +158,12 @@ impl Town<'_> {
             })
             .collect();
         let mut cands: Vec<(f32, usize, IVec2, usize)> = Vec::new();
-        for i in 4..n - 4 {
+        let span = span.map_or(4..n - 4, |r| r.start.max(4)..r.end.min(n - 4));
+        for i in span {
             let p = lane.pts[i];
             let d = p.distance(self.centre);
-            let ring = if ancient { self.old_radius(p) } else { (self.s.radius - deep as f32 - 10.0).min(self.s.radius * 0.92) };
-            if !(-3.0 * BAND..=BAND).contains(&(d - ring)) || d < self.green.radius + 12.0 {
+            let ring = self.gate_ring(p, ancient, deep);
+            if !(band.0..=band.1).contains(&(d - ring)) || d < self.green.radius + 12.0 {
                 continue;
             }
             let t = (lane.pts[i + 4] - lane.pts[i - 4]).normalize_or_zero();
@@ -192,6 +230,205 @@ impl Town<'_> {
             return Some((built.clone(), Gate { which, origin, turns, out: axis, passage: b.door.width, lo, hi, lane: li }));
         }
         None
+    }
+
+    /// The ring a gate stands near: an ancient town's gatehouse on its old wall's, any
+    /// other gate a little inside the town's edge, as far in as it is deep.
+    fn gate_ring(&self, p: Vec2, ancient: bool, deep: i32) -> f32 {
+        if ancient { self.old_radius(p) } else { (self.s.radius - deep as f32 - 10.0).min(self.s.radius * 0.92) }
+    }
+
+    /// Where on way `li` a gate of kind `which` stands once a stretch of the way is laid
+    /// anew to pass square through it: for a way running slantwise to every row and
+    /// column of the world about its ring, or over nothing dry there. The points nearest
+    /// the ring are tried first, a little further in and out than a gate on the way as it
+    /// was may stand ([`WIDE_BAND`]). At each the way is laid anew ([`Self::square`]) and a
+    /// gate looked for on its straight; if none will stand there, the way is put back as
+    /// it was. Only a stretch a gate is found on goes into the network.
+    fn squared_site(&mut self, li: usize, which: Special, net: &mut Network) -> Option<(Built, Gate)> {
+        let ancient = which == Special::Gatehouse;
+        let (_, deep) = gate::reach(which);
+        let pts = self.lanes[li].pts.clone();
+        let n = pts.len();
+        if n < 20 {
+            return None;
+        }
+        // Which of its points the way was laid on as it is: not where it was drawn
+        // straight over water or ended at water too wide to cross, nor on a bridge. Only
+        // about those is it laid anew.
+        let (lo, hi) = pts.iter().fold((Vec2::MAX, Vec2::MIN), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        let (points, _) = net.gather(lo, hi);
+        let real: Vec<bool> = pts.iter().map(|p| points.iter().any(|t| t.x == p.x && t.z == p.y && t.half_width > 0.0)).collect();
+        let mut order: Vec<(f32, usize)> = (8..n - 8)
+            .filter_map(|i| {
+                let p = pts[i];
+                let d = p.distance(self.centre);
+                let off = d - self.gate_ring(p, ancient, deep);
+                let laid = real[i - 8..=i + 8].iter().all(|&r| r) && !is_wet(&self.sam.column(p.x.floor() as i32, p.y.floor() as i32));
+                ((WIDE_BAND.0..=WIDE_BAND.1).contains(&off) && d >= self.green.radius + 12.0 && laid).then_some((off.abs(), i))
+            })
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut tried: Vec<usize> = Vec::new();
+        for (_, i) in order {
+            if tried.len() >= TRIES {
+                break;
+            }
+            if tried.iter().any(|&t| t.abs_diff(i) < 3) {
+                continue;
+            }
+            tried.push(i);
+            let Some(sq) = self.square(li, i, deep, net) else { continue };
+            // What laying it anew changes in the town's own reckoning, to put back.
+            let worn = Worn { lo: self.worn.lo, n: self.worn.n, bins: self.worn.bins.clone() };
+            let grid = Grid { x0: self.grid.x0, z0: self.grid.z0, n: self.grid.n, cells: self.grid.cells.clone() };
+            let (lane, hw, laid) = (self.lanes[li].pts.clone(), self.lanes[li].hw.clone(), self.layout.lanes[li].clone());
+            self.lay_square(&sq);
+            if let Some(found) = self.gate_site(li, which, net, WIDE_BAND, Some(sq.straight.clone())) {
+                sq.commit(net);
+                return Some(found);
+            }
+            (self.worn, self.grid) = (worn, grid);
+            (self.lanes[li].pts, self.lanes[li].hw, self.layout.lanes[li]) = (lane, hw, laid);
+        }
+        None
+    }
+
+    /// A stretch of way `li` about its point `i` laid anew to run square to the world,
+    /// straight along the row or column nearest its own heading for as far as a gate
+    /// `deep` deep needs and a little more, and swinging gently across from its old line
+    /// to the straight and back either side. None where the stretch would be laid over
+    /// water or a river's edge, kept or built ground, or anything the trails set beside
+    /// a way; nor where another way joins it there or shares its line, or a bridge
+    /// carries it, which are left as they were. Its height follows the ground as any
+    /// lane's does, drawn to the way where it meets it again and to any it crosses.
+    fn square(&self, li: usize, i: usize, deep: i32, net: &Network) -> Option<Squared> {
+        let pts = &self.lanes[li].pts;
+        let n = pts.len();
+        let c = pts[i];
+        let fwd = (pts[(i + 2).min(n - 1)] - pts[i.saturating_sub(2)]).normalize_or_zero();
+        if fwd == Vec2::ZERO {
+            return None;
+        }
+        let axis = if fwd.x.abs() >= fwd.y.abs() { Vec2::new(fwd.x.signum(), 0.0) } else { Vec2::new(0.0, fwd.y.signum()) };
+        let half = (deep + STRAIGHT) as f32;
+        // The further it must cross, the longer it takes to.
+        let swing = SWING.max(2.5 * half * fwd.perp_dot(axis).abs());
+        let near = i.saturating_sub(4)..(i + 4).min(n - 1);
+        let spacing = near.clone().map(|j| pts[j].distance(pts[j + 1])).sum::<f32>() / near.len().max(1) as f32;
+        let k = ((half + swing) / spacing.max(0.5)).ceil() as usize;
+        if i < k + 1 || i + k + 1 >= n {
+            return None;
+        }
+        let (from, to) = (i - k, i + k);
+        let tangent = |j: usize| (pts[j + 1] - pts[j - 1]).normalize_or(fwd);
+        let (a, b) = (c - axis * half, c + axis * half);
+        let mut line = hermite(pts[from], tangent(from), a, axis);
+        line.extend(hermite(b, axis, pts[to], tangent(to)));
+        let laid = along(&line, spacing);
+        if laid.len() < 3 {
+            return None;
+        }
+        let old: Vec<Vec2> = pts[from + 1..to].to_vec();
+        // The way as it was laid there: each point its own, none on a bridge, and no
+        // other way joining it.
+        let (lo, hi) = old.iter().chain(&laid).fold((Vec2::MAX, Vec2::MIN), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        let (points, _) = net.gather(lo, hi);
+        let mut hw = 0.0;
+        for p in &old {
+            let mut same = points.iter().filter(|t| t.x == p.x && t.z == p.y);
+            match (same.next(), same.next()) {
+                (Some(t), None) if t.half_width > 0.0 => hw += t.half_width,
+                _ => return None,
+            }
+        }
+        let hw = hw / old.len() as f32;
+        if net.junctions.iter().any(|j| old.iter().any(|p| p.distance(*j) < 4.0)) {
+            return None;
+        }
+        let ok = |p: Vec2| {
+            let col = self.sam.column(p.x.floor() as i32, p.y.floor() as i32);
+            !is_wet(&col)
+                && col.river >= m(2.4)
+                && p.distance(self.centre) <= self.s.radius + 4.0
+                && self.discs.iter().all(|d| d.at == self.centre || d.at.distance(p) >= d.r + hw + 2.0)
+                && self.grid.get(p.floor().as_ivec2()) & (PLOT | KEEP | THING) == 0
+        };
+        if !laid[1..laid.len() - 1].iter().all(|&p| ok(p)) {
+            return None;
+        }
+        let on = |q: IVec2| laid[1..laid.len() - 1].iter().any(|p| (q.as_vec2() + 0.5).distance(*p) < hw + 0.5);
+        if net.lanterns.iter().any(|l| l.footprint.iter().any(|&q| on(q))) || net.markers.iter().any(|(_, p)| on(IVec2::new(p.x, p.z))) || net.delights.iter().any(|d| d.footprint.iter().any(|&q| on(q))) {
+            return None;
+        }
+        // Heights: the ground's, drawn to the way at either end and to any it crosses
+        // (the nearest point of any way about, but the stretch it replaces).
+        let y_at = |p: Vec2| self.worn.nearest(p, 0.5).map_or(self.green.y, |q| q.y);
+        let mut pins = vec![(0, y_at(laid[0])), (laid.len() - 1, y_at(laid[laid.len() - 1]))];
+        for (j, &p) in laid.iter().enumerate().take(laid.len() - 1).skip(1) {
+            let mut best: Option<(f32, f32)> = None;
+            self.worn.any(p, 4.0, |q| {
+                let d = q.at.distance(p);
+                if !q.door && !old.contains(&q.at) && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, q.y));
+                }
+                false
+            });
+            if let Some((_, y)) = best {
+                pins.push((j, y));
+            }
+        }
+        let heights = profile(&sample(self.c, self.seed, &laid), &pins);
+        let new: Vec<TrailPoint> = (1..laid.len() - 1).map(|j| TrailPoint { x: laid[j].x, z: laid[j].y, y: heights[j], half_width: hw }).collect();
+        // Its straight: the points of the lane, once laid, square through the gate.
+        let square: Vec<usize> = new.iter().enumerate().filter(|(_, t)| (Vec2::new(t.x, t.z) - c).dot(axis).abs() <= half - 1.0).map(|(j, _)| from + 1 + j).collect();
+        let straight = *square.first()?..*square.last()? + 1;
+        Some(Squared { li, from, to, old, new, straight })
+    }
+
+    /// Lays `sq` into the town's own reckoning of its ways: the worn ground, the columns
+    /// a way covers, and the lane.
+    fn lay_square(&mut self, sq: &Squared) {
+        let worn = &mut self.worn;
+        for p in &sq.old {
+            let (i, j) = worn.bin(*p);
+            if (0..worn.n).contains(&i) && (0..worn.n).contains(&j) {
+                let bin = &mut worn.bins[(j * worn.n + i) as usize];
+                if let Some(k) = bin.iter().position(|q| !q.door && q.at == *p) {
+                    bin.remove(k);
+                }
+            }
+        }
+        for t in &sq.new {
+            worn.add(Point { at: Vec2::new(t.x, t.z), hw: t.half_width, y: t.y, door: false });
+        }
+        // The columns either stretch covers are reckoned afresh from every way about.
+        let reach = WIDEST + 2.0;
+        let all = sq.old.iter().copied().chain(sq.new.iter().map(|t| Vec2::new(t.x, t.z)));
+        let (lo, hi) = all.fold((Vec2::MAX, Vec2::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        let (lo, hi) = ((lo - reach).floor().as_ivec2(), (hi + reach).ceil().as_ivec2());
+        for z in lo.y..=hi.y {
+            for x in lo.x..=hi.x {
+                let (i, j) = (x - self.grid.x0, z - self.grid.z0);
+                if (0..self.grid.n).contains(&i) && (0..self.grid.n).contains(&j) {
+                    self.grid.cells[(j * self.grid.n + i) as usize] &= !WAY;
+                }
+            }
+        }
+        let (a, b) = (worn.bin(lo.as_vec2() - reach), worn.bin(hi.as_vec2() + reach));
+        for j in a.1.max(0)..=b.1.min(worn.n - 1) {
+            for i in a.0.max(0)..=b.0.min(worn.n - 1) {
+                for q in &worn.bins[(j * worn.n + i) as usize] {
+                    self.grid.disc(q.at, q.hw + 1.0, WAY);
+                }
+            }
+        }
+        let at: Vec<Vec2> = sq.new.iter().map(|t| Vec2::new(t.x, t.z)).collect();
+        let hw: Vec<f32> = sq.new.iter().map(|t| t.half_width).collect();
+        let lane = &mut self.lanes[sq.li];
+        lane.pts.splice(sq.from + 1..sq.to, at.iter().copied());
+        lane.hw.splice(sq.from + 1..sq.to, hw);
+        self.layout.lanes[sq.li].splice(sq.from + 1..sq.to, at);
     }
 
     /// Builds every gate kept for, but any a door's path has since come through the
@@ -335,7 +572,9 @@ impl Town<'_> {
             })
             .collect();
         let ring_at = |t: &Self, d: Vec2| {
-            let bump: f32 = bumps.iter().map(|&(g, dr)| dr * (1.0 - d.angle_to(g).abs() * mean / 24.0).max(0.0)).sum();
+            // Over 24 columns of its length either side, or more where the gatehouse
+            // stands far off the ring, so the wall bends to it rather than kinking.
+            let bump: f32 = bumps.iter().map(|&(g, dr)| dr * (1.0 - d.angle_to(g).abs() * mean / (dr.abs() * 2.0 / 3.0).max(24.0)).max(0.0)).sum();
             t.old_radius(t.centre + d) + bump
         };
         // The column at each step round the ring and each stray in or out of it.
@@ -450,6 +689,77 @@ impl Town<'_> {
             s0 += 11;
         }
     }
+}
+
+/// A stretch of a town's way laid anew to pass square through a gate (see
+/// [`Town::square`]): the points of lane `li` it replaces, those between its points
+/// `from` and `to`, and the trail points laid instead; `straight` is where the lane, so
+/// laid, runs square through the gate.
+struct Squared {
+    li: usize,
+    from: usize,
+    to: usize,
+    old: Vec<Vec2>,
+    new: Vec<TrailPoint>,
+    straight: Range<usize>,
+}
+
+impl Squared {
+    /// Lays it into the network in place of the stretch it replaces, the way's line on
+    /// the maps and for travellers following it there.
+    fn commit(&self, net: &mut Network) {
+        net.take_points(&self.old);
+        net.add_points(&self.new);
+        let (lo, hi) = self.old.iter().fold((Vec2::MAX, Vec2::MIN), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+        let last = self.new.len() - 1;
+        for line in &mut net.lines {
+            for q in line.iter_mut() {
+                if q.cmplt(lo).any() || q.cmpgt(hi).any() {
+                    continue;
+                }
+                if let Some(k) = self.old.iter().position(|p| p == q) {
+                    let t = &self.new[(k as f32 / (self.old.len() - 1).max(1) as f32 * last as f32).round() as usize];
+                    *q = Vec2::new(t.x, t.z);
+                }
+            }
+        }
+    }
+}
+
+/// A curve from `a`, heading `ta`, to `b`, heading `tb` (both unit), finely drawn.
+fn hermite(a: Vec2, ta: Vec2, b: Vec2, tb: Vec2) -> Vec<Vec2> {
+    let k = a.distance(b);
+    (0..=32)
+        .map(|s| {
+            let u = s as f32 / 32.0;
+            let (u2, u3) = (u * u, u * u * u);
+            a * (2.0 * u3 - 3.0 * u2 + 1.0) + ta * k * (u3 - 2.0 * u2 + u) + b * (3.0 * u2 - 2.0 * u3) + tb * k * (u3 - u2)
+        })
+        .collect()
+}
+
+/// Points `step` apart along `line`, from its first to its last, which are kept as they
+/// are (the last a little nearer the one before if need be).
+fn along(line: &[Vec2], step: f32) -> Vec<Vec2> {
+    let mut out = vec![line[0]];
+    // How far along the line it is since the last point.
+    let mut since = 0.0;
+    for pair in line.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let seg = a.distance(b);
+        let mut at = step - since;
+        while at <= seg {
+            out.push(a + (b - a) * (at / seg.max(1e-6)));
+            at += step;
+        }
+        since = seg - (at - step);
+    }
+    let end = line[line.len() - 1];
+    if out.len() > 1 && out[out.len() - 1].distance(end) < step * 0.5 {
+        out.pop();
+    }
+    out.push(end);
+    out
 }
 
 /// The columns a gate stands in at walking height, in its own space: its posts and

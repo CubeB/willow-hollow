@@ -60,6 +60,34 @@ fn gates_stand_on_the_ways_in_and_never_on_a_plot() {
     assert!(gates > 0, "no town on the test worlds has a gate");
 }
 
+/// Every way in a gate is wanted on has its gate: a town's main way in, every way in of
+/// a great town, and an ancient town's gatehouse on its main way, whether the way ran
+/// square to the world where the gate stands or slantwise (and was laid anew to pass
+/// square through it), or crossed water about the ring.
+#[test]
+fn every_main_way_in_has_its_gate() {
+    let mut wanted = 0;
+    for seed in 1..=8 {
+        let c = world(seed).continent(0, 0);
+        let net = &c.trails;
+        for (k, s) in net.settlements.iter().enumerate() {
+            let l = &net.layouts[k];
+            if s.kind < Kind::Town {
+                continue;
+            }
+            for li in 0..l.arrivals {
+                if !(li == 0 && l.main || s.kind == Kind::GreatTown) || l.lanes[li].len() < 20 {
+                    continue;
+                }
+                wanted += 1;
+                let gate = l.gates.iter().find(|g| g.lane == li);
+                assert!(gate.is_some(), "seed {seed}: the {:?} {:?} at {},{} has no gate on its way in {li}", s.age, s.kind, s.x, s.z);
+            }
+        }
+    }
+    assert!(wanted >= 4, "only {wanted} ways in want a gate on the test worlds");
+}
+
 fn special_passage_least() -> i32 {
     crate::settlements::special::gate::PASSAGE
 }
@@ -139,8 +167,8 @@ fn boat_sheds_back_onto_the_water() {
 /// boat putting out from there to its fishing grounds goes through the wall.
 #[test]
 fn harbour_walls_shelter_the_landing_the_boats_put_out_from() {
-    let mut walls = 0;
-    for seed in [1, 2, 3, 4, 5, 6] {
+    let (mut walls, mut grounds) = (0, 0);
+    for seed in [1, 2, 3, 4, 5, 6, 7, 8] {
         let c = world(seed).continent(0, 0);
         let net = &c.trails;
         for (k, s) in net.settlements.iter().enumerate() {
@@ -150,21 +178,29 @@ fn harbour_walls_shelter_the_landing_the_boats_put_out_from() {
             assert_eq!(Some(h.landing), s.port, "seed {seed}: the harbour wall shelters another landing");
             let wall: std::collections::HashSet<IVec2> = h.line.iter().flat_map(|&c| (-3..=3).flat_map(move |z| (-3..=3).map(move |x| c + IVec2::new(x, z)))).collect();
             let ways = &net.waterways;
+            // The wall stands up out of the sea, higher than the landing's boards, and the
+            // quay along the shore climbs to it.
+            assert!(h.top > net.sites[h.landing].y, "seed {seed}: the harbour wall's top is no higher than the landing");
             for (q, quay) in ways.quays.iter().enumerate().filter(|(_, q)| q.settlement == k) {
                 assert!(quay.footprint.iter().all(|c| !wall.contains(c)), "seed {seed}: a jetty stands on the harbour wall");
                 let from = Vec2::new(quay.berth.x, quay.berth.z);
                 for g in ways.grounds_of(q) {
+                    grounds += 1;
                     let to = Vec2::new(g.at.x, g.at.z);
                     let n = (from.distance(to) * 2.0) as i32;
                     for i in 0..=n {
-                        let p = from.lerp(to, i as f32 / n.max(1) as f32).floor().as_ivec2();
-                        assert!(!h.line.contains(&p), "seed {seed}: a boat from the landing at {from} to its ground at {to} goes through the harbour wall at {p}");
+                        let p = from.lerp(to, i as f32 / n.max(1) as f32);
+                        // Clear of the wall's breadth and parapet, of its round head, and
+                        // of the quay along the shore.
+                        let near = |cols: &[IVec2]| cols.iter().map(|c| (c.as_vec2() + 0.5).distance(p)).fold(f32::MAX, f32::min);
+                        let head = (h.line[h.line.len() - 1].as_vec2() + 0.5).distance(p);
+                        assert!(near(&h.line) > 3.5 && head > 5.0 && near(&h.quay) > 2.0, "seed {seed}: a boat from the landing at {from} to its ground at {to} goes over the harbour wall or its quay at {p}");
                     }
                 }
             }
         }
     }
-    println!("{walls} harbour walls");
+    println!("{walls} harbour walls, {grounds} fishing grounds out from them");
 }
 
 #[test]
@@ -275,7 +311,7 @@ fn list_edges() {
         }
         if let Some(h) = &l.harbour {
             let site = &net.sites[h.landing];
-            println!("    harbour wall of {} from {} to beacon {}, sheltering landing {} at {},{} moored at {:?}", h.line.len(), h.root, h.beacon, h.landing, site.x, site.z, site.mooring.map(|m| m.pos));
+            println!("    harbour wall of {} from {} to beacon {}, sheltering landing {} at {},{} moored at {:?}, quay of {}", h.line.len(), h.root, h.beacon, h.landing, site.x, site.z, site.mooring.map(|m| m.pos), h.quay.len());
             for (q, quay) in net.waterways.quays.iter().enumerate().filter(|(_, q)| q.settlement == k) {
                 let from = Vec2::new(quay.berth.x, quay.berth.z);
                 let through = net.waterways.grounds_of(q).filter(|g| (0..=200).any(|i| h.line.contains(&from.lerp(Vec2::new(g.at.x, g.at.z), i as f32 / 200.0).floor().as_ivec2()))).count();

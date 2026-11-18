@@ -872,21 +872,42 @@ fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option
     let upper = hem.min(4.0);
     let front = deep + 0.15 + spread * 0.3;
     let apron = |top: f32, length: f32, z: f32| ([-1.6 * g, -length, z], [3.2 * g, length + top, 0.12], look.over);
+    // Sat on the ground, the thighs lie along it and the skirt with them: whatever side
+    // of a tier is turned down is drawn in so that it rests on the ground rather than
+    // going into it, and the hem below the knee lies out along the shins if hanging it
+    // straight down would put it underground. Stood or sat on a seat, none of this
+    // touches it. The ground is as far below the soles as the pose lifts them.
+    let ground = -pose.lift / CELL;
+    // How deep a tier hung from `joint` at `pitch`, `down` long, may stand out on its
+    // lower side, up to `half`.
+    let rests = |joint: Vec3, pitch: f32, down: f32, half: f32| {
+        let s = pitch.sin().abs();
+        if s < 1e-3 { half } else { ((joint.y - down * pitch.cos().max(0.0) - ground) / s).clamp(0.0, half) }
+    };
+    // Its depth behind and before the line it hangs along: the side toward the way it
+    // is pitched is the lower.
+    let sides = |joint: Vec3, pitch: f32, down: f32, half: f32| {
+        let low = rests(joint, pitch, down, half);
+        if pitch < 0.0 { (low, half) } else { (half, low) }
+    };
     if hem > 0.0 {
         let cloth = if skirted { look.bottom } else { shade(look.top, 0.97) };
-        let mut tier = vec![([-2.0 * g - 0.12, -upper, -front], [4.0 * g + 0.24, upper + 0.25, 2.0 * front], cloth)];
+        let (back, fore) = sides(hips, swing, upper, front);
+        let mut tier = vec![([-2.0 * g - 0.12, -upper, -back], [4.0 * g + 0.24, upper + 0.25, back + fore], cloth)];
         if matches!(look.layer, Layer::Apron | Layer::Bib) {
             tier.push(apron(0.2, upper - 0.2, front));
         }
         part(hips, swing, 0.0, &tier);
         if hem > upper {
             let flare = deep + 0.45 + spread * 1.2;
-            part(
-                along(hips, swing, upper),
-                swing * 0.3,
-                0.0,
-                &[([-2.0 * g - 0.3, -(hem - upper), -flare], [4.0 * g + 0.6, hem - upper + 0.3, 2.0 * flare], shade(cloth, 0.96))],
-            );
+            let (knee, long) = (along(hips, swing, upper), hem - upper);
+            // Hung, unless that reaches the ground: then swung out along the legs, as
+            // far as it must be to clear it.
+            let hung = swing * 0.3;
+            let need = ((knee.y - ground) / long).clamp(0.0, 1.0).acos();
+            let pitch = if need > hung.abs() { need.copysign(swing) } else { hung };
+            let (back, fore) = sides(knee, pitch, long, flare);
+            part(knee, pitch, 0.0, &[([-2.0 * g - 0.3, -long, -back], [4.0 * g + 0.6, long + 0.3, back + fore], shade(cloth, 0.96))]);
         }
     } else if matches!(look.layer, Layer::Apron | Layer::Bib) {
         // Over trousers it rides on the leading thigh, which would push through it.
@@ -1627,6 +1648,40 @@ mod tests {
         let (n, sum) = player_sum();
         assert_eq!(n, 162);
         assert!((sum - -740.8407614302).abs() < 1e-9, "player: {n} boxes, sum {sum:.12e}");
+    }
+
+    #[test]
+    fn a_skirt_sat_on_the_ground_rests_on_it() {
+        // Smocks, dresses and robes, on a child, a stout grown-up and a tall one, sat on
+        // the ground through the pose: no box of the skirt goes into the ground. A smock's
+        // skirt is its top's cloth, a dress's or a robe's the bottom's.
+        let builds = [Build::standing(1.1, 0.9, 1.3, 0.0), Build::standing(1.62, 1.3, 1.0, 0.1), Build::standing(1.85, 1.0, 1.0, 0.0)];
+        let (top, bottom): (Rgb, Rgb) = ([0x11, 0x77, 0xcc], [0xcc, 0x44, 0x11]);
+        for garment in [Garment::Smock, Garment::Dress, Garment::Robe] {
+            let skirt = if garment.skirted() { bottom } else { shade(top, 0.97) };
+            let cloth = [linear(skirt), linear(shade(skirt, 0.96))];
+            for build in builds {
+                let look = Look { garment, top, bottom, build, pack: false, ..WANDERER };
+                let mut seen = 0;
+                for t in 0..8 {
+                    let pose = task_pose(Task::SitLow, &build, t as f32 * 0.37, 0.2);
+                    let mut out = Vec::new();
+                    draw_at(&look, DVec3::ZERO, 0.3, &pose, Task::SitLow, DVec3::new(4.0, 2.0, 1.0), &mut out);
+                    for b in &out {
+                        // How far it reaches below its middle, pitched about its own x.
+                        let (s, c) = b.tilt[0].sin_cos();
+                        // Drawn about the camera, which stands 2 m over the feet.
+                        let low = b.pos[1] + 2.0 - 0.5 * (b.size[1] * c.abs() + b.size[2] * s.abs());
+                        if cloth.contains(&b.color) {
+                            seen += 1;
+                            assert!(low > -1e-3, "{garment:?} on {build:?} at {t}: the skirt reaches {low} m into the ground");
+                        }
+                    }
+                }
+                // A tier at each moment at least; a smock's is short enough for one.
+                assert!(seen >= 8, "{garment:?} on {build:?}: only {seen} boxes of the skirt drawn");
+            }
+        }
     }
 
     #[test]
