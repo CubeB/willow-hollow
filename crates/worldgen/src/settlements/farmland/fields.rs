@@ -431,13 +431,22 @@ pub struct Patch {
     /// How each column lies by a lane hedged through the fields, as `plots`; empty where
     /// none runs (see [`super::lanes`]).
     lanes: Vec<Option<super::lanes::Lane>>,
+    /// The old field each column is in, as `plots`, where no field is worked today;
+    /// empty where none lies (see [`super::old`]).
+    old: Vec<Option<super::old::OldPlot>>,
 }
 
 impl Patch {
     /// The fields of the `n`-wide square of continent-local columns from `(x0, z0)`,
     /// whose ground is `columns` (`x * n + z`).
     pub fn new(c: &Continent, seed: u32, x0: i32, z0: i32, n: usize, columns: &[Column]) -> Patch {
-        let mut patch = Patch { x0, z0, n, plots: Vec::new(), lanes: Vec::new() };
+        let mut patch = Patch { x0, z0, n, plots: Vec::new(), lanes: Vec::new(), old: Vec::new() };
+        if super::old::near(&c.land, x0, z0, n as i32) {
+            patch.old = (0..n * n).map(|i| super::old::at(c, seed, x0 + (i / n) as i32, z0 + (i % n) as i32, &columns[i])).collect();
+            if patch.old.iter().all(Option::is_none) {
+                patch.old = Vec::new();
+            }
+        }
         if c.land.wild_square(x0, z0, n as i32) {
             return patch;
         }
@@ -489,6 +498,15 @@ impl Patch {
     /// Whether no field reaches the square at all.
     pub fn is_empty(&self) -> bool {
         self.plots.is_empty()
+    }
+
+    /// The old field of the column `(i, j)` of the square, if it is in one (see
+    /// [`super::old`]): never where a field is worked today.
+    pub fn old(&self, i: usize, j: usize) -> Option<&super::old::OldPlot> {
+        if self.old.is_empty() || i >= self.n || j >= self.n {
+            return None;
+        }
+        self.old[i * self.n + j].as_ref()
     }
 
     /// The field of the column `(i, j)` of the square, if it is in one.

@@ -74,7 +74,17 @@ mod tests {
                     }
                 }
             }
+            // Where a way crosses one of its ditches, for a bridge.
+            let bridges: Vec<(i32, i32)> = c
+                .trails
+                .points()
+                .filter(|p| p.half_width > 0.0 && drains && c.land.owner(p.x as i32, p.z as i32) == Some(k))
+                .filter(|p| super::ditch::crossing(&c, k, glam::vec2(p.x, p.z)))
+                .map(|p| (p.x as i32, p.z as i32))
+                .take(3)
+                .collect();
             let s = &c.trails.settlements[k];
+            println!("  bridges at {bridges:?}");
             println!(
                 "{:?} {:?} {:?} at {},{} y {} warmth {:.2} {:?}: rice {rice} drains {drains}: {paddy} paddy and {ditched} ditched samples, first at {first:?}",
                 s.age, s.kind, s.region, s.x, s.z, s.y, f.temperature, f.biome

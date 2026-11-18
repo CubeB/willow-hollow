@@ -329,7 +329,7 @@ mod tests {
         for (row, s) in seasons() {
             assert_eq!(table[row as usize][0], s.start);
         }
-        assert!(washes().len() < 64, "{} washes, more than the renderer holds", washes().len());
+        assert!(washes().len() < 128, "{} washes, more than the renderer holds (WASH_SLOTS in game/src/render.rs)", washes().len());
         for c in Crop::ALL {
             if let Some(code) = wash(c) {
                 assert_eq!(Some(washes()[code as usize - 1]), wash_of(c));

@@ -174,6 +174,9 @@ pub struct Land {
     /// What stands about the fields: haystacks, scarecrows, shelters, troughs, wells,
     /// dovecotes and skeps (see [`super::fixtures`]); set out last (#64, #206).
     pub fixtures: super::fixtures::Fixtures,
+    /// The land worked once and given up: beyond the ancient places' fields, and about
+    /// the ruins (see [`super::old`]).
+    pub old: Vec<super::old::Old>,
 }
 
 impl Land {
@@ -257,6 +260,16 @@ impl Land {
     /// The ring of land use at continent-local column `(lx, lz)`.
     pub fn land_use(&self, lx: i32, lz: i32) -> Use {
         if self.yard(lx, lz) { Use::Yard } else { Use::of(self.managed(lx, lz)) }
+    }
+
+    /// The settlement a boundary is kept by, as [`super::bounds::Edge::owner`] has it: one
+    /// of [`Self::farms`], or past them, the ruin whose old fields it ran between, made up
+    /// as one (see [`super::old`]).
+    pub fn farm(&self, owner: usize) -> &Farm {
+        match self.farms.get(owner) {
+            Some(f) => f,
+            None => &self.old[owner - self.farms.len()].farm,
+        }
     }
 
     /// How much of the continent any settlement reaches, in square voxels: for tests and
@@ -470,7 +483,9 @@ pub fn build(c: &Continent, seed: u32) -> Land {
             }
         }
     }
-    Land { tiles, farms, steads: Vec::new(), quarries: Vec::new(), fixtures: Default::default() }
+    let mut land = Land { tiles, farms, steads: Vec::new(), quarries: Vec::new(), fixtures: Default::default(), old: Vec::new() };
+    land.old = super::old::gather(c, seed, &land);
+    land
 }
 
 #[cfg(test)]

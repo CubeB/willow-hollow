@@ -1113,6 +1113,16 @@ impl GameWorld {
                             skin.0 = ground;
                         }
                     }
+                } else if !rocky && skin.0 == mat::ground_cover(col.biome) && fields.old(px + 1, pz + 1).is_some() {
+                    // What is left of the edges of fields given up long ago (see
+                    // farmland::old).
+                    if let Some(edge) = farmland::bounds::edge(&continent.land, &fields, col, px + 1, pz + 1) {
+                        if edges.is_empty() {
+                            edges = vec![None; PAD * PAD];
+                        }
+                        edges[px * PAD + pz] = Some(edge);
+                        hi = hi.max(top + 5);
+                    }
                 }
                 // The edge of a shelf over the next is its bank: a drystone coping or a
                 // lip of turf, which nothing is sown on.
@@ -1490,7 +1500,7 @@ impl GameWorld {
             let (px, pz) = (i / PAD, i % PAD);
             let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
             let own = planted && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz);
-            let farm = &continent.land.farms[edge.owner];
+            let farm = continent.land.farm(edge.owner);
             farmland::bounds::build(edge, farm, &columns[i], wx, wz, self.seed, &mut put, own.then_some(&mut plants));
         }
         // Built things go last: they clear whatever grew or stood in their way.

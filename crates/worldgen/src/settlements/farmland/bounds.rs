@@ -53,6 +53,9 @@ pub enum Style {
     Thorn,
     /// Driftwood posts and a rail, by the sea and in the marshes.
     Driftwood,
+    /// A low bank of earth grassed over, where an old field's edge ran (see
+    /// [`super::old`]).
+    Bank,
 }
 
 /// The boundary a column carries.
@@ -64,7 +67,8 @@ pub struct Edge {
     pub core: bool,
     /// How far gone to ruin it is: 0 by the houses, 1 at the edge of the wild.
     pub decay: f32,
-    /// The settlement whose it is, by its index in [`Land::farms`].
+    /// The settlement whose it is, by its index in [`Land::farms`]; or past them, an old
+    /// field's about a ruin (see [`Land::farm`]).
     pub owner: usize,
     /// Whether the core runs on into the next column each way: +x, -x, +z, -z.
     pub links: [bool; 4],
@@ -145,6 +149,9 @@ fn core_of(patch: &Patch, i: usize, j: usize) -> Option<(Plot, Plot)> {
 /// The boundary column `(i, j)` of `patch` carries, if any, whose ground is `col`. Needs
 /// the columns all round it in the patch, and for its links, all round them too.
 pub fn edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Option<Edge> {
+    if patch.at(i, j).is_none() {
+        return old_edge(land, patch, col, i, j);
+    }
     // Along a hedged lane, the hedge or wall on its side, open at the gaps; a boundary
     // between two fields that comes down to it meets it rather than ending in a post.
     let lane = patch.lane(i, j);
@@ -188,6 +195,46 @@ pub fn edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Opt
     });
     let gate = col.clear < GATEPOST && lane != Some(Lane::Beyond);
     Some(Edge { style, core, decay, owner: p.owner.min(q.owner), links, gate })
+}
+
+/// The neighbours of a column a boundary's core looks to, the sides first.
+const ROUND: [(i32, i32); 8] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+
+/// Whether column `(i, j)` of `patch` is the core of an old field's edge (see
+/// [`core_of`]), and the old field across it.
+fn old_core(patch: &Patch, i: usize, j: usize) -> Option<(super::old::OldPlot, super::old::OldPlot)> {
+    let p = *patch.old(i, j)?;
+    if i == 0 || j == 0 || i + 1 >= patch.n || j + 1 >= patch.n {
+        return None;
+    }
+    ROUND.iter().find_map(|&(dx, dz)| patch.old((i as i32 + dx) as usize, (j as i32 + dz) as usize).filter(|q| q.id > p.id).map(|q| (p, *q)))
+}
+
+/// What is left of the edge an old field's column carries, if any (see [`super::old`]),
+/// as [`edge`] has it for a field worked today.
+fn old_edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Option<Edge> {
+    let (p, q, core) = match old_core(patch, i, j) {
+        Some((p, q)) => (p, q, true),
+        None => {
+            let p = *patch.old(i, j)?;
+            if i == 0 || j == 0 || i + 1 >= patch.n || j + 1 >= patch.n {
+                return None;
+            }
+            let q = SIDES.iter().find_map(|&(dx, dz)| patch.old((i as i32 + dx) as usize, (j as i32 + dz) as usize).filter(|q| q.id < p.id))?;
+            (p, *q, false)
+        }
+    };
+    if col.clear < GATEWAY {
+        return None;
+    }
+    let style = super::old::style(land, &p, &q, col);
+    let links = SIDES.map(|(dx, dz)| {
+        let (a, b) = (i as i32 + dx, j as i32 + dz);
+        a >= 0 && b >= 0 && old_core(patch, a as usize, b as usize).is_some()
+    });
+    let source = if p.id < q.id { p.source } else { q.source };
+    let owner = land.old[source].owner.unwrap_or(land.farms.len() + source);
+    Some(Edge { style, core, decay: 1.0, owner, links, gate: false })
 }
 
 /// Builds boundary `edge` on the column at world `(x, z)`, whose ground is `col`: its
@@ -293,6 +340,12 @@ pub fn build(edge: &Edge, farm: &Farm, col: &Column, x: i32, z: i32, seed: u32, 
                 for k in 0..height {
                     put(at(k), if r(3 + k as u32) < 0.15 { farm.stone } else { mat::THORN }, false);
                 }
+            }
+        }
+        Style::Bank => {
+            // Grassed over, and worn through here and there.
+            if !edge.gate && noise(0xb0db, 6.0) < 0.35 && (edge.core || r(6) < 0.6) {
+                put(at(0), mat::ground_cover(col.biome), true);
             }
         }
         Style::Fence | Style::Hurdle | Style::Driftwood => {}

@@ -194,8 +194,7 @@ pub(super) fn cut(c: &Continent, seed: u32, lx: i32, lz: i32, owner: usize, col:
     (col.top() < level + 1).then_some(Shape { ground: (level + 1) as f32 + 0.5, water: None })
 }
 
-/// Whether column `col`, at continent-local `(lx, lz)` of `c`, is a ditch's water (and not
-/// a paddy's, which is a voxel deep).
+/// Whether column `col` is a ditch's water (and not a paddy's, which is a voxel deep).
 pub fn ditched(col: &Column) -> bool {
     paddy::flooded(col) && col.water_surface().is_some_and(|k| k - 1 - col.top() == DEPTH)
 }
@@ -211,6 +210,13 @@ pub fn bridged(c: &Continent, lx: i32, lz: i32, col: &Column) -> bool {
         return false;
     }
     nearest(c, owner, vec2(lx as f32 + 0.5, lz as f32 + 0.5)).is_some_and(|d| d < HALF + 0.5)
+}
+
+/// Whether continent-local `p` lies on a ditch of the settlement `owner`: for finding
+/// where the ways cross them.
+#[cfg(test)]
+pub(super) fn crossing(c: &Continent, owner: usize, p: Vec2) -> bool {
+    nearest(c, owner, p).is_some_and(|d| d < HALF)
 }
 
 /// The rails of a plank bridge on the column at world `(x, z)`, whose deck is its top

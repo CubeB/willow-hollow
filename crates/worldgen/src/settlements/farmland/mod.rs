@@ -23,6 +23,9 @@
 //! - [`ditch`]: the straight ditches that drain the wet ground about an old place, with
 //!   plank bridges where the lanes cross them.
 //! - [`water`]: both of those, shaped into the ground column by column.
+//! - [`old`]: the fields given up long ago beyond the ancient places' fields of today and
+//!   about the ruins, gone back to the wild, their edges going from hedgerow to scrub to
+//!   a stone or two.
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
@@ -35,6 +38,7 @@ pub mod fields;
 pub mod fixtures;
 pub mod influence;
 pub mod lanes;
+pub mod old;
 pub mod orchard;
 pub mod paddy;
 pub mod quarry;
@@ -67,10 +71,14 @@ pub struct Far {
 /// fields lie in a patchwork as the near ones do. `seed` is the world's. Out in the wild
 /// this is one lookup.
 pub fn far(c: &Continent, seed: u32, col: &Column, lx: i32, lz: i32, step: i32) -> Option<Far> {
-    if c.land.managed(lx, lz) < influence::EDGE || !fields::worked(col) {
+    if c.land.managed(lx, lz) < influence::EDGE || !(fields::worked(col) || paddy::flooded(col)) {
         return None;
     }
     let p = plot(c, seed, lx, lz)?;
+    // A paddy from afar is its water with the sky in it, and the rice over it in season.
+    if p.crop == Crop::Paddy {
+        return Some(Far { surface: mat::PADDY_FAR, wash: crops::wash(p.crop), wear: None });
+    }
     for (dx, dz) in [(step, 0), (0, step)] {
         if let Some(q) = plot(c, seed, lx + dx, lz + dz)
             && q.id != p.id

@@ -297,8 +297,9 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // to it would show a crack where it is cut off.
             let mut top = (lowest + 1).div_euclid(step) - 1;
             // Any water at the corners floods the cell, so narrow rivers stay joined up.
-            // A ditch is too narrow to show as water once the cells are wider than it.
-            let water = four.iter().filter(|c| step <= 2 || !worldgen::settlements::farmland::ditch::ditched(c)).filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
+            // A ditch is too narrow to show as water once the cells are wider than it, and
+            // a paddy is its field from there on, its rice over it in season.
+            let water = four.iter().filter(|c| step <= 2 || !worldgen::settlements::farmland::paddy::flooded(c)).filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
             // Rounding must not leave the bed poking through its own shallows.
             if let Some(w) = water {
                 top = top.min(w - 1);
@@ -308,7 +309,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // The fields about a settlement: their soil and crops' colours, and the hedges
             // and walls between them (see worldgen::settlements::farmland).
             let (cx_, cz_) = (lx0 + x as i32 * step, lz0 + z as i32 * step);
-            let field = if surface == mat::ground_cover(four[0].biome) {
+            let field = if surface == mat::ground_cover(four[0].biome) || (water.is_none() && worldgen::settlements::farmland::paddy::flooded(four[0])) {
                 worldgen::settlements::farmland::rotation::far(&continent, world.seed(), four[0], cx_, cz_, step, lives.when)
             } else {
                 None
