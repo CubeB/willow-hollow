@@ -166,6 +166,8 @@ fn stands(edge: &Edge, x: i32, z: i32, seed: u32) -> bool {
         Style::Stones => edge.core && r(1) < 0.1 + 0.12 * (1.0 - decay),
         Style::Thorn => !gap && (edge.core || r(6) < 0.5) && r(1) < 0.8,
         Style::Fence | Style::Hurdle | Style::Driftwood => edge.core && !fence_gap,
+        // An old field's grassed bank is a layer high, and stepped over (#64).
+        Style::Bank => false,
     }
 }
 
