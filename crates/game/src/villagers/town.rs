@@ -260,10 +260,17 @@ impl Town {
         let lanes = Lanes::new(&layout.lanes, centre, green, &mut |p| height(p));
         let reached = lanes.reach(0);
         let mut places: Vec<Place> = Vec::new();
-        // A path in from the nearest lane, straight; on the green, from its middle.
+        // The walls of every building, which a path in keeps clear of.
+        let walls: Vec<(IVec2, IVec2, bool)> = net.plots[layout.plots.clone()].iter().map(|p| (p.walls.0 - IVec2::ONE, p.walls.1 + IVec2::ONE, p.round)).collect();
+        let clear = |a: Vec2, b: Vec2| {
+            let n = ((a.distance(b) / 0.5).ceil() as usize).max(1);
+            (1..n).all(|k| !walls.iter().any(|&(lo, hi, round)| in_walls(lo, hi, round, a.lerp(b, k as f32 / n as f32), 0.0)))
+        };
+        // A path in from the nearest lane it can come straight from without going through a
+        // house (from the nearest of all where none can); on the green, from its middle.
         let place = |what: Where, at: Vec3, places: &mut Vec<Place>| -> Option<usize> {
             let on_green = flat(at).distance(flat(centre)) < green * 0.5;
-            let (anchor, d) = if on_green { (0, flat(at).distance(flat(centre))) } else { lanes.nearest(at, &reached)? };
+            let (anchor, d) = if on_green { (0, flat(at).distance(flat(centre))) } else { lanes.nearest_where(at, &reached, SPUR, |n| clear(flat(n), flat(at)))? };
             if d > SPUR {
                 return None;
             }

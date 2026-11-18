@@ -702,11 +702,14 @@ impl<'a> Town<'a> {
         // furnished as it is built; the homes and workplaces are the kit's.
         let (region, pal) = (self.s.region, &self.pal);
         let facts = Facts::of(&self.s);
+        // A great town's homes may take what only a great town's do (a wind catcher).
+        let how = kit::components::Dress { great_town: self.s.kind == Kind::GreatTown };
+        let home = |spec: &Spec| kit::build_dressed(spec, pal, kit::rules::rules(region), &how);
         let kits = in_parallel(&wants, |w| {
             let own = w.purpose.which().and_then(|which| special::build(&SpecialSpec { which, region, age: w.age, wealth: w.wealth, seed: w.seed, stream: None, facts }, pal));
             match own {
                 Some(own) => (own.building.clone(), Some(own)),
-                None => (kit::build(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed }, pal), None),
+                None => (home(&Spec { region, step: w.step, age: w.age, wealth: w.wealth, sleepers: w.beds, seed: w.seed }), None),
             }
         });
         for (want, (built, own)) in wants.into_iter().zip(kits) {
@@ -1248,12 +1251,13 @@ impl<'a> Town<'a> {
                 0 | 1 => Lot::new(built.clone(), garden, yard),
                 2 => Lot::new(built.clone(), false, yard.filter(|_| !matches!(want.purpose, Purpose::Home))),
                 _ => {
-                    // At the last, a hut: there was no room for anything bigger.
+                    // At the last, a hut with nothing set about it: there was no room for
+                    // anything bigger.
                     own = None;
                     want.step = Step::Hut;
                     want.beds = want.beds.min(Step::Hut.max_sleepers());
                     want.residents = want.residents.min(want.beds);
-                    Lot::new(kit::build(&spec(Step::Hut, want.beds), &self.pal), false, None)
+                    Lot::new(kit::generate_bare(&spec(Step::Hut, want.beds), &self.pal, kit::rules::rules(self.s.region)), false, None)
                 }
             };
             if let Some(spot) = self.find(&lot, &want, pass) {

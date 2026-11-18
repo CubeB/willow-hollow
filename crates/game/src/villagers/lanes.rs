@@ -150,13 +150,13 @@ impl Lanes {
         seen
     }
 
-    /// A node for a path from `p` to join the lanes at: the nearest lane node, and how
-    /// far it is (across the ground), among those reached from the green.
-    pub fn nearest(&self, p: Vec3, reached: &[bool]) -> Option<(u32, f32)> {
-        (0..self.nodes.len())
-            .filter(|&i| reached[i])
-            .map(|i| (i as u32, flat(self.nodes[i]).distance(flat(p))))
-            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)))
+    /// A node for a path from `p` to join the lanes at, and how far it is (across the
+    /// ground), among those `reached` from the green: the nearest within `reach` of `p`
+    /// that `ok` says yes to, else the nearest of all.
+    pub fn nearest_where(&self, p: Vec3, reached: &[bool], reach: f32, ok: impl Fn(Vec3) -> bool) -> Option<(u32, f32)> {
+        let mut by: Vec<(u32, f32)> = (0..self.nodes.len()).filter(|&i| reached[i]).map(|i| (i as u32, flat(self.nodes[i]).distance(flat(p)))).collect();
+        by.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        by.iter().take_while(|n| n.1 <= reach).copied().find(|&(i, _)| ok(self.nodes[i as usize])).or(by.first().copied())
     }
 
     /// How far it is along the lanes from `from` to every node (infinite where none
