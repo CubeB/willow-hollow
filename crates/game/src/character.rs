@@ -1028,7 +1028,17 @@ fn draw_doing(look: &Look, feet: DVec3, facing: f32, pose: &Pose, furled: Option
         }
         Carried::None | Carried::Purse => {}
     }
+    if task == Some(Task::Sketch) {
+        // The book open on the left hand, its far edge tipped up toward the eyes, reaching
+        // in toward the middle of the body; the pencil in the right hand, held to the page.
+        let h = hand(1);
+        frame.part(out, h, -0.7, 0.0, 0.0, &[([-4.0, -0.35, -1.2], [4.0, 0.22, 2.6], shade(LEATHER, 0.8)), ([-3.9, -0.13, -1.1], [3.8, 0.1, 2.4], PAGE)]);
+        frame.part(out, hand(0), pose.arm[0] + pose.fore[0], 0.0, 0.0, &[([-0.08, -1.3, -0.08], [0.16, 1.1, 0.16], shade(WOOD, 0.6))]);
+    }
 }
+
+/// The pages of a sketchbook.
+const PAGE: Rgb = [0xe8, 0xe0, 0xc8];
 
 /// What of the hair shows beyond the head's own three layers: what hangs down the back,
 /// a plait, a bun or a knot. None of it shows from under a hood or a scarf.
@@ -1174,6 +1184,13 @@ pub enum Task {
     Tend,
     /// On their back in bed.
     Lie,
+    /// At the oars of a boat, facing its stern, pulling (#205). Sat as the player sits in
+    /// a boat: the hips as high over `feet` as standing, so `feet` is set that far below
+    /// the thwart.
+    Row,
+    /// On a seat a stool high, a sketchbook held up in the left hand and the right at work
+    /// on it (#205).
+    Sketch,
 }
 
 /// How high a seat is, in metres: a stool's, and about a bench's.
@@ -1181,7 +1198,7 @@ pub const SEAT: f32 = 0.5;
 
 impl Task {
     #[cfg(test)]
-    pub const ALL: [Task; 13] = [
+    pub const ALL: [Task; 15] = [
         Task::Stand,
         Task::Chop,
         Task::Hoe,
@@ -1195,6 +1212,8 @@ impl Task {
         Task::Talk,
         Task::Tend,
         Task::Lie,
+        Task::Row,
+        Task::Sketch,
     ];
 
     /// What it is, in words, for logs and the console.
@@ -1213,6 +1232,8 @@ impl Task {
             Task::Talk => "talking",
             Task::Tend => "tending",
             Task::Lie => "asleep",
+            Task::Row => "rowing",
+            Task::Sketch => "sketching",
         }
     }
 
@@ -1234,6 +1255,11 @@ impl Task {
                 _ => Carried::None,
             },
             Task::Stand | Task::Talk => own,
+            // Both hands are busy: with the oars, and with the book and the pencil.
+            Task::Row | Task::Sketch => match own {
+                Carried::Purse | Carried::Bow => own,
+                _ => Carried::None,
+            },
         }
     }
 
@@ -1299,6 +1325,28 @@ pub fn task_pose(task: Task, build: &Build, clock: f32, phase: f32) -> Pose {
         }
         // Flat, the arms along the sides, breathing; a cell up off the mattress.
         Task::Lie => Pose { arm: [0.05; 2], fore: [-0.25; 2], lift: CELL + breath * m(0.008), ..Default::default() },
+        Task::Row => {
+            // In time with the oars (`wave` at the rate a boat's oars swing, the phase
+            // given as 0): reaching out toward the stern with the body forward as the
+            // blades swing to the bow, then pulling the handles in to the chest, leaning
+            // back, as they come aft.
+            let s = wave(2.4, 0.0);
+            Pose { leg: [-1.4; 2], shin: [1.25; 2], arm: [-0.9 - 0.4 * s; 2], fore: [-0.85 + 0.75 * s; 2], lean: 0.05 + 0.3 * s, ..Default::default() }
+        }
+        Task::Sketch => {
+            // The book held up before the chest, the pencil hand moving over it, the head
+            // still; the knees up a little, as on a stool lower than a bench.
+            let w = wave(1.6, 0.0);
+            Pose {
+                leg: [-1.72; 2],
+                shin: [1.72; 2],
+                arm: [-0.75 + 0.06 * w, -0.85],
+                fore: [-1.05 - 0.12 * w, -1.25],
+                lean: 0.12,
+                lift: seated(SEAT),
+                ..Default::default()
+            }
+        }
     }
 }
 
