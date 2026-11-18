@@ -23,6 +23,7 @@ use voxel::{
 use super::{
     fields::{Patch, Plot},
     influence::{CROPS, EDGE, Farm, Land, PASTURE, ROUGH},
+    lanes::Lane,
 };
 use crate::{
     biome::Biome,
@@ -144,6 +145,24 @@ fn core_of(patch: &Patch, i: usize, j: usize) -> Option<(Plot, Plot)> {
 /// The boundary column `(i, j)` of `patch` carries, if any, whose ground is `col`. Needs
 /// the columns all round it in the patch, and for its links, all round them too.
 pub fn edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Option<Edge> {
+    // Along a hedged lane, the hedge or wall on its side, open at the gaps; a boundary
+    // between two fields that comes down to it meets it rather than ending in a post.
+    let lane = patch.lane(i, j);
+    let along = match lane {
+        Some(Lane::Hedge { gap, post }) => Some((true, gap, post)),
+        Some(Lane::Back { gap }) => Some((false, gap, false)),
+        _ => None,
+    };
+    if let Some((core, gap, post)) = along {
+        let p = patch.at(i, j)?;
+        if gap {
+            return None;
+        }
+        // Walled where the fields are, hedged everywhere else: never a fence.
+        let style = if style(land, p, p, col) == Style::Wall { Style::Wall } else { Style::Hedge };
+        let decay = 1.0 - ((p.managed - EDGE) / (CROPS - EDGE)).clamp(0.0, 1.0);
+        return Some(Edge { style, core, decay, owner: p.owner, links: [false; 4], gate: post });
+    }
     let (p, q, core) = match core_of(patch, i, j) {
         Some((p, q)) => (p, q, true),
         None => {
@@ -166,7 +185,8 @@ pub fn edge(land: &Land, patch: &Patch, col: &Column, i: usize, j: usize) -> Opt
         let (a, b) = (i as i32 + dx, j as i32 + dz);
         a >= 0 && b >= 0 && core_of(patch, a as usize, b as usize).is_some()
     });
-    Some(Edge { style, core, decay, owner: p.owner.min(q.owner), links, gate: col.clear < GATEPOST })
+    let gate = col.clear < GATEPOST && lane != Some(Lane::Beyond);
+    Some(Edge { style, core, decay, owner: p.owner.min(q.owner), links, gate })
 }
 
 /// Builds boundary `edge` on the column at world `(x, z)`, whose ground is `col`: its
@@ -356,13 +376,19 @@ mod tests {
                     let col = &columns[i * n + j];
                     let Some(e) = edge(&c.land, &patch, col, i, j) else { continue };
                     styles.insert(e.style);
-                    assert!(col.clear >= GATEWAY, "a boundary on a trail at {i},{j}");
+                    // A hedged lane's hedge stands a verge's width off the way's worn edge
+                    // instead (see `lanes`' own tests).
+                    let by_lane = |i: usize, j: usize| matches!(patch.lane(i, j), Some(Lane::Hedge { .. } | Lane::Back { .. }));
+                    assert!(col.clear >= GATEWAY || by_lane(i, j), "a boundary on a trail at {i},{j}");
                     assert!(col.water_surface().is_none());
                     if e.core {
                         cores += 1;
                         // The core is a line: unless it ends at a gateway or the edge of
                         // the fields, it runs on to another core column.
-                        let next = SIDES.iter().any(|&(dx, dz)| core_of(&patch, (i as i32 + dx) as usize, (j as i32 + dz) as usize).is_some());
+                        let next = SIDES.iter().any(|&(dx, dz)| {
+                            let (a, b) = ((i as i32 + dx) as usize, (j as i32 + dz) as usize);
+                            core_of(&patch, a, b).is_some() || by_lane(a, b)
+                        });
                         let open = SIDES.iter().any(|&(dx, dz)| {
                             let k = (i as i32 + dx) as usize * n + (j as i32 + dz) as usize;
                             patch.at((i as i32 + dx) as usize, (j as i32 + dz) as usize).is_none() || columns[k].clear < GATEWAY

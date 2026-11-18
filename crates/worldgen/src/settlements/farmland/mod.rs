@@ -14,6 +14,8 @@
 //!   low bank of drystone or turf.
 //! - [`farmstead`]: the barns, byres and field sheds out among the fields far from the
 //!   houses.
+//! - [`lanes`]: the lanes out through the fields of the lowlands and the uplands, hedged
+//!   or walled on both sides.
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
@@ -23,6 +25,7 @@ pub mod crops;
 pub mod farmstead;
 pub mod fields;
 pub mod influence;
+pub mod lanes;
 pub mod orchard;
 pub mod terrace;
 

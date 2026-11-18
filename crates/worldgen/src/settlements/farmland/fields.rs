@@ -377,13 +377,16 @@ pub struct Patch {
     /// Row by row in x, as the chunk's columns are kept: `x * n + z`. Empty where no
     /// settlement reaches the square.
     plots: Vec<Option<Plot>>,
+    /// How each column lies by a lane hedged through the fields, as `plots`; empty where
+    /// none runs (see [`super::lanes`]).
+    lanes: Vec<Option<super::lanes::Lane>>,
 }
 
 impl Patch {
     /// The fields of the `n`-wide square of continent-local columns from `(x0, z0)`,
     /// whose ground is `columns` (`x * n + z`).
     pub fn new(c: &Continent, seed: u32, x0: i32, z0: i32, n: usize, columns: &[Column]) -> Patch {
-        let mut patch = Patch { x0, z0, n, plots: Vec::new() };
+        let mut patch = Patch { x0, z0, n, plots: Vec::new(), lanes: Vec::new() };
         if c.land.wild_square(x0, z0, n as i32) {
             return patch;
         }
@@ -396,7 +399,38 @@ impl Patch {
                 plot(c, seed, x0 + (i / n) as i32, z0 + (i % n) as i32)
             })
             .collect();
+        // The lanes hedged through the fields, where any field here is of a place that
+        // hedges them and a lane runs by; only the columns near a way are looked at.
+        let hedged = |p: &Plot| super::lanes::hedged(&c.land.farms[p.owner], p.managed);
+        if patch.plots.iter().flatten().any(hedged)
+            && let Some(lanes) = super::lanes::Lanes::near(c, x0, z0, n)
+        {
+            patch.lanes = (0..n * n)
+                .map(|i| {
+                    patch.plots[i].as_ref().filter(|p| hedged(p))?;
+                    if columns[i].clear >= super::lanes::LOOK {
+                        return None;
+                    }
+                    lanes.at(seed, x0 + (i / n) as i32, z0 + (i % n) as i32)
+                })
+                .collect();
+            // Nothing is sown on a verge.
+            for (plot, lane) in patch.plots.iter_mut().zip(&patch.lanes) {
+                if *lane == Some(super::lanes::Lane::Verge) {
+                    *plot = None;
+                }
+            }
+        }
         patch
+    }
+
+    /// How the column `(i, j)` of the square lies by a lane hedged through the fields, if
+    /// it does.
+    pub fn lane(&self, i: usize, j: usize) -> Option<super::lanes::Lane> {
+        if self.lanes.is_empty() || i >= self.n || j >= self.n {
+            return None;
+        }
+        self.lanes[i * self.n + j]
     }
 
     /// Whether no field reaches the square at all.
