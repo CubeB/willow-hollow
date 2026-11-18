@@ -854,6 +854,9 @@ impl GameWorld {
         // boundary depends on its neighbours' fields.
         let fields = farmland::fields::Patch::new(&continent, self.seed, lx0 - 1, lz0 - 1, WIDE, &wide);
         let mut edges: Vec<Option<farmland::bounds::Edge>> = Vec::new();
+        // The faces of the terraces' banks, where a stepped column's shelf stands over the
+        // next: the lowest voxel of each face and how it is built.
+        let mut banks: Vec<Option<(i32, farmland::terrace::Riser)>> = Vec::new();
         // An orchard's trees, in their rows.
         let orchard = farmland::orchard::trees_near(&continent, self.seed, &sampler, lx0, lz0, PAD as i32, (mx * MACRO_SIZE, mz * MACRO_SIZE));
         for t in &orchard {
@@ -876,11 +879,19 @@ impl GameWorld {
                 let ground = |x: usize, z: usize| wide[x * WIDE + z].ground;
                 let gx = (ground(px + 2, pz + 1) - ground(px, pz + 1)) * 0.5;
                 let gz = (ground(px + 1, pz + 2) - ground(px + 1, pz)) * 0.5;
-                let steep = gx.hypot(gz);
+                let mut steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = crate::surface::ground_patch(self.seed, wx, wz);
                 let col = &columns[px * PAD + pz];
+                // A terrace's shelf is the field's soil however its steps measure: the
+                // hillside under it is no steeper than any other field's.
+                let terraced = fields
+                    .at(px + 1, pz + 1)
+                    .and_then(|p| Some((p, farmland::terrace::stepped(&continent.land, p, lx0 + px as i32, lz0 + pz as i32, col)?)));
+                if terraced.is_some() {
+                    steep = steep.min(0.6);
+                }
                 let mut skin = surface_materials(col, steep, roll, patch);
                 let (cx_, cz_) = (wx as i32, wz as i32);
                 if !tors.is_empty() && col.cover == Cover::Land && skin.0 == mat::ground_cover(col.biome) && tors.iter().any(|t| t.turf(cx_, cz_)) {
@@ -894,9 +905,11 @@ impl GameWorld {
                 // In a field, the crop is on soil where the wild has grass; a boundary keeps a
                 // strip of grass under it.
                 let mut field = None;
+                let mut fielded = false;
                 if !fields.is_empty() && !rocky && skin.0 == mat::ground_cover(col.biome)
                     && let Some(plot) = fields.at(px + 1, pz + 1)
                 {
+                    fielded = true;
                     if edges.is_empty() {
                         edges = vec![None; PAD * PAD];
                     }
@@ -909,6 +922,21 @@ impl GameWorld {
                         if let Some(ground) = farmland::crops::ground(plot.crop, col) {
                             skin.0 = ground;
                         }
+                    }
+                }
+                // The edge of a shelf over the next is its bank: a drystone coping or a
+                // lip of turf, which nothing is sown on.
+                if let Some((plot, bank)) = terraced
+                    && fielded
+                {
+                    let low = [(2, 1), (0, 1), (1, 2), (1, 0)].iter().map(|&(i, j)| wide[(px + i) * WIDE + pz + j].top()).min().unwrap_or(top);
+                    if let Some((from, riser)) = farmland::terrace::riser(bank, &continent.land.farms[plot.owner], top, low, col) {
+                        if banks.is_empty() {
+                            banks = vec![None; PAD * PAD];
+                        }
+                        banks[px * PAD + pz] = Some((from, riser));
+                        field = None;
+                        skin.0 = if riser.capped() { riser.at(cx_, top, cz_, top, self.seed) } else { mat::ground_cover(col.biome) };
                     }
                 }
                 let mut growing = skin.0;
@@ -1069,6 +1097,11 @@ impl GameWorld {
                                 Some(r) if surface == mat::STONE => rock_at(y, r),
                                 _ => surface,
                             }
+                        } else if let Some(&Some((from, riser))) = banks.get(px * PAD + pz)
+                            && y >= from
+                        {
+                            // The face of a terrace's bank, down to the shelf below.
+                            riser.at(wx, y, wz, top, self.seed)
                         } else if let Some(r) = rock
                             && under == mat::STONE
                         {

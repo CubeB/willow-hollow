@@ -555,6 +555,17 @@ impl<'a> Sampler<'a> {
 
     /// The column at continent-local voxel `(lx, lz)`.
     pub fn column(&self, lx: i32, lz: i32) -> Column {
+        let mut column = self.unstepped(lx, lz);
+        // An old place's steep fields, stepped into terraces once the trails and
+        // buildings are down, well clear of both (see `farmland::terrace`).
+        if let Some(stepped) = crate::settlements::farmland::terrace::step(self.c, self.world_seed, lx, lz, &column) {
+            column.ground = stepped;
+        }
+        column
+    }
+
+    /// [`Self::column`] as it lies before any field is stepped into terraces.
+    pub(crate) fn unstepped(&self, lx: i32, lz: i32) -> Column {
         let c = self.c;
         let cs = c.cell_size();
         let p = vec2(lx as f32 + 0.5, lz as f32 + 0.5);

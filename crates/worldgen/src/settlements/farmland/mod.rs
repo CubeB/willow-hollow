@@ -10,6 +10,8 @@
 //!   a ragged hedge, a line of scrub and a stone or two out at the edge of the wild.
 //! - [`crops`]: what grows in the fields, as small plants that keep the farming year.
 //! - [`orchard`]: the fruit and olive trees standing in rows in an orchard.
+//! - [`terrace`]: an old place's steep fields stepped into shelves, each held up by a
+//!   low bank of drystone or turf.
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
@@ -19,6 +21,7 @@ pub mod crops;
 pub mod fields;
 pub mod influence;
 pub mod orchard;
+pub mod terrace;
 
 pub use fields::{Crop, Plot, plot};
 pub use influence::{Farm, Land, Use};

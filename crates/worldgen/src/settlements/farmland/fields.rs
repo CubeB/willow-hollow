@@ -127,6 +127,8 @@ pub struct Plot {
     /// The settlement whose field it is, by its index in `Network::settlements` and
     /// [`Land::farms`].
     pub owner: usize,
+    /// What holds its terraces up, if it is terraced (see [`super::terrace`]).
+    pub terrace: Option<super::terrace::Bank>,
 }
 
 /// Spacing of the seeded points the fields are cut about, in voxels: a field of an
@@ -361,7 +363,8 @@ pub fn plot(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Plot> {
             _ => crop,
         };
     }
-    Some(Plot { id: id | 1, crop, rows: along, managed, owner: farm_index })
+    let terrace = super::terrace::of(farm, crop, managed, slope);
+    Some(Plot { id: id | 1, crop, rows: along, managed, owner: farm_index, terrace })
 }
 
 /// The fields of a square of columns, worked out together for a chunk: the field each
