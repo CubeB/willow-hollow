@@ -163,9 +163,10 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
     let dow = weekday(day);
     let rest = dow == REST_DAY;
     let market = town.market_on(day);
-    // Whoever keeps a stall on market day works it, rest day or not; a seller with no
-    // market to keep keeps the house.
-    let keeps = if market { town.keeps(r.n) } else { None };
+    // Whoever keeps a stall on market day works it, rest day or not, and so does the
+    // keeper of a stall set out every day (#203); a seller with no stall to keep that day
+    // keeps the house.
+    let keeps = town.keeps_on(r.n, day);
     let role = match (r.role, keeps) {
         (Role::Child | Role::Elder, _) => r.role,
         (_, Some(_)) => Role::Seller,
@@ -191,13 +192,15 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
         taken.wells[i] += 1;
         Some(Want { place: town.wells[i], spot: around(town, town.wells[i], slot, Task::Fetch), start: f32::NEG_INFINITY, stay: 0.2 + 0.15 * d(k + 1) })
     };
-    // A stall to buy at, only on market day, when they are kept. Those at one at once
-    // stand in a few rows before it; those who come later take the places of those gone.
+    // A stall to buy at, when they are kept: any on market day, and on another day one of
+    // those set out every day, which a few go to (#203). Those at one at once stand in a
+    // few rows before it; those who come later take the places of those gone.
     let stall = |taken: &mut Taken, k: i32| -> Option<Want> {
-        if town.stalls.is_empty() || !market {
+        let open: Vec<usize> = (0..town.stalls.len()).filter(|&i| market || town.kept_daily(i)).collect();
+        if open.is_empty() || (!market && d(k + 40) > 0.25) {
             return None;
         }
-        let i = (d(k) * town.stalls.len() as f32) as usize % town.stalls.len();
+        let i = open[(d(k) * open.len() as f32) as usize % open.len()];
         let slot = taken.stalls[i] % 6;
         taken.stalls[i] += 1;
         Some(Want { place: town.stalls[i], spot: around(town, town.stalls[i], slot, Task::Talk), start: f32::NEG_INFINITY, stay: 0.35 + 0.3 * d(k + 1) })

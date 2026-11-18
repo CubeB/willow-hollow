@@ -80,9 +80,16 @@ fn market_day_fills_the_stalls_and_other_days_leave_them_bare() {
         assert!(busiest >= kept.len() + town.stalls.len(), "{}: at most {busiest} at {} stalls", town.name, town.stalls.len());
         let who = |hour: f32| -> Vec<usize> { (0..plans.len()).filter(|&n| !kept.contains(&n) && matches!(plans[n].now(hour), Now::At(i) if town.stalls.contains(&plans[n].stays[i].place))).collect() };
         assert_ne!(who(9.5), who(12.0), "{}: the same buyers all morning", town.name);
-        // On another day nobody goes to them, nor before the market opens or after it shuts.
+        // On another day nobody goes to them, nor before the market opens or after it shuts,
+        // but for the stalls set out every day, whose keepers keep them (#203).
         let other = plans_of(town, ordinary);
-        assert_eq!((0..48).map(|k| at_stalls(&other, k as f32 * 0.5)).max(), Some(0), "{}", town.name);
+        let at_plain = |plans: &[day::Plan], hour: f32| plans.iter().filter(|p| matches!(p.now(hour), Now::At(i) if town.stalls.iter().position(|&s| s == p.stays[i].place).is_some_and(|s| !town.kept_daily(s)))).count();
+        assert_eq!((0..48).map(|k| at_plain(&other, k as f32 * 0.5)).max(), Some(0), "{}", town.name);
+        for &n in kept.iter().filter(|&&n| town.kept_daily(town.keeps(n).unwrap())) {
+            let s = town.keeps(n).unwrap();
+            let Now::At(i) = other[n].now(12.0) else { panic!("{}: daily keeper {n} walking at noon", town.name) };
+            assert_eq!(other[n].stays[i].spot.at, town.behind[s].at, "{}: daily keeper {n} away", town.name);
+        }
         assert_eq!(at_stalls(&plans, 6.0) + at_stalls(&plans, 18.0), 0, "{}", town.name);
     }
     assert!(seen, "none of the towns looked at has a stall");

@@ -1050,7 +1050,11 @@ impl Town {
                 let along = (lane[i + 1] - lane[i - 1]).normalize_or(Vec2::X);
                 let out = along.perp() * side;
                 let foot = lane[i] + out * 3.0;
+                // Not out over the water beside a boardwalk (#203).
+                let boards = |p: Vec2| layout.boardwalks.deck_at(p.floor().as_ivec2()).is_some();
                 let clear = !self.walled(foot)
+                    && !boards(lane[i])
+                    && !boards(foot)
                     && ways.iter().all(|w| w.distance(foot) > 2.2)
                     && things.iter().all(|t| flat(t.1).distance(foot) > t.3.max_element() + 1.5)
                     && self.posts.iter().all(|q| flat(q.0).distance(foot) > EVERY * 0.6);
@@ -1098,6 +1102,18 @@ impl Town {
     /// The stall resident `n` keeps on market day, if any.
     pub fn keeps(&self, n: usize) -> Option<usize> {
         self.market.iter().position(|m| m.keeper == Some(n))
+    }
+
+    /// Whether stall `s` is one of those set out every day, not only on market day (#203).
+    pub fn kept_daily(&self, s: usize) -> bool {
+        self.market.get(s).is_some_and(|m| m.keeper.is_some() && worldgen::settlements::calendar::kept_daily(m.seed))
+    }
+
+    /// The stall resident `n` keeps on `day`: theirs on market day, and on another day
+    /// only if it is one of those set out every day.
+    pub fn keeps_on(&self, n: usize, day: i64) -> Option<usize> {
+        let market = self.market_on(day);
+        self.keeps(n).filter(|&s| market || self.kept_daily(s))
     }
 
     /// Everyone who lives there: a household for the beds of each home, each with a bed
