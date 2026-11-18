@@ -325,6 +325,9 @@ pub struct Network {
     /// tavern, on its boards, in continent-local voxels (see
     /// [`crate::settlements::special::Built::guest_beds_at`]).
     pub guest_beds: Vec<Vec3>,
+    /// The quays the boats of the settlements tie up at, the river runs between partners'
+    /// quays and the fishing grounds off the ports (#205).
+    pub waterways: crate::settlements::quay::Waterways,
 }
 
 impl Network {

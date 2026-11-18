@@ -11,6 +11,8 @@ pub mod place;
 pub mod tree;
 pub mod farmland;
 pub mod special;
+pub mod quay;
+pub mod travel;
 
 use glam::Vec2;
 
