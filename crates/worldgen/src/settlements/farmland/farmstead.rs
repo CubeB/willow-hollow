@@ -309,7 +309,7 @@ fn site(c: &Continent, seed: u32, (lo, hi): (IVec2, IVec2)) -> Option<i32> {
 /// Discs covering columns `lo` to `hi` (inclusive) with a column to spare beyond their
 /// corners: pieces about as long as they are wide along the longer side, so a long barn
 /// is not levelled as one wide round (as the village's buildings are).
-fn cover((lo, hi): (IVec2, IVec2)) -> Vec<(Vec2, f32)> {
+pub(super) fn cover((lo, hi): (IVec2, IVec2)) -> Vec<(Vec2, f32)> {
     let size = (hi - lo + IVec2::ONE).as_vec2();
     let long_x = size.x >= size.y;
     let (long, short) = if long_x { (size.x, size.y) } else { (size.y, size.x) };

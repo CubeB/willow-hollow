@@ -63,6 +63,8 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             farmland::farmstead::raise(&mut c, seed);
             // S8 (#207): the logging camps out in the woods, beyond the fields and barns.
             crate::settlements::logging::raise(&mut c, seed);
+            // The quarries, out in the land as the barns are (#203).
+            farmland::quarry::raise(&mut c, seed);
             Arc::new(c)
         })
         .clone();
@@ -874,7 +876,9 @@ impl GameWorld {
         let barn = |s: &&Cow<trails::Stamp>| run.continent.land.steads.iter().any(|b| b.stamped(s.lo, s.hi));
         // S8 (#207): nor from a logging camp's lean-to and log piles, which are worked.
         let camp = |s: &&Cow<trails::Stamp>| run.continent.trails.years.camps.iter().any(|k| k.stamped(s.lo, s.hi));
-        finder.stamps(found.iter().filter(near).filter(|s| !barn(s) && !camp(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        // Nor from a quarry's shed or its freshly worked faces (#203).
+        let quarry = |s: &&Cow<trails::Stamp>| run.continent.land.quarries.iter().any(|q| q.worked(s.lo, s.hi));
+        finder.stamps(found.iter().filter(near).filter(|s| !barn(s) && !camp(s) && !quarry(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
         finder.rims(&mut roots);
         // S8 (#207): nothing creeps over a logging camp's yard and its work, kept bare by

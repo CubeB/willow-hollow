@@ -168,6 +168,9 @@ pub struct Land {
     /// The barns out in the fields, each with the settlement it serves (see
     /// [`super::farmstead`]); raised once the land is worked out.
     pub steads: Vec<super::farmstead::Stead>,
+    /// The quarries, each with the settlement it serves (see [`super::quarry`]); cut once
+    /// the barns are raised (#203).
+    pub quarries: Vec<super::quarry::Quarry>,
 }
 
 impl Land {
@@ -464,7 +467,7 @@ pub fn build(c: &Continent, seed: u32) -> Land {
             }
         }
     }
-    Land { tiles, farms, steads: Vec::new() }
+    Land { tiles, farms, steads: Vec::new(), quarries: Vec::new() }
 }
 
 #[cfg(test)]

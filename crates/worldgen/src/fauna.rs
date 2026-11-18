@@ -459,8 +459,8 @@ pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
             if !matches!(f.crop, Crop::Pasture | Crop::Rough) || taken.iter().any(|t| t.distance(at) < m(40.0)) {
                 continue;
             }
-            // Nor about a barn out in the fields.
-            if c.land.steads.iter().any(|b| ((b.walls.0 + b.walls.1).as_vec2() * 0.5).distance(at) < m(20.0)) {
+            // Nor about a barn out in the fields, nor over a quarry (#203).
+            if c.land.steads.iter().any(|b| ((b.walls.0 + b.walls.1).as_vec2() * 0.5).distance(at) < m(20.0)) || c.land.quarries.iter().any(|q| q.distance(at) < half.length() + m(4.0)) {
                 continue;
             }
             let whole = [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)]

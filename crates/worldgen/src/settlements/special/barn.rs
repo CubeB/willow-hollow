@@ -9,6 +9,9 @@
 //!   of hay at its head, a loft of hay over them up a ladder, and a trough by the door.
 //! - A field shed: in poorer or drier country, a small shed for the tools and the sacks,
 //!   raised on stilts in the marsh and the rainforest.
+//! - A mason's shed, by a quarry (#203): the banker stones the stone is dressed on, each
+//!   with a stone half squared and the chisel and mallet laid by, a piece half carved,
+//!   the grindstone the chisels are kept sharp on and the tools on the wall.
 //!
 //! The walls, roof and floor are the region's, as the kit's rules choose them for a
 //! timber house (see [`super::frame::Look`]): weatherboard and thatch in the lowlands,
@@ -42,16 +45,19 @@ pub enum BarnKind {
     Byre,
     /// A small shed for the tools.
     Shed,
+    /// A mason's shed by a quarry, where the stone is dressed.
+    Mason,
 }
 
 impl BarnKind {
-    pub const ALL: [BarnKind; 3] = [BarnKind::Hay, BarnKind::Byre, BarnKind::Shed];
+    pub const ALL: [BarnKind; 4] = [BarnKind::Hay, BarnKind::Byre, BarnKind::Shed, BarnKind::Mason];
 
     pub fn word(self) -> &'static str {
         match self {
             BarnKind::Hay => "hay barn",
             BarnKind::Byre => "byre",
             BarnKind::Shed => "field shed",
+            BarnKind::Mason => "mason's shed",
         }
     }
 }
@@ -115,6 +121,7 @@ pub(crate) fn make(spec: &BarnSpec, pal: &Palette) -> (Barn, Vec<String>) {
         BarnKind::Hay => hay(f, spec),
         BarnKind::Byre => byre(f, spec, &mut stalls),
         BarnKind::Shed => shed(f),
+        BarnKind::Mason => mason(f),
     };
     (Barn { kind: spec.kind, building: built.building, stalls, uses: built.uses }, faults)
 }
@@ -351,6 +358,105 @@ fn shed(mut f: Frame) -> (super::Built, Vec<String>) {
     f.finish(Area { lo: b.lo, hi: b.hi }, fy)
 }
 
+/// A mason's tools hung on a rail along a wall, as [`tools`] hangs a farm's: a pair of
+/// chisels, a mallet, a square and a straightedge in turn, on a rail `len` columns long
+/// from column `from` at layer `y`, the wall's inner face at cell `face` across it.
+fn mason_tools(f: &mut Frame, along_x: bool, face: i32, inward: i32, from: i32, len: i32, y: i32) {
+    let (wood, iron, board) = (f.pal.wood, mat::IRON, f.pal.plank);
+    let yc = y * 4 + 3;
+    let mut put = |a0: i32, a1: i32, y0: i32, y1: i32, d: i32, v| {
+        let (c0, c1) = if inward > 0 { (face + d, face + d + 1) } else { (face - d - 1, face - d) };
+        if along_x {
+            f.bx(IVec3::new(a0, y0, c0), IVec3::new(a1, y1, c1), v);
+        } else {
+            f.bx(IVec3::new(c0, y0, a0), IVec3::new(c1, y1, a1), v);
+        }
+    };
+    put(from * 4, (from + len) * 4, yc, yc + 1, 0, wood);
+    for k in 0..len {
+        let a = from * 4 + 1 + k * 4;
+        match k % 4 {
+            // Two chisels, their blades down.
+            0 => {
+                for d in [0, 2] {
+                    put(a + d, a + d + 1, yc - 3, yc + 1, 1, wood);
+                    put(a + d, a + d + 1, yc - 6, yc - 3, 1, iron);
+                }
+            }
+            // A mallet, its round head down.
+            1 => {
+                put(a + 1, a + 2, yc - 3, yc + 1, 1, wood);
+                put(a, a + 3, yc - 6, yc - 3, 1, wood);
+                put(a, a + 3, yc - 6, yc - 3, 2, wood);
+            }
+            // A square of iron, hung by its corner.
+            2 => {
+                put(a, a + 1, yc - 6, yc + 1, 1, iron);
+                put(a, a + 4, yc - 6, yc - 5, 1, iron);
+            }
+            // A straightedge.
+            _ => put(a + 1, a + 2, yc - 10, yc + 2, 1, board),
+        }
+    }
+}
+
+/// A mason's shed by a quarry: two banker stones along the back wall, waist high, each
+/// with a block on it squared halfway and the rough of it still on top, a chisel and a
+/// mallet laid by and the chips swept off it into the corner; a piece half carved
+/// standing in the front corner, the grindstone and the tools on the wall. Its floor is
+/// flagged, and its door wide for a block on a barrow.
+fn mason(mut f: Frame) -> (super::Built, Vec<String>) {
+    f.look.floor = FloorKind::Flags;
+    let fy = 0;
+    let half = 4;
+    let b = Block::new((-5, -half), (4, half), fy, fy + 7);
+    let feet = b.feet();
+    f.shell(&b);
+    roof(&mut f, &b);
+    let dz = -1;
+    f.front_door(&b, dz, 3, 5);
+    f.door_leaf(&b, dz, 3, 5);
+    f.front_steps(&b, dz, 3, 1);
+    let (stone, dark, wood, iron) = (f.pal.stone, f.pal.stone_dark, f.pal.wood, mat::IRON);
+    // The bankers, two columns long each against the back wall, and what is on them.
+    for z0 in [-half + 1, half - 2] {
+        for z in z0..z0 + 2 {
+            f.put(IVec3::new(-4, feet, z), dark);
+            f.put(IVec3::new(-4, feet + 1, z), stone);
+        }
+        let (x, top, z) = (-4 * 4, (feet + 2) * 4, z0 * 4);
+        // The block, squared on its faces, the rough of it still standing on top.
+        f.bx(IVec3::new(x, top, z), IVec3::new(x + 3, top + 3, z + 4), stone);
+        f.bx(IVec3::new(x, top + 3, z + 1), IVec3::new(x + 2, top + 4, z + 4), dark);
+        // A chisel, its blade toward the block, and a mallet by it.
+        f.bx(IVec3::new(x + 1, top, z + 5), IVec3::new(x + 3, top + 1, z + 6), iron);
+        f.bx(IVec3::new(x + 3, top, z + 5), IVec3::new(x + 4, top + 1, z + 6), wood);
+        f.bx(IVec3::new(x, top, z + 6), IVec3::new(x + 2, top + 2, z + 8), wood);
+        f.bx(IVec3::new(x + 2, top, z + 7), IVec3::new(x + 4, top + 1, z + 8), wood);
+        f.uses.push((Use::Table, IVec3::new(-3, fy, z0)));
+    }
+    // The chips swept off the bankers into the corner between them.
+    for (k, (dx, dz)) in [(0, 0), (1, 1), (0, 2), (2, 0), (1, 3)].into_iter().enumerate() {
+        let q = IVec3::new(-4 * 4 + dx, feet * 4, -4 + dz);
+        let v = if k % 2 == 0 { mat::GRAVEL } else { dark };
+        f.bx(q, q + IVec3::new(1, 1 + (k % 2) as i32, 1), v);
+    }
+    // A piece half carved in the front corner: a rough block, a moulding cut along one
+    // side of its top and the rest still rough.
+    let corner = IVec3::new(3, feet, half - 1);
+    f.put(corner, dark);
+    let (cx, cy, cz) = (corner.x * 4, (feet + 1) * 4, corner.z * 4);
+    f.bx(IVec3::new(cx, cy, cz), IVec3::new(cx + 4, cy + 1, cz + 4), stone);
+    f.bx(IVec3::new(cx + 1, cy + 1, cz), IVec3::new(cx + 3, cy + 3, cz + 2), stone);
+    f.bx(IVec3::new(cx, cy + 1, cz + 2), IVec3::new(cx + 4, cy + 3, cz + 4), dark);
+    // The grindstone, and the tools on the +Z wall.
+    f.fit(Fitting::Grindstone, IVec3::new(-1, feet, -half + 1), IVec3::NEG_X, false);
+    mason_tools(&mut f, true, half * 4, -1, -1, 4, feet + 3);
+    f.window(IVec2::new(0, b.lo.y), feet + 3, 2, 1, IVec3::NEG_Z);
+    f.window(IVec2::new(-2, b.hi.y), feet + 3, 2, 1, IVec3::Z);
+    f.finish(Area { lo: b.lo, hi: b.hi }, fy)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -420,6 +526,10 @@ mod tests {
                 BarnKind::Byre => assert!(barn.stalls.len() >= 2, "{spec:?}"),
                 BarnKind::Hay => assert!(has(mat::HAY), "{spec:?}"),
                 BarnKind::Shed => assert!(barn.building.fine.iter().any(|b| b.voxel == mat::IRON), "{spec:?}: no tools"),
+                BarnKind::Mason => {
+                    assert!(barn.building.fine.iter().any(|b| b.voxel == mat::IRON), "{spec:?}: no chisels");
+                    assert_eq!(barn.uses.iter().filter(|u| u.0 == Use::Table).count(), 2, "{spec:?}: not two bankers");
+                }
             }
             // The same spec builds the same barn.
             assert!(build(&spec, &palette(spec.region, spec.seed)).building == barn.building);

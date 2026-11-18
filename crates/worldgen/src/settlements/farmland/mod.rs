@@ -29,6 +29,7 @@ pub mod fields;
 pub mod influence;
 pub mod lanes;
 pub mod orchard;
+pub mod quarry;
 pub mod rotation;
 pub mod terrace;
 
