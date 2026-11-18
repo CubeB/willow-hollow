@@ -729,10 +729,9 @@ impl GameWorld {
         }
         found.sort_unstable_by_key(|s| (s.lo.y, s.lo.x, s.lo.z, s.hi.y, s.hi.x, s.hi.z, s.voxels.len()));
         let origin = IVec3::new(run.macro_origin.0, 0, run.macro_origin.1);
-        let mut stamped: HashMap<IVec3, Voxel> = HashMap::new();
-        for s in &found {
-            stamped.extend(s.voxels.iter().map(|&(p, v)| (p + origin, v)));
-        }
+        // Looked up in each stamp's own voxels: a settlement's buildings, thousands of
+        // voxels each, would otherwise all be filed afresh for every chunk near.
+        let stamped = climber::Built::new(found.iter().map(|s| (s.voxels.as_slice(), origin, s.lo, s.hi)));
         let world = climber::Surroundings::new(lib, &self.materials, &placements, &sampler, run.macro_origin, &stamped);
         let (mox, moz) = run.macro_origin;
         let edge = REACH + 2;
@@ -749,7 +748,13 @@ impl GameWorld {
         };
         let mut roots = Vec::new();
         finder.trees(&mut roots);
-        finder.stamps(found.iter().map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        // A stamp's roots stand beside its voxels, so only those near where roots are kept
+        // can give any.
+        let near = |s: &&&crate::trails::Stamp| {
+            let (lo, hi) = (s.lo + origin, s.hi + origin);
+            hi.x >= finder.x0 - 2 && lo.x <= finder.x1 + 2 && hi.z >= finder.z0 - 2 && lo.z <= finder.z1 + 2
+        };
+        finder.stamps(found.iter().filter(near).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
         finder.rims(&mut roots);
         let before = plants.len();

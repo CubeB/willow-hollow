@@ -1314,7 +1314,7 @@ pub struct Surroundings<'a> {
     pub sampler: &'a Sampler<'a>,
     /// Where continent-local coordinates start, in world voxels.
     pub origin: (i32, i32),
-    pub stamps: &'a HashMap<IVec3, Voxel>,
+    pub stamps: &'a Built<'a>,
     /// Columns already read: reading one is the slow part of a voxel query.
     columns: RefCell<HashMap<(i32, i32), Column>>,
     /// The voxels of each placement's roots (by its index), worked out the first time
@@ -1326,6 +1326,57 @@ pub struct Surroundings<'a> {
     buckets: Buckets,
 }
 
+/// Built voxels for plants to look at: the voxels of stamps laid one after another, the
+/// later's where two have one at the same place, as filing them all in a map in that
+/// order would leave it, but looked up in each stamp's own list, not filed again for
+/// every chunk that asks.
+pub struct Built<'a> {
+    /// Each stamp's voxels, the offset from its coordinates to the world's, and its
+    /// bounds in the world's.
+    stamps: Vec<(&'a [(IVec3, Voxel)], IVec3, IVec3, IVec3)>,
+    /// Which stamps reach each square of [`BUCKET`] voxels, in the order laid.
+    buckets: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl<'a> Built<'a> {
+    /// The stamps given in the order they are laid: each its voxels, in (y, z, x) order
+    /// as the trails keep them (any two at one place in the order written), the offset
+    /// into world voxels, and its bounds in its own voxels.
+    pub fn new(stamps: impl Iterator<Item = (&'a [(IVec3, Voxel)], IVec3, IVec3, IVec3)>) -> Self {
+        let mut out = Built { stamps: Vec::new(), buckets: HashMap::new() };
+        for (voxels, offset, lo, hi) in stamps {
+            let (lo, hi) = (lo + offset, hi + offset);
+            let i = out.stamps.len() as u32;
+            out.stamps.push((voxels, offset, lo, hi));
+            for bz in lo.z.div_euclid(BUCKET)..=hi.z.div_euclid(BUCKET) {
+                for bx in lo.x.div_euclid(BUCKET)..=hi.x.div_euclid(BUCKET) {
+                    out.buckets.entry((bx, bz)).or_default().push(i);
+                }
+            }
+        }
+        out
+    }
+
+    /// The built voxel at `p`, in world voxels, if any.
+    pub fn get(&self, p: IVec3) -> Option<Voxel> {
+        let near = self.buckets.get(&(p.x.div_euclid(BUCKET), p.z.div_euclid(BUCKET)))?;
+        for &i in near.iter().rev() {
+            let (voxels, offset, lo, hi) = self.stamps[i as usize];
+            if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                continue;
+            }
+            let q = p - offset;
+            let key = (q.y, q.z, q.x);
+            // The last written at that place.
+            let after = voxels.partition_point(|&(v, _)| (v.y, v.z, v.x) <= key);
+            if after > 0 && voxels[after - 1].0 == q {
+                return Some(voxels[after - 1].1);
+            }
+        }
+        None
+    }
+}
+
 /// Placement indices with the heights they span, by square.
 type Buckets = HashMap<(i32, i32), Vec<(u32, i32, i32)>>;
 
@@ -1333,7 +1384,7 @@ type Buckets = HashMap<(i32, i32), Vec<(u32, i32, i32)>>;
 const BUCKET: i32 = 8;
 
 impl<'a> Surroundings<'a> {
-    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a HashMap<IVec3, Voxel>) -> Self {
+    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a Built<'a>) -> Self {
         let mut buckets = Buckets::new();
         for (i, p) in placements.iter().enumerate() {
             let reach = p.reach(lib);
@@ -1355,7 +1406,7 @@ impl<'a> Surroundings<'a> {
 impl Voxels for Surroundings<'_> {
     fn voxel(&self, p: IVec3) -> Voxel {
         // Built things go last in the world and replace whatever was there, air included.
-        if let Some(&v) = self.stamps.get(&p) {
+        if let Some(v) = self.stamps.get(p) {
             return v;
         }
         let mut leaf = None;
