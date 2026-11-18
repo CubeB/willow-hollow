@@ -1727,19 +1727,49 @@ impl<'a> Town<'a> {
     }
 
     /// A home's garden: its bed dug over in ridges and furrows with greens growing along
-    /// the ridges, and wattle hurdles round it but on the side toward the house.
+    /// the ridges, a row of herbs along the back with a fruit bush at its ends, and
+    /// wattle hurdles round it but on the side toward the house (#206). Where the
+    /// household keeps hens, their coop stands at the garden's far end, its run fenced
+    /// from the back hurdle to the house, and the bed is what is left: the hens keep to
+    /// that run (`fauna::kept_about` finds the coop in the garden).
     fn garden(&mut self, net: &mut Network, (lo, hi): (IVec2, IVec2), origin: IVec3, t: u32, seed: u32) {
         let mut voxels = Vec::new();
         let mut fine = Vec::new();
         let mut foot = Vec::new();
         let top = origin.y - 1;
         let crop = if unit(seed ^ 0xc409) < 0.5 { mat::TUFT_LUSH } else { mat::TUFT };
-        for z in lo.y..=hi.y {
+        // The hens' coop, turned to lie along the garden, where it is deep enough to keep
+        // a row of bed besides. A household that lets its coop fall in keeps no hens.
+        let mut bed_hi = hi.y;
+        let coop = Fitting::ChickenCoop;
+        let (a, b) = coop.room(IVec3::ZERO, 1);
+        if hi.y - lo.y + 1 > b.z - a.z && hi.x - lo.x + 1 >= b.x - a.x && unit(seed ^ 0x4e75) < 0.4 {
+            let f = self.fitting(coop, hash2(seed ^ 0x4e76, 1, 2));
+            if !f.decayed {
+                let at = IVec3::new(lo.x - a.x, 0, hi.y + 1 - b.z);
+                self.hold(net, &f, origin + rotate(at, t), (1 + t) & 3, Vec::new());
+                bed_hi = hi.y - (b.z - a.z);
+            }
+        }
+        // The herbs along the back, a few of each kind together, and the bushes'
+        // fruit: red currants or green gooseberries.
+        let herbs = hash2(seed ^ 0x4e77, 3, 4);
+        let berry = if unit(seed ^ 0x4e78) < 0.6 { mat::HOLLY_BERRY } else { mat::IVY_BERRY_GREEN };
+        for z in lo.y..=bed_hi {
             for x in lo.x..=hi.x {
                 let w = world(origin, IVec2::new(x, z), t);
                 let ridge = (x - lo.x) % 2 == 0;
                 voxels.push((IVec3::new(w.x, top, w.y), if ridge { mat::DIRT } else { mat::MUD }));
                 foot.push(w);
+                let at = IVec3::new(w.x * CELLS, (top + 1) * CELLS, w.y * CELLS);
+                if x == lo.x {
+                    if (z == lo.y || z == bed_hi) && bed_hi - lo.y >= 2 {
+                        fruit_bush(&mut fine, at, berry, hash2(seed ^ 0x4e79, x, z));
+                    } else {
+                        herb(&mut fine, at, (herbs.wrapping_add(((z - lo.y) / 2) as u32) % 4) as usize);
+                    }
+                    continue;
+                }
                 // Greens along the ridges, a few gone to the pot already.
                 if ridge && (z - lo.y) % 2 == 0 && unit(hash2(seed ^ 0x9e3, x, z)) < 0.8 {
                     let (cx, cy, cz) = (w.x * CELLS, (top + 1) * CELLS, w.y * CELLS);
@@ -1772,6 +1802,46 @@ impl<'a> Town<'a> {
             let s = hash2(seed ^ 0x40d1, n as i32, 1);
             let f = self.fitting(Fitting::Hurdle, s);
             self.hold(net, &f, origin + rotate(at, t), (ft + t) & 3, Vec::new());
+        }
+
+        /// A box of plant `v` from `lo` to `hi` cells of the column whose corner cell is
+        /// `at`, swaying at its top.
+        fn part(fine: &mut Vec<PlantBox>, at: IVec3, lo: [i32; 3], hi: [i32; 3], v: Voxel, season: u8) {
+            let (lo, hi) = (at + IVec3::from_array(lo), at + IVec3::from_array(hi));
+            fine.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), voxel: v, sway_lo: false, sway_hi: true, thin: 0, season, flap: 0 });
+        }
+
+        /// A clump of herbs on the column whose corner cell is `at`, each kind one even
+        /// colour: lavender in flower over its grey leaves, sage, parsley, or camomile
+        /// with its white flowers on top.
+        fn herb(fine: &mut Vec<PlantBox>, at: IVec3, kind: usize) {
+            match kind {
+                0 => {
+                    part(fine, at, [0, 0, 0], [3, 3, 3], mat::LEAF_GREY, 0);
+                    part(fine, at, [1, 3, 1], [2, 5, 2], mat::FLOWER_PURPLE, 0);
+                }
+                1 => part(fine, at, [0, 0, 1], [3, 2, 4], mat::LEAF_GREY, 0),
+                2 => part(fine, at, [1, 0, 0], [4, 3, 3], mat::TUFT_LUSH, 0),
+                _ => {
+                    part(fine, at, [0, 0, 0], [3, 2, 3], mat::MEADOW_TUFT, 0);
+                    part(fine, at, [0, 2, 0], [3, 3, 3], mat::FLOWER_WHITE, 0);
+                }
+            }
+        }
+
+        /// A fruit bush on the column whose corner cell is `at`: a round head of leaves
+        /// on a short stem, its berries out on its sides through the summer (they keep
+        /// the orchards' fruiting season).
+        fn fruit_bush(fine: &mut Vec<PlantBox>, at: IVec3, berry: Voxel, h: u32) {
+            use super::farmland::orchard::FRUIT;
+            part(fine, at, [1, 0, 1], [3, 1, 3], mat::STEM, 0);
+            part(fine, at, [0, 1, 0], [4, 6, 4], mat::ORCHARD_LEAF, 0);
+            part(fine, at, [1, 6, 1], [3, 7, 3], mat::ORCHARD_LEAF, 0);
+            for (i, (lo, hi)) in [([4, 2, 1], [5, 3, 2]), ([-1, 3, 2], [0, 4, 3]), ([2, 2, 4], [3, 3, 5]), ([1, 4, -1], [2, 5, 0]), ([4, 4, 2], [5, 5, 3])].into_iter().enumerate() {
+                if (h >> i) & 3 != 0 {
+                    part(fine, at, lo, hi, berry, FRUIT);
+                }
+            }
         }
     }
 

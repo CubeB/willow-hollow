@@ -366,6 +366,25 @@ pub struct Kept {
     pub gate_toward: Vec2,
 }
 
+/// The floor of the run of a hen coop standing at continent-local `at` turned `turns`
+/// (as `Layout::things` has it), from its first corner to its second in voxels, if it has
+/// a run: the hens' own ground.
+pub fn hen_run(at: IVec3, turns: u32) -> Option<(Vec2, Vec2)> {
+    use crate::features::{
+        fittings::{self, Fitting, Hook},
+        landmarks::Palette,
+    };
+    // The run is the same whatever the coop is built of.
+    let f = fittings::build(Fitting::ChickenCoop, &Palette::of(Biome::Deciduous), 0, false).place(at, turns);
+    f.hooks.iter().find_map(|h| match *h {
+        Hook::Pen(a, b) => {
+            let (a, b) = (a.as_vec3() / voxel::mesh::CELLS as f32, b.as_vec3() / voxel::mesh::CELLS as f32);
+            Some((Vec2::new(a.x.min(b.x), a.z.min(b.z)), Vec2::new(a.x.max(b.x), a.z.max(b.z))))
+        }
+        _ => None,
+    })
+}
+
 /// The animals settlement `k` of continent `c` keeps (see [`kept_by`]), and where: hens
 /// (or ducks or geese by water) in the yards with a coop, pigs in some others, and on a
 /// pasture or two (more for a bigger place) a flock or a herd of what grazes there, and
@@ -411,6 +430,21 @@ pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
         }
         let door = Vec2::new(p.door.x as f32 + 0.5, p.door.z as f32 + 0.5);
         out.push(Kept { key: key(n as u32), kind, count, middle: origin + (a + b) * 0.5, half: (b - a) * 0.5, gate_toward: origin + door });
+    }
+    // Hens kept in a garden (#64, #206): the coop at its far end, the hens in the run
+    // fenced against the house, as `layout`'s garden sets them out.
+    for (n, p) in net.plots[layout.plots.clone()].iter().enumerate() {
+        let Some((glo, ghi)) = p.garden else { continue };
+        for &(f, at, turns) in &layout.things {
+            if f != crate::features::fittings::Fitting::ChickenCoop || at.x < glo.x || at.x > ghi.x || at.z < glo.y || at.z > ghi.y {
+                continue;
+            }
+            let Some((a, b)) = hen_run(at, turns) else { continue };
+            let door = Vec2::new(p.door.x as f32 + 0.5, p.door.z as f32 + 0.5);
+            let roll = unit(hash2(seed ^ 0x79a3, at.x, at.z));
+            let count = 2 + (roll * 1000.0) as usize % 3;
+            out.push(Kept { key: key(0x800 | n as u32), kind: Kind::Chicken, count, middle: origin + (a + b) * 0.5, half: (b - a) * 0.5, gate_toward: origin + door });
+        }
     }
     // The pastures: squares wholly within one grazed field, round the place.
     let grazers: Vec<Kind> = kinds.iter().copied().filter(|k| matches!(k, Kind::Sheep | Kind::Goat | Kind::Cattle | Kind::Ox | Kind::Pony | Kind::Donkey | Kind::Reindeer)).collect();
@@ -774,6 +808,33 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A household's hens in its garden are kept to the run of their coop there, and the
+    /// run lies inside the garden's hurdles (#206).
+    #[test]
+    fn hens_kept_in_a_garden_keep_to_its_run() {
+        use crate::{continent::SimConfig, features::fittings::Fitting};
+        let w = GameWorld::with_config(3, SimConfig { size: 256 });
+        let c = w.continent(0, 0);
+        let mut runs = 0;
+        for (k, layout) in c.trails.layouts.iter().enumerate() {
+            let kept = kept_about(&c, w.seed(), k);
+            for p in &c.trails.plots[layout.plots.clone()] {
+                let Some((glo, ghi)) = p.garden else { continue };
+                for &(f, at, turns) in &layout.things {
+                    if f != Fitting::ChickenCoop || !(glo.x..=ghi.x).contains(&at.x) || !(glo.y..=ghi.y).contains(&at.z) {
+                        continue;
+                    }
+                    let (a, b) = hen_run(at, turns).expect("a coop with a run");
+                    assert!(a.cmpge(glo.as_vec2() - 0.01).all() && b.cmple(ghi.as_vec2() + 1.01).all(), "the run {a}..{b} is out of the garden {glo}..{ghi}");
+                    let hens = kept.iter().any(|h| h.kind == Kind::Chicken && (h.middle - (a + b) * 0.5).length() < 0.01 && (h.half - (b - a) * 0.5).length() < 0.01);
+                    assert!(hens, "no hens in the run at {a}..{b}");
+                    runs += 1;
+                }
+            }
+        }
+        assert!(runs > 0, "no garden keeps hens");
     }
 
     #[test]
