@@ -1,15 +1,19 @@
+mod animals;
 mod arena;
 mod audio;
 mod aurora;
 mod camera;
 mod camp;
 mod character;
+mod chimneys;
 mod commands;
 mod crows;
 mod editor;
 mod env;
 mod fallen;
+mod farbuilt;
 mod farview;
+mod figure;
 mod gfx;
 mod impostors;
 mod insects;
@@ -19,9 +23,11 @@ mod lod;
 mod minimap;
 mod overlay;
 mod particles;
+mod people;
 mod placed;
 mod player;
 mod profile;
+mod reading;
 mod render;
 mod season;
 mod starlings;
@@ -29,7 +35,9 @@ mod settings;
 mod weather;
 mod terrain;
 mod threads;
+mod travellers;
 mod vehicles;
+mod villagers;
 
 use std::{
     collections::HashSet,
@@ -54,6 +62,7 @@ use winit::{
 use worldgen::{
     World,
     scale::{OLD_VOXEL, m, m64},
+    settlements::years,
     world::GameWorld,
 };
 
@@ -94,11 +103,19 @@ struct Options {
     figure_rise: f32,
     /// How far the figure on a screenshot has swung its furled glider up from its back.
     figure_furl: f32,
+    /// The player looks as this roll makes them, for this run only (#204).
+    figure_look: Option<figure::Roll>,
+    /// Show the figure screen on a screenshot, the figure turned this many degrees.
+    shot_figure_screen: Option<f32>,
+    /// Generated people standing in rows before a screenshot's camera.
+    shot_people: Option<people::Gallery>,
     look: (f32, f32),
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
     /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
     date: Option<f32>,
+    /// The world's year, from 0 for its first, if not the one left off in.
+    year: Option<u32>,
     /// Weather to hold for this run (clear, overcast, rain, snow, storm, fog).
     weather: Option<weather::Forced>,
     /// Start from the spawn point, ignoring any saved position.
@@ -143,13 +160,27 @@ struct Options {
     shot_hotbar: bool,
     /// A line of words to show along the foot of a screenshot, as a prompt is shown.
     shot_prompt: Option<String>,
+    /// Greet whoever of a settlement is nearest the figure (or the camera) on a
+    /// screenshot (the `greet` command): they turn to it, and what they say is the prompt.
+    shot_greet: bool,
+    /// Read the board the camera looks at on a screenshot (`--read`, or the `read`
+    /// command): its page is shown over the view (#207).
+    shot_read: bool,
     /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
     /// How far ahead that camp is made, in metres.
     camp_ahead: f64,
+    /// Chimneys set out ahead of the camera, from `camp_ahead` metres on, to see their
+    /// smoke where there is no village (`--chimneys`).
+    shot_chimneys: usize,
     /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
+    /// Stand a settlement building of the country (a tavern unless another is named) this
+    /// many metres ahead of the camera, its door toward it, before a screenshot or a run.
+    tavern: Option<(worldgen::features::designs::Special, f64)>,
+    /// With a tavern: on a screenshot, standing at the foot of its first guest bed.
+    bed: bool,
     /// Hold a lit lantern on a screenshot.
     shot_lantern: bool,
     /// Set crows out on a screenshot: feeding on the ground, perched, flying, landing
@@ -157,6 +188,8 @@ struct Options {
     shot_crows: Option<String>,
     /// How far ahead that point is, in metres.
     crows_ahead: f64,
+    /// Animals on a screenshot: a gallery, a herd, pens or the wild herds about.
+    shot_animals: animals::Shot,
     /// Pick every flower within this many metres of the camera before a screenshot.
     picked: Option<f32>,
     /// Show the journal's window on a screenshot, open at this page, written up as if
@@ -182,9 +215,13 @@ impl Default for Options {
             figure_bank: 0.0,
             figure_rise: -1.5,
             figure_furl: 0.0,
+            figure_look: None,
+            shot_figure_screen: None,
+            shot_people: None,
             look: (35.0, -18.0),
             time: None,
             date: None,
+            year: None,
             weather: None,
             fresh: false,
             murmuration: false,
@@ -207,12 +244,18 @@ impl Default for Options {
             shot_pack: false,
             shot_hotbar: false,
             shot_prompt: None,
+            shot_greet: false,
+            shot_read: false,
             shot_camp: None,
             camp_ahead: CAMP_AHEAD,
+            shot_chimneys: 0,
             rest: false,
+            tavern: None,
+            bed: false,
             shot_lantern: false,
             shot_crows: None,
             crows_ahead: 12.0,
+            shot_animals: animals::Shot::default(),
             picked: None,
             shot_journal: None,
             journal_fill: 16,
@@ -238,11 +281,25 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --figure-bank DEG     with --figure-glide, the wing banked DEG degrees, right wing down
   --figure-rise V       with --figure-glide, rising V metres a second (default -1.5)
   --figure-furl T       the figure has its furled glider T of the way up from its back (0-1)
+  --figure-look SEED[,REGION[,AGE]]  the player looks as the figure screen's roll SEED
+                        makes them (from REGION, a child, adult or elder), for this run only
+  --figure-screen [DEG] on a screenshot, the figure screen open, the figure turned DEG
+                        degrees from facing the view (default -30)
+  --people N            on a screenshot, N generated people in rows ahead, facing the camera:
+                        a household first, then every trade and age
+  --people-region R     their region (temperate, upland, northern, alpine, desert, wetland,
+                        rainforest, oldgrowth); the camera's own if not given
+  --people-ahead M      the first row M metres ahead (default 3.5)
+  --people-stride V     caught mid stride at V metres a second (default standing)
+  --people-turn DEG     turned DEG degrees from facing the camera (90 shows them side on)
+  --people-age A        all child, adult or elder after the household
+  --people-far          drawn as they are from far off, in a few boxes each
   --look YAW,PITCH      camera direction in degrees
   --time H              time of day, 0-24
   --season S            spring, summer, autumn or winter
   --date F              time of year, 0-1 from the spring equinox, or a month (may, october):
                         each flower has its own months
+  --year N              the world's year, counting its first as 0 (the journal's first year)
   --weather W           hold the weather: clear, fair, broken, overcast, rain, snow, storm or fog
   --radius N            chunk load radius
   --no-audio            run without sound
@@ -257,12 +314,45 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         things set down
   --camp-ahead M        make that camp M metres ahead instead (default 4.2), to see its
                         smoke from far off
+  --chimneys N          N chimneys smoking ahead, four to a row from --camp-ahead metres
+                        on, as if a village stood there: to see chimney smoke at the hour
+                        --time gives (give --ambient 30 or so on a screenshot for a full
+                        column)
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
+  --tavern [M]          stand a tavern of the country M metres ahead (default 3), its
+                        door toward the camera, before a screenshot or a run. With
+                        --rest, the night in its first guest bed: in a run, to bed at
+                        once; on a screenshot, waking in it, the hours slept gone by
+  --bed                 with --tavern, on a screenshot: standing at the foot of that bed,
+                        with what E would do there (--minimap shows the hour)
+  --stand KIND [M]      as --tavern, any settlement building: smithy, sawmill, granary,
+                        market-hall, guild-house or boat-shed
   --lantern             hold a lit lantern on a screenshot (in the figure's hand with --third)
   --crows HOW           set crows out on a screenshot near a point ahead: ground, perch,
                         tree, rock, fly, land, roost or any (they never take fright)
   --crows-ahead M       that point M metres ahead (default 12)
+  --animals WHICH       on a screenshot, a gallery of animals standing in rows ahead: all,
+                        kept, wild, or a kind (sheep, wild-boar, hens...) shown as a male,
+                        females and young
+  --animals-ahead M     the first row M metres ahead (default 4)
+  --animals-turn DEG    turned DEG degrees from side on (90 faces them away)
+  --animals-pose P      stand, walk, trot, run, graze or alert
+  --animals-far         drawn as from far off, in a few boxes each
+  --herd KIND           on a screenshot, a herd of KIND ahead, living as a herd does (on a
+                        still, herds take no notice of the camera unless it walks)
+  --herd-n N            N of them (default as many as a herd of them has)
+  --herd-ahead M        M metres ahead (default 30)
+  --herd-at X,Z         at voxel column X,Z instead
+  --herd-wait S         S seconds of their life before the shot (default 6); VOXEL_CLOCK
+                        adds to it, for motion between two stills
+  --herd-walk M         the player walks M metres along the view meanwhile, and the herds
+                        see them come; the shot is taken from where they stop, and where
+                        the herds are goes to the log each second
+  --herd-far            every animal drawn as from far off
+  --pens                on a screenshot, a pen of each kept kind ahead, fenced
+  --pens-ahead M        the nearest pens M metres ahead (default 12)
+  --wild                on a screenshot, the wild herds of the land about
   --picked M            pick every flower within M metres before a screenshot
   --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
                         written up as if after a walk round the places near the camera
@@ -280,7 +370,7 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --aurora              the northern lights out tonight, wherever the camera is
   --command LINE        run a console command at the start (` or / opens the console in
                         game; 'help' lists the commands); give it as often as you like.
-                        On a screenshot: weather, time, date, season, tp, spawn camp,
+                        On a screenshot: weather, time, date, season, year, tp, spawn camp,
                         murmuration, crows and boat, and aurora
   --console             show the console on a screenshot, with what --command said; in
                         a run, start with it open
@@ -295,11 +385,14 @@ Options hold for one run. Settings and your place in each world are saved betwee
 The structure editor, for looking at the landmarks and drawing your own:
   --structures          open it instead of the game
   --structure WHAT      start at a kind (shrine), a saved one (shrine/high-gate), landing,
-                        lantern/N or signpost
+                        lantern/N, signpost, props (props/furniture, props/trades,
+                        props/yard), or a home of the house kit
+                        (house/REGION/hut, timber or stone)
   --variant N           the generator's variant N
   --place N             seen in place N of its list (0 to 8)
   --layer L             cut away everything above layer L
   --copy                start drawing on a copy of the variant
+  --furnished           a home of the house kit furnished, as its variant's household keeps it
   --orbit YAW,PITCH[,D] the view, in degrees, D voxels off
   --hover X,Y           on a screenshot, as if the cursor were at X,Y
   --structures-dir DIR  read and save structures in DIR, not the repository's
@@ -345,6 +438,23 @@ fn parse_args() -> Result<Options> {
             "--figure-bank" => o.figure_bank = value()?.parse()?,
             "--figure-rise" => o.figure_rise = value()?.parse()?,
             "--figure-furl" => o.figure_furl = value()?.parse()?,
+            "--figure-look" => o.figure_look = Some(figure::Roll::from_flag(&value()?)?),
+            "--figure-screen" => o.shot_figure_screen = Some(args.next_if(|v| !v.starts_with("--")).map_or(Ok(-30.0), |d| d.parse::<f32>())?),
+            "--people" => o.shot_people.get_or_insert_default().count = value()?.parse::<usize>()?.min(60),
+            "--people-region" => {
+                let word = value()?;
+                let region = worldgen::settlements::Region::ALL.into_iter().find(|r| r.word() == word);
+                o.shot_people.get_or_insert_default().region = Some(region.ok_or_else(|| anyhow::anyhow!("unknown region {word}"))?);
+            }
+            "--people-ahead" => o.shot_people.get_or_insert_default().ahead = value()?.parse::<f64>()?.clamp(0.5, 300.0),
+            "--people-stride" => o.shot_people.get_or_insert_default().stride = value()?.parse::<f32>()?.clamp(0.0, 8.0),
+            "--people-turn" => o.shot_people.get_or_insert_default().turn = value()?.parse::<f32>()?.to_radians(),
+            "--people-age" => {
+                let word = value()?;
+                let age = [people::Age::Child, people::Age::Adult, people::Age::Elder].into_iter().find(|a| a.word() == word);
+                o.shot_people.get_or_insert_default().only = Some(age.ok_or_else(|| anyhow::anyhow!("unknown age {word}: child, adult or elder"))?);
+            }
+            "--people-far" => o.shot_people.get_or_insert_default().far = true,
             "--over" => {
                 let v = list::<f64>(&value()?, ',', 3)?;
                 o.over = Some((v[0] as i32, v[1] as i32, v[2]));
@@ -365,6 +475,7 @@ fn parse_args() -> Result<Options> {
                 };
                 o.date = Some(date.rem_euclid(1.0));
             }
+            "--year" => o.year = Some(value()?.parse().map_err(|_| anyhow::anyhow!("--year takes a whole number from 0"))?),
             "--weather" => {
                 let name = value()?;
                 o.weather = Some(weather::Forced::named(&name).ok_or_else(|| anyhow::anyhow!("unknown weather {name}"))?);
@@ -382,7 +493,20 @@ fn parse_args() -> Result<Options> {
             "--hotbar" => o.shot_hotbar = true,
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
+            "--tavern" | "--stand" => {
+                use worldgen::features::designs::Special;
+                let which = if a == "--stand" {
+                    let word = value()?;
+                    Special::ALL.into_iter().find(|s| s.word() == word).ok_or_else(|| anyhow::anyhow!("unknown building '{word}': {}", Special::ALL.map(|s| s.word()).join(", ")))?
+                } else {
+                    Special::Tavern
+                };
+                let far = args.next_if(|v| !v.starts_with("--"));
+                o.tavern = Some((which, far.map_or(Ok(3.0), |m| m.parse::<f64>())?.clamp(1.0, 200.0)));
+            }
+            "--bed" => o.bed = true,
             "--lantern" => o.shot_lantern = true,
+            "--read" => o.shot_read = true,
             "--crows" => {
                 let how = value()?;
                 if !commands::CROWS.contains(&how.as_str()) {
@@ -392,6 +516,7 @@ fn parse_args() -> Result<Options> {
             }
             "--crows-ahead" => o.crows_ahead = value()?.parse::<f64>()?.clamp(0.0, 500.0),
             "--camp-ahead" => o.camp_ahead = value()?.parse::<f64>()?.clamp(2.0, 1000.0),
+            "--chimneys" => o.shot_chimneys = value()?.parse::<usize>()?.min(64),
             "--camp" => {
                 let word = value()?;
                 o.shot_camp = Some(commands::fire_state(&word).ok_or_else(|| anyhow::anyhow!("unknown fire '{word}': laid, lit, out or burnt"))?);
@@ -436,6 +561,7 @@ fn parse_args() -> Result<Options> {
             "--place" => o.structures.get_or_insert_default().place = Some(value()?.parse()?),
             "--layer" => o.structures.get_or_insert_default().layer = Some(value()?.parse()?),
             "--copy" => o.structures.get_or_insert_default().copy = true,
+            "--furnished" => o.structures.get_or_insert_default().furnished = true,
             "--structures-dir" => o.structures.get_or_insert_default().dir = Some(value()?.into()),
             "--orbit" => {
                 let v: Vec<f32> = value()?.split(',').map(|w| w.trim().parse()).collect::<Result<_, _>>()?;
@@ -450,6 +576,7 @@ fn parse_args() -> Result<Options> {
                 println!("{USAGE}");
                 std::process::exit(0);
             }
+            flag if animals::Shot::takes(flag) => o.shot_animals.flag(flag, &mut value)?,
             other => bail!("unknown argument '{other}'\n{USAGE}"),
         }
     }
@@ -511,6 +638,10 @@ const BUTTERFLY_REACH: f32 = 12.0;
 /// How close a boat must be to climb aboard.
 const BOARD_REACH: f64 = m64(4.8);
 
+/// How far round each settlement the wayfarers mark (#207) the land is shown on the map
+/// as seen, in metres: enough for its houses and green.
+const CHARTED_LAND: f32 = 160.0;
+
 /// How far ahead the hands reach to set a thing down.
 const PLACE_REACH: f64 = m64(3.0);
 /// How long a fire burns once lit, in days: from dusk until well into the morning.
@@ -537,6 +668,14 @@ fn ground_near(voxels: &mut WorldVoxels, x: f64, y: f64, z: f64) -> Option<f64> 
     None
 }
 
+/// The ground under `(x, z)` near the height `foot`, or, further off, wherever it is
+/// above or below it, as a camp made far ahead finds it.
+fn ground_ahead(voxels: &mut WorldVoxels, x: f64, z: f64, foot: f64) -> Option<f64> {
+    ground_near(voxels, x, foot + 2.0, z)
+        .or_else(|| ground_near(voxels, x, foot - 4.0, z))
+        .or_else(|| (-30..30).rev().find_map(|k| ground_near(voxels, x, foot + 8.0 * k as f64, z)))
+}
+
 /// The fires of the camps that were in the world already, near `pos`: the top of each
 /// bed of embers, once.
 fn embers_near(streamer: &Streamer, voxels: &mut WorldVoxels, pos: DVec3) -> Vec<DVec3> {
@@ -548,6 +687,20 @@ fn embers_near(streamer: &Streamer, voxels: &mut WorldVoxels, pos: DVec3) -> Vec
         }
     }
     embers
+}
+
+/// The taverns' guest beds near `pos`, as far as the embers are looked for.
+fn beds_near(world: &GameWorld, pos: DVec3) -> Vec<DVec3> {
+    world.guest_beds_near(pos.x.floor() as i32, pos.z.floor() as i32, m(24.0) as i32).into_iter().map(|b| b.as_dvec3()).collect()
+}
+
+/// What E does in a guest bed now, in words: as a fire's, the night slept through, or by
+/// day a lie down until dark.
+fn bed_prompt(env: &Environment) -> String {
+    match camp::Until::from(env) {
+        camp::Until::Dawn => "E to sleep in the bed until dawn".into(),
+        camp::Until::Dusk => "E to lie down on the bed until dark".into(),
+    }
 }
 
 /// Where a fire's light comes from, and how brightly this moment: it never burns steady.
@@ -615,6 +768,60 @@ fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, 
     false
 }
 
+/// Stands a settlement building `which` of the country `far` metres ahead of someone
+/// whose eye is at `eye`, looking along `yaw`, its door toward them, on the highest ground
+/// under its walls; a tavern's guest beds are the world's from now on. For a look at one,
+/// and a night in a tavern, without finding a town that has one. Must come before the
+/// chunks there are made. Where its guest beds are, nearest the door first.
+fn stand_tavern(world: &GameWorld, eye: DVec3, yaw: f32, (which, far): (worldgen::features::designs::Special, f64)) -> Vec<DVec3> {
+    use worldgen::{
+        features::landmarks::Palette,
+        settlements::{Region, special},
+    };
+    let ahead = DVec3::new(yaw.cos() as f64, 0.0, yaw.sin() as f64);
+    // The door, at +X as built, turned to face back along the view.
+    let back = -ahead;
+    let turns = if back.x.abs() >= back.z.abs() { if back.x > 0.0 { 0 } else { 2 } } else if back.z > 0.0 { 1 } else { 3 };
+    let (x, z) = (eye.x.floor() as i32, eye.z.floor() as i32);
+    let biome = world.column(x, z).biome;
+    let seed = world.seed() ^ (x as u32).wrapping_mul(0x9e37_79b9) ^ (z as u32).wrapping_mul(0x85eb_ca6b);
+    let pal = Palette::local(biome, worldgen::materials::bedrock(biome).0).varied(seed);
+    let Some(built) = special::build(&special::SpecialSpec::new(which, Region::of(biome), seed), &pal) else { return Vec::new() };
+    let built = built.turned(turns);
+    let b = &built.building;
+    // The ground before the door `far` metres ahead.
+    let spot = eye + ahead * m64(far);
+    let before = b.door.floor + b.door.facing;
+    let (ox, oz) = (spot.x.floor() as i32 - before.x, spot.z.floor() as i32 - before.z);
+    let (lo, hi) = (b.walls.lo, b.walls.hi);
+    let top = [(lo.x, lo.y), (lo.x, hi.y), (hi.x, lo.y), (hi.x, hi.y), ((lo.x + hi.x) / 2, (lo.y + hi.y) / 2)].iter().map(|&(cx, cz)| world.column(ox + cx, oz + cz).top()).max().unwrap_or(0);
+    let origin = glam::IVec3::new(ox, top + 1, oz);
+    let cells = glam::IVec3::splat(voxel::mesh::CELLS);
+    let voxels = b.voxels.iter().map(|&(p, v)| (p + origin, v)).collect();
+    let fine = b.fine.iter().map(|f| voxel::mesh::PlantBox { lo: (glam::IVec3::from_array(f.lo) + origin * cells).to_array(), hi: (glam::IVec3::from_array(f.hi) + origin * cells).to_array(), ..*f }).collect();
+    let beds = built.guest_beds_at(origin, 0);
+    log::info!("a {} of {:?} stood at {} {} {}, its door {:?}, with {} guest beds", which.word(), Region::of(biome), origin.x, origin.y, origin.z, b.door.facing, beds.len());
+    world.stand(voxels, fine, beds.clone());
+    let door = (origin + b.door.floor).as_dvec3();
+    let mut beds: Vec<DVec3> = beds.iter().map(|b| b.as_dvec3()).collect();
+    beds.sort_by(|a, b| a.distance(door).total_cmp(&b.distance(door)));
+    beds
+}
+
+/// The guest bed `bed` (its middle, on its boards) as one comes to it from its foot: where
+/// to stand to look at it, and the way to look. The foot is the end of it with more floor
+/// beyond, so this stands in the room rather than in the wall.
+fn foot_of_bed(voxels: &mut WorldVoxels, bed: DVec3) -> (DVec3, f32) {
+    use player::Voxels;
+    let y = bed.y.floor() as i32;
+    let clear = |voxels: &mut WorldVoxels, p: DVec3| (0..4).all(|k| voxels.kind(p.x.floor() as i32, y + k, p.z.floor() as i32) != voxel::Kind::Solid);
+    let ways = [DVec3::X, DVec3::NEG_X, DVec3::Z, DVec3::NEG_Z];
+    let (way, n) = ways.into_iter().map(|w| (w, (1..=7).take_while(|&k| clear(voxels, bed + w * k as f64)).count())).max_by_key(|&(_, n)| n).unwrap_or((DVec3::X, 1));
+    // As far back as the room lets, a step short of what stands beyond.
+    let at = bed + way * (n as f64 - 1.0).clamp(1.0, 6.0);
+    (at, ((-way.z).atan2(-way.x) as f32).rem_euclid(std::f32::consts::TAU))
+}
+
 /// The nearest water ahead of `eye` along `yaw`, within 80 m, deep enough to float a
 /// boat on: where on its surface.
 fn water_ahead(world: &GameWorld, eye: DVec3, yaw: f32) -> Option<DVec3> {
@@ -646,6 +853,62 @@ fn named_places(world: &GameWorld, at: DVec3, query: &str, n: usize) -> Vec<comm
     found.sort_by(|a, b| (a.name.to_lowercase() != whole).cmp(&(b.name.to_lowercase() != whole)).then(a.at.distance(local).total_cmp(&b.at.distance(local))));
     found.truncate(n);
     found.into_iter().map(|p| commands::Named { name: p.name.clone(), kind: p.kind.key(), x: origin.x + p.at.x as f64, z: origin.y + p.at.y as f64 }).collect()
+}
+
+/// The settlements of the continent under `at` nearest it, of `kind` if given, at most
+/// `n`, for `settlements` and `tp village`.
+fn nearest_settlements(world: &GameWorld, at: DVec3, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+    let Some((c, local)) = journal::continent_at(world, at, true) else { return Vec::new() };
+    let origin = glam::DVec2::new(at.x - local.x as f64, at.z - local.y as f64);
+    let mut found: Vec<usize> = (0..c.trails.settlements.len()).filter(|&k| kind.is_none_or(|kind| c.trails.settlements[k].kind == kind)).collect();
+    found.sort_by(|&a, &b| c.trails.settlements[a].at().distance(local).total_cmp(&c.trails.settlements[b].at().distance(local)));
+    found.truncate(n);
+    found
+        .into_iter()
+        .map(|k| {
+            let s = &c.trails.settlements[k];
+            let name = c.trails.names.settlement(k).map_or_else(|| "a settlement with no name".to_string(), |p| p.name.clone());
+            commands::Settlement { name, kind: s.kind.word(), facts: s.summary(), x: origin.x + s.x as f64 + 0.5, z: origin.y + s.z as f64 + 0.5 }
+        })
+        .collect()
+}
+
+/// Grants the settlement nearest `at` boon `boon` in year `year`, writing it into
+/// `boons`, or with None says which boons it has and could have (#207).
+fn grant_boon(world: &GameWorld, at: DVec3, year: u32, boons: &mut years::Boons, boon: Option<years::Boon>) -> commands::Reply {
+    use years::Boon;
+    let Some((c, local)) = journal::continent_at(world, at, true) else { return Err("no settlements in this part of the world".into()) };
+    let cell = worldgen::macro_layout::cell_of(at.x.floor() as i32, at.z.floor() as i32);
+    let net = &c.trails;
+    let Some(k) = (0..net.settlements.len()).min_by(|&a, &b| net.settlements[a].at().distance(local).total_cmp(&net.settlements[b].at().distance(local))) else {
+        return Err("no settlements in this part of the world".into());
+    };
+    let name = net.names.settlement(k).map_or_else(|| "The settlement".to_string(), |p| p.name.clone());
+    // Only where the settlement was laid out with room for it.
+    let room = |b: Boon| net.years.sites.iter().any(|s| s.settlement as usize == k && s.boon == b);
+    let Some(boon) = boon else {
+        let mut out = format!("{name}:");
+        for b in Boon::ALL {
+            let state = match boons.year_of(cell, k, b) {
+                Some(y) => format!("granted in year {y}"),
+                None if room(b) => "can be granted".to_string(),
+                None => "no room for it".to_string(),
+            };
+            out += &format!("\n  {}: {state} ({})", b.name(), b.about());
+        }
+        return Ok(out);
+    };
+    if let Some(y) = boons.year_of(cell, k, boon) {
+        return Err(format!("{name} was granted {} in year {y}", boon.name()));
+    }
+    if !room(boon) {
+        return Err(match boon {
+            Boon::SecondWell => format!("{name} has no room on its green for a second well"),
+            Boon::GuildHall => format!("{name} has no guild house to open"),
+        });
+    }
+    boons.grant(years::Granted { cell, settlement: k as u32, boon, year: year.min(i32::MAX as u32) as i32 });
+    Ok(format!("{name} is granted {} in year {year}: {}", boon.name(), boon.about()))
 }
 
 /// Voxel positions with their linear colours.
@@ -740,7 +1003,10 @@ fn scan_surroundings(
     let sticks = fallen::near(world, voxels, camera);
     // The nests in sight, and the flowers in bloom a bee from each could fly to: a few
     // nests at most, so it is a few small squares of the world to look over.
-    let nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    let mut nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    // And the nearest of the hives people keep, whose bees work the same flowers (#202):
+    // a few, as an apiary's row would otherwise fill the air with bees.
+    nests.extend(world.hives_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32).into_iter().take(4));
     let mut forage = Vec::new();
     for n in nests.iter().filter(|n| n.kind == worldgen::features::nests::NestKind::Bees && insects::on_the_wing(n.kind, date)).take(3) {
         let reach = m(insects::FORAGE as f32) as i32;
@@ -829,6 +1095,10 @@ struct Running {
     particles: Particles,
     /// The crows about the player, and their nests.
     crows: crows::Crows,
+    /// The animals about the player: wild herds, and the kept in their pens.
+    animals: animals::Herds,
+    /// People stood about by `spawn people`, to see them before anyone lives anywhere.
+    people: Vec<people::Standing>,
     /// Leaf and flower voxels near the player, refreshed now and then.
     leaves: Leaves,
     flowers: Vec<(DVec3, [f32; 3])>,
@@ -868,6 +1138,10 @@ struct Running {
     store: Option<Store>,
     save_timer: f32,
     show_settings: bool,
+    /// How the player looks (#204), and the figure screen while it is open over the
+    /// settings menu.
+    figure: figure::Figure,
+    figure_screen: Option<figure::Screen>,
     /// What the player carries, its window, and whether that is open.
     pack: inventory::Pack,
     pack_view: inventory::View,
@@ -884,12 +1158,27 @@ struct Running {
     journal_timer: f32,
     /// A word about what was just gathered, and how long it has left to show.
     notice: Option<(String, f32)>,
+    /// A board being read (#207), and where the player stood to read it.
+    reading: Option<(reading::Page, DVec3)>,
     /// What has been set down in this world: flowers, sticks, fires.
     placed: placed::Placed,
     /// The thing set down that is within reach, if one is; looked for with `within_reach`.
     thing_near: Option<placed::Handle>,
     /// The embers of camps that were here already, near the player: fires to rest by.
     embers: Vec<DVec3>,
+    /// The chimneys of the homes near the player, and which are smoking at this hour.
+    chimneys: chimneys::Chimneys,
+    /// The guest beds of the taverns near the player: the middle of each, on its boards.
+    beds: Vec<DVec3>,
+    /// The people of the settlements near the player (#204).
+    villagers: villagers::Villagers,
+    /// The campers, settlers and boats about the player, as their timetables have them (#205).
+    travellers: travellers::Travellers,
+    /// The boons the player has granted the settlements, whether they have been saved,
+    /// and the moment what is built was last generated for (#207).
+    boons: years::Boons,
+    boons_unsaved: bool,
+    now: years::When,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1006,6 +1295,12 @@ impl Running {
         let placed = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(placed::Placed::new, |s| placed::Placed::from_text(&s.placed(settings.seed)));
 
         let journal = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(journal::Journal::new, |s| journal::Journal::from_text(&s.journal(settings.seed)));
+        // Who the player is goes with them into every world; a look given by hand is for
+        // this run only.
+        let figure = match &opts.figure_look {
+            Some(roll) => figure::Figure::rolled(roll),
+            None => store.as_ref().map_or_else(figure::Figure::default, |s| figure::Figure::from_text(&s.figure())),
+        };
 
         // Simulating the continent takes seconds, so it starts now, alongside the window
         // and the GPU, instead of waiting its turn after them.
@@ -1056,6 +1351,14 @@ impl Running {
         let flying = opts.fly || progress.is_some_and(|p| p.travel == Travel::Flying);
         let time = opts.time.or(progress.map(|p| p.time)).unwrap_or(10.0);
         let date = opts.date.or(progress.map(|p| p.date)).unwrap_or(season::DEFAULT_DATE);
+        // A world saved before it kept its year takes it from the journal, which counted
+        // the springs; a new one begins in year 0.
+        let year = opts.year.or(progress.and_then(|p| p.year.or(journal.year()))).unwrap_or(0);
+        // The settlements as they stand in this year and season, with the boons granted
+        // them (#207), before anything of them is made. A visit given by hand has none.
+        let boons = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(years::Boons::default, |s| years::Boons::from_text(&s.boons(settings.seed)));
+        let now = years::When::of(year, date);
+        world.set_now(now, &boons);
         // What has been seen of this world is kept with the rest of its save; a visit to
         // a place given by hand keeps nothing.
         // A camp asked for by hand, to look at or to time: made where the run begins.
@@ -1073,6 +1376,24 @@ impl Running {
                 log::info!("resting by the fire from {time:.2} h");
             }
         }
+        // A tavern asked for by hand, stood before anything about it is made; with --rest,
+        // the night in its first guest bed.
+        if let Some(stand) = opts.tavern {
+            let beds = stand_tavern(&world, camera.pos, camera.yaw, stand);
+            if opts.rest
+                && !flying
+                && let Some(&bed) = beds.first()
+            {
+                player.pos = bed;
+                rest = Some(camp::Rest::in_bed(&Environment::at(time, date)));
+                log::info!("to bed at {time:.2} h");
+            }
+        }
+        // Chimneys asked for by hand, smoking ahead from the first frame.
+        let mut chimneys = chimneys::Chimneys::new();
+        let foot = camera.pos.y - player::EYE_HEIGHT;
+        chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
+        let travellers = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(travellers::Travellers::new, |s| travellers::Travellers::from_text(&s.travellers(settings.seed)));
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
         let mut map = Minimap::new(&gpu, surface.config.format, world.clone(), map_dir);
         map.corner = settings.minimap;
@@ -1095,7 +1416,7 @@ impl Running {
             far: FarView::new(&gpu, world.clone()),
             impostors: Impostors::new(&gpu, world.clone()),
             streamer: Streamer::new(&gpu, world.clone(), settings.radius),
-            env: Environment::at(time, date),
+            env: Environment::at(time, date).in_year(year),
             particles: {
                 let mut p = Particles::new();
                 // Asked for: ahead of where the camera first looks.
@@ -1105,6 +1426,8 @@ impl Running {
                 p
             },
             crows: crows::Crows::new(world.clone()),
+            animals: animals::Herds::new(world.clone()),
+            people: Vec::new(),
             leaves: Vec::new(),
             flowers: Vec::new(),
             fallen: Vec::new(),
@@ -1128,19 +1451,33 @@ impl Running {
             store,
             save_timer: AUTOSAVE,
             show_settings: false,
+            figure_screen: None,
             pack,
             pack_view: inventory::View::default(),
             pack_open: false,
             journal,
-            journal_view: journal::View::new(world.materials()),
+            journal_view: {
+                let mut view = journal::View::new(world.materials());
+                view.owner = figure.name.clone();
+                view
+            },
+            figure,
             journal_open: false,
             journal_timer: 0.0,
             within_reach: None,
             reach_timer: 0.0,
             notice: None,
+            reading: None,
             placed,
             thing_near: None,
             embers: Vec::new(),
+            chimneys,
+            beds: Vec::new(),
+            villagers: villagers::Villagers::new(),
+            travellers,
+            boons,
+            boons_unsaved: false,
+            now,
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -1222,6 +1559,23 @@ impl Running {
         }
     }
 
+    /// Opens the figure screen over the settings menu, or closes it, keeping what was
+    /// chosen there and saving it beside the settings (#204).
+    fn set_figure(&mut self, open: bool) {
+        if open {
+            self.figure_screen = Some(figure::Screen::new(&self.figure));
+            return;
+        }
+        let Some(screen) = self.figure_screen.take() else { return };
+        if screen.figure != self.figure {
+            self.figure = screen.figure;
+            self.journal_view.owner = self.figure.name.clone();
+            if let Some(store) = &self.store {
+                store.write_figure(&self.figure.to_text());
+            }
+        }
+    }
+
     /// Opens or closes the pack, which needs the mouse.
     fn set_pack(&mut self, open: bool) {
         self.pack_open = open;
@@ -1292,7 +1646,7 @@ impl Running {
     /// Writes up the journal: the time gone by (`days`, of the game's), the way gone,
     /// and, every second or so, the named places come to.
     fn keep_journal(&mut self, dt: f32, days: f32) {
-        self.journal.tick(days, self.env.date, self.env.time, self.weather.now.snow > 0.3);
+        self.journal.tick(days, self.env.date, self.env.year, self.env.time, self.weather.now.snow > 0.3);
         let way = match (self.walking, self.player.mode, self.player.swimming) {
             (false, ..) => None,
             (true, Mode::Boat, _) => Some(journal::Way::Sail),
@@ -1517,6 +1871,14 @@ impl Running {
         self.embers.iter().copied().find(|e| (e.x - hands.x).hypot(e.z - hands.z) <= m64(2.4) && (e.y - hands.y).abs() < m64(2.0))
     }
 
+    /// The tavern's guest bed the player stands at or reaches for, if they are at one:
+    /// on its floor, not the floor above or below.
+    fn bed_near(&self) -> Option<DVec3> {
+        let (feet, hands) = (self.player.pos, self.hands());
+        let near = |b: &DVec3, p: DVec3| (b.x - p.x).hypot(b.z - p.z) <= m64(1.4) && (b.y - p.y).abs() < m64(1.0);
+        self.beds.iter().copied().find(|b| near(b, feet) || near(b, hands))
+    }
+
     /// What E would do with the thing set down within reach, or with the fire of a
     /// camp that was here already, in words; and what a left click would.
     fn camp_prompt(&self) -> Option<String> {
@@ -1525,7 +1887,7 @@ impl Running {
         }
         let until = camp::Until::from(&self.env).word();
         let Some(thing) = self.thing_near.and_then(|at| self.placed.get(at)) else {
-            return self.ember_near().map(|_| format!("E to rest by the fire until {until}"));
+            return self.ember_near().map(|_| format!("E to rest by the fire until {until}")).or_else(|| self.bed_near().map(|_| bed_prompt(&self.env)));
         };
         Some(if thing.burns() {
             format!("E to rest by the fire until {until}   \u{b7}   left click to put it out")
@@ -1564,7 +1926,17 @@ impl Running {
                 self.rest = Some(camp::Rest::begin(&self.env));
                 true
             }
-            None => false,
+            None => match self.bed_near() {
+                // Into the bed, lying in the middle of it.
+                Some(bed) => {
+                    self.player.vel = glam::Vec3::ZERO;
+                    self.player.pos = bed;
+                    self.rest = Some(camp::Rest::in_bed(&self.env));
+                    log::info!("to bed at {:.2} h", self.env.time);
+                    true
+                }
+                None => false,
+            },
         }
     }
 
@@ -1630,6 +2002,7 @@ impl Running {
             pitch: self.camera.pitch,
             time: self.env.time,
             date: self.env.date,
+            year: Some(self.env.year),
             travel: match (flying, self.player.mode) {
                 (true, _) => Travel::Flying,
                 (false, Mode::Boat) => Travel::Sailing,
@@ -1656,6 +2029,12 @@ impl Running {
             }
             if self.placed.unsaved && store.write_placed(self.settings.seed, &self.placed.to_text()) {
                 self.placed.unsaved = false;
+            }
+            if self.travellers.unsaved && store.write_travellers(self.settings.seed, &self.travellers.to_text()) {
+                self.travellers.unsaved = false;
+            }
+            if self.boons_unsaved && store.write_boons(self.settings.seed, &self.boons.to_text()) {
+                self.boons_unsaved = false;
             }
         }
         self.map.save(false);
@@ -1703,6 +2082,10 @@ impl Running {
         if !self.walking {
             return;
         }
+        // E puts down what is being read.
+        if self.reading.take().is_some() {
+            return;
+        }
         if self.player.mode == Mode::Boat {
             let (pos, heading) = self.player.leave_boat(&mut self.voxels);
             self.fleet.leave(pos, heading);
@@ -1710,9 +2093,52 @@ impl Running {
         } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
             let boat = self.fleet.take(i);
             self.player.board(boat.pos, boat.heading);
-        } else if !self.make_camp() {
+        } else if !self.read_board() && !self.greet() && !self.make_camp() {
             self.gather();
         }
+    }
+
+    /// Reads the board looked at, if one is near enough (#207): its page is shown until
+    /// it is put down, a notice board's requests go in the journal as offered, and at a
+    /// guild house with wayfarers the settlements about are marked on the map, with masons
+    /// the quarries. False with none in reach.
+    fn read_board(&mut self) -> bool {
+        let Some((which, _)) = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()) else { return false };
+        let journal = &self.journal;
+        let Some(read) = self.villagers.read(which, |key| journal.charted().iter().any(|c| c.key == key)) else { return false };
+        for q in &read.requests {
+            self.journal.offer(&q.key, &q.name, &read.town, &q.text);
+        }
+        if let Some((places, at, reach)) = &read.chart
+            && self.journal.chart(&read.key, &read.town, *at, *reach)
+        {
+            let at: Vec<glam::DVec2> = places.iter().map(|p| p.1).collect();
+            self.map.reveal_about(&at, m(CHARTED_LAND));
+        }
+        // And the masons the quarries they know (#207).
+        if let Some(town) = self.villagers.towns().nth(which.0)
+            && let Some((pits, at, reach)) = villagers::notices::quarry_chart(town, which.1)
+            && self.journal.chart_quarries(&villagers::notices::masons_key(&read.key), &read.town, at, reach)
+        {
+            self.map.reveal_about(&pits, m(CHARTED_LAND));
+        }
+        log::info!("read: {}", read.page.text());
+        self.reading = Some((read.page, self.player.pos));
+        true
+    }
+
+    /// Greets whoever of the settlement is near enough (#204): they stop and turn, and
+    /// say a word, and the journal counts the meeting. False with nobody near.
+    fn greet(&mut self) -> bool {
+        let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+        let Some((who, name)) = self.villagers.within_reach(feet) else { return false };
+        let (key, name) = (who.key(), name.to_string());
+        let met = self.journal.met(&key, &name);
+        let Some(said) = self.villagers.greet(who, feet, met, self.env.time, self.env.date) else { return false };
+        self.journal.meet(&key, &said.name, &said.town);
+        log::info!("{} of {}: {}", said.name, said.town, said.line);
+        self.notice = Some((format!("{}:  {}", said.name, said.line), 7.0));
+        true
     }
 
     /// Counts the steps taken, one each stride, playing a footstep for each and a
@@ -1865,6 +2291,7 @@ impl Running {
             let on_foot = self.walking && self.player.mode == Mode::Walk;
             self.thing_near = if on_foot { self.placed.within_reach(self.hands()) } else { None };
             self.embers = embers_near(&self.streamer, &mut self.voxels, self.player.pos);
+            self.beds = beds_near(&self.world, self.player.pos);
         }
         self.hand_word = (self.hand_word - dt).max(0.0);
         if let Some((_, left)) = &mut self.notice {
@@ -1872,6 +2299,10 @@ impl Running {
             if *left <= 0.0 {
                 self.notice = None;
             }
+        }
+        // A board being read is put down on walking away from it.
+        if self.reading.as_ref().is_some_and(|r| !self.walking || r.1.distance(self.player.pos) > m64(reading::LEAVE as f64)) {
+            self.reading = None;
         }
         self.cpu.lap(0);
         self.sub.lap(0);
@@ -1909,8 +2340,18 @@ impl Running {
             }
         }
         if days > 0.0 {
-            let date = season::advance(self.env.date, days, self.settings.year_days);
-            self.env = Environment::at(self.env.time + days * 24.0, date);
+            let (date, year) = season::advance_year(self.env.date, self.env.year, days, self.settings.year_days);
+            self.env = Environment::at(self.env.time + days * 24.0, date).in_year(year);
+        }
+        // What is built and what grows in the fields are the year's and the season's
+        // (#207): when either turns, by the days passing or the console, the world says
+        // so, and what it reaches is made again about the player.
+        let now = years::When::of(self.env.year, self.env.date);
+        if now != self.now {
+            self.now = now;
+            if self.world.set_now(now, &self.boons) {
+                log::info!("year {} {}: the settlements and their fields are made again", now.year, ["spring", "summer", "autumn", "winter"][now.season as usize]);
+            }
         }
         self.keep_journal(dt, days);
         // What was gathered a year or two ago has grown back: looked over now and then.
@@ -1966,6 +2407,11 @@ impl Running {
         let burning: Vec<DVec3> = self.placed.near(self.camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
         let mut fires = self.placed.smoking(self.camera.pos, m64(particles::SMOKE_SIGHT), (SMOULDERS / self.settings.year_days.max(1.0)) as f64);
         fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
+        self.chimneys.update(dt, &self.world, self.camera.pos, self.env.time);
+        self.villagers.update(dt, &self.world, self.camera.pos, self.env.time, self.env.date, self.env.year, self.settings.year_days);
+        let when = travellers::When { hour: self.env.time, date: self.env.date, year: self.env.year, year_days: self.settings.year_days, day_minutes: self.settings.day_minutes };
+        self.travellers.update(&self.world, self.camera.pos, when, travellers::calm(&self.weather.now));
+        fires.extend(self.travellers.smoking());
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -1976,6 +2422,7 @@ impl Running {
             leaves: &self.leaves,
             flowers: &self.flowers,
             fires: &fires,
+            chimneys: self.chimneys.smoking(),
             player_entered_water: entered_water,
             leaf_fall: season::leaf_fall(self.env.date),
             date: self.env.date,
@@ -2002,6 +2449,9 @@ impl Running {
             land: &|x, z| particles::land_under(&self.world, x, z),
         };
         self.crows.update(dt, &around);
+        let here = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.animals.set_time(animals::herd::Time { day: villagers::day_number(self.env.time, self.env.date, self.env.year, self.settings.year_days), hour: self.env.time, sunset: villagers::day::sunset(self.env.date) });
+        self.animals.update(dt, here);
         self.sub.lap(20);
         self.update_footsteps(dt);
         self.sub.lap(8);
@@ -2016,6 +2466,9 @@ impl Running {
         let mut held_light = None;
         fallen::draw(&self.fallen, &self.pack, self.camera.pos, &mut self.props);
         self.crows.draw(self.camera.pos, &mut self.props);
+        people::draw_all(&self.people, false, self.camera.pos, &mut self.props);
+        self.animals.draw(self.camera.pos, &mut self.props);
+        self.travellers.draw(self.camera.pos, clock, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2041,20 +2494,36 @@ impl Running {
                 let into = if self.third { &mut self.props } else { &mut self.shades };
                 // The glider is a rod on the back until the wing itself is out.
                 let furled = (self.glider <= GLIDER_UP).then_some(self.glider / GLIDER_UP);
-                character::draw(&character::WANDERER, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
+                // As the player has made themselves (#204), hands on the bar and seated
+                // on the thwart whatever their height.
+                let look = &self.figure.look;
+                let hanging = ((self.glider - GLIDER_UP) / (1.0 - GLIDER_UP)).max(0.0);
+                let feet = figure::fitted(look, feet, self.gait.facing, hanging, self.player.mode == Mode::Boat);
+                character::draw(look, feet, self.gait.facing, &self.gait.pose(), furled, self.camera.pos, into);
                 // A lantern in hand lights the way, unless it is shuttered; not with both
                 // hands on the glider's bar.
                 if self.pack.in_hand().is_some_and(|s| s.item.id == "lantern") && self.player.mode != Mode::Glide {
                     let lit = if self.shuttered { 0.0 } else { candle(clock) };
-                    let flame = character::draw_lantern(feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
+                    let flame = character::draw_lantern_by(&look.build, feet, self.gait.facing, &self.gait.pose(), lit, self.camera.pos, into);
                     held_light = (lit > 0.0).then_some((flame, lit));
                 }
             }
         }
+        // What the settlements have out today, market stalls and festivals (#207), lit
+        // at night; then their people last, so that if ever the props overflow it is
+        // some of them that go, not the player's figure.
+        let festival_lit = if self.env.sun_elevation < 0.06 { candle(clock) } else { 0.0 };
+        self.villagers.dress(self.camera.pos, self.env.time, festival_lit, &mut self.props);
+        let feet = if self.walking { self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0) } else { self.camera.pos };
+        self.villagers.draw(feet, self.camera.pos, self.env.time, &mut self.props);
 
         self.sub.lap(9);
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
+        self.map.met = self.travellers.marks();
+        let (quarried, charted): (Vec<_>, Vec<_>) = self.journal.charted().iter().partition(|c| villagers::notices::by_masons(&c.key));
+        self.map.charted = charted.iter().map(|c| (c.at, c.reach)).collect();
+        self.map.quarried = quarried.iter().map(|c| (c.at, c.reach)).collect();
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
         self.sub.lap(10);
@@ -2063,7 +2532,9 @@ impl Running {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let mut lamps: Vec<(DVec3, f32)> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(burning.iter().map(|&heart| firelight(heart, clock)));
+        lamps.extend(self.travellers.burning(self.camera.pos).into_iter().map(|heart| firelight(heart, clock)));
         lamps.extend(held_light);
+        lamps.extend(self.villagers.lamps(self.camera.pos, self.env.time, festival_lit));
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
         // The northern lights, on the nights they are out where the camera is.
@@ -2138,14 +2609,21 @@ impl Running {
             _ if !self.walking => None,
             Mode::Boat => Some("E to go ashore   W to sail   Shift for full sail".into()),
             Mode::Walk if self.fleet.nearest(self.player.pos, BOARD_REACH).is_some() => Some("E to board the boat".into()),
+            _ if self.reading.is_some() => Some("E to put it down".into()),
             _ if self.notice.is_some() => self.notice.as_ref().map(|n| n.0.clone()),
-            _ => self.camp_prompt().or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name))),
+            _ => {
+                let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+                let read = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()).map(|(_, name)| format!("E to read {name}"));
+                let greet = || self.villagers.within_reach(feet).map(|(_, name)| format!("E to greet {name}"));
+                read.or_else(greet).or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
+            }
         };
         // What has just come to hand, and what it is for, fading out.
         let hand_word = self.pack.in_hand().filter(|_| self.hand_word > 0.0).map(|s| (format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)), (self.hand_word / 0.6).min(1.0)));
         let mut let_go = Vec::new();
         let (pack, pack_view, pack_open) = (&mut self.pack, &mut self.pack_view, self.pack_open);
         let (journal, journal_view, journal_open) = (&self.journal, &mut self.journal_view, self.journal_open);
+        let page = self.reading.as_ref().map(|r| &r.0);
         let mut time = self.env.time;
         let mut date = self.env.date;
         let mut settings = self.settings;
@@ -2154,10 +2632,13 @@ impl Running {
         let (show_debug, show_menu, grabbed) = (settings.show_debug, self.show_settings, self.grabbed);
         let (labels, map_open) = (self.map.labels(), self.map.open);
         let console = &mut self.console;
+        let (figure_screen, mut figure_done) = (&mut self.figure_screen, false);
         self.overlay
             .draw(&self.window, &self.gpu, &mut encoder, &view, size, |ctx| {
                 overlay::map_labels(ctx, labels);
-                if show_menu {
+                if show_menu && let Some(screen) = figure_screen {
+                    figure_done = figure::show(ctx, screen);
+                } else if show_menu {
                     choice = overlay::settings_menu(ctx, &mut settings, held, (size[0], size[1]));
                 } else if pack_open {
                     let_go = inventory::show(ctx, pack, pack_view);
@@ -2165,6 +2646,8 @@ impl Running {
                     journal::show(ctx, journal, journal_view);
                 } else if console.open {
                     console.show(ctx);
+                } else if let Some(page) = page.filter(|_| !map_open) {
+                    reading::show(ctx, page);
                 } else if !grabbed && !map_open {
                     overlay::bottom_line(ctx, "hint", "Click the view (or press Tab) to look around", 150.0, egui::Color32::from_gray(220));
                 }
@@ -2225,10 +2708,13 @@ impl Running {
                     });
             });
         if time != self.env.time || date != self.env.date {
-            self.env = Environment::at(time, date);
+            self.env = Environment::at(time, date).in_year(self.env.year);
         }
         if choice.resume {
             self.set_menu(false);
+        }
+        if choice.figure || figure_done {
+            self.set_figure(choice.figure);
         }
         for stack in let_go {
             self.set_down(stack);
@@ -2300,6 +2786,8 @@ impl ApplicationHandler for App {
                 r.set_pack(false);
             } else if r.journal_open {
                 r.set_journal(false);
+            } else if r.figure_screen.is_some() {
+                r.set_figure(false);
             } else {
                 r.set_menu(!r.show_settings);
             }
@@ -2562,6 +3050,7 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _el: &ActiveEventLoop) {
         if let Some(r) = self.run.as_mut() {
+            r.set_figure(false);
             r.map.save(true);
             r.persist(&self.opts.overrides);
         }
@@ -2609,7 +3098,7 @@ fn main() -> Result<()> {
         // made of them. One that fails stops the shot: it would not show what was asked.
         let mut console = commands::Console::default();
         for line in std::mem::take(&mut opts.commands) {
-            let reply = console.run(&line, &mut Shot { opts: &mut opts, world: &world, seed: settings.seed });
+            let reply = console.run(&line, &mut Shot { opts: &mut opts, world: &world, seed: settings.seed, year_days: settings.year_days });
             Running::log_reply(&line, &reply);
             if let Err(wrong) = reply {
                 bail!("--command '{line}': {wrong}");
@@ -2617,7 +3106,19 @@ fn main() -> Result<()> {
         }
         console.open = opts.shot_console;
         let opts = opts;
+        // The settlements as they stand in the year and season asked for, with any boons
+        // the commands granted (#207).
+        world.set_now(years::When::of(opts.year.unwrap_or(0), opts.date.unwrap_or(season::DEFAULT_DATE)), &world.boons());
         let mut camera = make_camera(&opts, &world, None);
+        // The animals asked for, given their seconds of life before anything else is set
+        // out: a walk toward a herd moves the camera.
+        let animals = opts.shot_animals.any().then(|| {
+            let clock = std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let hour = opts.time.unwrap_or(10.0);
+            let date = opts.date.unwrap_or(season::DEFAULT_DATE);
+            let time = animals::herd::Time { day: villagers::day_number(hour, date, opts.year.unwrap_or(0), settings.year_days), hour, sunset: villagers::day::sunset(date) };
+            animals::ShotAnimals::set_out(&opts.shot_animals, world.clone(), &mut camera.pos, camera.yaw, clock, time, &|x, z| surface_height(&world, x, z))
+        });
         // The figure stands where the camera was, mid stride, and the camera steps back.
         let figure = opts.third.map(|turned| {
             let feet = camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
@@ -2632,11 +3133,25 @@ fn main() -> Result<()> {
             };
             (feet, gait)
         });
+        // A tavern ahead, stood before the chunks about it are made; with --rest, the
+        // night slept in its first guest bed, from the hour asked to the hour it ends.
+        let beds = opts.tavern.map_or(Vec::new(), |stand| stand_tavern(&world, camera.pos, camera.yaw, stand));
+        let mut hour = opts.time.unwrap_or(10.0);
+        if opts.rest && !beds.is_empty() {
+            let date = opts.date.unwrap_or(season::DEFAULT_DATE);
+            let (mut slept, from) = (Environment::at(hour, date), hour);
+            let mut rest = camp::Rest::in_bed(&slept);
+            while let Some(hours) = rest.hours(&slept, 1.0 / 30.0) {
+                slept = Environment::at(slept.time + hours, date);
+            }
+            hour = slept.time;
+            log::info!("to bed at {from:.2} h, until {}: woke at {hour:.2} h", rest.until.word());
+        }
         let mut far = FarView::new(&gpu, world.clone());
         let mut streamer = Streamer::new(&gpu, world.clone(), settings.radius);
         let mut impostors = Impostors::new(&gpu, world.clone());
         let t = Instant::now();
-        let mut env = Environment::at(opts.time.unwrap_or(10.0), opts.date.unwrap_or(season::DEFAULT_DATE));
+        let mut env = Environment::at(hour, opts.date.unwrap_or(season::DEFAULT_DATE)).in_year(opts.year.unwrap_or(0));
         // Screenshots are clear unless a weather is asked for.
         let mut weather = weather::Weather::new(opts.weather);
         weather.apply(&mut env);
@@ -2652,8 +3167,33 @@ fn main() -> Result<()> {
         // A few seconds of ambient life, so stills show spray, leaves and fireflies.
         streamer.wait_idle(&gpu, camera.pos);
         let mut voxels = WorldVoxels::new(world.clone());
+        // In the tavern's first guest bed: at its foot looking down at it, with what E
+        // would do there; or waking in it, looking down it from the pillow. The hour is
+        // put before the words, to show the night gone by.
+        let mut prompt = opts.shot_prompt.clone();
+        let hour = commands::clock_face(env.time);
+        if let Some(&bed) = beds.first()
+            && (opts.bed || opts.rest)
+        {
+            let (foot, yaw) = foot_of_bed(&mut voxels, bed);
+            log::info!("the guest bed at {:.1} {:.1} {:.1}, its foot at {:.1} {:.1}", bed.x, bed.y, bed.z, foot.x, foot.z);
+            if opts.rest {
+                camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::in_bed(&env).lowered() as f64), 0.0);
+                camera.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU);
+                camera.pitch = 0.15;
+                prompt = prompt.or(Some(format!("{hour}   \u{b7}   Morning")));
+            } else {
+                camera.pos = foot + DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
+                (camera.yaw, camera.pitch) = (yaw, -0.6);
+                prompt = prompt.or(Some(format!("{hour}   \u{b7}   {}", bed_prompt(&env))));
+            }
+        }
         let (biome, leaves, flowers, low, sticks, nests) = scan_surroundings(&world, &mut voxels, camera.pos, 1, env.date);
         env.mist_floor = low;
+        let gallery = opts.shot_people.as_ref().map(|g| {
+            let region = g.region.unwrap_or(worldgen::settlements::Region::of(biome));
+            (people::stand_gallery(g, region, settings.seed, camera.pos, camera.yaw, &|x, z| surface_height(&world, x, z)), g.far)
+        });
         // The snow and ice the season has left lying here, as the game would have them.
         let warmth = season::warmth(biome);
         // The northern lights, if they are out tonight here (or asked for).
@@ -2675,9 +3215,12 @@ fn main() -> Result<()> {
         for boat in fleet.boats() {
             vehicles::draw_boat(boat.pos, boat.heading, 0.0, camera.pos, &mut props);
         }
+        // The player as they look: the wanderer, unless a roll is given (#204).
+        let own = opts.figure_look.as_ref().map_or_else(figure::Figure::default, figure::Figure::rolled);
         if let Some((feet, gait)) = &figure {
             let furled = opts.figure_glide.is_none().then_some(opts.figure_furl);
-            character::draw(&character::WANDERER, *feet, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
+            let at = figure::fitted(&own.look, *feet, gait.facing, opts.figure_glide.unwrap_or(0.0), false);
+            character::draw(&own.look, at, gait.facing, &gait.pose(), furled, camera.pos, &mut props);
             if let Some(open) = opts.figure_glide {
                 let flight = vehicles::Flight::of(opts.figure_bank.to_radians(), opts.figure_rise, 0.0);
                 vehicles::draw_glider(*feet, gait.facing, open, flight, camera.pos, &mut props);
@@ -2703,7 +3246,18 @@ fn main() -> Result<()> {
         // Smoke rises from them, and from the embers of the camps that were here already.
         let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);
         smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
+        // The travellers about, where their timetables have them at this hour (#205).
+        let mut travellers = travellers::Travellers::new();
+        let when = travellers::When { hour: env.time, date: env.date, year: env.year, year_days: settings.year_days, day_minutes: settings.day_minutes };
+        travellers.settle(&world, camera.pos, when, travellers::calm(&weather.now));
+        smoking.extend(travellers.smoking());
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
+        // And from the chimneys about, and any set out ahead by hand.
+        let mut chimneys = chimneys::Chimneys::new();
+        let foot = camera.pos.y - player::EYE_HEIGHT;
+        chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
+        chimneys.update(0.0, &world, camera.pos, env.time);
+        log::info!("{} chimneys smoking near at {:.1} h", chimneys.smoking().len(), env.time);
         let mut particles = Particles::new();
         if opts.murmuration {
             particles.starlings.forced = Some(camera.forward());
@@ -2722,6 +3276,7 @@ fn main() -> Result<()> {
                 leaves: &leaves,
                 flowers: &flowers,
                 fires: &smoking,
+                chimneys: chimneys.smoking(),
                 player_entered_water: None,
                 leaf_fall: season::leaf_fall(env.date),
                 date: env.date,
@@ -2758,6 +3313,70 @@ fn main() -> Result<()> {
         }
         crows.report(camera.pos);
         crows.draw(camera.pos, &mut props);
+        if let Some((standing, far)) = &gallery {
+            people::draw_all(standing, *far, camera.pos, &mut props);
+        }
+        if let Some(animals) = &animals {
+            animals.draw(camera.pos, &mut props);
+        }
+        // Their legs and oars at the renderer's clock, so two stills can show them moving.
+        travellers.draw(camera.pos, std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6), &mut props);
+        for s in &travellers.seen {
+            log::info!("{} {:.0} m off: {} ({} people)", s.scene.kind.word(), s.distance / m64(1.0), s.scene.doing, s.scene.people.len());
+        }
+        log::info!("{} parties of travellers near, drawn in {} boxes", travellers.seen.len(), travellers.drawn);
+        // The people of the settlements about, where they are at this hour (#204); the
+        // nearest greeted, if asked, turned to the figure and saying their word.
+        let mut folk = villagers::Villagers::new();
+        let foot = figure.as_ref().map_or(camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), |(feet, _)| *feet);
+        folk.settle(&world, camera.pos, env.time, env.date, env.year, settings.year_days);
+        // And what they have out today (#207).
+        let festival_lit = if env.sun_elevation < 0.06 { candle(0.6) } else { 0.0 };
+        folk.dress(camera.pos, env.time, festival_lit, &mut props);
+        if folk.towns().next().is_some() {
+            log::info!("the settlements' dressing: {} boxes", folk.dressed);
+        }
+        let before = props.len();
+        folk.draw(foot, camera.pos, env.time, &mut props);
+        let mut greeted = None;
+        if opts.shot_greet {
+            let nearest = folk.seen().iter().filter(|f| f.task != Some(character::Task::Lie)).min_by(|a, b| a.feet.distance(foot).total_cmp(&b.feet.distance(foot))).map(|f| f.who);
+            match nearest.and_then(|who| folk.greet(who, foot, 0, env.time, env.date)) {
+                Some(said) => {
+                    log::info!("greeted {} of {}: {}", said.name, said.town, said.line);
+                    greeted = Some(format!("{}:  {}", said.name, said.line));
+                    props.truncate(before);
+                    folk.draw(foot, camera.pos, env.time, &mut props);
+                }
+                None => log::warn!("greet: nobody of a settlement in sight"),
+            }
+        }
+        // The board the camera looks at, read, its page over the view (#207).
+        let mut read_page = None;
+        // What it marks on the map, for a shot of the map as well: the country the
+        // wayfarers chart, the quarries the masons know, and the places to show the land of.
+        let (mut charted, mut quarried, mut shown) = (Vec::new(), Vec::new(), Vec::new());
+        if opts.shot_read {
+            match folk.board_in_sight(camera.pos, camera.forward()).and_then(|(which, _)| Some((which, folk.read(which, |_| false)?))) {
+                Some((which, r)) => {
+                    log::info!("read: {}", r.page.text());
+                    if let Some((places, at, reach)) = &r.chart {
+                        charted.push((*at, *reach));
+                        shown.extend(places.iter().map(|p| p.1));
+                    }
+                    if let Some((pits, at, reach)) = folk.towns().nth(which.0).and_then(|t| villagers::notices::quarry_chart(t, which.1)) {
+                        log::info!("the masons mark {} quarries, {:.0} m round {:.0} {:.0}", pits.len(), reach / m64(1.0), at.x, at.y);
+                        quarried.push((at, reach));
+                        shown.extend(pits);
+                    }
+                    read_page = Some(r.page);
+                }
+                None => log::warn!("read: no board in reach of the camera and looked at"),
+            }
+        }
+        if folk.towns().next().is_some() {
+            log::info!("the settlements' people: {:?}, {} in sight", folk.drawn, folk.seen().len());
+        }
         for (at, n) in particles.flocks() {
             let off = at - camera.pos;
             log::info!("flock of {n} at {:.0} {:.0} {:.0} from the camera", off.x, off.y, off.z);
@@ -2774,6 +3393,9 @@ fn main() -> Result<()> {
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
+        lamps.extend(travellers.burning(camera.pos).into_iter().map(|heart| firelight(heart, 0.6)));
+        lamps.extend(folk.lamps(camera.pos, env.time, festival_lit));
+        let met = travellers.marks();
         // A lit lantern in the hand: of the figure if there is one, else of whoever's eyes
         // the camera is, standing (seen only by its light).
         if opts.shot_lantern {
@@ -2782,7 +3404,7 @@ fn main() -> Result<()> {
                 Some((feet, gait)) => (*feet, gait, &mut props),
                 None => (camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), &standing, &mut unseen),
             };
-            lamps.push((character::draw_lantern(feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
+            lamps.push((character::draw_lantern_by(&own.look.build, feet, gait.facing, &gait.pose(), candle(0.6), camera.pos, into), candle(0.6)));
         }
         // The map, as the player would have it after walking here.
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -2804,6 +3426,10 @@ fn main() -> Result<()> {
                 }
             }
             map.camps = camp.camps();
+            map.met = met.clone();
+            map.charted = charted.clone();
+            map.quarried = quarried.clone();
+            map.reveal_about(&shown, m(CHARTED_LAND));
             map.settle(&gpu, camera.pos, camera.forward());
             map
         });
@@ -2838,7 +3464,7 @@ fn main() -> Result<()> {
             let mut view = journal::View::new(world.materials());
             view.page = page;
             let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
-            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue()), view)
+            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue(), env.year), view)
         });
         // A hotbar as it might be an hour into a walk: sticks, things picked.
         let hotbar = opts.shot_hotbar.then(|| {
@@ -2852,7 +3478,17 @@ fn main() -> Result<()> {
             pack.hold(0);
             pack
         });
+        // The figure screen, open on the player as they look.
+        let mut figure_screen = opts.shot_figure_screen.map(|turn| figure::Screen::new(&own).turned(turn.to_radians()));
+        if let Some((_, journal_view)) = &mut written {
+            journal_view.owner = own.name.clone();
+        }
         let mut hud = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, text: bool| {
+            if text && let Some(screen) = &mut figure_screen {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| {
+                    figure::show(ctx, screen);
+                });
+            }
             if text && let Some((journal, journal_view)) = &mut written {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| journal::show(ctx, journal, journal_view));
             }
@@ -2862,7 +3498,10 @@ fn main() -> Result<()> {
                 let word = pack.in_hand().map(|s| format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)));
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| inventory::hotbar(ctx, pack, word.as_deref().map(|w| (w, 1.0))));
             }
-            if text && let Some(line) = &opts.shot_prompt {
+            if text && let Some(page) = &read_page {
+                overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| reading::show(ctx, page));
+            }
+            if text && let Some(line) = prompt.as_ref().or(greeted.as_ref()) {
                 overlay::draw_headless(&gpu, encoder, view, format, opts.size, |ctx| overlay::bottom_line(ctx, "prompt", line, 112.0, egui::Color32::from_gray(235)));
             }
             if text && console.open {
@@ -3013,7 +3652,16 @@ impl commands::Game for Running {
     }
 
     fn set_clock(&mut self, hour: f32, date: f32) {
-        self.env = Environment::at(hour, date);
+        self.env = Environment::at(hour, date).in_year(self.env.year);
+    }
+
+    fn year(&self) -> u32 {
+        self.env.year
+    }
+
+    fn set_year(&mut self, year: u32) -> commands::Reply {
+        self.env.year = year;
+        Ok(String::new())
     }
 
     fn weather(&self) -> String {
@@ -3052,6 +3700,32 @@ impl commands::Game for Running {
     fn places(&self, query: &str, n: usize) -> Vec<commands::Named> {
         let eye = if self.walking { self.player.eye() } else { self.camera.pos };
         named_places(&self.world, eye, query, n)
+    }
+
+    fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        nearest_settlements(&self.world, eye, kind, n)
+    }
+
+    fn travellers(&self, kind: Option<worldgen::settlements::travel::Kind>, quays: bool, n: usize) -> Vec<travellers::Listed> {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        let when = travellers::When { hour: self.env.time, date: self.env.date, year: self.env.year, year_days: self.settings.year_days, day_minutes: self.settings.day_minutes };
+        travellers::listing(&self.world, eye, when, travellers::calm(&self.weather.now), kind, quays, n)
+    }
+
+    fn face(&mut self, yaw: f32) {
+        (self.camera.yaw, self.camera.pitch) = (yaw, -0.15);
+    }
+
+    fn boon(&mut self, boon: Option<years::Boon>) -> commands::Reply {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        let reply = grant_boon(&self.world, eye, self.env.year, &mut self.boons, boon)?;
+        if boon.is_some() {
+            // Kept with the world's save, and the settlement made again with it.
+            self.boons_unsaved = true;
+            self.world.set_now(self.now, &self.boons);
+        }
+        Ok(reply)
     }
 
     fn fly(&mut self, on: Option<bool>) -> commands::Reply {
@@ -3108,6 +3782,30 @@ impl commands::Game for Running {
                 self.reach_timer = 0.0;
                 Ok(word)
             }
+            Spawn::People(n) => {
+                // Of the country here, and new ones for each place they are called to.
+                let region = worldgen::settlements::Region::of(self.world.column(eye.x.floor() as i32, eye.z.floor() as i32).biome);
+                let seed = worldgen::noise::hash2(self.settings.seed, eye.x.floor() as i32, eye.z.floor() as i32);
+                let g = people::Gallery { count: n as usize, region: Some(region), ..Default::default() };
+                self.people = people::stand_gallery(&g, region, seed, eye, self.camera.yaw, &|x, z| surface_height(&self.world, x, z));
+                Ok(format!("{n} people of the {} country stand ahead, a household in front", region.word()))
+            }
+            Spawn::Herd(kind, n) => {
+                // Far enough ahead that the wild do not run at once.
+                let flight = kind.habits().flight as f64;
+                let ahead = (flight * 1.8).clamp(8.0, 90.0);
+                let p = glam::DVec2::new(eye.x, eye.z) + glam::DVec2::new(self.camera.yaw.cos() as f64, self.camera.yaw.sin() as f64) * m64(ahead);
+                let at = DVec3::new(p.x, surface_height(&self.world, p.x.floor() as i32, p.y.floor() as i32), p.y);
+                let n = self.animals.call(kind, n.map(|n| n as usize), at);
+                Ok(format!("{n} {} {ahead:.0} m ahead", kind.word()))
+            }
+            Spawn::Pen(kind) => {
+                let flat = glam::DVec2::new(eye.x, eye.z);
+                let at = flat + glam::DVec2::new(self.camera.yaw.cos() as f64, self.camera.yaw.sin() as f64) * m64(12.0);
+                self.animals.set_player(eye);
+                let (pen, n) = self.animals.pen_ahead(kind, at, flat);
+                Ok(format!("{n} {} in a pen of {:.0} square metres ahead", kind.word(), pen.area()))
+            }
         }
     }
 
@@ -3141,6 +3839,34 @@ impl commands::Game for Running {
         self.third = !self.third;
         Ok(if self.third { "the view from behind".into() } else { "the view through the eyes".into() })
     }
+
+    fn people(&mut self, all: bool) -> commands::Reply {
+        let at = if self.walking { self.player.eye() } else { self.camera.pos };
+        self.villagers.settle(&self.world, at, self.env.time, self.env.date, self.env.year, self.settings.year_days);
+        Ok(self.villagers.report(at, self.env.time, all))
+    }
+
+    fn read(&mut self) -> commands::Reply {
+        if !self.walking {
+            return Err("walk first: reading is done on foot".into());
+        }
+        if self.read_board() {
+            Ok(self.reading.as_ref().map_or_else(String::new, |r| r.0.text()))
+        } else {
+            Err(format!("no board near enough to read and looked at (within {:.1} m)", reading::REACH))
+        }
+    }
+
+    fn greet(&mut self) -> commands::Reply {
+        if !self.walking {
+            return Err("walk first: greeting is done on foot".into());
+        }
+        if self.greet() {
+            Ok(self.notice.as_ref().map_or_else(String::new, |n| n.0.clone()))
+        } else {
+            Err(format!("nobody is near enough to greet (within {:.0} m)", villagers::GREET_REACH))
+        }
+    }
 }
 
 /// A screenshot being set up, for the console's commands: each sets what its flag would.
@@ -3148,6 +3874,8 @@ struct Shot<'a> {
     opts: &'a mut Options,
     world: &'a GameWorld,
     seed: u32,
+    /// How many days the world's year has, for the travellers' timetables.
+    year_days: f32,
 }
 
 impl Shot<'_> {
@@ -3175,6 +3903,15 @@ impl commands::Game for Shot<'_> {
 
     fn set_clock(&mut self, hour: f32, date: f32) {
         (self.opts.time, self.opts.date) = (Some(hour), Some(date));
+    }
+
+    fn year(&self) -> u32 {
+        self.opts.year.unwrap_or(0)
+    }
+
+    fn set_year(&mut self, year: u32) -> commands::Reply {
+        self.opts.year = Some(year);
+        Ok(String::new())
     }
 
     fn weather(&self) -> String {
@@ -3206,6 +3943,27 @@ impl commands::Game for Shot<'_> {
         named_places(self.world, self.eye(), query, n)
     }
 
+    fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
+        nearest_settlements(self.world, self.eye(), kind, n)
+    }
+
+    fn travellers(&self, kind: Option<worldgen::settlements::travel::Kind>, quays: bool, n: usize) -> Vec<travellers::Listed> {
+        let (hour, date) = commands::Game::clock(self);
+        let when = travellers::When { hour, date, year: commands::Game::year(self), year_days: self.year_days, day_minutes: 40.0 };
+        travellers::listing(self.world, self.eye(), when, travellers::calm(&weather::Weather::new(self.opts.weather).now), kind, quays, n)
+    }
+
+    fn face(&mut self, yaw: f32) {
+        self.opts.look = (yaw.to_degrees(), -8.0);
+    }
+
+    fn boon(&mut self, boon: Option<years::Boon>) -> commands::Reply {
+        let mut boons = (*self.world.boons()).clone();
+        let reply = grant_boon(self.world, self.eye(), commands::Game::year(self), &mut boons, boon)?;
+        self.world.set_now(self.world.now(), &boons);
+        Ok(reply)
+    }
+
     fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {
         use commands::Spawn;
         Ok(match what {
@@ -3229,6 +3987,20 @@ impl commands::Game for Shot<'_> {
                 format!("a boat afloat {:.0} m ahead", at.with_y(eye.y).distance(eye) / m64(1.0))
             }
             Spawn::Thing(..) => return Err("things can't be set down on a screenshot: spawn camp sets a few down".into()),
+            Spawn::People(n) => {
+                self.opts.shot_people.get_or_insert_default().count = n as usize;
+                format!("{n} people stand ahead, a household in front")
+            }
+            Spawn::Herd(kind, n) => {
+                self.opts.shot_animals.herd = Some(kind);
+                self.opts.shot_animals.herd_n = n.map(|n| n as usize);
+                format!("a herd of {} {:.0} m ahead", kind.word(), self.opts.shot_animals.herd_ahead)
+            }
+            Spawn::Pen(kind) => {
+                // A screenshot sets out every kept kind's pen at once.
+                self.opts.shot_animals.pens.get_or_insert(12.0);
+                format!("a pen of {} ahead, among the other kept animals' pens", kind.word())
+            }
         })
     }
 
@@ -3239,5 +4011,23 @@ impl commands::Game for Shot<'_> {
             Some(false) => "no northern lights".into(),
             None => "the northern lights come out as the night has them".into(),
         })
+    }
+
+    fn people(&mut self, all: bool) -> commands::Reply {
+        let (eye, (hour, date)) = (self.eye(), self.clock());
+        let mut v = villagers::Villagers::new();
+        v.settle(self.world, eye, hour, date, self.year(), self.year_days);
+        v.draw(eye - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), eye, hour, &mut Vec::new());
+        Ok(v.report(eye, hour, all))
+    }
+
+    fn read(&mut self) -> commands::Reply {
+        self.opts.shot_read = true;
+        Ok("reading the board the camera looks at: its page is drawn over the shot".into())
+    }
+
+    fn greet(&mut self) -> commands::Reply {
+        self.opts.shot_greet = true;
+        Ok("greeting whoever is nearest: what they say is the shot's prompt".into())
     }
 }

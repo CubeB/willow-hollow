@@ -481,6 +481,10 @@ pub fn seasons() -> [[f32; 4]; SEASON_SLOTS] {
         rows[f.bloom_code() as usize] = f.bloom().row();
         rows[f.leaf_code() as usize] = f.leaves().row();
     }
+    // Then the crops of the fields, sown, ripe and cut (see settlements::farmland::crops).
+    for (code, s) in crate::settlements::farmland::crops::seasons() {
+        rows[code as usize] = s.row();
+    }
     rows
 }
 
@@ -855,6 +859,12 @@ pub fn washes() -> &'static [Wash] {
         }
         for &f in Flower::ALL {
             add(Growth::Flower(f));
+        }
+        // The crops of the fields, seen from afar (see settlements::farmland::crops).
+        for w in crate::settlements::farmland::crops::washes_of_crops() {
+            if !all.contains(&w) {
+                all.push(w);
+            }
         }
         assert!(all.len() < 256, "a wash is named in a byte");
         all
@@ -1593,6 +1603,16 @@ fn build_flower(p: &mut Plot, rng: &mut Rng, kind: Flower) {
         Flower::DesertMarigold => desert_marigold(p, rng),
         Flower::Thistle => thistle(p, rng),
     }
+}
+
+/// A flower of `kind` planted by hand in the voxel `at` (x, y, z), standing on the one
+/// below, built as the ground grows it, its bloom and leaves keeping their seasons: for
+/// beds of flowers in a park or a garden. A water lily is not grown this way.
+pub fn plant_flower(kind: Flower, at: [i32; 3], seed: u32, out: &mut Vec<PlantBox>) {
+    let mut rng = Rng::new(seed);
+    let mut plot = Plot::new([at[0] * CELLS, at[1] * CELLS, at[2] * CELLS], out);
+    plot.flower = Some(kind);
+    build_flower(&mut plot, &mut rng, kind);
 }
 
 /// Adds whatever grows on the column at world position `(x, z)`. `surface` is its top

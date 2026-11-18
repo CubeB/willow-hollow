@@ -36,6 +36,17 @@ pub struct Named {
     pub z: f64,
 }
 
+/// A hamlet, village or town, found for `settlements` and `tp village`.
+pub struct Settlement {
+    pub name: String,
+    /// What it is, in words: hamlet, village, large village, town or great town.
+    pub kind: &'static str,
+    /// Its people, age, water and trades, in a line.
+    pub facts: String,
+    pub x: f64,
+    pub z: f64,
+}
+
 /// Something `spawn` can bring.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Spawn {
@@ -48,6 +59,12 @@ pub enum Spawn {
     Boat,
     /// This many of a thing from the pack's list, set down at the feet.
     Thing(String, u32),
+    /// This many people of the country about, standing in rows ahead.
+    People(u32),
+    /// A herd of animals of a kind ahead: this many, or as many as a herd of them has.
+    Herd(worldgen::fauna::Kind, Option<u32>),
+    /// A pen of animals of a kind ahead, fenced.
+    Pen(worldgen::fauna::Kind),
 }
 
 /// What the commands act on. Only what every game can say is required; the rest can't
@@ -58,6 +75,13 @@ pub trait Game {
     /// The hour, and the date as a fraction of the year from the spring equinox.
     fn clock(&self) -> (f32, f32);
     fn set_clock(&mut self, hour: f32, date: f32);
+    /// Which year of the world it is, counting its first as 0.
+    fn year(&self) -> u32 {
+        0
+    }
+    fn set_year(&mut self, _year: u32) -> Reply {
+        cannot("changing the year")
+    }
     /// What the weather is doing, in words.
     fn weather(&self) -> String;
     /// Holds a weather, or with None lets it go its own way.
@@ -73,6 +97,10 @@ pub trait Game {
     /// The named places nearest, those whose names have all of `query`'s words in them
     /// (all of them when it is empty), at most `n`.
     fn places(&self, _query: &str, _n: usize) -> Vec<Named> {
+        Vec::new()
+    }
+    /// The settlements nearest, only those of `kind` when given, at most `n`.
+    fn settlements(&self, _kind: Option<worldgen::settlements::Kind>, _n: usize) -> Vec<Settlement> {
         Vec::new()
     }
     /// Flies, or walks, or with None turns from one to the other.
@@ -97,6 +125,30 @@ pub trait Game {
     fn third(&mut self) -> Reply {
         cannot("the view")
     }
+    /// Who lives in the settlement nearest, and where they all are now (#204).
+    fn people(&mut self, _all: bool) -> Reply {
+        cannot("looking for the people of a settlement")
+    }
+    /// Greets whoever of a settlement is nearest, as E does.
+    fn greet(&mut self) -> Reply {
+        cannot("greeting")
+    }
+    /// Reads the board looked at, as E does (#207).
+    fn read(&mut self) -> Reply {
+        cannot("reading")
+    }
+    /// The travellers nearest, of a kind if one is given, or with `quays` the quays they
+    /// tie up at (#205).
+    fn travellers(&self, _kind: Option<worldgen::settlements::travel::Kind>, _quays: bool, _n: usize) -> Vec<crate::travellers::Listed> {
+        Vec::new()
+    }
+    /// Turns the view to look along `yaw` (radians), as after a `tp` to something to see.
+    fn face(&mut self, _yaw: f32) {}
+    /// Grants the settlement nearest a boon this year, or with None says which it has
+    /// been granted (#207).
+    fn boon(&mut self, _boon: Option<worldgen::settlements::years::Boon>) -> Reply {
+        cannot("granting boons")
+    }
 }
 
 fn cannot(what: &str) -> Reply {
@@ -119,6 +171,10 @@ fn none() -> Vec<&'static str> {
     Vec::new()
 }
 
+fn here_words() -> Vec<&'static str> {
+    vec!["here", "all"]
+}
+
 /// Every command, in the order `help` lists them.
 pub const COMMANDS: &[Spec] = &[
     Spec { name: "help", also: &["?"], usage: "help [command]", about: "list the commands, or say more of one", words: command_names, run: help },
@@ -127,18 +183,81 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "time", also: &[], usage: "time [hour|+h|-h]", about: "set the hour (18, 18:30, dusk), or move it on or back", words: hour_words, run: time },
     Spec { name: "date", also: &[], usage: "date [month|0-1]", about: "set the time of year: a month, or a fraction of the year from the spring equinox", words: month_words, run: date },
     Spec { name: "season", also: &[], usage: "season <spring|summer|autumn|winter>", about: "set the time of year to the middle of a season", words: season_words, run: set_season },
-    Spec { name: "tp", also: &["teleport", "go"], usage: "tp <x> <z> [h] | tp x,z[,h] | tp <place> | tp home | tp back", about: "go to voxel x, z (h above the ground), to a named place, to the world's start, or back", words: tp_words, run: tp },
+    Spec { name: "year", also: &[], usage: "year [n|+n|-n]", about: "say which year of the world it is (its first is 0), or set it", words: none, run: year },
+    Spec { name: "tp", also: &["teleport", "go"], usage: "tp <x> <z> [h] | tp x,z[,h] | tp <place> | tp <hamlet|village|town|...> | tp home | tp back", about: "go to voxel x, z (h above the ground), to a named place, to the nearest settlement of a kind, to the world's start, or back", words: tp_words, run: tp },
     Spec { name: "back", also: &[], usage: "back", about: "go back to where the last tp left from", words: none, run: |_, game| game.back() },
     Spec { name: "pos", also: &["where"], usage: "pos", about: "say where you are, ready for tp and for --over and --look", words: none, run: pos },
     Spec { name: "places", also: &[], usage: "places [name]", about: "the named places nearest, or those with this in their name", words: none, run: places },
+    Spec { name: "settlements", also: &["villages", "towns"], usage: "settlements [hamlet|village|largevillage|town|greattown]", about: "the hamlets, villages and towns nearest, or those of one kind, with their people and trades", words: kind_words, run: settlements },
+    Spec { name: "people", also: &[], usage: "people [here|all]", about: "who lives in the settlement nearest, and where they all are at this hour; all names each of them", words: here_words, run: |args, game| game.people(args.first() == Some(&"all")) },
+    Spec { name: "greet", also: &["hello"], usage: "greet", about: "greet whoever of a settlement is nearest, as E does", words: none, run: |_, game| game.greet() },
+    Spec { name: "read", also: &[], usage: "read", about: "read the notice board or guilds' board looked at, as E does", words: none, run: |_, game| game.read() },
     Spec { name: "fly", also: &[], usage: "fly [on|off]", about: "fly free of the ground, or walk again", words: on_off, run: |args, game| game.fly(switch(args, "fly")?) },
     Spec { name: "view", also: &["third"], usage: "view", about: "look through the eyes, or from behind the figure (V)", words: none, run: |_, game| game.third() },
-    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, or set things down", words: spawn_words, run: spawn },
+    Spec { name: "spawn", also: &["summon"], usage: "spawn <camp [laid|lit|out|burnt] | murmuration | crows [how] | boat | people [n] | herd <animal> [n] | pen <animal> | thing [n]>", about: "make camp ahead, call starlings or crows, put a boat on the water ahead, stand people of the country ahead, bring a herd or a pen of animals, or set things down", words: spawn_words, run: spawn },
     Spec { name: "aurora", also: &[], usage: "aurora [on|off|auto]", about: "the northern lights out every night, never, or as the night has them", words: on_off_auto, run: aurora },
     Spec { name: "give", also: &[], usage: "give <thing> [n]", about: "put things in the pack: sticks, lantern, a flower (poppy, bluebell...), holly-berries...", words: item_words, run: give },
     Spec { name: "speed", also: &[], usage: "speed [times]", about: "walk, run and swim this many times faster (1 is usual)", words: none, run: speed },
     Spec { name: "seed", also: &[], usage: "seed", about: "say which world this is", words: none, run: |_, game| Ok(format!("world seed {0} (run with --seed {0} to come back to it)", game.seed())) },
+    Spec { name: "travellers", also: &["travelers"], usage: "travellers [camper|settlers|riverboat|fishingboat|quay]", about: "who is on the road or the water nearest, and what they are doing, or the quays: tp goes to them by the same words", words: traveller_words, run: travellers },
+    Spec { name: "boon", also: &["grant"], usage: "boon [second-well|guild-hall]", about: "grant the settlement nearest a boon this year (a second well, its guild hall opened), or say which it has", words: boon_words, run: boon },
 ];
+
+/// The boons `boon` grants (#207).
+fn boon_words() -> Vec<&'static str> {
+    worldgen::settlements::years::Boon::ALL.iter().map(|b| b.name()).collect()
+}
+
+fn boon(args: &[&str], game: &mut dyn Game) -> Reply {
+    use worldgen::settlements::years::Boon;
+    let words = args.join(" ");
+    match words.trim() {
+        "" => game.boon(None),
+        w => game.boon(Some(Boon::by_name(w).ok_or_else(|| format!("'{w}' is no boon: {}", boon_words().join(", ")))?)),
+    }
+}
+
+/// The words `travellers` and `tp` take for the travellers (#205).
+fn traveller_words() -> Vec<&'static str> {
+    let mut words: Vec<&str> = worldgen::settlements::travel::Kind::ALL.iter().map(|k| k.key()).collect();
+    words.push("quay");
+    words
+}
+
+/// What a word names among the travellers: a kind of them, or the quays.
+fn traveller_kind(word: &str) -> Option<(Option<worldgen::settlements::travel::Kind>, bool)> {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "quay" | "quays" | "jetty" => Some((None, true)),
+        // A camp is the player's own, or a place's name.
+        "camp" => None,
+        w => worldgen::settlements::travel::Kind::named(w).map(|k| (Some(k), false)),
+    }
+}
+
+fn travellers(args: &[&str], game: &mut dyn Game) -> Reply {
+    let words = args.join(" ");
+    let (kind, quays) = match words.trim() {
+        "" => (None, false),
+        w => traveller_kind(w).ok_or_else(|| format!("'{w}' is not a kind of traveller: {}", traveller_words().join(", ")))?,
+    };
+    let found = game.travellers(kind, quays, 8);
+    if found.is_empty() {
+        return Err(if quays { "no quays in this part of the world".into() } else { "no travellers out in this part of the world just now".into() });
+    }
+    let here = game.here().eye;
+    let mut out = String::new();
+    for t in found {
+        let (dx, dz) = (t.at.x - here.x, t.at.z - here.z);
+        let metres = dx.hypot(dz) / worldgen::scale::VOXELS_PER_METRE as f64;
+        let far = if metres >= 1000.0 { format!("{:.1} km", metres / 1000.0) } else { format!("{metres:.0} m") };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        // The look is the yaw `--look` takes, for a still of them from where tp puts you.
+        out += &format!("{}, {far} {}   tp {:.0},{:.0} look {:.0}\n  {} (at {:.0},{:.0},{:.0})", t.what, compass(dx, dz), t.stand.x, t.stand.y, t.look.to_degrees(), t.doing, t.at.x, t.at.y, t.at.z);
+    }
+    Ok(out)
+}
 
 /// The command a word names, by its name or another it answers to.
 pub fn find(word: &str) -> Option<&'static Spec> {
@@ -281,6 +400,25 @@ fn date(args: &[&str], game: &mut dyn Game) -> Reply {
     Ok(format!("it is now {}", date_words(d)))
 }
 
+/// The year `word` asks for, from `now`: a year counted from 0, or so many on or back.
+fn year_of(word: &str, now: u32) -> Result<u32, String> {
+    let wrong = || format!("'{word}' is not a year: a whole number from 0 (the world's first year), or +n or -n");
+    let step = |n: &str| n.parse::<u32>().map_err(|_| wrong());
+    match word.as_bytes().first() {
+        Some(b'+') => Ok(now.saturating_add(step(&word[1..])?)),
+        Some(b'-') => Ok(now.saturating_sub(step(&word[1..])?)),
+        _ => step(word),
+    }
+}
+
+fn year(args: &[&str], game: &mut dyn Game) -> Reply {
+    let now = game.year();
+    let Some(word) = args.first() else { return Ok(format!("it is year {now} of this world (its first is 0)")) };
+    let y = year_of(word, now)?;
+    game.set_year(y)?;
+    Ok(format!("it is now year {y} of this world"))
+}
+
 fn set_season(args: &[&str], game: &mut dyn Game) -> Reply {
     let word = args.first().ok_or("which season: spring, summer, autumn or winter?")?;
     let d = season::named(&word.to_ascii_lowercase()).ok_or_else(|| format!("'{word}' is not a season: spring, summer, autumn or winter"))?;
@@ -312,6 +450,10 @@ pub enum Goto {
     Home,
     Back,
     Place(String),
+    /// The nearest settlement of a kind.
+    Nearest(worldgen::settlements::Kind),
+    /// The nearest travellers, of a kind or any, or the nearest quay (#205).
+    Traveller(Option<worldgen::settlements::travel::Kind>, bool),
 }
 
 /// Reads `tp`'s words: two or three numbers, apart or joined by commas as `pos` and
@@ -323,7 +465,14 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
         [] => Err("where to? tp x z, tp x,z,h, tp home, or the name of a place".into()),
         ["home"] => Ok(Goto::Home),
         ["back"] => Ok(Goto::Back),
-        [x, ..] if x.parse::<f64>().is_err() =>Ok(Goto::Place(joined.trim().to_string())),
+        [word] if traveller_kind(word).is_some() => {
+            let (kind, quays) = traveller_kind(word).expect("a traveller's word");
+            Ok(Goto::Traveller(kind, quays))
+        }
+        [x, ..] if x.parse::<f64>().is_err() => Ok(match worldgen::settlements::Kind::named(&joined) {
+            Some(kind) => Goto::Nearest(kind),
+            None => Goto::Place(joined.trim().to_string()),
+        }),
         [x, z] => Ok(Goto::At(number(x, "x")?, number(z, "z")?, None)),
         [x, z, h] => Ok(Goto::At(number(x, "x")?, number(z, "z")?, Some(number(h, "the height above the ground")?))),
         _ => Err(format!("'{joined}': tp takes x and z, and a height if you like")),
@@ -331,7 +480,14 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
 }
 
 fn tp_words() -> Vec<&'static str> {
-    vec!["home", "back"]
+    let mut words = vec!["home", "back"];
+    words.extend(kind_words());
+    words.extend(traveller_words());
+    words
+}
+
+fn kind_words() -> Vec<&'static str> {
+    worldgen::settlements::Kind::ALL.iter().map(|k| k.key()).collect()
 }
 
 fn tp(args: &[&str], game: &mut dyn Game) -> Reply {
@@ -348,7 +504,45 @@ fn tp(args: &[&str], game: &mut dyn Game) -> Reply {
             let (x, z, said) = (p.x, p.z, format!("{} ({})", p.name, p.kind));
             game.teleport(x, z, None).map(|line| format!("{said}: {line}"))
         }
+        Goto::Nearest(kind) => {
+            let found = game.settlements(Some(kind), 1);
+            let s = found.first().ok_or_else(|| format!("no {} in this part of the world", kind.word()))?;
+            let (x, z, said) = (s.x, s.z, format!("{} ({})", s.name, s.kind));
+            game.teleport(x, z, None).map(|line| format!("{said}: {line}"))
+        }
+        Goto::Traveller(kind, quays) => {
+            let found = game.travellers(kind, quays, 1);
+            let t = found.first().ok_or_else(|| format!("no {} out in this part of the world just now", if quays { "quay" } else { kind.map_or("travellers", |k| k.word()) }))?;
+            let (x, z, look, said) = (t.stand.x, t.stand.y, t.look, format!("{}, {}", t.what, t.doing));
+            let line = game.teleport(x, z, None)?;
+            game.face(look);
+            Ok(format!("{said}: {line}"))
+        }
     }
+}
+
+fn settlements(args: &[&str], game: &mut dyn Game) -> Reply {
+    let words = args.join(" ");
+    let kind = match words.trim() {
+        "" => None,
+        w => Some(worldgen::settlements::Kind::named(w).ok_or_else(|| format!("'{w}' is not a kind of settlement: {}", kind_words().join(", ")))?),
+    };
+    let found = game.settlements(kind, 6);
+    if found.is_empty() {
+        return Err("no settlements in this part of the world".into());
+    }
+    let here = game.here().eye;
+    let mut out = String::new();
+    for s in found {
+        let (dx, dz) = (s.x - here.x, s.z - here.z);
+        let metres = dx.hypot(dz) / worldgen::scale::VOXELS_PER_METRE as f64;
+        let far = if metres >= 1000.0 { format!("{:.1} km", metres / 1000.0) } else { format!("{metres:.0} m") };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out += &format!("{} ({}), {far} {}   tp {:.0},{:.0}\n  {}", s.name, s.kind, compass(dx, dz), s.x, s.z, s.facts);
+    }
+    Ok(out)
 }
 
 fn pos(_: &[&str], game: &mut dyn Game) -> Reply {
@@ -440,7 +634,7 @@ pub fn fire_word(state: u8) -> &'static str {
 pub const CROWS: &[&str] = &["ground", "perch", "tree", "rock", "fly", "land", "roost", "any"];
 
 fn spawn_words() -> Vec<&'static str> {
-    let mut w = vec!["camp", "murmuration", "crows", "boat"];
+    let mut w = vec!["camp", "murmuration", "crows", "boat", "people", "herd", "pen"];
     w.extend(item_words().into_iter().filter(|i| *i != "lantern"));
     w
 }
@@ -463,6 +657,16 @@ pub fn spawning(args: &[&str]) -> Result<Spawn, String> {
             Spawn::Crows(how)
         }
         "boat" => Spawn::Boat,
+        "people" | "folk" => Spawn::People(rest.first().map_or(Ok(12), |n| count(n))?.min(60)),
+        "herd" | "herds" | "animals" | "flock" => {
+            // The kind may be more than a word ("wild boar"), the count last.
+            let (n, words) = match rest.split_last() {
+                Some((last, before)) if last.chars().all(|c| c.is_ascii_digit()) => (Some(count(last)?.min(40)), before),
+                _ => (None, rest),
+            };
+            Spawn::Herd(animal(words)?, n)
+        }
+        "pen" | "coop" | "pasture" | "fold" => Spawn::Pen(animal(rest)?),
         _ => {
             let n = match rest.first() {
                 Some(n) => count(n)?,
@@ -472,6 +676,16 @@ pub fn spawning(args: &[&str]) -> Result<Spawn, String> {
             Spawn::Thing(what, n)
         }
     })
+}
+
+/// The animal some words name: "sheep", "wild boar", "wild-goats", "hens".
+fn animal(words: &[&str]) -> Result<worldgen::fauna::Kind, String> {
+    use worldgen::fauna::Kind;
+    let all = || Kind::ALL.iter().map(|k| k.key()).collect::<Vec<_>>().join(", ");
+    if words.is_empty() {
+        return Err(format!("of what? {}", all()));
+    }
+    Kind::named(&words.join("-")).ok_or_else(|| format!("there is no animal called '{}': {}", words.join(" "), all()))
 }
 
 fn spawn(args: &[&str], game: &mut dyn Game) -> Reply {
@@ -749,6 +963,7 @@ mod tests {
     struct Mock {
         hour: f32,
         date: f32,
+        year: u32,
         weather: Option<Option<Forced>>,
         went: Option<(f64, f64, Option<f64>)>,
         spawned: Vec<Spawn>,
@@ -758,7 +973,7 @@ mod tests {
 
     impl Mock {
         fn new() -> Self {
-            Self { hour: 10.0, date: 0.32, weather: None, went: None, spawned: Vec::new(), given: Vec::new(), pace: 1.0 }
+            Self { hour: 10.0, date: 0.32, year: 0, weather: None, went: None, spawned: Vec::new(), given: Vec::new(), pace: 1.0 }
         }
     }
 
@@ -774,6 +989,13 @@ mod tests {
         }
         fn set_clock(&mut self, hour: f32, date: f32) {
             (self.hour, self.date) = (hour, date);
+        }
+        fn year(&self) -> u32 {
+            self.year
+        }
+        fn set_year(&mut self, year: u32) -> Reply {
+            self.year = year;
+            Ok(String::new())
         }
         fn weather(&self) -> String {
             "fair".into()
@@ -792,6 +1014,15 @@ mod tests {
         fn places(&self, query: &str, _n: usize) -> Vec<Named> {
             let all = [("Hollin Tarn", "lake", 10.0, 20.0), ("Old Hollin Cairn", "cairn", 30.0, 40.0)];
             all.iter().filter(|p| p.0.to_lowercase().contains(&query.to_lowercase())).map(|p| Named { name: p.0.into(), kind: p.1, x: p.2, z: p.3 }).collect()
+        }
+        fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<Settlement> {
+            use worldgen::settlements::Kind;
+            let all = [("Ashcot", Kind::Hamlet, 50.0, 60.0), ("Brynell", Kind::GreatTown, 900.0, 80.0), ("Elmley", Kind::Village, 300.0, 400.0)];
+            all.iter()
+                .filter(|s| kind.is_none_or(|k| k == s.1))
+                .take(n)
+                .map(|s| Settlement { name: s.0.into(), kind: s.1.word(), facts: "9 people".into(), x: s.2, z: s.3 })
+                .collect()
         }
         fn spawn(&mut self, what: Spawn) -> Reply {
             self.spawned.push(what);
@@ -833,6 +1064,22 @@ mod tests {
     }
 
     #[test]
+    fn the_year_is_said_and_set_from_0_or_moved_on_and_back() {
+        let mut game = Mock::new();
+        assert!(run("year", &mut game).unwrap().contains("year 0"));
+        assert_eq!(run("year 4", &mut game), Ok("it is now year 4 of this world".into()));
+        assert_eq!(game.year, 4);
+        run("year +2", &mut game).unwrap();
+        assert_eq!(game.year, 6);
+        run("year -10", &mut game).unwrap();
+        assert_eq!(game.year, 0);
+        assert!(run("year last", &mut game).unwrap_err().contains("'last'"));
+        assert!(run("year 1.5", &mut game).is_err());
+        // The date is left as it was.
+        assert_eq!((game.hour, game.date), (10.0, 0.32));
+    }
+
+    #[test]
     fn tp_reads_numbers_apart_or_joined_names_and_home() {
         assert_eq!(goto(&["42186", "30679"]), Ok(Goto::At(42186.0, 30679.0, None)));
         assert_eq!(goto(&["42186", "30679", "60"]), Ok(Goto::At(42186.0, 30679.0, Some(60.0))));
@@ -841,6 +1088,9 @@ mod tests {
         assert_eq!(goto(&["home"]), Ok(Goto::Home));
         assert_eq!(goto(&["back"]), Ok(Goto::Back));
         assert_eq!(goto(&["Hollin", "Tarn"]), Ok(Goto::Place("Hollin Tarn".into())));
+        assert_eq!(goto(&["village"]), Ok(Goto::Nearest(worldgen::settlements::Kind::Village)));
+        assert_eq!(goto(&["great", "town"]), Ok(Goto::Nearest(worldgen::settlements::Kind::GreatTown)));
+        assert_eq!(goto(&["greattown"]), Ok(Goto::Nearest(worldgen::settlements::Kind::GreatTown)));
         assert!(goto(&[]).is_err());
         assert!(goto(&["1", "2", "3", "4"]).is_err());
         assert!(goto(&["1", "x"]).is_err());
@@ -867,6 +1117,13 @@ mod tests {
         assert!(run("tp hollin tarn", &mut g).unwrap().starts_with("Hollin Tarn (lake)"));
         assert_eq!(g.went, Some((10.0, 20.0, None)));
         assert!(run("tp nowhere at all", &mut g).is_err());
+        assert!(run("tp greattown", &mut g).unwrap().starts_with("Brynell (great town)"));
+        assert_eq!(g.went, Some((900.0, 80.0, None)));
+        assert!(run("tp town", &mut g).is_err(), "there is no plain town here");
+        let listed = run("settlements", &mut g).unwrap();
+        assert!(listed.contains("Ashcot (hamlet)") && listed.contains("tp 300,400") && listed.contains("9 people"), "{listed}");
+        assert!(!run("villages village", &mut g).unwrap().contains("Ashcot"));
+        assert!(run("settlements city", &mut g).unwrap_err().contains("greattown"));
         run("spawn camp", &mut g).unwrap();
         run("spawn camp out", &mut g).unwrap();
         run("spawn crows perch", &mut g).unwrap();
@@ -980,5 +1237,24 @@ mod tests {
         assert_eq!(compass(0.0, -10.0), "N");
         assert_eq!(compass(10.0, 0.0), "E");
         assert_eq!(compass(-10.0, 10.0), "SW");
+    }
+
+    #[test]
+    fn people_are_called_by_the_dozen_or_as_many_as_asked() {
+        assert_eq!(spawning(&["people"]), Ok(Spawn::People(12)));
+        assert_eq!(spawning(&["people", "5"]), Ok(Spawn::People(5)));
+        assert_eq!(spawning(&["people", "500"]), Ok(Spawn::People(60)));
+        assert!(spawning(&["people", "some"]).is_err());
+    }
+
+    #[test]
+    fn herds_and_pens_are_called_by_their_animal() {
+        use worldgen::fauna::Kind;
+        assert_eq!(spawning(&["herd", "sheep"]), Ok(Spawn::Herd(Kind::Sheep, None)));
+        assert_eq!(spawning(&["herd", "wild", "boar", "5"]), Ok(Spawn::Herd(Kind::Boar, Some(5))));
+        assert_eq!(spawning(&["herd", "wild-goats", "500"]), Ok(Spawn::Herd(Kind::WildGoat, Some(40))));
+        assert_eq!(spawning(&["pen", "hens"]), Ok(Spawn::Pen(Kind::Chicken)));
+        assert!(spawning(&["herd"]).is_err());
+        assert!(spawning(&["pen", "dragons"]).is_err());
     }
 }

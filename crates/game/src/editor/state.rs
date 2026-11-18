@@ -11,14 +11,22 @@ use voxel::{AIR, Materials, Voxel, mesh::PlantBox};
 use worldgen::{
     biome::Biome,
     features::{
-        designs::{self, Cell, Design, Role},
+        designs::{self, Cell, Design, Kind, Role, Special},
+        fittings::{self, Group},
         landmarks::{self, Landmark, Palette},
         parts::{self, LampStyle},
     },
     materials as mat,
+    settlements::{
+        Region,
+        kit::{self, Step, components::Component},
+    },
 };
 
-use super::view::{self, Grid, Orbit, Vertex};
+use super::{
+    components, houses,
+    view::{self, Grid, Orbit, Vertex},
+};
 
 /// The lamps there are to look at: the one put up beside the trails, and the posts that
 /// stand at the corners of a landmark. (The old gate lantern is no longer put up.)
@@ -30,6 +38,15 @@ fn lamp_name(style: LampStyle) -> String {
         style => format!("Lamp post: {style:?}"),
     }
 }
+
+/// The galleries of the props settlements are furnished and dressed with: every one, or
+/// a group of them. The word is the one `--structure props/WORD` takes.
+const PROP_GALLERIES: [(&str, &str, Option<Group>); 4] = [
+    ("Every prop", "all", None),
+    ("Furniture", "furniture", Some(Group::Furniture)),
+    ("Trades", "trades", Some(Group::Trade)),
+    ("Yard and lane", "yard", Some(Group::Yard)),
+];
 
 /// Places to see a structure in: the palette of each, as a site there would have it.
 pub const PLACES: [(&str, Biome, Voxel); 9] = [
@@ -69,7 +86,8 @@ impl Tool {
 /// What is shown.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Showing {
-    /// The generator's own variants of a kind (an index into [`designs::KINDS`]).
+    /// The generator's own variants of a kind (an index into [`Editor::kinds`]): a
+    /// landmark's, or the stand-in for a settlement building.
     Generator(usize),
     /// A saved structure: the kind, and which of its files.
     Saved(usize, usize),
@@ -77,6 +95,20 @@ pub enum Showing {
     Landing,
     Lantern(usize),
     Signpost,
+    /// A home of the house kit: a region and a step (see [`houses`]).
+    House(houses::House),
+    /// A gallery of settlement props (an index into [`PROP_GALLERIES`]).
+    Props(usize),
+    /// A regional component by its generator, on its stand (an index into
+    /// [`Component::ALL`]; see [`components`]).
+    Component(usize),
+    /// A gallery of components (an index into [`components::galleries`]).
+    Components(usize),
+}
+
+/// Where a component is in [`Component::ALL`].
+fn component_index(c: Component) -> usize {
+    Component::ALL.iter().position(|&d| d == c).unwrap_or(0)
 }
 
 type Edit = Vec<(IVec3, Option<Cell>, Option<Cell>)>;
@@ -93,9 +125,10 @@ pub struct Entry {
     redo: Vec<Edit>,
 }
 
-/// The files of one kind.
+/// The files of one kind: one folder (every house, whatever its region and step, is in
+/// the one folder).
 pub struct KindFiles {
-    pub kind: Landmark,
+    pub kind: Kind,
     /// The generator's weight, if it has a generator.txt.
     pub generator: Option<u32>,
     pub entries: Vec<Entry>,
@@ -103,7 +136,11 @@ pub struct KindFiles {
 
 impl KindFiles {
     fn generator_weight(&self) -> u32 {
-        self.generator.unwrap_or(if self.entries.iter().any(|e| e.on_disk) { 0 } else { 1 })
+        match self.kind {
+            // The kit keeps its weight against saved houses (see designs::KIT_WEIGHT).
+            Kind::House(..) | Kind::Component(..) => self.generator.unwrap_or(designs::KIT_WEIGHT),
+            _ => self.generator.unwrap_or(if self.entries.iter().any(|e| e.on_disk) { 0 } else { 1 }),
+        }
     }
 }
 
@@ -131,8 +168,12 @@ struct Model {
 pub struct Options {
     /// The structures folder, if not the repository's own.
     pub dir: Option<PathBuf>,
-    /// What to show first: a kind (`shrine`), a saved structure (`shrine/high-gate`),
-    /// `landing`, `lantern`, `lantern/N` or `signpost`.
+    /// What to show first: a kind (`shrine`, `tavern`), a saved structure
+    /// (`shrine/high-gate`, `house/shut-hut`), the kit's own home (`house/upland/stone`,
+    /// or `house/upland/stone/bare` without its components), a component
+    /// (`component/porch`, or a saved one by its file's name), a gallery of components
+    /// (`components/all`, `components/desert`), `landing`, `lantern`, `lantern/N` or
+    /// `signpost`.
     pub show: Option<String>,
     pub variant: Option<u32>,
     /// Cut away everything above this layer.
@@ -146,6 +187,8 @@ pub struct Options {
     pub place: Option<usize>,
     pub screenshot: Option<PathBuf>,
     pub size: (u32, u32),
+    /// A home of the house kit furnished for a household of its variant.
+    pub furnished: bool,
 }
 
 pub struct Editor {
@@ -156,6 +199,9 @@ pub struct Editor {
     pub showing: Showing,
     pub variant: u32,
     pub place: usize,
+    /// The region a settlement building's generator builds in, as an index into
+    /// [`Region::ALL`]: it is built of that region's own country, as the kit's homes are.
+    pub region: usize,
     pub tool: Tool,
     pub brush: Cell,
     pub mirror_x: bool,
@@ -181,6 +227,24 @@ pub struct Editor {
     filter: String,
     show_help: bool,
     mats: Materials,
+    /// The house kit's home on view, for what the panel says about it.
+    house: Option<worldgen::settlements::kit::Building>,
+    /// The Houses view's household and the kit's rules as read from their files.
+    houses: houses::Houses,
+    /// Walking into a saved house on view: whether the door still leads to every bed.
+    walk: Option<kit::Walk>,
+    /// The home is shown furnished, and who lives there.
+    furnished: bool,
+    household: String,
+    /// What the settlement building on view has besides its rooms, in a line.
+    special_notes: String,
+    /// Words drawn in the view at places in it: the names in a gallery of components.
+    notes: Vec<(Vec3, String)>,
+    /// The layer the ground plane is drawn under: 0 but for a component on a raised
+    /// floor's door, whose stand stands as high as the floor.
+    ground: i32,
+    /// A saved component on view fits where it was drawn on some home of the kit.
+    fits: Option<bool>,
     /// The window was asked to close with changes not saved, and is asking what to do.
     pub closing: bool,
     /// Done: the window may close.
@@ -190,13 +254,16 @@ pub struct Editor {
 impl Editor {
     pub fn new(opts: &Options) -> Self {
         let dir = opts.dir.clone().unwrap_or_else(default_dir);
+        let houses = houses::Houses::new(&dir);
+        let place = opts.place.unwrap_or(0).min(PLACES.len() - 1);
         let mut e = Editor {
             dir,
             kinds: Vec::new(),
             problems: Vec::new(),
             showing: Showing::Generator(0),
             variant: opts.variant.unwrap_or(1),
-            place: opts.place.unwrap_or(0).min(PLACES.len() - 1),
+            place,
+            region: Region::ALL.iter().position(|&r| r == Region::of(PLACES[place].1)).unwrap_or(0),
             tool: Tool::Build,
             brush: Cell::Role(Role::Stone),
             mirror_x: false,
@@ -218,6 +285,15 @@ impl Editor {
             filter: String::new(),
             show_help: true,
             mats: mat::build(),
+            house: None,
+            houses,
+            walk: None,
+            furnished: opts.furnished,
+            household: String::new(),
+            special_notes: String::new(),
+            notes: Vec::new(),
+            ground: 0,
+            fits: None,
             closing: false,
             quit: false,
         };
@@ -239,32 +315,81 @@ impl Editor {
         e
     }
 
-    /// Reads every structure file again, keeping none of the unsaved changes.
+    /// Reads every structure file again, keeping none of the unsaved changes, and the
+    /// kit's rules.
     pub fn reload(&mut self) {
         let (kinds, problems) = read_dir(&self.dir);
         self.kinds = kinds;
         self.problems = problems;
+        self.houses.kit.read_all();
         if let Showing::Saved(k, i) = self.showing
             && i >= self.kinds[k].entries.len()
         {
-            self.showing = Showing::Generator(k);
+            self.showing = self.generator_of(k);
         }
         self.stale = true;
     }
 
+    /// The folder of saved houses.
+    fn house_folder(&self) -> usize {
+        self.kinds.iter().position(|f| matches!(f.kind, Kind::House(..))).expect("a folder for houses")
+    }
+
+    /// What is shown for a kind's own: its generator, or for houses the kit.
+    fn generator_of(&self, k: usize) -> Showing {
+        match self.kinds[k].kind {
+            Kind::House(..) => Showing::House((0, 0)),
+            Kind::Component(c) => Showing::Component(component_index(c)),
+            _ => Showing::Generator(k),
+        }
+    }
+
+    /// The folder of saved components.
+    fn component_folder(&self) -> usize {
+        self.kinds.iter().position(|f| matches!(f.kind, Kind::Component(..))).expect("a folder for components")
+    }
+
     fn show_named(&mut self, name: &str) {
         let (head, tail) = name.split_once('/').map_or((name, None), |(a, b)| (a, Some(b)));
+        let saved = |e: &Editor, k: usize| tail.and_then(|t| e.kinds[k].entries.iter().position(|f| f.path.file_stem().is_some_and(|s| s == t)));
         match head {
             "landing" => self.select(Showing::Landing),
             "signpost" => self.select(Showing::Signpost),
+            // A saved house by its file's name, or else the kit's own of a region and step.
+            "house" | "houses" => {
+                // `house/REGION/STEP/bare`: the kit's own without its components.
+                if tail.is_some_and(|t| t.ends_with("/bare")) {
+                    self.houses.components = false;
+                }
+                let k = self.house_folder();
+                self.select(match saved(self, k) {
+                    Some(i) => Showing::Saved(k, i),
+                    None => Showing::House(houses::named(tail)),
+                })
+            }
+            // A saved component by its file's name, or else the generator's own by its word.
+            "component" => {
+                let k = self.component_folder();
+                self.select(match saved(self, k) {
+                    Some(i) => Showing::Saved(k, i),
+                    None => Showing::Component(tail.and_then(Component::by_word).map_or(0, component_index)),
+                })
+            }
+            "components" => self.select(Showing::Components(tail.and_then(|t| components::galleries().iter().position(|g| g.1 == t)).unwrap_or(0))),
+            "props" => self.select(Showing::Props(tail.and_then(|t| PROP_GALLERIES.iter().position(|g| g.1 == t)).unwrap_or(0))),
             "lantern" | "lanterns" => self.select(Showing::Lantern(tail.and_then(|t| t.parse().ok()).unwrap_or(0).min(LAMPS.len() - 1))),
             _ => {
-                let Some(k) = designs::KINDS.iter().position(|&kind| designs::kind_word(kind) == head) else {
+                let Some(k) = self.kinds.iter().position(|f| f.kind.word() == head) else {
                     self.message = format!("There is no kind of structure called {head}");
                     return;
                 };
-                let file = tail.and_then(|t| self.kinds[k].entries.iter().position(|e| e.path.file_stem().is_some_and(|s| s == t)));
-                self.select(match file {
+                // A settlement building's generator in a region: `tavern/desert`.
+                if matches!(self.kinds[k].kind, Kind::Special(_))
+                    && let Some(r) = tail.and_then(|t| Region::ALL.iter().position(|r| r.word() == t))
+                {
+                    self.region = r;
+                }
+                self.select(match saved(self, k) {
                     Some(i) => Showing::Saved(k, i),
                     None => Showing::Generator(k),
                 });
@@ -284,8 +409,22 @@ impl Editor {
 
     fn kind(&self) -> Option<Landmark> {
         match self.showing {
-            Showing::Generator(k) | Showing::Saved(k, _) => Some(designs::KINDS[k]),
+            Showing::Generator(k) | Showing::Saved(k, _) => self.kinds[k].kind.landmark(),
             Showing::Landing => Some(Landmark::Landing),
+            _ => None,
+        }
+    }
+
+    /// What kind of building is shown, if a house or a settlement building: a house with
+    /// its region and step.
+    fn building_kind(&self) -> Option<Kind> {
+        match self.showing {
+            Showing::House((r, s)) => Some(Kind::House(Region::ALL[r], Step::ALL[s])),
+            Showing::Saved(..) => self.entry().map(|e| e.design.kind).filter(|k| k.landmark().is_none()),
+            Showing::Generator(k) => Some(self.kinds[k].kind).filter(|k| k.landmark().is_none()),
+            // A gallery of components is seen as each of them is.
+            Showing::Component(c) => Some(Kind::Component(Component::ALL[c])),
+            Showing::Components(_) => Some(Kind::Component(Component::ALL[0])),
             _ => None,
         }
     }
@@ -309,19 +448,59 @@ impl Editor {
         Palette::local(biome, rock)
     }
 
+    /// The materials what is shown is built of, varied for the variant as a site's are: a
+    /// house's own country, or else the place it is seen in.
+    fn shown_palette(&self) -> Palette {
+        match self.building_kind() {
+            Some(Kind::House(region, _)) => houses::palette(region, self.variant),
+            _ if self.special_shown().is_some() => houses::palette(Region::ALL[self.region], self.variant),
+            _ => self.palette().varied(self.variant),
+        }
+    }
+
+    /// The settlement building whose generator is on view, if one is.
+    fn special_shown(&self) -> Option<Special> {
+        match self.showing {
+            Showing::Generator(k) => match self.kinds[k].kind {
+                Kind::Special(s) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The name shown for what is on view.
     pub fn title(&self) -> String {
         match self.showing {
-            Showing::Generator(k) => format!("{}: the generator's own, variant {}", kind_label(designs::KINDS[k]), self.variant),
-            Showing::Saved(k, i) => format!("{}: {}", kind_label(designs::KINDS[k]), self.kinds[k].entries[i].design.name),
+            Showing::Generator(k) => match self.kinds[k].kind {
+                Kind::Special(s) if houses::special(s, Region::ALL[self.region], 0).is_none() => format!("{}: an empty plot, which has no generator", s.label()),
+                Kind::Special(s) => format!("{}: the generator's own, {}, variant {}", s.label(), houses::region_label(Region::ALL[self.region]).to_lowercase(), self.variant),
+                kind => format!("{}: the generator's own, variant {}", folder_label(kind), self.variant),
+            },
+            Showing::Saved(k, i) => {
+                let d = &self.kinds[k].entries[i].design;
+                match d.kind {
+                    Kind::House(r, s) => format!("House ({}, {}): {}", houses::region_label(r).to_lowercase(), s.label().to_lowercase(), d.name),
+                    Kind::Component(c) => format!("Component ({}): {}", c.label().to_lowercase(), d.name),
+                    kind => format!("{}: {}", folder_label(kind), d.name),
+                }
+            }
             Showing::Landing => format!("Landing, variant {}", self.variant),
             Showing::Lantern(s) => format!("{}, variant {}", lamp_name(LAMPS[s]), self.variant),
             Showing::Signpost => "Signpost".into(),
+            Showing::House(h) => houses::title(h, self.variant),
+            Showing::Props(g) => format!("Settlement props: {}, variant {}", PROP_GALLERIES[g].0.to_lowercase(), self.variant),
+            Showing::Component(c) => format!("Component: {}, the generator's own, variant {}", Component::ALL[c].label().to_lowercase(), self.variant),
+            Showing::Components(g) => format!("Components: {}, variant {}", components::galleries()[g].0.to_lowercase(), self.variant),
         }
     }
 
     /// Rebuilds the model if anything shown has changed, and hands the view what to draw.
     pub fn prepare(&mut self, gpu: &crate::gfx::Gpu, view: &mut view::View) {
+        // A kit file saved since it was read changes the kit's homes and stand-ins.
+        if self.houses.kit.poll() && matches!(self.showing, Showing::House(_) | Showing::Generator(_) | Showing::Component(_) | Showing::Components(_)) {
+            self.stale = true;
+        }
         if self.stale {
             let (opaque, glass) = self.rebuild();
             view.load(gpu, &opaque, &glass);
@@ -353,12 +532,62 @@ impl Editor {
     fn rebuild(&mut self) -> (Vec<Vertex>, Vec<Vertex>) {
         let local = self.palette();
         let seed = self.variant;
+        let mut spaces = Vec::new();
+        self.house = None;
+        self.walk = None;
+        self.notes.clear();
+        self.ground = 0;
+        self.fits = None;
         let (mut voxels, mut fine, props) = match self.showing {
-            Showing::Generator(k) => landmarks::build_site(designs::KINDS[k], &local, seed, 0),
+            Showing::Generator(k) => match self.kinds[k].kind {
+                Kind::Special(s) => match houses::build_special(s, Region::ALL[self.region], seed) {
+                    Some(b) => {
+                        let (v, f) = (b.building.voxels.clone(), b.building.fine.clone());
+                        self.walk = Some(kit::walk(&b.building));
+                        self.special_notes = houses::special_notes(&b);
+                        self.house = Some(b.building);
+                        (v, f, Vec::new())
+                    }
+                    None => (Vec::new(), Vec::new(), Vec::new()),
+                },
+                kind => landmarks::build_site(kind.landmark().expect("only landmarks and settlement buildings have a generator shown"), &local, seed, 0),
+            },
             Showing::Saved(k, i) => {
-                let p = local.varied(seed);
                 let d = &self.kinds[k].entries[i].design;
-                landmarks::finish(d.kind, &p, seed, 0, d.shape(&p, seed))
+                match d.kind {
+                    Kind::Landmark(kind) => {
+                        let p = local.varied(seed);
+                        landmarks::finish(kind, &p, seed, 0, d.shape(&p, seed))
+                    }
+                    // On a stand of a home it fits on, drawn in the anchor's frame.
+                    Kind::Component(c) => {
+                        let s = components::shown(c, seed, Some(d));
+                        self.ground = s.ground;
+                        self.fits = Some(s.fits);
+                        (s.voxels, s.fine, Vec::new())
+                    }
+                    // A house in its own country; a settlement building where it is seen.
+                    kind => {
+                        let p = match kind {
+                            Kind::House(region, _) => houses::palette(region, seed),
+                            _ => local.varied(seed),
+                        };
+                        match kit::from_design(d, &p, seed) {
+                            Some(b) => {
+                                let (v, f) = (b.voxels.clone(), b.fine.clone());
+                                self.walk = Some(kit::walk(&b));
+                                self.house = Some(b);
+                                (v, f, Vec::new())
+                            }
+                            // Drawn from nothing, with no door to walk in by.
+                            None => {
+                                let mut s = d.shape(&p, seed);
+                                let f = s.take_fine();
+                                (s.into_voxels(), f, Vec::new())
+                            }
+                        }
+                    }
+                }
             }
             Showing::Landing => landmarks::build_site(Landmark::Landing, &local, seed, 12),
             Showing::Lantern(s) => {
@@ -366,6 +595,33 @@ impl Editor {
                 (v, f, Vec::new())
             }
             Showing::Signpost => (landmarks::signpost(&local.varied(seed), &[0.4, 2.3, 4.4]), Vec::new(), Vec::new()),
+            Showing::House(h) => {
+                let (b, mut v, mut f) = self.houses.build(h, seed);
+                if self.furnished {
+                    let (fv, ff, who) = houses::furnish(&self.houses.spec(h, seed), seed, &b);
+                    v.extend(fv);
+                    f.extend(ff);
+                    self.household = who;
+                }
+                self.house = Some(b);
+                (v, f, Vec::new())
+            }
+            Showing::Props(g) => {
+                let gallery = fittings::gallery(&local.varied(seed), seed, PROP_GALLERIES[g].2);
+                spaces = gallery.spaces.iter().map(|&(a, b, ..)| (a, b)).collect();
+                (gallery.voxels, gallery.fine, Vec::new())
+            }
+            Showing::Component(c) => {
+                let s = components::shown(Component::ALL[c], seed, None);
+                self.ground = s.ground;
+                (s.voxels, s.fine, Vec::new())
+            }
+            Showing::Components(g) => {
+                let (v, f, rooms, labels) = components::gallery(components::galleries()[g].2, seed);
+                spaces = rooms;
+                self.notes = labels;
+                (v, f, Vec::new())
+            }
         };
         // Only the structure itself can be picked and drawn over; props are laid round
         // it by the game, whatever it is.
@@ -381,11 +637,17 @@ impl Editor {
         let drawn: Vec<(IVec3, Voxel)> = voxels.iter().copied().filter(|(q, v)| *v != AIR && shown(q)).collect();
         let air: Vec<IVec3> = voxels.iter().filter(|(q, v)| *v == AIR && shown(q)).map(|&(q, _)| q).collect();
         let fine: Vec<PlantBox> = fine.into_iter().filter(|b| shown(&IVec3::new(0, b.lo[1].div_euclid(voxel::mesh::CELLS), 0))).collect();
-        pickable.retain(|q| shown(q) && (cut.is_some() || q.y >= 0));
+        let ground = self.ground;
+        pickable.retain(|q| shown(q) && (cut.is_some() || q.y >= ground));
         let (mut lo, mut hi) = (IVec3::splat(-2), IVec3::splat(2));
         for (q, _) in &voxels {
             lo = lo.min(*q);
             hi = hi.max(*q);
+        }
+        // Most of a prop is finer than voxels, so a gallery is framed by the room each takes.
+        for &(a, b, ..) in &spaces {
+            lo = lo.min(a);
+            hi = hi.max(b - IVec3::ONE);
         }
         self.model = Model {
             at: voxels.iter().copied().collect(),
@@ -398,12 +660,16 @@ impl Editor {
         view::voxels(&mut opaque, &drawn, &solid, &self.mats);
         view::fine(&mut opaque, &fine, &self.mats);
         let reach = self.reach();
-        if cut.is_none_or(|l| l >= 0) {
+        if cut.is_none_or(|l| l >= ground) {
             // A hair below the layer 0 floor, so the bottoms of voxels there never show
             // through it.
-            view::plane(&mut opaque, -0.003, reach, GROUND, 1.0, view::FACE);
+            view::plane(&mut opaque, ground as f32 - 0.003, reach, GROUND, 1.0, view::FACE);
         }
         let mut glass = Vec::new();
+        // The room each prop takes, faintly on the ground: what a plan must leave for it.
+        for &(a, b, ..) in &spaces {
+            view::cuboid(&mut glass, Vec3::new(a.x as f32, 0.0, a.z as f32), Vec3::new(b.x as f32, 0.02, b.z as f32), [235, 225, 190], 0.07, view::OUTLINE, false);
+        }
         if self.show_air {
             for q in air {
                 let lo = q.as_vec3() + Vec3::splat(0.08);
@@ -445,6 +711,23 @@ impl Editor {
                 view::arrow(&mut out, dir * (r + 6.0) + Vec3::Y * y, -dir, 5.0, [255, 214, 90], 0.85);
             }
         }
+        // A saved house's way in and its beds, where the kit put them; red where an edit
+        // has shut them off from the door.
+        if let (Some(b), Some(walk)) = (&self.house, &self.walk) {
+            let red = [255, 80, 60];
+            for (n, bed) in b.inside.beds.iter().enumerate() {
+                let (lo, hi) = bed.cells().fold((IVec3::MAX, IVec3::MIN), |(a, c), q| (a.min(q), c.max(q)));
+                // Those on a floor cut away are not outlined over the one looked at.
+                if self.cut.is_some_and(|cut| lo.y > cut) {
+                    continue;
+                }
+                let rgb = if walk.cut_off.contains(&n) { red } else { [240, 200, 90] };
+                view::cuboid(&mut out, lo.as_vec3() + Vec3::splat(0.06), hi.as_vec3() + Vec3::new(0.94, 0.45, 0.94), rgb, 0.7, view::OUTLINE, false);
+            }
+            let dir = b.door.facing.as_vec3();
+            let at = b.door.floor.as_vec3() + Vec3::new(0.5, 1.1, 0.5);
+            view::arrow(&mut out, at + dir * 6.0, -dir, 5.0, if walk.door { [255, 214, 90] } else { red }, 0.85);
+        }
         let editing = self.entry().is_some();
         if let Some(hit) = self.hover {
             if let Some(q) = hit.cell {
@@ -469,7 +752,7 @@ impl Editor {
     fn brush_color(&self) -> [u8; 3] {
         match self.brush {
             Cell::Air => [120, 170, 230],
-            c => self.mats.get(c.resolve(&self.palette().varied(self.variant), self.variant, IVec3::ZERO)).color,
+            c => self.mats.get(c.resolve(&self.shown_palette(), self.variant, IVec3::ZERO)).color,
         }
     }
 
@@ -483,7 +766,7 @@ impl Editor {
         let r = self.viewport;
         let (o, d) = self.orbit.ray(pos.x - r.min.x, pos.y - r.min.y, r.width(), r.height());
         let cell = self.model.pick.as_ref().and_then(|g| g.cast(o, d, 1e5));
-        let floor = self.cut.unwrap_or(0) as f32;
+        let floor = self.cut.unwrap_or(self.ground) as f32;
         let reach = self.reach() as f32;
         let plane = (d.y.abs() > 1e-6).then(|| (floor - o.y) / d.y).filter(|&t| t > 0.0).filter(|&t| {
             let p = o + d * t;
@@ -561,8 +844,11 @@ impl Editor {
     fn click(&mut self, hit: Hit, button: egui::PointerButton) {
         use egui::PointerButton::*;
         if self.entry().is_none() {
-            if matches!(self.showing, Showing::Generator(_)) {
-                self.message = "This is the generator's own. Copy this variant (on the right) to draw on it.".into();
+            match self.showing {
+                Showing::Generator(_) => self.message = "This is the generator's own. Copy this variant (on the right) to draw on it.".into(),
+                Showing::House(_) => self.message = "This is the kit's own. Copy this house (on the right) to draw on it.".into(),
+                Showing::Component(_) => self.message = "This is the generator's own. Copy it (on the right) to draw on it.".into(),
+                _ => {}
             }
             return;
         }
@@ -625,20 +911,50 @@ impl Editor {
         }
     }
 
-    /// Starts a saved structure from the variant on view.
+    /// Starts a saved structure from the variant on view: a landmark's, a settlement
+    /// building's stand-in, or the kit's home.
     pub fn copy_variant(&mut self) {
-        let Showing::Generator(k) = self.showing else { return };
-        let kind = designs::KINDS[k];
-        let name = if self.copy_name.trim().is_empty() { format!("{} {}", kind_label(kind), self.variant) } else { self.copy_name.trim().to_string() };
-        let palette = self.palette().varied(self.variant);
-        let design = Design::copy_of(kind, &palette, self.variant, &name);
+        let named = |e: &Editor, default: String| if e.copy_name.trim().is_empty() { default } else { e.copy_name.trim().to_string() };
+        let (k, design) = match self.showing {
+            Showing::Generator(k) => match self.kinds[k].kind {
+                Kind::Landmark(kind) => {
+                    let name = named(self, format!("{} {}", kind_label(kind), self.variant));
+                    (k, Design::copy_of(kind, &self.palette().varied(self.variant), self.variant, &name))
+                }
+                Kind::Special(s) => {
+                    let region = Region::ALL[self.region];
+                    let name = named(self, format!("{} {} {}", houses::region_label(region), s.label().to_lowercase(), self.variant));
+                    let design = houses::copy_special(s, region, self.variant, &name).unwrap_or_else(|| Design::new(Kind::Special(s), &name));
+                    (k, design)
+                }
+                Kind::House(..) | Kind::Component(..) => return,
+            },
+            Showing::House(h) => {
+                let s = self.houses.spec(h, self.variant);
+                let name = named(self, format!("{} {} {}", houses::region_label(s.region), s.step.label().to_lowercase(), self.variant));
+                (self.house_folder(), self.houses.copy(h, self.variant, &name))
+            }
+            Showing::Component(c) => {
+                let c = Component::ALL[c];
+                let name = named(self, format!("{} {}", c.label(), self.variant));
+                match components::copy(c, self.variant, &name) {
+                    Some(d) => (self.component_folder(), d),
+                    None => {
+                        self.message = format!("No home of the kit takes a {} for this variant to copy.", c.label().to_lowercase());
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
+        let name = design.name.clone();
         self.add_entry(k, design);
         self.message = format!("Copied variant {} as \u{201c}{name}\u{201d}. Draw on it, then save (Ctrl+S).", self.variant);
         self.copy_name.clear();
     }
 
     fn add_entry(&mut self, k: usize, design: Design) {
-        let folder = self.dir.join(designs::kind_word(design.kind));
+        let folder = self.dir.join(design.kind.word());
         let stem = designs::slug(&design.name);
         let mut path = folder.join(format!("{stem}.txt"));
         let mut n = 2;
@@ -681,8 +997,16 @@ impl Editor {
             Ok(()) => {
                 entry.dirty = false;
                 entry.on_disk = true;
+                // A house still saves with its door shut on its beds, but says so.
+                let shut = match entry.design.kind {
+                    Kind::House(region, _) => kit::from_design(&entry.design, &houses::palette(region, 0), 0).map(|b| kit::walk(&b)).filter(|w| !w.ok()).map(|w| w.problems.join(" ")),
+                    _ => None,
+                };
                 // Read back, to be sure what was written is what is drawn.
                 match Design::parse(&text) {
+                    Ok(_) if shut.is_some() => format!("Saved {}, but: {} The tests hold every saved house to being walked into.", short(&entry.path), shut.unwrap_or_default()),
+                    Ok(back) if back == entry.design && matches!(back.kind, Kind::Component(_)) => format!("Saved {}. Build the game again to see it on the homes, chosen against the generator's own by weight.", short(&entry.path)),
+                    Ok(back) if back == entry.design && matches!(back.kind, Kind::Special(_)) => format!("Saved {}. The world builds its settlements' own of these, not saved ones, for now.", short(&entry.path)),
                     Ok(back) if back == entry.design => format!("Saved {}. Build the game again to see it in the world.", short(&entry.path)),
                     Ok(_) => format!("Saved {}, but it reads back differently: please report this.", short(&entry.path)),
                     Err(e) => format!("Saved {}, but it does not read back: {e}", short(&entry.path)),
@@ -720,12 +1044,18 @@ impl Editor {
             return;
         }
         self.message = format!("Deleted \u{201c}{}\u{201d}.", entry.design.name);
+        // Back to what it came from: for a house, the kit's own of its region and step.
+        let back = match entry.design.kind {
+            Kind::House(r, s) => Showing::House(houses::of(r, s)),
+            Kind::Component(c) => Showing::Component(component_index(c)),
+            _ => self.generator_of(k),
+        };
         self.kinds[k].entries.remove(i);
-        self.select(Showing::Generator(k));
+        self.select(back);
     }
 
     fn set_generator_weight(&mut self, k: usize, weight: u32) {
-        let path = self.dir.join(designs::kind_word(designs::KINDS[k])).join("generator.txt");
+        let path = self.dir.join(self.kinds[k].kind.word()).join("generator.txt");
         let result = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, designs::generator_text(weight)));
         match result {
             Ok(()) => {
@@ -892,24 +1222,54 @@ impl Editor {
     }
 
     fn list(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Landmarks").strong());
-        ui.small("Each has the generator's own variants, and any you have saved.");
         let mut chosen = None;
-        for (k, files) in self.kinds.iter().enumerate() {
+        // A kind's own and the ones saved of it, under its name.
+        let folder = |ui: &mut egui::Ui, k: usize, files: &KindFiles, chosen: &mut Option<Showing>| {
             let open = matches!(self.showing, Showing::Generator(j) | Showing::Saved(j, _) if j == k);
-            egui::CollapsingHeader::new(kind_label(files.kind)).id_salt(k).open(open.then_some(true)).show(ui, |ui| {
-                if ui.selectable_label(self.showing == Showing::Generator(k), format!("The generator's own  (weight {})", files.generator_weight())).clicked() {
-                    chosen = Some(Showing::Generator(k));
+            egui::CollapsingHeader::new(folder_label(files.kind)).id_salt(k).open(open.then_some(true)).show(ui, |ui| {
+                let own = match files.kind {
+                    Kind::Special(s) if houses::special(s, Region::Temperate, 0).is_none() => "An empty plot",
+                    _ => "The generator's own",
+                };
+                if ui.selectable_label(self.showing == Showing::Generator(k), format!("{own}  (weight {})", files.generator_weight())).clicked() {
+                    *chosen = Some(Showing::Generator(k));
                 }
                 for (i, e) in files.entries.iter().enumerate() {
-                    let star = if e.dirty { " (not saved)" } else { "" };
-                    let text = format!("{}  (weight {}){star}", e.design.name, e.design.weight);
-                    if ui.selectable_label(self.showing == Showing::Saved(k, i), text).on_hover_text(short(&e.path)).clicked() {
-                        chosen = Some(Showing::Saved(k, i));
+                    if ui.selectable_label(self.showing == Showing::Saved(k, i), entry_label(e)).on_hover_text(short(&e.path)).clicked() {
+                        *chosen = Some(Showing::Saved(k, i));
                     }
                 }
             });
+        };
+        ui.label(egui::RichText::new("Landmarks").strong());
+        ui.small("Each has the generator's own variants, and any you have saved.");
+        for (k, files) in self.kinds.iter().enumerate().filter(|(_, f)| matches!(f.kind, Kind::Landmark(_))) {
+            folder(ui, k, files, &mut chosen);
         }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Houses").strong());
+        ui.small("The house kit's homes, and any copied from them to edit, each in the region and step it was copied for.");
+        let h = self.house_folder();
+        let files = &self.kinds[h];
+        if ui.selectable_label(matches!(self.showing, Showing::House(_)), format!("The kit's own  (weight {})", files.generator_weight())).on_hover_text("The house kit's huts, timber houses and stone houses").clicked() {
+            chosen = Some(match self.showing {
+                Showing::House(h) => Showing::House(h),
+                _ => Showing::House((0, 0)),
+            });
+        }
+        for (i, e) in files.entries.iter().enumerate() {
+            if ui.selectable_label(self.showing == Showing::Saved(h, i), entry_label(e)).on_hover_text(short(&e.path)).clicked() {
+                chosen = Some(Showing::Saved(h, i));
+            }
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Settlement buildings").strong());
+        ui.small("The tavern, smithy, sawmill and the rest, each in every region's own way. The world builds the generators' own; any you save are kept for when it builds those too.");
+        for (k, files) in self.kinds.iter().enumerate().filter(|(_, f)| matches!(f.kind, Kind::Special(_))) {
+            folder(ui, k, files, &mut chosen);
+        }
+        ui.add_space(8.0);
+        self.component_list(ui, &mut chosen);
         ui.add_space(8.0);
         ui.label(egui::RichText::new("To look at").strong());
         ui.small("These follow the shore or the trail and cannot be saved yet.");
@@ -924,6 +1284,14 @@ impl Editor {
         if ui.selectable_label(self.showing == Showing::Signpost, "Signpost").clicked() {
             chosen = Some(Showing::Signpost);
         }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Props").strong());
+        ui.small("What settlements are furnished and dressed with, each intact and decayed.");
+        for (g, (name, ..)) in PROP_GALLERIES.iter().enumerate() {
+            if ui.selectable_label(self.showing == Showing::Props(g), *name).clicked() {
+                chosen = Some(Showing::Props(g));
+            }
+        }
         if !self.problems.is_empty() {
             ui.add_space(8.0);
             ui.label(egui::RichText::new("Files that could not be read").strong().color(egui::Color32::from_rgb(230, 110, 90)));
@@ -932,7 +1300,7 @@ impl Editor {
             }
         }
         ui.add_space(8.0);
-        if ui.button("Read the files again").on_hover_text("Throws away changes not yet saved").clicked() {
+        if ui.button("Read the files again").on_hover_text("The structures and the kit's rules. Throws away changes not yet saved").clicked() {
             self.reload();
         }
         ui.small(format!("Folder: {}", self.dir.display()));
@@ -945,6 +1313,36 @@ impl Editor {
         match self.showing {
             Showing::Generator(k) => self.generator_tools(ui, k),
             Showing::Saved(..) => self.design_tools(ui),
+            Showing::House(h) => {
+                let (next, stepped) = self.houses.tools(ui, h, &mut self.variant, self.house.as_ref());
+                if let Some(next) = next {
+                    self.select(Showing::House(next));
+                }
+                let air = ui.checkbox(&mut self.show_air, "Show carved air").on_hover_text("The rooms and the way in, drawn as blue boxes").changed();
+                let furnished = ui.checkbox(&mut self.furnished, "Furnished").on_hover_text("As a household of this variant keeps it: cut the layers to see inside").changed();
+                if self.furnished {
+                    ui.small(&self.household);
+                }
+                if stepped || air || furnished {
+                    self.stale = true;
+                }
+                ui.add_space(6.0);
+                self.layers(ui);
+                ui.add_space(8.0);
+                self.house_tools(ui, h);
+            }
+            Showing::Props(g) => {
+                ui.label("Only to look at: settlements will be furnished with these.");
+                self.preview(ui);
+                prop_key(ui, PROP_GALLERIES[g].2);
+            }
+            Showing::Component(c) => self.component_tools(ui, Component::ALL[c]),
+            Showing::Components(g) => {
+                ui.label("Only to look at: each component on a stretch of a home it goes on, new and then let go. Choose one in the list to copy and draw on.");
+                self.preview(ui);
+                let names: Vec<&str> = components::of_gallery(components::galleries()[g].2).into_iter().map(|c| c.label()).collect();
+                ui.small(format!("Left to right along each row, from the front row back: {}.", names.join(", ")));
+            }
             _ => {
                 ui.label("Only to look at: the game builds these to fit the shore or the trail.");
                 self.preview(ui);
@@ -974,17 +1372,37 @@ impl Editor {
                 self.stale = true;
             }
         });
-        let mut place = self.place;
-        egui::ComboBox::from_label("Seen in").selected_text(PLACES[place].0).show_ui(ui, |ui| {
-            for (k, p) in PLACES.iter().enumerate() {
-                ui.selectable_value(&mut place, k, p.0);
+        // A house is seen in the country it was copied for, as the kit's own are; a
+        // settlement building's generator builds in whichever region is chosen.
+        if let Some(Kind::House(region, _)) = self.building_kind() {
+            ui.small(format!("Seen in its own country: {}.", houses::region_label(region).to_lowercase()));
+        } else if let Some(Kind::Component(_)) = self.building_kind() {
+            ui.small("Seen on a home of a region that has it, in the stone and timber of that country.");
+        } else if self.special_shown().is_some() {
+            let mut region = self.region;
+            egui::ComboBox::from_label("Region").selected_text(houses::region_label(Region::ALL[region])).show_ui(ui, |ui| {
+                for (k, r) in Region::ALL.iter().enumerate() {
+                    ui.selectable_value(&mut region, k, houses::region_label(*r));
+                }
+            });
+            if region != self.region {
+                self.region = region;
+                self.stale = true;
             }
-        });
-        if place != self.place {
-            self.place = place;
-            self.stale = true;
+        } else {
+            let mut place = self.place;
+            egui::ComboBox::from_label("Seen in").selected_text(PLACES[place].0).show_ui(ui, |ui| {
+                for (k, p) in PLACES.iter().enumerate() {
+                    ui.selectable_value(&mut place, k, p.0);
+                }
+            });
+            if place != self.place {
+                self.place = place;
+                self.stale = true;
+            }
         }
-        if ui.checkbox(&mut self.show_props, "Show props").on_hover_text("Barrels, crates, woodpiles: the game lays them round every structure of the kind").changed() {
+        // Props are laid only round landmarks.
+        if self.building_kind().is_none() && ui.checkbox(&mut self.show_props, "Show props").on_hover_text("Barrels, crates, woodpiles: the game lays them round every structure of the kind").changed() {
             self.stale = true;
         }
         if ui.checkbox(&mut self.show_air, "Show carved air").on_hover_text("Voxels that clear the ground or plants away, drawn as blue boxes").changed() {
@@ -1008,24 +1426,48 @@ impl Editor {
     }
 
     fn generator_tools(&mut self, ui: &mut egui::Ui, k: usize) {
-        let kind = designs::KINDS[k];
-        ui.label(egui::RichText::new(format!("{}: the generator's own", kind_label(kind))).strong());
-        ui.small("Each variant is what a different site makes. Step through them to find one to start from.");
+        let kind = self.kinds[k].kind;
+        let label = folder_label(kind);
+        // A settlement building's generator, or none for a well head or a gate.
+        let made = match kind {
+            Kind::Special(s) => Some(houses::special(s, Region::ALL[self.region], self.variant).is_some()),
+            _ => None,
+        };
+        match made {
+            Some(true) => {
+                ui.label(egui::RichText::new(format!("{label}: the generator's own")).strong());
+                ui.small(format!(
+                    "Each variant is another {} of the region chosen: older or newer, poorer or richer, and (for a sawmill) with its stream on another side or none. Copy one to make your own: its door, beds and hearth are kept with a copy.",
+                    label.to_lowercase()
+                ));
+            }
+            Some(false) => {
+                ui.label(egui::RichText::new(format!("{label}: an empty plot")).strong());
+                ui.small(format!("No generator makes a {}: it is not a building anyone goes into. Start one from nothing.", label.to_lowercase()));
+            }
+            None => {
+                ui.label(egui::RichText::new(format!("{label}: the generator's own")).strong());
+                ui.small("Each variant is what a different site makes. Step through them to find one to start from.");
+            }
+        }
         ui.add_space(4.0);
         self.preview(ui);
+        if made == Some(true) && !self.special_notes.is_empty() {
+            ui.small(self.special_notes.clone());
+        }
         ui.add_space(6.0);
         self.layers(ui);
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Make your own").strong());
         ui.horizontal(|ui| {
             ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut self.copy_name).hint_text(format!("{} {}", kind_label(kind), self.variant)).desired_width(170.0));
+            ui.add(egui::TextEdit::singleline(&mut self.copy_name).hint_text(format!("{label} {}", self.variant)).desired_width(170.0));
         });
-        if ui.button("Copy this variant to edit").on_hover_text("Starts a structure of your own from what is shown").clicked() {
+        if made != Some(false) && ui.button("Copy this variant to edit").on_hover_text("Starts a structure of your own from what is shown").clicked() {
             self.copy_variant();
         }
         if ui.button("Start from nothing").clicked() {
-            let name = if self.copy_name.trim().is_empty() { format!("New {}", kind_label(kind).to_lowercase()) } else { self.copy_name.trim().to_string() };
+            let name = if self.copy_name.trim().is_empty() { format!("New {}", label.to_lowercase()) } else { self.copy_name.trim().to_string() };
             self.add_entry(k, Design::new(kind, &name));
             self.copy_name.clear();
         }
@@ -1039,10 +1481,112 @@ impl Editor {
             }
         });
         ui.small("Each site of this kind is built from the generator or one of your saved ones, chosen in proportion to their weights. Once one is saved, the generator's weight is 0 until you change it here.");
+        if made.is_some() {
+            ui.small("The world builds the generator's own of these for now; the weights are kept for when it builds saved ones too.");
+        }
+    }
+
+    /// Copying the kit's home on view, and the kit's weight against the houses saved.
+    fn house_tools(&mut self, ui: &mut egui::Ui, house: houses::House) {
+        let s = self.houses.spec(house, self.variant);
+        ui.label(egui::RichText::new("Make your own").strong());
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            let hint = format!("{} {} {}", houses::region_label(s.region), s.step.label().to_lowercase(), self.variant);
+            ui.add(egui::TextEdit::singleline(&mut self.copy_name).hint_text(hint).desired_width(170.0));
+        });
+        if ui.button("Copy this house to edit").on_hover_text("Starts a house of your own from the one shown, keeping where its door, beds and hearth are").clicked() {
+            self.copy_variant();
+        }
+        ui.small(format!(
+            "Saved, it is one of the {} the world builds in {} country, chosen against the kit's own by weight, for a household it has beds for.",
+            plural(s.step),
+            houses::region_label(s.region).to_lowercase()
+        ));
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("How often in the world").strong());
+        let k = self.house_folder();
+        let mut w = self.kinds[k].generator_weight();
+        ui.horizontal(|ui| {
+            ui.label("The kit's weight");
+            if ui.add(egui::DragValue::new(&mut w).range(0..=100)).changed() {
+                self.set_generator_weight(k, w);
+            }
+        });
+        ui.small(format!("Against the houses saved for each region and step: one of weight 1 is then one home in {}. With none saved, every home is the kit's.", w + 1));
+    }
+
+    /// The components in the list: the galleries, and under each region its components,
+    /// each the generator's own and any saved of it.
+    fn component_list(&self, ui: &mut egui::Ui, chosen: &mut Option<Showing>) {
+        ui.label(egui::RichText::new("Components").strong());
+        ui.small("What the kit sets on each region's homes: porches, awnings, woodpiles. Each on a stretch of a home it goes on; copy one to draw your own, which the world chooses against the generator's.");
+        let k = self.component_folder();
+        let files = &self.kinds[k];
+        let galleries = components::galleries();
+        if ui.selectable_label(self.showing == Showing::Components(0), format!("Gallery: {}", galleries[0].0.to_lowercase())).clicked() {
+            *chosen = Some(Showing::Components(0));
+        }
+        let open_on = |c: Component| match self.showing {
+            Showing::Component(i) => Component::ALL[i] == c,
+            Showing::Saved(j, i) if j == k => files.entries.get(i).is_some_and(|e| e.design.kind == Kind::Component(c)),
+            _ => false,
+        };
+        for (g, (label, _, region)) in galleries.iter().enumerate().skip(1) {
+            let list = components::of_gallery(*region);
+            let open = self.showing == Showing::Components(g) || list.iter().any(|&c| open_on(c) && region.is_some_and(|r| c.regions().first() == Some(&r)));
+            egui::CollapsingHeader::new(label.as_str()).id_salt(("components", g)).open(open.then_some(true)).show(ui, |ui| {
+                if ui.selectable_label(self.showing == Showing::Components(g), "Gallery of them all").clicked() {
+                    *chosen = Some(Showing::Components(g));
+                }
+                for c in list {
+                    let i = component_index(c);
+                    if ui.selectable_label(self.showing == Showing::Component(i), format!("{}  (weight {})", c.label(), files.generator_weight())).on_hover_text(components::about(c)).clicked() {
+                        *chosen = Some(Showing::Component(i));
+                    }
+                    for (j, e) in files.entries.iter().enumerate().filter(|(_, e)| e.design.kind == Kind::Component(c)) {
+                        if ui.selectable_label(self.showing == Showing::Saved(k, j), format!("    {}", entry_label(e))).on_hover_text(short(&e.path)).clicked() {
+                            *chosen = Some(Showing::Saved(k, j));
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /// A component's generator: what it is, its variants, and copying it to edit.
+    fn component_tools(&mut self, ui: &mut egui::Ui, c: Component) {
+        ui.label(egui::RichText::new(format!("{}: the generator's own", c.label())).strong());
+        ui.small(components::about(c));
+        ui.small("Each variant sets it on another home of the kit, of a region that has it, as far into the house as the stretch of wall shows.");
+        ui.add_space(4.0);
+        self.preview(ui);
+        ui.add_space(6.0);
+        self.layers(ui);
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Make your own").strong());
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut self.copy_name).hint_text(format!("{} {}", c.label(), self.variant)).desired_width(170.0));
+        });
+        if ui.button("Copy this variant to edit").on_hover_text("Starts a component of your own from the one shown, drawn in its anchor's frame").clicked() {
+            self.copy_variant();
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("How often in the world").strong());
+        let k = self.component_folder();
+        let mut w = self.kinds[k].generator_weight();
+        ui.horizontal(|ui| {
+            ui.label("The generators' weight");
+            if ui.add(egui::DragValue::new(&mut w).range(0..=100)).changed() {
+                self.set_generator_weight(k, w);
+            }
+        });
+        ui.small(format!("For every component, against the ones saved of it: one of weight 1 is then one in {} where it goes. With none saved, every one is the generator's.", w + 1));
     }
 
     fn design_tools(&mut self, ui: &mut egui::Ui) {
-        let palette = self.palette().varied(self.variant);
+        let palette = self.shown_palette();
         if let Some(entry) = self.entry_mut() {
             ui.horizontal(|ui| {
                 ui.label("Name");
@@ -1058,6 +1602,7 @@ impl Editor {
                 }
             });
         }
+        self.building_notes(ui);
         ui.add_space(6.0);
         ui.label(egui::RichText::new("Tool").strong());
         ui.horizontal_wrapped(|ui| {
@@ -1145,6 +1690,36 @@ impl Editor {
         });
     }
 
+    /// What a saved house or settlement building is chosen against, and whether a house
+    /// is still walked into from its door to every bed.
+    fn building_notes(&self, ui: &mut egui::Ui) {
+        let Some(kind) = self.entry().map(|e| e.design.kind) else { return };
+        match kind {
+            Kind::House(r, s) => ui.small(format!("One of the {} of {} country, chosen against the kit's own of that region and step.", plural(s), houses::region_label(r).to_lowercase())),
+            Kind::Special(_) => ui.small("The world builds its settlements' own of these, not saved ones, for now."),
+            Kind::Component(c) => {
+                ui.small(format!("Drawn where it goes: the anchor's voxel is the origin, out from the house is east (+x), and the wall is at x = \u{2212}1. Chosen against the generator's own {} by weight.", c.label().to_lowercase()));
+                if self.fits == Some(false) {
+                    ui.label(egui::RichText::new("It fits on none of the homes tried: something of it stands in the house, floats, or blocks the way in. Where it does not fit, the generator's own goes instead.").color(egui::Color32::from_rgb(240, 150, 90)));
+                }
+                return;
+            }
+            Kind::Landmark(_) => return,
+        };
+        let (Some(w), Some(b)) = (&self.walk, &self.house) else { return };
+        if w.ok() {
+            let beds = match b.inside.beds.len() {
+                0 => "every room".to_string(),
+                1 => "the bed".to_string(),
+                n => format!("all {n} beds"),
+            };
+            ui.small(format!("Walked into: the door leads to {beds}."));
+        } else {
+            ui.label(egui::RichText::new(w.problems.join(" ")).color(egui::Color32::from_rgb(240, 150, 90)));
+            ui.small("It still saves, but every home has to be walked into, and the tests hold saved houses to that. The beds are outlined in the view (cut away the layers above to see them), red where the way to them is shut.");
+        }
+    }
+
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.viewport = rect;
@@ -1191,6 +1766,17 @@ impl Editor {
             let corner = r * std::f32::consts::FRAC_1_SQRT_2;
             label(Vec3::new(-corner, 0.0, -corner), "Edge of the levelled ground");
         }
+        if let (Some(b), Some(_)) = (&self.house, &self.walk) {
+            label(b.door.floor.as_vec3() + Vec3::new(0.5, 2.6, 0.5) + b.door.facing.as_vec3() * 7.0, "The way in");
+        }
+        for (at, text) in &self.notes {
+            label(*at, text);
+        }
+        if let Some(s) = self.special_shown()
+            && houses::special(s, Region::ALL[self.region], self.variant).is_none()
+        {
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "No generator: start one from nothing (on the right)", egui::FontId::proportional(18.0), egui::Color32::WHITE);
+        }
         if self.entry().is_some_and(|e| e.design.cells.is_empty()) {
             painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Click on the ground to lay the first voxel", egui::FontId::proportional(18.0), egui::Color32::WHITE);
         }
@@ -1222,6 +1808,36 @@ pub fn kind_label(kind: Landmark) -> &'static str {
     }
 }
 
+/// How the editor's panels give a folder's kind.
+pub fn folder_label(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Landmark(k) => kind_label(k),
+        Kind::House(..) => "House",
+        Kind::Special(s) => s.label(),
+        Kind::Component(_) => "Component",
+    }
+}
+
+/// A step's homes, in a sentence: "timber houses".
+fn plural(step: Step) -> &'static str {
+    match step {
+        Step::Hut => "huts",
+        Step::Timber => "timber houses",
+        Step::Stone => "stone houses",
+    }
+}
+
+/// How the list gives a saved structure: its name and weight, and a house's region and
+/// step.
+fn entry_label(e: &Entry) -> String {
+    let star = if e.dirty { " (not saved)" } else { "" };
+    match e.design.kind {
+        Kind::House(r, s) => format!("{}  ({} {}, weight {}){star}", e.design.name, r.word(), s.word(), e.design.weight),
+        Kind::Component(c) => format!("{}  ({}, weight {}){star}", e.design.name, c.word(), e.design.weight),
+        _ => format!("{}  (weight {}){star}", e.design.name, e.design.weight),
+    }
+}
+
 fn cell_label(c: Cell) -> String {
     match c {
         Cell::Air => "air".into(),
@@ -1234,6 +1850,27 @@ fn cell_label(c: Cell) -> String {
 fn short(path: &Path) -> String {
     let parts: Vec<String> = path.components().rev().take(2).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
+/// What is in a gallery of props and in what order, as it is laid out from the front row
+/// back.
+fn prop_key(ui: &mut egui::Ui, group: Option<Group>) {
+    egui::CollapsingHeader::new("In this gallery").default_open(true).show(ui, |ui| {
+        ui.small("Left to right along each row, from the front row back. Each stands intact, with its decayed form to its right; the faint outline is the room it takes.");
+        for g in [Group::Furniture, Group::Trade, Group::Yard] {
+            if group.is_some_and(|only| only != g) {
+                continue;
+            }
+            let names: Vec<&str> = fittings::Fitting::ALL.iter().filter(|f| f.group() == g).map(|f| f.name()).collect();
+            let heading = match g {
+                Group::Furniture => "Furniture",
+                Group::Trade => "Trades",
+                Group::Yard => "Yard and lane",
+            };
+            ui.label(egui::RichText::new(heading).strong());
+            ui.small(names.join(", "));
+        }
+    });
 }
 
 /// The repository's structures folder, where the game this was built from reads them.
@@ -1250,8 +1887,8 @@ pub fn default_dir() -> PathBuf {
 fn read_dir(dir: &Path) -> (Vec<KindFiles>, Vec<(PathBuf, String)>) {
     let mut problems = Vec::new();
     let mut kinds = Vec::new();
-    for kind in designs::KINDS {
-        let folder = dir.join(designs::kind_word(kind));
+    for kind in designs::folders() {
+        let folder = dir.join(kind.word());
         let mut files: Vec<PathBuf> = std::fs::read_dir(&folder).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "txt")).collect();
         files.sort();
         let mut k = KindFiles { kind, generator: None, entries: Vec::new() };
@@ -1271,8 +1908,8 @@ fn read_dir(dir: &Path) -> (Vec<KindFiles>, Vec<(PathBuf, String)>) {
                 continue;
             }
             match Design::parse(&text) {
-                Ok(d) if d.kind == kind => k.entries.push(Entry { path, design: d, dirty: false, on_disk: true, undo: Vec::new(), redo: Vec::new() }),
-                Ok(d) => problems.push((path, format!("it says it is a {}, but is in the {} folder", designs::kind_word(d.kind), designs::kind_word(kind)))),
+                Ok(d) if d.kind.same_folder(kind) => k.entries.push(Entry { path, design: d, dirty: false, on_disk: true, undo: Vec::new(), redo: Vec::new() }),
+                Ok(d) => problems.push((path, format!("it says it is a {}, but is in the {} folder", d.kind.word(), kind.word()))),
                 Err(e) => problems.push((path, e)),
             }
         }

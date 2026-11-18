@@ -48,9 +48,12 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Moves a date on by `days` game days.
-pub fn advance(date: f32, days: f32, year_days: f32) -> f32 {
-    (date + days / year_days.max(1.0)).rem_euclid(1.0)
+/// Moves a date on by `days` game days, and the world's `year` with it: the year counts
+/// from 0, the year the world began in, and turns each time the date comes round from
+/// winter into spring.
+pub fn advance_year(date: f32, year: u32, days: f32, year_days: f32) -> (f32, u32) {
+    let moved = date + days / year_days.max(1.0);
+    (moved.rem_euclid(1.0), year.saturating_add(moved.floor().max(0.0) as u32))
 }
 
 /// How far north the sun stands of the equator through the year: 1 at midsummer, -1 at
@@ -264,7 +267,8 @@ mod tests {
 
     #[test]
     fn the_year_wraps_and_the_seasons_come_in_order() {
-        assert!((advance(0.9, 3.0, 24.0) - 0.025).abs() < 1e-5);
+        let (date, year) = advance_year(0.9, 0, 3.0, 24.0);
+        assert!((date - 0.025).abs() < 1e-5 && year == 1);
         assert!(declination(0.25) > 0.99 && declination(0.75) < -0.99);
         assert!(leaf_fall(0.62) > 0.99 && leaf_fall(DEFAULT_DATE) == 0.0 && leaf_fall(0.9) == 0.0);
         assert!(snow_cover(0.86) > 0.99 && snow_cover(DEFAULT_DATE) == 0.0);
@@ -280,6 +284,24 @@ mod tests {
         assert_eq!((month("ma"), month("smarch")), (None, None));
         assert!(month("june").unwrap() < month("august").unwrap() && month("feb").unwrap() > 0.85);
         assert_eq!(named("monsoon"), None);
+    }
+
+    #[test]
+    fn the_year_turns_when_the_date_comes_round_into_spring() {
+        // Through the summer the year stays as it is.
+        let (date, year) = advance_year(0.3, 0, 2.4, 24.0);
+        assert!((date - 0.4).abs() < 1e-5 && year == 0);
+        // Out of winter into spring it turns.
+        let (date, year) = advance_year(0.95, 2, 2.4, 24.0);
+        assert!((date - 0.05).abs() < 1e-5 && year == 3);
+        // A day at a time for three years and a bit, from high summer: three springs.
+        let (mut date, mut year) = (DEFAULT_DATE, 0);
+        for _ in 0..(24 * 3 + 6) {
+            (date, year) = advance_year(date, year, 1.0, 24.0);
+        }
+        assert_eq!(year, 3);
+        // Nothing passing is no new year, even on the equinox itself.
+        assert_eq!(advance_year(0.0, 5, 0.0, 24.0), (0.0, 5));
     }
 
     #[test]

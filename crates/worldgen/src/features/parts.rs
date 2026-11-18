@@ -101,13 +101,13 @@ pub fn rotate_box(lo: IVec3, hi: IVec3, turns: u32) -> (IVec3, IVec3) {
 }
 
 /// Moves fine parts made in model space to where the model stands: turned, then with
-/// model voxel 0 at voxel `origin`.
+/// model voxel 0 at voxel `origin`. A sheet of cloth's corners turn with it.
 pub fn place_fine(parts: &[PlantBox], origin: IVec3, turns: u32) -> Vec<PlantBox> {
     parts
         .iter()
         .map(|b| {
             let (lo, hi) = rotate_box(IVec3::from_array(b.lo), IVec3::from_array(b.hi), turns);
-            PlantBox { lo: (lo + origin * CELLS).to_array(), hi: (hi + origin * CELLS).to_array(), ..*b }
+            PlantBox { lo: (lo + origin * CELLS).to_array(), hi: (hi + origin * CELLS).to_array(), ..super::cloth::turned(b, turns) }
         })
         .collect()
 }
@@ -413,6 +413,16 @@ pub fn paint_lantern_spanning(s: &mut Shape, style: LampStyle, p: &Palette, at: 
 /// up, whatever the height asked for, as a pole of sticks is never tall.
 fn stick_arm(h: i32) -> i32 {
     h.clamp(5, 6)
+}
+
+/// The fine parts of a lamp hung round the lit voxel `l` (which the caller fills with
+/// [`mat::LANTERN`]) from the underside of the voxel `drop` above it, as a crook's lamp
+/// hangs: its glazing, cap, drip and chain, in cells of the same model space. For a
+/// lamp hung from a gate's beam or a bracket on a wall.
+pub fn hung_lamp(l: IVec3, drop: i32, iron: Voxel) -> Vec<PlantBox> {
+    let mut s = Shape::raw();
+    Fine { s: &mut s, at: IVec3::ZERO, turns: 0 }.hanging(l, drop, iron, iron);
+    s.take_fine()
 }
 
 /// Puts a lantern out: its lamps are cold glass rather than lit voxels, so they neither

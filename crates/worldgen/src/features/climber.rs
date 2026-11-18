@@ -1314,12 +1314,67 @@ pub struct Surroundings<'a> {
     pub sampler: &'a Sampler<'a>,
     /// Where continent-local coordinates start, in world voxels.
     pub origin: (i32, i32),
-    pub stamps: &'a HashMap<IVec3, Voxel>,
+    pub stamps: &'a Built<'a>,
     /// Columns already read: reading one is the slow part of a voxel query.
     columns: RefCell<HashMap<(i32, i32), Column>>,
+    /// The voxels of each placement's roots (by its index), worked out the first time
+    /// anything low enough beside it is asked about: a large tree's flaring foot stands
+    /// outside its model, where ivy finding the trunk would otherwise start inside it.
+    roots: RefCell<HashMap<u32, HashMap<IVec3, Voxel>>>,
     /// Which placements can reach each square of [`BUCKET`] voxels, in placement order,
     /// with the heights they span.
     buckets: Buckets,
+}
+
+/// Built voxels for plants to look at: the voxels of stamps laid one after another, the
+/// later's where two have one at the same place, as filing them all in a map in that
+/// order would leave it, but looked up in each stamp's own list, not filed again for
+/// every chunk that asks.
+pub struct Built<'a> {
+    /// Each stamp's voxels, the offset from its coordinates to the world's, and its
+    /// bounds in the world's.
+    stamps: Vec<(&'a [(IVec3, Voxel)], IVec3, IVec3, IVec3)>,
+    /// Which stamps reach each square of [`BUCKET`] voxels, in the order laid.
+    buckets: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl<'a> Built<'a> {
+    /// The stamps given in the order they are laid: each its voxels, in (y, z, x) order
+    /// as the trails keep them (any two at one place in the order written), the offset
+    /// into world voxels, and its bounds in its own voxels.
+    pub fn new(stamps: impl Iterator<Item = (&'a [(IVec3, Voxel)], IVec3, IVec3, IVec3)>) -> Self {
+        let mut out = Built { stamps: Vec::new(), buckets: HashMap::new() };
+        for (voxels, offset, lo, hi) in stamps {
+            let (lo, hi) = (lo + offset, hi + offset);
+            let i = out.stamps.len() as u32;
+            out.stamps.push((voxels, offset, lo, hi));
+            for bz in lo.z.div_euclid(BUCKET)..=hi.z.div_euclid(BUCKET) {
+                for bx in lo.x.div_euclid(BUCKET)..=hi.x.div_euclid(BUCKET) {
+                    out.buckets.entry((bx, bz)).or_default().push(i);
+                }
+            }
+        }
+        out
+    }
+
+    /// The built voxel at `p`, in world voxels, if any.
+    pub fn get(&self, p: IVec3) -> Option<Voxel> {
+        let near = self.buckets.get(&(p.x.div_euclid(BUCKET), p.z.div_euclid(BUCKET)))?;
+        for &i in near.iter().rev() {
+            let (voxels, offset, lo, hi) = self.stamps[i as usize];
+            if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                continue;
+            }
+            let q = p - offset;
+            let key = (q.y, q.z, q.x);
+            // The last written at that place.
+            let after = voxels.partition_point(|&(v, _)| (v.y, v.z, v.x) <= key);
+            if after > 0 && voxels[after - 1].0 == q {
+                return Some(voxels[after - 1].1);
+            }
+        }
+        None
+    }
 }
 
 /// Placement indices with the heights they span, by square.
@@ -1329,10 +1384,10 @@ type Buckets = HashMap<(i32, i32), Vec<(u32, i32, i32)>>;
 const BUCKET: i32 = 8;
 
 impl<'a> Surroundings<'a> {
-    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a HashMap<IVec3, Voxel>) -> Self {
+    pub fn new(lib: &'a Library, mats: &'a Materials, placements: &'a [Placement], sampler: &'a Sampler<'a>, origin: (i32, i32), stamps: &'a Built<'a>) -> Self {
         let mut buckets = Buckets::new();
         for (i, p) in placements.iter().enumerate() {
-            let reach = lib.get(p.species, p.variant).reach;
+            let reach = p.reach(lib);
             let (lo, hi) = (p.bottom(), p.top(lib));
             for bz in (p.pos.z - reach).div_euclid(BUCKET)..=(p.pos.z + reach).div_euclid(BUCKET) {
                 for bx in (p.pos.x - reach).div_euclid(BUCKET)..=(p.pos.x + reach).div_euclid(BUCKET) {
@@ -1340,7 +1395,7 @@ impl<'a> Surroundings<'a> {
                 }
             }
         }
-        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default(), buckets }
+        Self { lib, mats, placements, sampler, origin, stamps, columns: RefCell::default(), roots: RefCell::default(), buckets }
     }
 
     fn column(&self, x: i32, z: i32) -> Column {
@@ -1351,7 +1406,7 @@ impl<'a> Surroundings<'a> {
 impl Voxels for Surroundings<'_> {
     fn voxel(&self, p: IVec3) -> Voxel {
         // Built things go last in the world and replace whatever was there, air included.
-        if let Some(&v) = self.stamps.get(&p) {
+        if let Some(v) = self.stamps.get(p) {
             return v;
         }
         let mut leaf = None;
@@ -1360,11 +1415,28 @@ impl Voxels for Surroundings<'_> {
             if p.y < lo || p.y > hi {
                 continue;
             }
-            if let Some(v) = super::model_voxel(self.lib, &self.placements[i as usize], p) {
+            let placement = &self.placements[i as usize];
+            if let Some(v) = super::model_voxel(self.lib, placement, p) {
                 if self.mats.get(v).kind == Kind::Solid {
                     return v;
                 }
                 leaf = leaf.or(Some(v));
+            }
+            // Roots and flares stand no higher than this over the tree's own ground.
+            if let Some(roots) = &placement.roots
+                && p.y <= placement.pos.y + 20
+            {
+                let mut known = self.roots.borrow_mut();
+                let voxels = known.entry(i).or_insert_with(|| {
+                    let mut voxels = HashMap::new();
+                    roots.voxels(placement.pos, |q, v| {
+                        voxels.insert(q, v);
+                    });
+                    voxels
+                });
+                if let Some(&v) = voxels.get(&p) {
+                    return v;
+                }
             }
         }
         let col = self.column(p.x, p.z);
@@ -1530,16 +1602,19 @@ fn cell_beside(air: IVec3, out: IVec3) -> IVec3 {
 
 /// Roots along the foot of a built thing: walks from sampled voxels of `stamp` down to
 /// the ground on an open side.
-pub fn stamp_roots(voxels: &[(IVec3, Voxel)], world: &impl Voxels, mats: &Materials, seed: u32) -> Vec<Root> {
+/// `voxels` are the stamp's own, `offset` from them to the world's.
+pub fn stamp_roots(voxels: &[(IVec3, Voxel)], offset: IVec3, world: &impl Voxels, mats: &Materials, seed: u32) -> Vec<Root> {
     let mut roots = Vec::new();
     if voxels.len() < 40 {
         return roots;
     }
     let attempts = (voxels.len() / 300).clamp(1, 10);
+    let first = voxels[0].0 + offset;
     for k in 0..attempts {
-        let h = hash3(seed ^ 0x57a3, voxels[0].0.x, voxels[0].0.z, k as i32);
+        let h = hash3(seed ^ 0x57a3, first.x, first.z, k as i32);
         let mut rng = Rng::new(h);
         let (p, v) = voxels[(rng.next_u32() as usize) % voxels.len()];
+        let p = p + offset;
         if v == voxel::AIR || !climbable(v) {
             continue;
         }
@@ -1555,6 +1630,13 @@ pub fn stamp_roots(voxels: &[(IVec3, Voxel)], world: &impl Voxels, mats: &Materi
             depth += 1;
         }
         if depth >= 48 || !solid(world.voxel(air - side), mats) {
+            continue;
+        }
+        // Not indoors: the wall's open side must be out under the sky, not in a room of
+        // the same building. Three out from the wall clears the eaves; anything of the
+        // stamp over that is its roof or floor above.
+        let out = air + side * 3 - offset;
+        if voxels.iter().any(|&(q, v)| v != voxel::AIR && q.x == out.x && q.z == out.z && q.y > out.y) {
             continue;
         }
         roots.push(Root { cell: cell_beside(air, side), out: side, age: rng.range(0.3, 1.0), seed: h, wind: 0.0 });
@@ -1701,8 +1783,7 @@ impl RootFinder<'_> {
     /// from its coordinates to the world's.
     pub fn stamps<'b>(&self, stamps: impl Iterator<Item = (&'b [(IVec3, Voxel)], IVec3)>, out: &mut Vec<(Root, Climber)>) {
         for (voxels, offset) in stamps {
-            let world: Vec<(IVec3, Voxel)> = voxels.iter().map(|&(p, v)| (p + offset, v)).collect();
-            for root in stamp_roots(&world, self.world, self.mats, self.seed) {
+            for root in stamp_roots(voxels, offset, self.world, self.mats, self.seed) {
                 let (x, z) = (root.cell.x.div_euclid(CELL), root.cell.z.div_euclid(CELL));
                 if !self.within(x, z) || unit(root.seed) >= self.chance(x, z) {
                     continue;

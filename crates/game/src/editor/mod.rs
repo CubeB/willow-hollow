@@ -3,6 +3,8 @@
 //! of one's own from them, which the world then builds (see
 //! `worldgen::features::designs`).
 
+mod components;
+mod houses;
 mod state;
 mod view;
 

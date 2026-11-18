@@ -24,6 +24,11 @@
 first = Skar Hald Ulv Bjor Frey Ast Grim Tor Kvi Eid Ran Hvit Sval Ing Rok Ves Har Lod Sig Brei Thol Alv Vard Ost
 second = vik heim stad dal by nes holm rud berg mark gard lund ey vang fell sund
 given = Ragna Ulf Sigrid Eirik Hild Torvald Astrid Bjorn Ingrid Halvar Solveig Leif
+# People (names/folk.rs): given names for women and for men, and family names taken
+# from a trade or a place. {root} and {stem} are the tongue's own words, {man} a man's name.
+women = Ragna Sigrid Hild Astrid Ingrid Solveig Gunn Liv Tora Frida Ylva Signe Embla Runa Dagny Eir Gudrun Halla
+men = Ulf Eirik Torvald Bjorn Halvar Leif Arne Gunnar Knut Sten Ivar Orm Ketil Rolf Svein Vidar Trygve Haakon
+family = Smed | Fisker | Vever | Jeger | Moen | Dahl | Berg | Lund | Strand | Haug | Bakke | Holm | Skog | Aas | Nes | {root} | {root} | {stem}dal | {stem}berg
 region = {stem}mark | {stem}land | {root}
 lake = {stem}vatn | Lake {root} | {stem}sjo
 peak = {stem}tind | {root} Fell | Mount {root}
@@ -33,11 +38,18 @@ bay = {stem}fjord | {root} Bay
 inlet = {stem}fjord | {root} Sound
 falls = {stem}foss | {root} Falls
 range = The {root} Fells | The {root} Mountains
+hamlet = {stem}gard | {stem}sel
+village = {stem}by | {stem}stad
+town = {stem}vik | {stem}heim
+greattown = {stem}borg
 
 [tongue vale]
 first = Llan Pen Caer Aber Bryn Glyn Tre Dol Maen Rhos Cor Hen Mor Tal Nant Gwen Car Lys
 second = wen dur ith ell an oc eth yn on aeth og is
 given = Bronwen Cadoc Elin Gwyn Rhiannon Owain Mabon Ceri Dilys Teilo Nia Emrys
+women = Bronwen Elin Rhiannon Ceri Dilys Nia Angharad Gwenllian Mererid Eluned Tegwen Heledd Lowri Morfudd Nest Siwan Catrin Gwawr
+men = Cadoc Gwyn Owain Mabon Teilo Emrys Dafydd Iolo Rhodri Gethin Huw Ifor Madoc Pryderi Tudur Llew Bedwyr Cai
+family = ap {man} | ap {man} | Gof | Saer | Bugail | Pennant | Nant | Bryn | Llwyd | Fychan | Glyn | Morgan | Rhys | {root} | {root}
 region = {root} | The Vale of {root}
 lake = Llyn {root} | Lake {root}
 peak = Moel {root} | {root} Peak
@@ -46,11 +58,18 @@ island = Ynys {root} | {root} Isle
 bay = {root} Bay | Porth {root}
 falls = {root} Falls
 range = The {root} Hills | The {root} Mountains
+hamlet = Bryn {root} | {root}
+village = Llan{low} | Tre{low}
+town = Caer{low}
+greattown = Caer {root}
 
 [tongue old]
 first = Ash Brad Ald Wen Hal Stan Thorn Wil Lang Mar Ed Brom Hart Elm Bur Wych Hen Ren
 second = ford ley ton bury wick ham stead worth field combe dale by thorpe well hurst
 given = Marren Edwin Alys Hal Wenna Osric Bess Tamsin Aldric Maud Godric Elsie
+women = Marren Alys Wenna Bess Tamsin Maud Elsie Edith Agnes Rowena Ada Mabel Joan Matilda Ebba Isolde Nell Hilda
+men = Edwin Hal Osric Aldric Godric Tam Wat Hob Alwin Cuthbert Oswin Rowan Edgar Wulf Ned Piers Simkin Jory
+family = Weaver | Smith | Cooper | Fletcher | Thatcher | Miller | Fisher | Hunter | Carter | Shepherd | Baker | Mason | Turner | Webb | Wright | of the Ford | of the Hill | of the Mill | Atwood | Brook | Underhill | Greenwood | Marsh | {root} | {root} | {root}
 region = {stem}shire | {root} | The {root} Wold
 lake = {root} Mere | Lake {root}
 peak = {root} Pike | {root} Beacon | Mount {root}
@@ -59,11 +78,18 @@ island = {root} Isle | {root} Holm
 bay = {root} Bay
 falls = {root} Force | {root} Falls
 range = The {root} Hills | The {root} Edge
+hamlet = {stem}cot | {stem}thorpe
+village = {root} | {stem}ham
+town = {stem}bury | {stem}bridge
+greattown = {stem}minster | {stem}chester
 
 [tongue sun]
 first = Sol Val Mir Cal Ser Ar Lun Cor Tal Ven Ros Alb Lor Mon Pal Sar
 second = ara ena ossa ino era ida ano eira ona ella ia ante ero oso
 given = Lucia Mateo Ines Tomas Clara Aurelio Rosa Teo Paola Silvio Marta Elio
+women = Lucia Ines Clara Rosa Paola Marta Elena Bianca Chiara Pilar Livia Nera Sofia Alba Carmen Teresa Viola Greta
+men = Mateo Tomas Aurelio Teo Silvio Elio Marco Bruno Dario Enzo Lino Rafael Santo Tiago Vasco Ugo Nico Pablo
+family = Ferrer | Molina | Pastor | Pescador | Tejedor | Herrero | Serra | Vidal | Costa | Fontana | Ferraro | del Rio | de la Fuente | del Monte | {root} | {root}
 region = {root} | The {root} Coast
 lake = Lago {root} | Lake {root}
 peak = Monte {root} | Mount {root}
@@ -72,11 +98,18 @@ island = Isla {root} | {root} Isle
 bay = Cala {root} | {root} Bay
 falls = Salto {root} | {root} Falls
 range = Sierra {root} | The {root} Mountains
+hamlet = Casa {root}
+village = San {root} | Villa {root}
+town = Porto {root} | {root}
+greattown = Ciudad {root}
 
 [tongue isle]
 first = Ka Moa Lei Ho Mau Ki Wai Ana Ta Ma Ri Ola Nai Ke Pua Tua
 second = lami nolu kea hana mai rau tolo vani pele luma waro niu
 given = Kai Moana Leilo Tavi Nalu Ana Hemi Mele Iolo Ravi Tama Loa
+women = Moana Leilo Ana Mele Loa Hina Kaia Lani Malia Noe Pua Alana Iwa Nohea Kalea Tiare Ula Wainani
+men = Kai Tavi Nalu Hemi Iolo Ravi Tama Keoni Kekoa Makoa Manu Koa Tane Rangi Akoni Ikaika Pono Kale
+family = Kahale | Kealoha | Makani | Nakoa | Akana | {root} | {root} | {root} | {root}
 region = {root} | The {root} Isles
 lake = Lake {root} | Wai{low}
 peak = Mount {root} | {root} Peak
@@ -85,11 +118,15 @@ island = {root} | Motu {root} | {root} Isle
 bay = {root} Lagoon | {root} Bay
 falls = {root} Falls
 range = The {root} Heights | The {root} Mountains
+village = Kai{low} | {root}
 
 [tongue dune]
 first = Zar Kef Sab Tam Ir Dah Mer Kal Nef Qar Sal Tir Hab Sur Mez Yar
 second = esh ar im oun ara ir ab un ez an ul ira
 given = Zara Kemal Nadir Samira Tarek Leyla Idris Selim Yasmin Farid Nour Hadi
+women = Zara Samira Leyla Yasmin Nour Amira Dalia Farah Hala Rania Salma Soraya Yara Lina Nadia Mariam Shirin Aisha
+men = Kemal Nadir Tarek Idris Selim Farid Hadi Karim Omar Rafiq Samir Yusuf Zaid Bashir Jamal Malik Tariq Hamid
+family = al-Haddad | al-Najjar | al-Sayyad | al-Hayek | al-Attar | al-Bustani | al-Fakhouri | al-Khayyat | ibn {man} | {root} | {root}
 region = {root} | The {root} Wastes
 lake = {root} Oasis | Lake {root}
 peak = Mount {root} | {root} Peak
@@ -98,6 +135,10 @@ island = {root} Isle
 bay = {root} Bay
 falls = {root} Falls
 range = The {root} Heights | The {root} Mountains
+hamlet = Bir {root}
+village = Ksar {root} | {root}
+town = Qasr {root}
+greattown = Medina {root}
 
 # --- Words for the surroundings ---------------------------------------------------------
 # Keyed by what the place is near or stands in: its forest, ground, water and landform.
@@ -243,12 +284,72 @@ type = Landing | Quay | Haven | Jetty
 role = haven
 pattern = {near} {type} | {word} {type} | {root} {type} | {owner}'s {type} | {word}{role}
 
-# Settlements, once there are any: a hamlet about as much a draw as the busiest
-# landmark twice over, a town much more.
+# The fields about a place (settlements/farmland/fieldnames.rs), as its people call them:
+# by their shape, where they lie, what grows there or whose they are. {by} is what a
+# field lies beside, such as Brook; {owner} one of the people of the place.
+[kind field]
+type = Field | Field | Acre | Acres | Furlong | Close | Piece | Ground
+adj = Long | Long | Broad | Great | Little | Hither | Far | Middle | Upper | Lower | Nether | Short | Crooked | Stony | Sandy | Red | Black | Barley | Oat | Bean | Pease | Windmill | Hungry | Five | Ten | Twelve
+pattern = {adj} {type} | {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind meadow]
+type = Meadow | Meadow | Mead | Ings | Hams
+adj = Long | Broad | Great | Little | Lower | Wet | Cuckoo | Lammas | Lady | Flood | Far | Kingcup
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind pasture]
+type = Pasture | Leaze | Ground | Close | Leys
+adj = Cow | Ox | Horse | Calf | Sheep | Bull | Long | Great | Little | Far | Hill | Rough
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind common]
+type = Common | Heath | Moor | Rough | Down
+adj = Great | Little | Far | High | Gorse | Bracken | Broad | Cold
+pattern = {adj} {type} | {adj} {type} | {by} {type}
+
+[kind orchard]
+type = Orchard | Orchard | Garth
+adj = Old | Little | Long | Cider | Home | Crab
+pattern = {owner}'s {type} | {owner}'s {type} | {adj} {type} | {by} {type}
+
+[kind vineyard]
+type = Vineyard | Vines | Terraces
+adj = Old | South | Sunny | Little | Upper | Lower | Stony
+pattern = {owner}'s {type} | {adj} {type} | {adj} {type}
+
+[kind olives]
+type = Olive Grove | Olives | Grove
+adj = Old | Grey | Little | Upper | Lower | Stony
+pattern = {owner}'s {type} | {adj} {type} | {adj} {type}
+
+[kind copse]
+type = Copse | Spinney | Coppice | Withy Bed | Hanger
+adj = Hazel | Ash | Long | Little | Round | Fox | Bluebell
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind paddy]
+type = Paddies | Wet Field | Water Field
+adj = Long | Lower | Upper | Broad | Old | Little | Great | Far
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+# Settlements (see settlements/place.rs). A hamlet is often named for the family that
+# farms it; villages of either size share their words; a great town has grander ones
+# than a town.
 [kind hamlet]
-role = ford ton by stead wick ley
-pattern = {root} | {word}{role} | {stem}{role} | {near}{role}
+type = End | Green | Farm | Cot | Steading
+role = ford ton by stead wick ley cot
+pattern = {root} | {word}{role} | {stem}{role} | {near}{role} | {owner}'s {type} | {word} {type} | {owner}'s {type}
+
+[kind village]
+type = Green | Cross | Bridge | Well | Hill
+role = ton by ham ford wick ley stead well
+pattern = {root} | {root} | {stem}{role} | {word}{role} | {near}{role} | {word} {type} | {stem}{role}
 
 [kind town]
 role = ford ton bury bridge port
 pattern = {root} | {root} | {word}{role} | {stem}{role}
+
+[kind greattown]
+role = bury minster chester caster borough
+adj = Great | High | Old
+pattern = {root} | {root} | {stem}{role} | {word}{role} | {adj} {root}

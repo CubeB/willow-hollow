@@ -23,6 +23,7 @@ use worldgen::{
 
 use crate::{
     arena::{MeshSpan, VertexArena},
+    farbuilt::FarBuilt,
     farview,
     gfx::Gpu,
     lod,
@@ -107,6 +108,8 @@ pub struct Tile {
 struct Built {
     tile: (i32, i32),
     boxes: Result<Vec<BoxInstance>, Wait>,
+    /// The world's epoch when it was begun (see `GameWorld::epoch`).
+    epoch: u64,
 }
 
 /// Why a square could not be built yet.
@@ -141,8 +144,13 @@ pub struct Impostors {
     progressed: Instant,
     center: Option<(i32, i32)>,
     arena: VertexArena,
+    /// The world's epoch as last seen: when the year turns, the squares a logging
+    /// camp's clearing reaches are made again (#207).
+    epoch: u64,
     /// Boxes loaded, for statistics.
     pub boxes: u64,
+    /// What people have built, drawn as boxes with the trees and loaded with them.
+    pub built: FarBuilt,
 }
 
 impl Impostors {
@@ -155,7 +163,7 @@ impl Impostors {
             .expect("thread pool");
         let (tx, rx) = channel();
         Self {
-            world,
+            world: world.clone(),
             models: Arc::default(),
             pool,
             tx,
@@ -170,7 +178,9 @@ impl Impostors {
             progressed: Instant::now(),
             center: None,
             arena: VertexArena::new(gpu, "tree impostors", 32 << 20, size_of::<BoxInstance>() as u64),
+            epoch: 0,
             boxes: 0,
+            built: FarBuilt::new(world),
         }
     }
 
@@ -197,6 +207,7 @@ impl Impostors {
     /// rest wait in the channel for the next frame.
     pub fn update(&mut self, gpu: &Gpu, camera: DVec3) {
         self.update_within(gpu, camera, UPLOAD_MS);
+        self.built.update(gpu, camera);
     }
 
     fn update_within(&mut self, gpu: &Gpu, camera: DVec3, upload_ms: f32) {
@@ -217,6 +228,15 @@ impl Impostors {
         if !self.soon.is_empty() && self.soon_since.elapsed().as_secs_f32() > 0.1 {
             self.wanted.append(&mut self.soon);
         }
+        // The year has turned (#207): the squares a logging camp's clearing reaches are
+        // made again, nearest first, and shown as they were until they are.
+        let epoch = self.world.epoch();
+        if epoch != self.epoch {
+            self.epoch = epoch;
+            let mut again: Vec<(i32, i32)> = self.tiles.keys().copied().filter(|&t| !self.pending.contains(&t) && !self.wanted.contains(&t) && self.world.fells_with_years(t.0 * TILE, t.1 * TILE, TILE)).collect();
+            again.sort_unstable_by_key(|t| std::cmp::Reverse((t.0 - here.0).pow(2) + (t.1 - here.1).pow(2)));
+            self.wanted.extend(again);
+        }
 
         while self.pending.len() < MAX_IN_FLIGHT {
             let Some(tile) = self.wanted.pop() else { break };
@@ -224,8 +244,9 @@ impl Impostors {
             let (world, models, tx) = (self.world.clone(), self.models.clone(), self.tx.clone());
             self.pool.spawn(move || {
                 TILE_WATCH.set((0, tile.0, tile.1), 1);
+                let epoch = world.epoch();
                 let boxes = build_tile(&world, &models, tile);
-                let _ = tx.send(Built { tile, boxes });
+                let _ = tx.send(Built { tile, boxes, epoch });
                 TILE_WATCH.idle();
             });
         }
@@ -258,9 +279,17 @@ impl Impostors {
                     continue;
                 }
             };
+            // Begun before the year turned: shown, and made again.
+            if built.epoch != self.epoch && self.world.fells_with_years(built.tile.0 * TILE, built.tile.1 * TILE, TILE) && !self.wanted.contains(&built.tile) {
+                self.wanted.push(built.tile);
+            }
             let tile = self.upload(gpu, built.tile, &boxes);
             self.boxes += boxes.len() as u64;
-            self.tiles.insert(built.tile, tile);
+            // What it takes the place of goes.
+            if let Some(Some(old)) = self.tiles.insert(built.tile, tile) {
+                self.boxes = self.boxes.saturating_sub(old.span.quads as u64);
+                self.arena.remove(old.span);
+            }
         }
     }
 
@@ -343,6 +372,7 @@ impl Impostors {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         log::info!("stage: far trees loaded after {:.2} s, {}", began.elapsed().as_secs_f32(), self.progress());
+        self.built.wait_idle(gpu, camera);
     }
 }
 
@@ -357,7 +387,10 @@ fn build_tile(world: &GameWorld, models: &Models, tile: (i32, i32)) -> Result<Ve
     let sampler = Sampler::new(&continent, world.seed(), lx0 - margin, lz0 - margin, TILE + 2 * margin);
     let lib = world.library();
     let mut boxes = Vec::new();
-    for p in features::place(world.seed(), lib, &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE)) {
+    let mut found = features::place(world.seed(), lib, &sampler, lx0, lz0, TILE, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+    // As the loggers have left the woods this year (#207).
+    worldgen::settlements::logging::fell(&continent, world.now(), (mx * MACRO_SIZE, mz * MACRO_SIZE), &mut found);
+    for p in found {
         // Each tree belongs to the square its trunk is in.
         let inside = (x0..x0 + TILE).contains(&p.pos.x) && (z0..z0 + TILE).contains(&p.pos.z);
         // The far surface is coarse, and may show water where the tree really stands on

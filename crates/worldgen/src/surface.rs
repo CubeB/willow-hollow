@@ -371,6 +371,10 @@ pub struct Sampler<'a> {
     shores: coast::Shores,
     trail_points: Vec<TrailPoint>,
     pads: Vec<Pad>,
+    /// Trees planted by hand that features in the area must know of, and the ground worn
+    /// round each village tree that reaches it.
+    planted: Vec<crate::features::Planted>,
+    rings: Vec<crate::settlements::tree::WornRing>,
     /// Small ravines that can reach the area.
     ravines: Vec<ravine::Ravine>,
 }
@@ -431,6 +435,17 @@ impl<'a> Sampler<'a> {
         });
         heads.retain(|h| h.x >= lo.x && h.x <= hi.x && h.y >= lo.y && h.y <= hi.y);
         let (trail_points, pads) = net.gather(lo, hi);
+        let wide = crate::features::PLANTED_REACH as f32 + 1.0;
+        let planted = net.planted.iter().filter(|t| (t.x as f32) >= lo.x - wide && (t.x as f32) <= hi.x + wide && (t.z as f32) >= lo.y - wide && (t.z as f32) <= hi.y + wide).copied().collect();
+        let rings = net
+            .rings
+            .iter()
+            .filter(|r| {
+                let q = r.reach();
+                r.x + q >= lo.x && r.x - q <= hi.x && r.z + q >= lo.y && r.z - q <= hi.y
+            })
+            .copied()
+            .collect();
         let mut s = Self {
             c,
             world_seed,
@@ -444,6 +459,8 @@ impl<'a> Sampler<'a> {
             shores: coast::Shores::new(c, lo, hi),
             trail_points,
             pads,
+            planted,
+            rings,
             ravines: Vec::new(),
         };
         s.ravines = s.small_ravines(lo, hi);
@@ -500,6 +517,11 @@ impl<'a> Sampler<'a> {
         lx - reach >= x0 && lz - reach >= z0 && lx + reach < x0 + span && lz + reach < z0 + span
     }
 
+    /// The continent it samples.
+    pub fn continent(&self) -> &'a Continent {
+        self.c
+    }
+
     /// How far in from its wall continent-local column `(lx, lz)` is, if it lies in a
     /// small ravine.
     pub fn ravine_at(&self, lx: i32, lz: i32) -> Option<f32> {
@@ -515,6 +537,11 @@ impl<'a> Sampler<'a> {
         &self.ravines
     }
 
+    /// The trees planted by hand that features placed in the area must know of.
+    pub fn planted(&self) -> &[crate::features::Planted] {
+        &self.planted
+    }
+
     /// Springs whose pools can reach the area.
     pub fn springs(&self) -> &[Spring] {
         &self.springs
@@ -528,6 +555,20 @@ impl<'a> Sampler<'a> {
 
     /// The column at continent-local voxel `(lx, lz)`.
     pub fn column(&self, lx: i32, lz: i32) -> Column {
+        let mut column = self.unstepped(lx, lz);
+        // An old place's steep fields, stepped into terraces once the trails and
+        // buildings are down, well clear of both (see `farmland::terrace`).
+        if let Some(stepped) = crate::settlements::farmland::terrace::step(self.c, self.world_seed, lx, lz, &column) {
+            column.ground = stepped;
+        }
+        // Paddies levelled and flooded, and the ditches of drained land (see
+        // `farmland::water`).
+        crate::settlements::farmland::water::shape(self.c, self.world_seed, lx, lz, &mut column);
+        column
+    }
+
+    /// [`Self::column`] as it lies before any field is stepped into terraces.
+    pub(crate) fn unstepped(&self, lx: i32, lz: i32) -> Column {
         let c = self.c;
         let cs = c.cell_size();
         let p = vec2(lx as f32 + 0.5, lz as f32 + 0.5);
@@ -950,7 +991,7 @@ impl<'a> Sampler<'a> {
         lake_level: Option<i32>,
         near_sea: bool,
     ) -> (f32, Option<Worn>) {
-        if self.trail_points.is_empty() && self.pads.is_empty() {
+        if self.trail_points.is_empty() && self.pads.is_empty() && self.rings.is_empty() {
             return (f32::MAX, None);
         }
         let mut worn = None;
@@ -1027,7 +1068,9 @@ impl<'a> Sampler<'a> {
                 *ground += (pad.y - *ground) * w;
             }
             // Bare where people walk about the place.
-            if d < 0.0 && guard > 0.5 && matches!(*cover, Cover::Land | Cover::Bank | Cover::Scree) && pad.worn(self.world_seed, p, lx, lz) {
+            // A town's square (#203) is paved on the sand of a shore as anywhere.
+            let sand = pad.paved && matches!(*cover, Cover::Beach | Cover::Shingle | Cover::Dune);
+            if d < 0.0 && guard > 0.5 && (matches!(*cover, Cover::Land | Cover::Bank | Cover::Scree) || sand) && pad.worn(self.world_seed, p, lx, lz) {
                 // Worn as a well-used footpath is, into whatever ground the place stands on:
                 // midway across it, so neither grassed down the middle nor ragged at the edge.
                 let half_width = m(0.6);
@@ -1039,6 +1082,23 @@ impl<'a> Sampler<'a> {
                     dir: Vec2::X,
                     point: hash2(self.world_seed ^ 0x7a12, lx, lz),
                 });
+                *cover = Cover::Trail;
+            }
+            // A town's square (#203) is paved over, the ways across it too, the paving
+            // stamped with the town: worn as faintly as a trace, so no duckboards or log
+            // steps are laid on it.
+            if pad.paved
+                && d < 0.0
+                && *cover == Cover::Trail
+                && let Some(w) = worn.as_mut()
+            {
+                w.half_width = w.half_width.min(m(0.3));
+            }
+        }
+        // The ground trodden bare round a village tree. It clears nothing: the tree stands.
+        for ring in &self.rings {
+            if dry && let Some(w) = ring.wear(self.world_seed, p, lx, lz, *cover, slope) {
+                worn = Some(w);
                 *cover = Cover::Trail;
             }
         }
@@ -1426,6 +1486,24 @@ fn natural_ground(c: &Continent, seed: u32, fx: f32, fz: f32, wx: f64, wz: f64) 
         + perlin2(seed ^ 0xd2, wx / m64(13.6), wz / m64(13.6)) * m(0.8)
         + perlin2(seed ^ 0xd3, wx / m64(5.6), wz / m64(5.6)) * m(0.44);
     (base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0), slope)
+}
+
+/// The ground at continent-local point `p` of `c` as the land lies before any river,
+/// trail or settlement shaped it, in voxels (see `natural_ground`). With `fine` false,
+/// without the relief finer than some 45 m: the lie of the land a long straight ditch
+/// keeps its water level along (see `settlements::farmland::ditch`).
+pub(crate) fn natural_at(c: &Continent, seed: u32, p: Vec2, fine: bool) -> f32 {
+    let cs = c.cell_size();
+    let max = (c.size - 1) as f32;
+    let (fx, fz) = ((p.x / cs - 0.5).clamp(0.0, max), (p.y / cs - 0.5).clamp(0.0, max));
+    let wx = c.desc.mx as f64 * MACRO_SIZE as f64 + p.x as f64;
+    let wz = c.desc.mz as f64 * MACRO_SIZE as f64 + p.y as f64;
+    if fine {
+        return natural_ground(c, seed, fx, fz, wx, wz).0;
+    }
+    let base = bicubic_slope(c, fx, fz).0 * OLD_VOXEL;
+    let detail = fbm2(seed ^ 0xd1, wx / m64(44.8), wz / m64(44.8), 3, 2.0, 0.5) * m(2.08);
+    base + detail * ((base - m(0.4)).abs() / m(3.2)).clamp(0.12, 1.0)
 }
 
 /// Catmull-Rom interpolation of terrain height at a position in the cell-centre grid,

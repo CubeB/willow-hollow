@@ -28,6 +28,11 @@ pub enum Kind {
     Mouth,
     Confluence,
     Landmark,
+    /// A hamlet, village or town.
+    Settlement,
+    /// A settlement's quarry out in its land (#207): come on unawares, or marked from a
+    /// guild house's masons' roll.
+    Quarry,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +99,17 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         // Continent-local, so a site's luck does not change with where its continent lies.
         let hint = !surprise(world_seed, s.x, s.z);
         marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name, hint });
+    }
+    // Settlements are visited by walking onto their green, and never kept quiet about:
+    // everyone in the country knows where the villages are.
+    for (k, s) in c.trails.settlements.iter().enumerate() {
+        let name = c.trails.names.settlement(k).map(|p| p.name.clone());
+        marks.push(Mark { kind: Kind::Settlement, at: world(s.at()), reach: s.radius.max(NEAR), name, hint: true });
+    }
+    // The quarries, by the middle of the pit's floor, where the masons' roll puts them.
+    for q in &c.land.quarries {
+        let at = Vec2::new(q.floor.x as f32 + 0.5, q.floor.z as f32 + 0.5);
+        marks.push(Mark { kind: Kind::Quarry, at: world(at), reach: NEAR, name: None, hint: false });
     }
 
     let land: Vec<usize> = (0..n * n).filter(|&i| !c.ocean[i]).collect();

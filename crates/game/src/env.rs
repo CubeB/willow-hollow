@@ -42,6 +42,10 @@ pub struct Environment {
     pub sun_elevation: f32,
     /// Time of year, 0 to 1 from the spring equinox.
     pub date: f32,
+    /// Which year of the world it is, counting the one it began in as 0: it turns as the
+    /// date comes round into spring (`season::advance_year`). Anything that changes over
+    /// the years, what is built or grows up, reads it here.
+    pub year: u32,
     /// How bright the northern lights are, 0 to 1 (see aurora.rs); 0 unless set.
     pub aurora: f32,
 }
@@ -86,7 +90,8 @@ impl Environment {
         (self.haze * VOXELS_PER_METRE / HAZE).clamp(0.0, 1.5) / 1.5
     }
 
-    /// The environment at an hour of the day and a time of year (0..1).
+    /// The environment at an hour of the day and a time of year (0..1), in the world's
+    /// first year (see [`Environment::in_year`]).
     pub fn at(hours: f32, date: f32) -> Self {
         let time = hours.rem_euclid(24.0);
         // The sun stands higher and rides the sky longer in summer, lower and shorter in winter.
@@ -155,7 +160,14 @@ impl Environment {
             cloud_swell: 0.5,
             sun_elevation: elev,
             date,
+            year: 0,
             aurora: 0.0,
         }
+    }
+
+    /// The same moment in another of the world's years (counting from 0). The light and
+    /// the sky are the same whatever the year.
+    pub fn in_year(self, year: u32) -> Self {
+        Self { year, ..self }
     }
 }

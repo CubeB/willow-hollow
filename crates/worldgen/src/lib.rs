@@ -2,12 +2,14 @@
 
 pub mod biome;
 pub mod continent;
+pub mod fauna;
 pub mod features;
 pub mod macro_layout;
 pub mod materials;
 pub mod names;
 pub mod noise;
 pub mod scale;
+pub mod settlements;
 pub mod structures;
 pub mod surface;
 pub mod trails;

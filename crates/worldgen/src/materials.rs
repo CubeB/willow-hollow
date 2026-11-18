@@ -316,7 +316,116 @@ palette! {
     // CLOTH_RED: a dyed cloth's colours, where moss and a yellow bloom stood in before.
     CLOTH_GREEN       = ( 58, 132,  72), Solid, 1;
     CLOTH_YELLOW      = (228, 190,  52), Solid, 1;
+    // What settlements are furnished with (features::fittings), added last so existing ids
+    // keep their numbers: hay new and rotten, willow rods cut and woven, hide and leather,
+    // antler, fish fresh and dried, a tarred net, and water standing dark in a well or a
+    // trough. Then flowers and herbs hung to dry: never classed as plants, so they keep
+    // their colour the year round, as no growing flower does.
+    HAY               = (190, 176,  98), Solid, 3;
+    HAY_ROTTEN        = (128, 114,  82), Solid, 3;
+    WITHY             = (124,  74,  52), Solid, 2;
+    WICKER            = (176, 140,  90), Solid, 2;
+    HIDE              = (206, 186, 150), Solid, 2;
+    LEATHER           = (108,  72,  48), Solid, 1;
+    ANTLER            = (214, 200, 168), Solid, 1;
+    FISH              = (150, 160, 162), Solid, 1;
+    FISH_DRIED        = (154, 120,  78), Solid, 2;
+    NET               = ( 92,  80,  64), Solid, 2;
+    WATER_STILL       = ( 44,  70,  84), Solid, 0;
+    DRIED_RED         = (170,  72,  60), Solid, 2;
+    DRIED_GOLD        = (206, 168,  72), Solid, 2;
+    DRIED_WHITE       = (222, 214, 190), Solid, 2;
+    DRIED_PURPLE      = (138,  96, 140), Solid, 2;
+    DRIED_BLUE        = (102, 114, 170), Solid, 2;
+    DRIED_PINK        = (200, 142, 158), Solid, 2;
+    DRIED_HERB        = (110, 122,  80), Solid, 2;
+    DRIED_BROWN       = (124,  94,  66), Solid, 2;
+    // What the house kit builds homes of (settlements::kit), added last so existing ids
+    // keep their numbers: walls of earth, clay and woven rods, the limewash over them, and
+    // the roofs of each country. None of the roofs is wood to the seasons, so snow never
+    // falls through one into a room (voxel::mesh's `roofs`), even a roof of shingles.
+    COB               = (178, 142,  98), Solid, 2;
+    DAUB              = (206, 188, 152), Solid, 2;
+    WHITEWASH         = (230, 224, 208), Solid, 1;
+    WATTLE            = (126,  98,  66), Solid, 3;
+    MUD_BRICK         = (166, 118,  80), Solid, 2;
+    MUD_PLASTER       = (194, 154, 108), Solid, 1;
+    THATCH_OLD        = (136, 120,  84), Solid, 3;
+    REED_THATCH       = (156, 140, 100), Solid, 3;
+    PALM_THATCH       = (150, 142,  84), Solid, 3;
+    ROOF_TURF         = ( 96, 126,  64), Solid, 3;
+    SHINGLE           = (128, 104,  82), Solid, 2;
+    SHINGLE_OLD       = (126, 122, 114), Solid, 2;
+    ROOF_TILE_OLD     = (128,  80,  64), Solid, 2;
+    ROOF_MUD          = (176, 136,  94), Solid, 1;
+    // Window glass (settlements::furnish), added last so existing ids keep their numbers:
+    // a pane with a lamp or the fire behind it, a dim warm brown by day that glows after
+    // dark as a lantern's glass does, and a pane with nobody home behind it.
+    WINDOW_LIT        = (120,  84,  46), Solid, 0, glow;
+    WINDOW_DARK       = ( 54,  60,  66), Solid, 0;
+    // The fields about settlements (settlements::farmland), added last so existing ids keep
+    // their numbers: ploughed ground, wet and dry; the crops, each modelled as it is ripe
+    // (the seasons show it green before, see farmland::crops); fruit trees, vines and
+    // olives; and what bounds the fields: a hedge's leaves and the stems under them, and
+    // dead thorn piled up in the dry country.
+    PLOUGH            = (104,  76,  52), Solid, 2;
+    PLOUGH_DRY        = (158, 124,  88), Solid, 2;
+    WHEAT             = (214, 178,  92), Foliage, 2;
+    WHEAT_EAR         = (190, 146,  66), Foliage, 2;
+    BARLEY            = (224, 204, 136), Foliage, 2;
+    RYE               = (178, 164, 112), Foliage, 2;
+    STUBBLE           = (206, 190, 138), Foliage, 2;
+    FLAX              = (176, 150,  96), Foliage, 2;
+    FLAX_BLOOM        = (132, 170, 236), Foliage, 1;
+    ROOT_LEAF         = ( 56, 118,  54), Foliage, 2;
+    ROOT_CROWN        = (172, 112, 150), Foliage, 1;
+    VINE_ROW          = ( 76, 126,  52), Foliage, 2;
+    GRAPE             = ( 80,  42,  86), Foliage, 1;
+    ORCHARD_LEAF      = ( 80, 136,  54), Foliage, 3;
+    OLIVE_LEAF        = (112, 128,  98), Foliage, 3;
+    BARK_OLIVE        = (130, 120, 104), Solid, 2;
+    BLOSSOM           = (246, 228, 236), Foliage, 1;
+    APPLE             = (198,  50,  40), Foliage, 1;
+    FRUIT_GOLD        = (216, 186,  66), Foliage, 1;
+    HEDGE             = ( 58, 106,  46), Foliage, 3;
+    HEDGE_WOOD        = ( 92,  76,  58), Solid, 2;
+    THORN             = (124, 108,  88), Foliage, 2;
+    MEADOW_TUFT       = (150, 176,  92), Foliage, 3;
+    // A hedge seen from far off, as the coarse ground draws the line of it across a field.
+    HEDGE_FAR         = ( 50,  86,  42), Solid, 2;
+    // Paint for door frames and shutters (settlements::kit::components), added last so
+    // existing ids keep their numbers: the blue and green of a desert door, the red and
+    // ochre of a lowland shutter, each a little chalky as limewash paint is.
+    PAINT_BLUE        = ( 58, 104, 150), Solid, 1;
+    PAINT_GREEN       = ( 70, 118,  92), Solid, 1;
+    PAINT_RED         = (150,  62,  52), Solid, 1;
+    PAINT_OCHRE       = (196, 150,  70), Solid, 1;
+    // Thatch laid fresh (settlements::years), added last so existing ids keep their
+    // numbers: each thatch as it is the season it is laid, and paler the next two, before
+    // it is as thatch is. Palm leaves are laid green and dry to straw.
+    THATCH_NEW        = (222, 192, 104), Solid, 3;
+    THATCH_NEW_2      = (208, 180, 100), Solid, 3;
+    THATCH_NEW_3      = (195, 168,  96), Solid, 3;
+    REED_NEW          = (192, 172, 112), Solid, 3;
+    REED_NEW_2        = (180, 161, 108), Solid, 3;
+    REED_NEW_3        = (168, 150, 104), Solid, 3;
+    PALM_NEW          = (146, 162,  74), Solid, 3;
+    PALM_NEW_2        = (148, 155,  78), Solid, 3;
+    PALM_NEW_3        = (149, 148,  81), Solid, 3;
+    // The paddies (settlements::farmland::paddy), added last so existing ids keep their
+    // numbers: rice as it is ripe (the seasons show it green before), and a paddy's water
+    // as the far view draws it, the sky in it.
+    RICE              = (212, 184, 104), Foliage, 2;
+    PADDY_FAR         = (132, 156, 164), Solid, 1;
 }
+
+/// The materials the house kit roofs with: what keeps the rain and the light off a room,
+/// so that moss and lichen leave what is under them alone (features::moss).
+pub const ROOFING: &[Voxel] = &[
+    THATCH, SLATE, ROOF_TILE, THATCH_OLD, REED_THATCH, PALM_THATCH, ROOF_TURF, SHINGLE, SHINGLE_OLD, ROOF_TILE_OLD, ROOF_MUD,
+    // Thatch laid since (settlements::years).
+    THATCH_NEW, THATCH_NEW_2, THATCH_NEW_3, REED_NEW, REED_NEW_2, REED_NEW_3, PALM_NEW, PALM_NEW_2, PALM_NEW_3,
+];
 
 /// The material called `name` in the code (see [`NAMES`]), ignoring case.
 pub fn by_name(name: &str) -> Option<Voxel> {
@@ -540,4 +649,7 @@ fn classify(m: &mut Materials) {
             m.set_plant(v, kind);
         }
     }
+    // A turf roof is grass, and dries and yellows with the grass round about.
+    m.set_plant(ROOF_TURF, pk::GROUND);
+    crate::settlements::farmland::crops::classify(m);
 }

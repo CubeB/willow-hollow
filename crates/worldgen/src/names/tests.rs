@@ -30,7 +30,9 @@ fn the_word_lists_are_complete() {
         PlaceKind::Peak,
         PlaceKind::Falls,
         PlaceKind::Hamlet,
+        PlaceKind::Village,
         PlaceKind::Town,
+        PlaceKind::GreatTown,
         PlaceKind::Tor,
     ]);
     for k in kinds {

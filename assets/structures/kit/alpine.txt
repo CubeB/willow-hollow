@@ -1,0 +1,67 @@
+# How the alpine meadows build: the house kit's rules (settlements::kit says how a file
+# reads). Sizes are in voxels of 0.4 m.
+about: Alpine: log huts on stone, chalets of log over a stone storey, and stone houses, all under shingles held down with stones.
+
+hut:
+  footprint: rect
+  width: 10 12
+  length: 12 15
+  walls: log 2, drystone 1
+  base: 2 3
+  wall height: 5 6
+  roof: shingle
+  roof shape: gable
+  pitch: 0.8 1.0
+  overhang: 1 2
+  floor: boards 1, earth 1
+  smoke: hole
+  windows: 0 1
+  door width: 2 3
+  roof stones: 0.5
+
+timber:
+  footprint: rect
+  width: 13 16
+  length: 16 22
+  walls: log 2, plank 1
+  base: 3 4
+  wall height: 6 7
+  roof: shingle
+  roof shape: gable
+  pitch: 1.0 1.3
+  overhang: 2 3
+  gable door: 0.5
+  floor: boards
+  smoke: chimney
+  windows: 2 4
+  roof stones: 0.7
+
+stone:
+  footprint: rect 3, l 1 rich
+  width: 13 16
+  length: 17 23
+  thick: 2
+  walls: stone
+  base: 0
+  wall height: 6 7
+  roof: shingle 2, slate 1
+  roof shape: gable
+  pitch: 1.0 1.2
+  overhang: 2 3
+  gable door: 0.3
+  floor: boards 1, flags 1
+  smoke: chimney
+  windows: 2 4
+  whitewash: 0.3 rich
+  roof stones: 0.5
+
+components:
+  door: bench 2, woodpile 1, nothing 2
+  eaves: herbs 1, nothing 2
+  wall: woodpile 4, nothing 1
+  corner: woodpile 1, nothing 3
+  yard: hay-rack 2, nothing 2
+  window: window-box 3 rich, shutters 2, nothing 1
+  gable: balcony 2, carved-boards 1, banner 1 rich, nothing 1
+  ridge: bell 1 rich, nothing 3
+  roof: nothing

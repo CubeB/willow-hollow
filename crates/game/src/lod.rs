@@ -12,7 +12,7 @@ use std::{
 };
 
 use glam::IVec3;
-use voxel::{AIR, CHUNK, Kind, PAD, PaddedChunk, Voxel};
+use voxel::{AIR, CHUNK, Kind, Materials, PAD, PaddedChunk, Voxel, mesh::CELLS};
 use worldgen::{
     World,
     biome::Biome,
@@ -102,6 +102,60 @@ fn downsample(world: &GameWorld, species: Species, variant: usize, turns: u32, l
     out
 }
 
+/// The voxels of something built (a stamp's, in its order) gathered into cells `step`
+/// voxels wide whose low corner is `origin` less a whole number of cells: the coarse
+/// rings draw these, and the far boxes are made of the coarsest (farbuilt.rs).
+///
+/// A cell anything glows in keeps the glow, so a lit lantern shines from far off. Else
+/// a cell holding at least a line of solid voxels across it is solid, of its commonest
+/// material: a post or a wall one voxel thick survives beside the air of the room it
+/// stands by, where keeping the last voxel written would often have kept the air. Else
+/// a cell the thing carves is air, and one it barely touches is left as it was.
+pub(crate) fn built_cells(voxels: &[(IVec3, Voxel)], origin: IVec3, step: i32, mats: &Materials) -> Vec<(IVec3, Voxel)> {
+    let cell_of = |p: IVec3| (p + origin).div_euclid(IVec3::splat(step));
+    // A place written twice keeps its last voxel, as in the full-size world; stamps are
+    // in one order (trails' `add_stamp_with`), so the two writes stand side by side.
+    let mut cells: Vec<(IVec3, usize, Voxel)> = Vec::with_capacity(voxels.len());
+    for (i, &(p, v)) in voxels.iter().enumerate() {
+        if voxels.get(i + 1).is_some_and(|n| n.0 == p) {
+            continue;
+        }
+        cells.push((cell_of(p), i, v));
+    }
+    cells.sort_unstable_by_key(|&(c, i, _)| (c.y, c.z, c.x, i));
+    let mut out = Vec::new();
+    let mut kinds: Vec<(Voxel, u32, usize)> = Vec::new();
+    for run in cells.chunk_by(|a, b| a.0 == b.0) {
+        let (mut solid, mut air, mut flame) = (0, false, None);
+        kinds.clear();
+        for &(_, i, v) in run {
+            if v == AIR {
+                air = true;
+                continue;
+            }
+            if mats.get(v).emissive {
+                flame = Some(v);
+            }
+            solid += 1;
+            match kinds.iter_mut().find(|k| k.0 == v) {
+                Some(k) => (k.1, k.2) = (k.1 + 1, i),
+                None => kinds.push((v, 1, i)),
+            }
+        }
+        let cell = run[0].0;
+        if let Some(v) = flame {
+            out.push((cell, v));
+        } else if solid >= step as u32 {
+            // Ties go to the material written last, so the choice is the same each run.
+            let best = kinds.iter().max_by_key(|k| (k.1, k.2)).expect("a solid cell has a material");
+            out.push((cell, best.0));
+        } else if air {
+            out.push((cell, AIR));
+        }
+    }
+    out
+}
+
 /// What the top of a coarse cell is made of, and the layer under it: the choice
 /// `world::surface_materials` makes, each biome with its own ground, soil and rock,
 /// taking the commonest of its voxel-to-voxel speckle, which would only shimmer at this
@@ -121,6 +175,8 @@ pub(crate) fn skin(col: &Column, slope: f32) -> (Voxel, Voxel) {
         Cover::Dune if matches!(col.biome, Biome::Desert | Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
         Cover::Spring => (mat::MOSSY_STONE, mat::STONE),
+        // A paddy's floor or a ditch's, under its water.
+        Cover::Land if col.water_surface().is_some() => (mat::MUD, mat::MUD),
         Cover::Trail => (worldgen::trails::tread::far(col), mat::DIRT),
         // Tidal flats: wet sand where barely above the sea, as the voxel world has them.
         Cover::Bank if !col.biome.arid() && worldgen::surface::flat_is_sand(col.ground, 0.5) => (mat::SAND, mat::SAND),
@@ -202,6 +258,8 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     let (wx0, wz0) = (cx * span - step, cz * span - step);
     let (mx, mz) = cell_of(cx * span, cz * span);
     let continent = world.continent(mx, mz);
+    // How its settlements and fields stand in the year it is seen in (#207).
+    let lives = world.lives(mx, mz, &continent);
     let (lx0, lz0) = (wx0 - mx * MACRO_SIZE, wz0 - mz * MACRO_SIZE);
     let margin = features::MAX_REACH + 1;
     let width = PAD as i32 * step;
@@ -239,13 +297,26 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // to it would show a crack where it is cut off.
             let mut top = (lowest + 1).div_euclid(step) - 1;
             // Any water at the corners floods the cell, so narrow rivers stay joined up.
-            let water = four.iter().filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
+            // A ditch is too narrow to show as water once the cells are wider than it, and
+            // a paddy is its field from there on, its rice over it in season.
+            let water = four.iter().filter(|c| step <= 2 || !worldgen::settlements::farmland::paddy::flooded(c)).filter_map(|c| c.water_surface()).max().map(|k| k.div_euclid(step) - 1);
             // Rounding must not leave the bed poking through its own shallows.
             if let Some(w) = water {
                 top = top.min(w - 1);
             }
             let low_corner = four.iter().map(|c| c.top()).min().expect("four corners");
-            let (surface, under) = skin(four[0], (highest - low_corner) as f32 / step as f32);
+            let (mut surface, under) = skin(four[0], (highest - low_corner) as f32 / step as f32);
+            // The fields about a settlement: their soil and crops' colours, and the hedges
+            // and walls between them (see worldgen::settlements::farmland).
+            let (cx_, cz_) = (lx0 + x as i32 * step, lz0 + z as i32 * step);
+            let field = if surface == mat::ground_cover(four[0].biome) || (water.is_none() && worldgen::settlements::farmland::paddy::flooded(four[0])) {
+                worldgen::settlements::farmland::rotation::far(&continent, world.seed(), four[0], cx_, cz_, step, lives.when)
+            } else {
+                None
+            };
+            if let Some(f) = field {
+                surface = f.surface;
+            }
             let cliff = (four[0].cover == Cover::Cliff).then_some(four[0].biome);
             lo = lo.min(top);
             hi = hi.max(top).max(water.unwrap_or(i32::MIN));
@@ -253,19 +324,26 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             // The grass as the full-size ground has it, so it does not change at the
             // ring's edge: from the column at the cell's corner, its slope across the cell.
             let by_rock = four.iter().any(|c| matches!(c.cover, Cover::Cliff | Cover::Scree | Cover::Boulders));
-            let sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
-            wash.push((top, if grows { world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step) } else { 0 }, sward));
+            let mut sward = worldgen::surface::sward::code(&continent, four[0], lx0 + x as i32 * step, lz0 + z as i32 * step, (highest - low_corner) as f32 / step as f32, by_rock);
+            if let Some(wear) = field.and_then(|f| f.wear) {
+                sward = (sward & 7) | (sward >> 3).max(wear) << 3;
+            }
+            let crop = field.and_then(|f| f.wash);
+            wash.push((top, if grows { crop.unwrap_or_else(|| world.wash_at(four[0], surface, wx0 + x as i32 * step, wz0 + z as i32 * step)) } else { 0 }, sward));
             cells.push(Cell { top, water, surface, under, cliff });
         }
     }
 
     let lib = world.library();
     let origin = (mx * MACRO_SIZE, mz * MACRO_SIZE);
-    let found = if every_feature {
+    let mut found = if every_feature {
         features::place(world.seed(), lib, &sampler, lx0, lz0, width, origin)
     } else {
         features::place_only(world.seed(), lib, &sampler, lx0, lz0, width, origin, stands_tall)
     };
+    // About a logging camp, what the loggers have felled by this year is left out below
+    // as the stump it is (#207).
+    worldgen::settlements::logging::fell(&continent, lives.when, origin, &mut found);
     let placements: Vec<_> = found
         .into_iter()
         .filter(|p| {
@@ -286,7 +364,8 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
     let mut stamps = Vec::new();
     for dx in 0..step {
         for dz in 0..step {
-            stamps.extend(continent.trails.stamps_at(local.0 + dx, local.1 + dz));
+            stamps.extend(continent.trails.stamps_at(local.0 + dx, local.1 + dz).filter_map(|s| lives.view(s)));
+            stamps.extend(continent.land.fixtures.at(local.0 + dx, local.1 + dz, world.seed(), &lives).into_iter().map(|(s, _)| std::borrow::Cow::Borrowed(s)));
         }
     }
     for s in &stamps {
@@ -330,6 +409,7 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
         chunks.push((cy, chunk));
     }
 
+    let mats = world.materials();
     let mut put = |q: IVec3, v: Voxel, force: bool| {
         let (px, pz) = (q.x - (cx * CHUNK - 1), q.z - (cz * CHUNK - 1));
         let py = q.y - cy_min * CHUNK;
@@ -339,10 +419,15 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
         let (ci, ly) = ((py / CHUNK) as usize, py.rem_euclid(CHUNK) as usize);
         let (ux, uz) = (px as usize, pz as usize);
         let mut write = |index: usize, padded: usize| {
-            if let Some((_, chunk)) = chunks.get_mut(index)
-                && (force || chunk.get(ux, padded, uz) == AIR)
-            {
-                chunk.set(ux, padded, uz, v);
+            if let Some((_, chunk)) = chunks.get_mut(index) {
+                let old = chunk.get(ux, padded, uz);
+                // A flame keeps its cell from the lamp round it, so that a lit lantern
+                // glows from here at night as it does beyond, where the far boxes of
+                // what is built take over (farbuilt.rs).
+                let flame = mats.get(old).emissive && !mats.get(v).emissive;
+                if (force && !flame) || old == AIR {
+                    chunk.set(ux, padded, uz, v);
+                }
             }
         };
         write(ci, ly + 1);
@@ -353,7 +438,6 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
             write(ci + 1, 0);
         }
     };
-    let mats = world.materials();
     for p in &placements {
         let at = IVec3::new(p.pos.x.div_euclid(step), p.pos.y.div_euclid(step), p.pos.z.div_euclid(step));
         // A cell floods if water reaches any of its corners, so a tree on the shore can
@@ -373,9 +457,15 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
         t.raster_coarse(step, cx * CHUNK - 1, cz * CHUNK - 1, PAD as i32, |q, v| put(q, v, true));
     }
     for s in &stamps {
-        for &(p, v) in &s.voxels {
-            let q = p + origin;
-            put(IVec3::new(q.x.div_euclid(step), q.y.div_euclid(step), q.z.div_euclid(step)), v, true);
+        for (cell, v) in built_cells(&s.voxels, origin, step, mats) {
+            put(cell, v, true);
+        }
+        // A lit window, a pane of glass among the fine parts, takes the cell of the wall it
+        // is in, so that it glows from here at night as the far boxes show it beyond. The
+        // fire inside does not: at this size its cell would take the wall's.
+        for b in s.fine.iter().filter(|b| b.voxel == mat::WINDOW_LIT) {
+            let q = IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS)) + origin;
+            put(q.div_euclid(IVec3::splat(step)), b.voxel, true);
         }
     }
     (chunks, placements, wash)
@@ -384,6 +474,37 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A post one voxel thin keeps its cell beside the air of a room, a speck in that air
+    /// does not, a flame always does, and a place written twice keeps its second voxel.
+    #[test]
+    fn built_cells_keep_thin_posts_and_lights() {
+        let world = GameWorld::new(1);
+        let mats = world.materials();
+        let mut voxels = Vec::new();
+        for y in 0..8 {
+            for z in 0..4 {
+                for x in 0..8 {
+                    // A post up the corner of the first cell, air everywhere else.
+                    voxels.push((IVec3::new(x, y, z), if x == 0 && z == 0 && y < 4 { mat::PLANK } else { AIR }));
+                }
+            }
+        }
+        // A speck in the second cell along, and a flame in the cell over it.
+        voxels.push((IVec3::new(5, 1, 1), mat::PLANK));
+        voxels.push((IVec3::new(6, 5, 2), mat::EMBER));
+        // Written twice: air first, then a plank, so the plank stands.
+        voxels.push((IVec3::new(1, 6, 1), AIR));
+        voxels.push((IVec3::new(1, 6, 1), mat::PLANK));
+        voxels.sort_by_key(|&(p, _)| (p.y, p.z, p.x));
+        let cells: HashMap<IVec3, Voxel> = built_cells(&voxels, IVec3::ZERO, 4, mats).into_iter().collect();
+        assert_eq!(cells[&IVec3::new(0, 0, 0)], mat::PLANK, "the post");
+        assert_eq!(cells[&IVec3::new(1, 0, 0)], AIR, "the speck");
+        assert_eq!(cells[&IVec3::new(1, 1, 0)], mat::EMBER, "the flame");
+        assert_eq!(cells[&IVec3::new(0, 1, 0)], AIR, "one plank is not a line");
+        let lone = built_cells(&[(IVec3::new(9, 9, 9), mat::PLANK)], IVec3::ZERO, 4, mats);
+        assert!(lone.is_empty(), "a speck with no air about it leaves its cell alone");
+    }
 
     #[test]
     fn coarse_trees_keep_their_trunk_and_stay_smaller_in_cells() {

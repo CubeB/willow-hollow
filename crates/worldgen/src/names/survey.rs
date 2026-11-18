@@ -9,6 +9,7 @@ use crate::{
     macro_layout::{CellKind, MACRO_SIZE},
     noise::{fbm2, hash2},
     scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
+    settlements::Kind,
     structures::{self, Field},
     trails::sites,
 };
@@ -30,6 +31,9 @@ pub fn survey(c: &Continent, world_seed: u32) -> Gazetteer {
     s.peaks(&mut g);
     s.tors(&mut g);
     s.bays(&mut g);
+    // Settlements before landmarks, so a landing that became a town's port can take
+    // the town's name.
+    s.settlements(&mut g);
     s.landmarks(&mut g);
     g
 }
@@ -746,23 +750,62 @@ impl<'a> Survey<'a> {
         }
     }
 
+    /// Every hamlet, village and town, the greatest first so they have the pick of the
+    /// names. Each has a few of its people named, and may be named after one of them.
+    fn settlements(&self, g: &mut Gazetteer) {
+        let list = &self.c.trails.settlements;
+        let mut order: Vec<usize> = (0..list.len()).collect();
+        order.sort_by(|&a, &b| list[b].kind.cmp(&list[a].kind).then(a.cmp(&b)));
+        for k in order {
+            let s = &list[k];
+            let at = s.at();
+            let mut facts = self.facts(self.index(at), &[]);
+            facts.residents = g.given_names(at, s.seed, 3);
+            g.add_settlement(
+                k,
+                Request {
+                    kind: s.kind.place_kind(),
+                    at,
+                    radius: s.radius,
+                    line: Vec::new(),
+                    importance: s.kind.importance(),
+                    facts: &facts,
+                    salt: hash2(0x5e77, s.x, s.z),
+                },
+            );
+        }
+    }
+
     /// Every landmark on the trails.
     fn landmarks(&self, g: &mut Gazetteer) {
         for (k, site) in self.c.trails.sites.iter().enumerate() {
             let at = Vec2::new(site.x as f32, site.z as f32);
             let facts = self.facts(self.index(at), &[]);
-            g.add_site(
-                k,
-                Request {
-                    kind: PlaceKind::Landmark(site.kind),
-                    at,
-                    radius: site.kind.radius(),
-                    line: Vec::new(),
-                    importance: sites::importance(site.kind),
-                    facts: &facts,
-                    salt: hash2(0x517e, site.x, site.z),
-                },
-            );
+            let req = Request {
+                kind: PlaceKind::Landmark(site.kind),
+                at,
+                radius: site.kind.radius(),
+                line: Vec::new(),
+                importance: sites::importance(site.kind),
+                facts: &facts,
+                salt: hash2(0x517e, site.x, site.z),
+            };
+            // A landing that became a settlement's port is called after the place:
+            // a great town's harbour, a town's quay, a village's landing.
+            let port = self.c.trails.settlements.iter().enumerate().find(|(_, s)| s.port == Some(k));
+            match port.and_then(|(j, s)| Some((g.settlement(j)?.name.clone(), s.kind))) {
+                Some((town, kind)) => {
+                    let word = match kind {
+                        Kind::GreatTown => "Harbour",
+                        Kind::Town => "Quay",
+                        _ => "Landing",
+                    };
+                    g.add_site_named(k, req, format!("{town} {word}"));
+                }
+                None => {
+                    g.add_site(k, req);
+                }
+            }
         }
     }
 }

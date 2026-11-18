@@ -86,10 +86,16 @@ Delete `settings.txt` there to go back to the defaults. A hand-edited or damaged
 never stops the game from starting: anything unreadable falls back to its default.
 
 Each world N keeps its own files beside it, all plain text but the map: `world-N.txt`
-(where you stand), `pack-N.txt` (what you carry), `journal-N.txt` (the journal: a line
-to each find, place, river and note, and the distances gone) and `map-N/` (what the map
-has seen). Any of them can be deleted on its own; a line the game cannot read is left
-out and the rest still loads.
+(where you stand, the hour, the date and the world's year), `pack-N.txt` (what you
+carry), `journal-N.txt` (the journal: a line to each find, place, river and note, and
+the distances gone) and `map-N/` (what the map has seen). Any of them can be deleted on
+its own; a line the game cannot read is left out and the rest still loads.
+
+The world's year counts from 0, the year it began in, and turns each time the date
+comes round from winter into spring (`season::advance_year`); the journal's "of the
+first year" is year 0. A world saved before the year was kept takes it from its journal,
+which counted the springs. Anything drawn that changes over the years should read
+`Environment::year`, which the game keeps with the hour and the date.
 
 ## Tests
 
@@ -123,8 +129,9 @@ degrees: yaw 0 looks toward +x (where the sun rises), 180 toward -x (where it se
 (`--date may`) or a fraction of the year from the spring equinox. Each flower is out in
 its own months (`Flower::months` in `worldgen/src/features/plants.rs`), so a shot of a
 bluebell wood needs `--date may` and one of heather `--date august`; the default date is
-the middle of July. PNG files are ignored by git everywhere except under `docs/`, so
-shots can be written anywhere.
+the middle of July. `--year N` sets the world's year (0 is its first), which the journal
+shows. PNG files are ignored by git everywhere except under `docs/`, so shots can be
+written anywhere.
 
 The windows can be put on a shot too: `--pack` for the pack, and `--journal [PAGE]` for
 the journal open at `finds`, `places`, `walk` or `days`. A screenshot reads no save, so
@@ -281,6 +288,87 @@ variant and can be left as they are. A file the game cannot read fails
 `--screenshot FILE` with `--structures` draws the editor once without a window
 (`--help` lists `--layer`, `--copy`, `--orbit` and `--hover` for it).
 
+**Houses in the editor.** Nobody draws the homes: the house kit
+(`worldgen::settlements::kit`) builds them from rules. *Houses* in the editor's list
+shows *the kit's own* (`--structure house/temperate/timber`): choose a region, a step
+(hut, timber house or stone house) and a variant. Each variant is another household,
+and *Household* shows its age, wealth and how many sleep there; move a slider and that
+holds for every variant, so the arrows step through the variety of one household
+(*As the variant has it* lets go again).
+
+The kit's rules are `assets/structures/kit/<region>.txt`. Run from the repository (or
+with `--structures-dir`), the editor builds the kit's homes from those files, and reads
+a file again within half a second of its being saved, or at *Read the kit files again*,
+so a change to the rules shows without a rebuild. A line the kit cannot read is named in
+red in the panel, and until it reads the homes are built with the rules last read from
+the file (or those compiled in). The world always builds with the rules compiled into
+the game: it takes up a change when the game is built again, and the panel says when
+the files and the game differ.
+
+*Copy this house to edit* (or `--copy`) turns the home shown into a house of your own,
+saved as `assets/structures/house/<name>.txt`. Its file is a structure file with three
+more things: the `region:` and `step:` it was copied for, and a `home:` section keeping
+where the kit put its door, beds, hearth, furniture places, windows, smoke and anchors
+(`crates/worldgen/src/settlements/kit/copy.rs` says how each line reads). Its blocks are roles, as a copied
+landmark's are, so built again in the same place it is the kit's home to the voxel. The
+floor is not kept: it is found again by walking in from before the door each time the
+house is built (`kit::walk`), so it follows the edits. The view outlines the beds (cut
+the layers above away to see them) and marks the way in; if an edit shuts the door on
+any bed they turn red and the panel says so. It still saves, but
+`every_saved_structure_reads` fails until the way is open again, since every home in the
+world must be walked into.
+
+A saved house is one of the homes `kit::build` makes for its region and step: each home
+is the kit's or one of the saved ones, chosen by its seed in proportion to their weights,
+and a saved house only for a household it has a bed for each of. It is built as drawn,
+whatever the age and wealth asked for. The kit's weight is in `house/generator.txt`, as
+a generator's is, written from *How often in the world*; left out, it is 10, not 0, so
+one saved house of weight 1 is one home in eleven of its region and step rather than
+every one of them. With no houses saved, `kit::build` is the kit and the world is as it
+was. `--structure house/<name>` opens a saved house. To try a hand edit on a house's file
+without the editor, `KIT_COPY="temperate hut 5" cargo test --release -p worldgen --lib
+kit::copy::tests::print -- --ignored --nocapture` prints a copy of one.
+
+**Components.** What makes a region's homes its own (#203), set on the kit's homes at
+the anchors the kit marks: a desert house's cloth awning and water jars, a lowland
+cottage's porch, window boxes and climbing rose, a northern woodpile to the eaves and
+flowers on the turf roof, a marsh hut's rope rails, boardwalk and punt. Each is a small
+generator in `crates/worldgen/src/settlements/kit/components/` (its module says how they
+go on and what the kit already builds itself), and each region's kit file says which go
+at which kind of anchor and how often, under `components:` (a name in the wrong place is
+named in red as any wrong line is). The editor shows the homes with theirs on; untick
+*Components* in the Houses panel, or add `/bare` (`--structure
+house/temperate/timber/bare`), to see one as the kit first makes it, and the panel lists
+what went where. *Components* in the list has a gallery of every one, or a region's, each
+on a stretch of a home it goes on, new and let go (`--structure components/desert`), and
+each component's own (`--structure component/porch`), whose variants set it on other
+homes. Every awning, sail, banner and hide is cloth and moves in the wind in the game, as
+washing does; the editor draws it still.
+
+*Copy this variant to edit* turns one into a component of your own, saved as
+`assets/structures/component/<name>.txt` with a `component:` line saying which it is. It
+is drawn in its anchor's frame: the anchor's voxel is the origin, out from the house is
+east (+x), and the wall is at x = -1, so whatever home it is chosen for it is turned to
+fit. Wherever its component goes it is chosen against the generator's own by weight
+(`component/generator.txt`, 10 if left out, as for houses), and if it does not fit there
+(it would stand in a wall, hang in the air or block the way in) the generator's goes
+instead; the panel says when a saved one fits on none of the homes tried. To look into a
+component that never goes on, `COMPONENT_SHOW="rope-rail wetland" cargo test --release
+-p worldgen --lib components::tests::trace -- --ignored --nocapture` tries it on that
+region's homes and says what stopped it.
+
+**Settlement buildings.** The tavern, smithy, sawmill, granary, market hall, guild house,
+well head and gate are kinds of their own (`designs::Special`), listed under *Settlement
+buildings*, each with its folder (`tavern/`, `market-hall/`, `guild-house/`,
+`well-head/`...), so they can be drawn before stage 3 (#203) brings their generators. Until
+then the generator's own is a stand-in: a plain home of the kit, of the country in *Seen
+in*, for a building people go into, which can be copied with its door and beds as a
+house can; and an empty plot for the well head and the gate, which are started from
+nothing. The tavern stands in as a timber house with six beds and the guild house as a
+stone house with two; the smithy and the market hall as stone houses, and the sawmill
+and the granary as timber houses, with none (`editor/houses.rs`, `stand_in`). The world
+does not build any of them yet.
+
 **Small delights** live in `crates/worldgen/src/trails/delights.rs`. Each kind has a
 reason to stand where it does and a chance of being taken up when the reason holds;
 `APART` and `APART_SAME` keep any two from standing near each other. They are meant to
@@ -293,6 +381,20 @@ run down from a pole to a cairn. Every box on a line carries how far the line gi
 there (`PlantBox::flap`), and `flap_motion` in terrain.wgsl swings the line and
 flutters each flag's free edge in the wind, each at its own phase. Motion does not show
 in one shot: take two with different `VOXEL_CLOCK` values and compare them.
+
+Two other kinds of cloth move in the wind (`features/cloth.rs`), made of fine boxes in
+cells like the flags. A ribbon tied by one end (`cloth::ribbon`) hangs from its knot in
+still air, leans out downwind the harder it blows and flutters most at its free end. A
+sheet tied at its corners (`cloth::sheet`, for sail shades and awnings) billows up and
+down between them and ripples at its free edges; it lies smoothest tied level, since a
+slope is built in steps a cell high. Cloth is told from flags and plants by the ground's
+plant kind, which nothing that sways otherwise has, with a code in the colour's tag:
+for a ribbon how far below its knot that corner hangs, for a sheet how far it gives
+there and how big it is (`mesh::cloth_code`, read by `cloth_motion` in terrain.wgsl).
+What it was made as is kept in `PlantBox::flap` and `season` (`PlantBox::cloth`), and a
+sheet's corners turn with the model it belongs to (`parts::place_fine`). Ribbons hang
+from the tie beam of a shrine's stone gate, and a camp in desert or savanna has a sail
+shade over its bench. Cloth casts a shadow that stays still, as the flags' do.
 
 **Bees' and wasps' nests** (`crates/worldgen/src/features/nests.rs`) belong to the trees
 and boulders they are in, chosen by a hash of where each stands: a colony of bees in a
@@ -392,11 +494,15 @@ cannot be done says why and how it is used.
 | `time [hour\|+h\|-h]` | Set the hour (`18`, `18:30`, or a word: `dawn`, `noon`, `dusk`, `midnight`...), or move it on or back (`+3`, `-1.5`). Alone, says the time |
 | `date [month\|0-1]` | Set the time of year: a month (`may`, `oct`) or a fraction of the year from the spring equinox, as `--date` takes |
 | `season <name>` | The middle of `spring`, `summer`, `autumn` or `winter` |
+| `year [n\|+n\|-n]` | Set which year of the world it is, counting its first as 0, as `--year` takes, or move it on or back. Alone, says the year. The date stays as it is |
 | `tp <x> <z> [h]` | Go to voxel x, z, the eye h voxels above the ground or water there (eye height when not given). Also `tp x,z,h`, as `pos` prints it |
 | `tp <place>` | Go to the named place on this continent whose name has these words in it, nearest first (`tp hollin tarn`) |
 | `tp home`, `tp back`, `back` | Go to the world's start; go back to where the last tp left from |
 | `pos` | Say where you are, as `x,z,h` for `tp` and as `--over` and `--look` for a screenshot |
 | `places [name]` | The ten named places nearest, or those with this in their name, with how far, which way and the `tp` to each |
+| `people [here\|all]` | Who lives in the settlement nearest, how many households, how many of them are where at this hour (in bed, at the well, at work, at the tavern...) and where its well, market, tavern and tree are, with the nearest few by name; `all` names every one of them and where each is |
+| `greet` | Greet whoever of a settlement is within 3 m, as E does. On a screenshot, the one nearest the figure (or the camera) turns to it, and what they say is the shot's prompt |
+| `read` | Read the notice board or guild house's board looked at, within 2.4 m, as E does. On a screenshot (or with `--read`), the board the camera looks at, its page drawn over the shot. `people` says where each board of the settlement nearest is read from, and when its next market day is |
 | `fly [on\|off]` | Fly free of the ground, or walk again (F) |
 | `view` | Through the eyes, or from behind the figure (V) |
 | `spawn camp [laid\|lit\|out\|burnt]` | Make camp a few steps ahead, as `--camp` does: a fire (lit if not said) and a few things set down |
@@ -408,12 +514,13 @@ cannot be done says why and how it is used.
 | `give <thing> [n]` | Put n of a thing in the pack (the same things as `spawn`, and the `lantern`) |
 | `speed [times]` | Walk, run and swim this many times faster than usual, 0.1 to 20. Alone, says the speed |
 | `seed` | Say which world this is |
+| `boon [second-well\|guild-hall]` | Grant the settlement nearest a boon in this year, kept in `boons-N.txt` with the world's save: a `second-well` sunk on its green (its empty homes are soon built again), or a great town's `guild-hall` opened, hung with its banners. Only where it was laid out with room for one. Alone, says which it has and could have. On a screenshot it holds for the shot |
 
 `--command "LINE"` runs a line at the start, as if typed, and can be given as often as
 needed; what each says goes in the log and in the console. On a screenshot the commands
-set the shot up as their flags would: `weather`, `time`, `date`, `season`, `tp` (as
-`--over`), `pos`, `places`, `spawn camp`, `spawn murmuration`, `spawn crows`,
-`spawn boat` and `aurora`; any other, or one that fails, stops the shot with what was
+set the shot up as their flags would: `weather`, `time`, `date`, `season`, `year`, `tp` (as
+`--over`), `pos`, `places`, `people`, `greet`, `read`, `spawn camp`, `spawn murmuration`,
+`spawn crows`, `spawn boat`, `aurora` and `boon`; any other, or one that fails, stops the shot with what was
 wrong. `--console` draws the console open on a screenshot, with what the commands said,
 and in a run starts with it open.
 
@@ -454,6 +561,28 @@ it cannot yet. The parsing and the console's history and completion have tests t
   whether it is there and what colour it is. `Season::phase` in Rust is the same sum,
   which is how picking and the butterflies know which flowers are out. Change one and
   change the other.
+- **What people build is generated for the year, and the fields for the season** (#207),
+  the one exception to the rule above. Settlements are still laid out once, from the
+  seed; each building and yard stamp carries a tag (`settlements::years::Tag`), and
+  `years::Lives`, a pure function of the seed, the year, the season and the boons
+  granted, says what each home is that year (lived in, freshly thatched, standing
+  empty, being taken down, rising again in scaffolding) and `Lives::view` makes the
+  stamp as it stands. Every reader of stamps (chunks, the far rings, the far boxes, the
+  map, the climbers) goes through `view`, so they agree, and chunk borders with them.
+  Which crop a field is in is `farmland::rotation`. Year 0 is today's world in every
+  season, so the checksums and layout tests hold. `GameWorld::set_now` sets the moment;
+  when it changes anything the world's `epoch` goes up, and the streamer makes again
+  every loaded column a settlement or its fields reach (`changes_with_years`), showing
+  the old meshes until the new are up, while the far boxes and the villagers are made
+  again on their own threads. Nothing of a chunk is ever saved, so there is nothing to
+  undo: the save keeps the year and the boons (`boons-N.txt`), and the rest follows.
+  A settlement that lives by logging works a camp out in the woods beyond its fields
+  (`settlements::logging`, raised after the barns and kept in `Network::years`), whose
+  clearing is felled back a ring a year as far as the land lets it.
+  `logging::fell` turns the trees felled by the year to stumps. Every reader of the
+  trees calls it: chunks, climbers, nests, the coarse rings, the far trees and the
+  map. The far trees a clearing reaches are made again when the year turns
+  (`GameWorld::fells_with_years`).
 
 ## How work gets in
 

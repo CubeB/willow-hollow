@@ -20,6 +20,7 @@ pub const SENSITIVITY: RangeInclusive<f32> = 0.2..=3.0;
 pub const VOLUME: RangeInclusive<f32> = 0.0..=1.0;
 
 const SETTINGS_FILE: &str = "settings.txt";
+const FIGURE_FILE: &str = "figure.txt";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
@@ -175,6 +176,9 @@ pub struct Progress {
     pub time: f32,
     /// Time of year, 0 to 1 from the spring equinox.
     pub date: f32,
+    /// Which year of the world it is, from 0 for the one it began in; None in a save from
+    /// before the years were kept.
+    pub year: Option<u32>,
     pub travel: Travel,
     /// Which way the boat points, in radians.
     pub heading: f32,
@@ -187,8 +191,9 @@ impl Progress {
             Travel::Flying => "flying",
             Travel::Sailing => "sailing",
         };
+        let year = self.year.map_or_else(String::new, |y| format!("year = {y}\n"));
         format!(
-            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\ntravel = {travel}\nheading = {}\n",
+            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\n{year}travel = {travel}\nheading = {}\n",
             self.pos.x, self.pos.y, self.pos.z, self.yaw, self.pitch, self.time, self.date, self.heading
         )
     }
@@ -207,6 +212,7 @@ impl Progress {
             pitch: f.finite("pitch")? as f32,
             time: f.finite("time").map_or(10.0, |t| t.rem_euclid(24.0) as f32),
             date: f.finite("date").map_or(crate::season::DEFAULT_DATE, |d| d.rem_euclid(1.0) as f32),
+            year: f.get("year"),
             travel,
             heading: f.finite("heading").unwrap_or(0.0) as f32,
         })
@@ -307,6 +313,39 @@ impl Store {
         self.report(write_whole(&self.dir, &path, text))
     }
 
+    /// The travellers met in a world, as they were saved: none if none were (#205).
+    pub fn travellers(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("travellers-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_travellers(&self, seed: u32, text: &str) -> bool {
+        let path = PathBuf::from(format!("travellers-{seed}.txt"));
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
+    /// The boons the player has granted the settlements of a world, as they were saved
+    /// (#207): none if none were. The settlements are laid out with them, so they are all
+    /// the world's settlements keep of what the player has done for them.
+    pub fn boons(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("boons-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_boons(&self, seed: u32, text: &str) -> bool {
+        let path = PathBuf::from(format!("boons-{seed}.txt"));
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
+    /// How the player has made their figure look, as it was saved: empty if they never
+    /// have (#204). It is the player's own, as the settings are, and goes with them into
+    /// every world: a plain run is a new world each time.
+    pub fn figure(&self) -> String {
+        fs::read_to_string(self.dir.join(FIGURE_FILE)).unwrap_or_default()
+    }
+
+    pub fn write_figure(&self, text: &str) -> bool {
+        self.report(write_whole(&self.dir, FIGURE_FILE.as_ref(), text))
+    }
+
     /// Where the map of what has been seen of each world is kept.
     pub fn map_dir(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("map-{seed}"))
@@ -346,6 +385,7 @@ mod tests {
             pitch: -0.3,
             time: 17.5,
             date: 0.62,
+            year: Some(3),
             travel: Travel::Sailing,
             heading: 2.5,
         }
@@ -386,6 +426,15 @@ mod tests {
     #[test]
     fn positions_come_back_exact() {
         assert_eq!(Progress::from_text(&progress().to_text()), Some(progress()));
+    }
+
+    #[test]
+    fn a_save_from_before_the_years_were_kept_has_none() {
+        let old = "x = 1\ny = 2\nz = 3\nyaw = 0\npitch = 0\ntime = 9\ndate = 0.5\ntravel = walking\n";
+        assert_eq!(Progress::from_text(old).map(|p| (p.date, p.year)), Some((0.5, None)));
+        assert_eq!(Progress::from_text(&format!("{old}year = -2\n")).map(|p| p.year), Some(None));
+        let first = Progress { year: Some(0), ..progress() };
+        assert_eq!(Progress::from_text(&first.to_text()), Some(first));
     }
 
     #[test]
@@ -430,6 +479,24 @@ mod tests {
         assert_eq!(store.settings(), settings);
         assert_eq!(store.progress(1), Some(progress()));
         assert!(store.progress(2).is_none(), "worlds keep separate saves");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_players_figure_is_saved_and_read_back() {
+        use crate::figure::{Choice, Figure, Roll};
+        let dir = std::env::temp_dir().join(format!("willow-hollow-figure-{}", std::process::id()));
+        let store = Store { dir: dir.clone() };
+        // Never saved, the player is the wanderer.
+        assert_eq!(Figure::from_text(&store.figure()), Figure::default());
+        let mut figure = Figure::rolled(&Roll { seed: 41, region: worldgen::settlements::Region::Desert, ..Roll::default() });
+        figure.name = "Tam of the Ford".into();
+        figure.choose(Choice::Height(1.68));
+        assert!(store.write_figure(&figure.to_text()));
+        assert_eq!(Figure::from_text(&store.figure()), figure);
+        // It is the player's own, not a world's.
+        assert!(store.write_progress(5, progress()));
+        assert_eq!(Figure::from_text(&store.figure()), figure);
         let _ = fs::remove_dir_all(dir);
     }
 }

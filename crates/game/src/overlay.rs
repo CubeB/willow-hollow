@@ -16,6 +16,8 @@ const CHUNK_METRES: f32 = voxel::CHUNK as f32 / worldgen::scale::VOXELS_PER_METR
 pub struct MenuChoice {
     pub resume: bool,
     pub quit: bool,
+    /// Open the figure screen, to change how the player looks (#204).
+    pub figure: bool,
 }
 
 /// The settings menu. `held` is the radius in force, if graphics memory is holding the
@@ -96,6 +98,7 @@ pub fn settings_menu(ctx: &egui::Context, s: &mut Settings, held: Option<i32>, w
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 choice.resume = ui.button("Back to the game").clicked();
+                choice.figure = ui.button("Your figure").clicked();
                 choice.quit = ui.button("Quit").clicked();
             });
         });

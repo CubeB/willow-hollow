@@ -179,8 +179,8 @@ const FLAG_WASH: u32 = 24u;
 // lie over a far hillside in the same drifts they are found in on it, and the land does
 // not go bare a hundred metres from the camera.
 fn wash(ground: vec3<f32>, code: u32, voxel: vec3<i32>, centre: vec3<f32>, scale: f32) -> vec3<f32> {
-    let body = G.wash_body[min(code, 63u)];
-    let bloom = G.wash_bloom[min(code, 63u)];
+    let body = G.wash_body[min(code, 127u)];
+    let bloom = G.wash_bloom[min(code, 127u)];
     let kinds = vec2<u32>(u32(body.a), u32(bloom.a) & 7u);
     // The row of G.flowering the flowers keep, if they have a season of their own.
     let flowering = (u32(bloom.a) >> 3u) & 63u;
@@ -372,6 +372,60 @@ fn flap_motion(origin: vec3<i32>, local: vec3<f32>, scale: f32, code: u32) -> ve
     return d * VOXELS_PER_METRE;
 }
 
+// How far the wind has moved a point of a ribbon tied by one end, or of a sheet tied at
+// its corners (voxel's Cloth). `code` is voxel's cloth_code.
+//
+// A ribbon's (bit 5 clear) is 1 more than how many cells below its knot the point hangs.
+// The ribbon leans out downwind from the knot, further the harder it blows and more and
+// less as the gusts come and go, so in a storm it streams out at a slant; and a wave
+// runs down it from the knot, growing toward the free end, across the wind and a little
+// along it, so the end flutters most. Where the knot is gives each ribbon its own phase.
+//
+// A sheet's (bit 5 set) has how far it gives at the point in its low three bits, 0 where it
+// is tied to 7, and how big the sheet is in the next two. It sags a little in still air,
+// and the wind lifts and drops it in a slow billow, nearly together across the sheet, more
+// the bigger it is and the harder it blows; ripples run across it downwind, most toward
+// its free edges, where it gives some but not all the way.
+//
+// Everything is a smooth function of where the point is, so pieces of cloth cut at the
+// edges of voxels move as one, and a corner shared by two tiles of a sheet, or two lengths
+// of a ribbon, is moved the same by both.
+fn cloth_motion(origin: vec3<i32>, local: vec3<f32>, scale: f32, code: u32) -> vec3<f32> {
+    let world = (vec3<f32>(origin) + local * scale) / VOXELS_PER_METRE;
+    let t = G.sun_dir.w;
+    let wind = length(G.wind.xz);
+    // Metres a second, as for a line, never quite still.
+    let blow = min(wind / VOXELS_PER_METRE, 10.0) + 0.4;
+    let dir = select(vec2<f32>(0.6, 0.8), G.wind.xz / max(wind, 1e-4), wind > 1e-3);
+    let down = vec3<f32>(dir.x, 0.0, dir.y);
+    if ((code & 32u) == 0u) {
+        let s = f32(code - 1u) * 0.1;
+        let knot = world + vec3<f32>(0.0, s, 0.0);
+        let phase = dot(knot, vec3<f32>(6.3, 2.1, 5.7));
+        let gust = 0.75 + 0.25 * sin(t * 0.9 + phase * 0.37);
+        let lean = clamp(0.15 * (blow - 0.4), 0.0, 1.35) * gust;
+        // Straight down the ribbon, and across it in the plane of the wind.
+        let along = vec3<f32>(sin(lean) * dir.x, -cos(lean), sin(lean) * dir.y);
+        let across = vec3<f32>(cos(lean) * dir.x, sin(lean), cos(lean) * dir.y);
+        let side = vec3<f32>(-dir.y, 0.0, dir.x);
+        let rate = 4.5 + 0.6 * blow;
+        let wave = sin(t * rate - s * 6.5 + phase) + 0.35 * sin(t * rate * 2.1 - s * 14.0 + phase * 1.7 + 1.0);
+        let sway = sin(t * rate * 0.7 - s * 5.0 + phase * 1.3 + 2.0);
+        let size = (0.035 + 0.02 * min(blow, 8.0)) * s * sqrt(s);
+        return (s * (along + vec3<f32>(0.0, 1.0, 0.0)) + size * (0.8 * wave * across + 0.6 * sway * side)) * VOXELS_PER_METRE;
+    }
+    let give = f32(code & 7u) / 7.0;
+    let big = 0.5 + 0.5 * f32((code >> 3u) & 3u);
+    let phase = dot(world.xz, vec2<f32>(0.21, 0.17));
+    let billow = sin(t * (0.8 + 0.07 * blow) + phase) + 0.4 * sin(t * (2.1 + 0.1 * blow) + phase * 1.9 + 1.1);
+    let lift = (0.03 + 0.03 * blow) * big;
+    let sag = 0.1 * big;
+    let rim = give * (1.0 - give) * 4.0;
+    let ripple = sin(dot(world.xz, dir) * 4.2 - t * (3.5 + 0.5 * blow)) * (0.01 + 0.01 * blow) * (0.3 * give + rim);
+    let rise = give * (lift * billow - sag) + ripple;
+    return (vec3<f32>(0.0, rise, 0.0) + down * give * 0.01 * blow * big) * VOXELS_PER_METRE;
+}
+
 @vertex
 fn vs(in: VIn) -> VOut {
     var out: VOut;
@@ -393,9 +447,14 @@ fn vs(in: VIn) -> VOut {
     out.still = rel;
     if ((out.flags & FLAG_FOLIAGE) != 0u) {
         // What sways with no plant kind and a code in its tag is on a line (voxel's
-        // flap_code); anything else sways as a leaf.
+        // flap_code), and with ground's kind, which nothing growing sways with, it is a
+        // ribbon or a sheet (voxel's cloth_code), drawn as no plant at all; anything else
+        // sways as a leaf.
         if ((in.b >> 29u) == 0u && tag != 0u) {
             rel += flap_motion(in.origin, local, scale, tag);
+        } else if ((in.b >> 29u) == PLANT_GROUND && tag != 0u) {
+            rel += cloth_motion(in.origin, local, scale, tag);
+            out.flags &= ~(7u << 5u);
         } else {
             rel += leaf_sway(in.origin, local, scale);
         }

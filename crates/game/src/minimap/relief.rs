@@ -322,10 +322,12 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                 let (ox, oz) = (key.0 * MACRO_SIZE, key.1 * MACRO_SIZE);
                 let (lx0, lz0) = ((req.origin.0 + tx as i32) * step - ox, (req.origin.1 + tz as i32) * step - oz);
                 let span = TILE as i32 * step;
-                // What people built on this square, to stand on it as models.
+                // What people built on this square, to stand on it as models: what stands
+                // in the year it is seen in (#207), as built.
+                let lives = world.lives(key.0, key.1, c);
                 for cz in lz0.div_euclid(voxel::CHUNK)..=(lz0 + span - 1).div_euclid(voxel::CHUNK) {
                     for cx in lx0.div_euclid(voxel::CHUNK)..=(lx0 + span - 1).div_euclid(voxel::CHUNK) {
-                        for stamp in c.trails.stamps_at(cx, cz) {
+                        for stamp in c.trails.stamps_at(cx, cz).filter(|s| lives.shows(s)) {
                             built.entry(stamp as *const Stamp).or_insert((stamp, IVec2::new(ox, oz)));
                         }
                     }
@@ -338,7 +340,10 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                 for t in &tors {
                     rocks.entry(t.origin).or_insert_with(|| t.clone());
                 }
-                for p in features::place_trees(world.seed(), world.library(), &sampler, lx0, lz0, span, (ox, oz)) {
+                let mut trees = features::place_trees(world.seed(), world.library(), &sampler, lx0, lz0, span, (ox, oz));
+                // Less those the loggers have felled by this year (#207).
+                worldgen::settlements::logging::fell(c, world.now(), (ox, oz), &mut trees);
+                for p in trees {
                     // Each tree belongs to the square its trunk is in; the world leaves out
                     // those a tor's rock would be in.
                     let inside = (0..span).contains(&(p.pos.x - ox - lx0)) && (0..span).contains(&(p.pos.z - oz - lz0));
@@ -1095,7 +1100,9 @@ mod tests {
                     for sx in (x0..x0 + side).step_by(32) {
                         let sampler = Sampler::new(&c, world.seed(), sx - margin, sz - margin, 32 + 2 * margin);
                         let tors = world.tors_near(&c, sx, sz, 32);
-                        for p in features::place(world.seed(), world.library(), &sampler, sx, sz, 32, (0, 0)) {
+                        let mut found = features::place(world.seed(), world.library(), &sampler, sx, sz, 32, (0, 0));
+                        worldgen::settlements::logging::fell(&c, world.now(), (0, 0), &mut found);
+                        for p in found {
                             let inside = (sx..sx + 32).contains(&p.pos.x) && (sz..sz + 32).contains(&p.pos.z);
                             if inside &&crate::lod::stands_tall(p.species) && !tors.iter().any(|t| t.crowds(p.pos)) {
                                 grown.push((p.pos.x, p.pos.z));

@@ -13,9 +13,9 @@ use worldgen::names::PlaceKind;
 /// How much a kind of place matters on the map.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Rank {
-    /// Falls, tors, and what people built.
+    /// Falls, tors, hamlets, and what people built.
     Small,
-    /// Ranges, islands, lakes, rivers, peaks, bays.
+    /// Ranges, islands, lakes, rivers, peaks, bays, villages and towns.
     Feature,
     Region,
 }
@@ -26,7 +26,11 @@ pub fn rank(kind: PlaceKind) -> Rank {
         PlaceKind::Range | PlaceKind::Fault | PlaceKind::Rift | PlaceKind::Island | PlaceKind::Lake | PlaceKind::River | PlaceKind::Bay | PlaceKind::Inlet | PlaceKind::Peak => {
             Rank::Feature
         }
-        PlaceKind::Falls | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town | PlaceKind::Tor => Rank::Small,
+        PlaceKind::Falls | PlaceKind::Landmark(_) | PlaceKind::Tor => Rank::Small,
+        // A village or town is named as far out as a lake of its standing; a hamlet only
+        // close in, among the landmarks.
+        PlaceKind::Hamlet => Rank::Small,
+        PlaceKind::Village | PlaceKind::Town | PlaceKind::GreatTown => Rank::Feature,
     }
 }
 

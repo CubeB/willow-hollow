@@ -11,7 +11,7 @@
 
 use std::{collections::VecDeque, sync::Arc};
 
-use glam::{DVec3, Vec2};
+use glam::{DVec2, DVec3, Vec2};
 use worldgen::{
     continent::Continent,
     features::plants::Flower,
@@ -54,7 +54,8 @@ pub struct Stamp {
     pub hour: f32,
     /// Which day of the walk, from 1.
     pub day: u32,
-    /// Which year of the walk, from 1; the year turns at the spring equinox.
+    /// Which year of the world, from 1 for its first (its year 0); the year turns at the
+    /// spring equinox.
     pub year: u32,
 }
 
@@ -179,8 +180,9 @@ pub struct Journal {
     date: Option<f32>,
     /// Game days since the midnight before the walk began.
     days: f64,
-    /// Seasons that have turned since the walk began, and years: the year turns at the
-    /// spring equinox.
+    /// Seasons that have turned since the walk began, and the world's year as of the last
+    /// tick (from 0). It is saved so that a world saved before it kept its own year can
+    /// take its year from here.
     seasons: u32,
     years: u32,
     /// The year whose first snow has been written down.
@@ -191,6 +193,48 @@ pub struct Journal {
     now: Stamp,
     here: String,
     last_pos: Option<DVec3>,
+    /// The people of the settlements met (#204): who each is (see `villagers::Who`),
+    /// their name, and how many times they have been greeted.
+    met: Vec<Met>,
+    /// The requests read on notice boards (#207), offered to the player: for errands to
+    /// take up (#46).
+    offered: Vec<Offer>,
+    /// The settlements guild houses' wayfarers have marked on the map (#207).
+    charted: Vec<Chart>,
+}
+
+/// A request read on a settlement's notice board (#207).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Offer {
+    /// Which it is: `villagers::notices::Request::key`.
+    pub key: String,
+    /// Who asked, and of where.
+    pub name: String,
+    pub town: String,
+    pub text: String,
+    pub when: Stamp,
+}
+
+/// The settlements about a guild house, marked on the map by its wayfarers (#207); or,
+/// under a key of their own (`villagers::notices::masons_key`), the quarries its masons
+/// mark.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chart {
+    /// The settlement the guild house is in: `villagers::Town::key`, and its name.
+    pub key: String,
+    pub town: String,
+    /// The middle of the country marked, world x and z, and how far it reaches round.
+    pub at: DVec2,
+    pub reach: f64,
+}
+
+/// Someone of a settlement the player has greeted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Met {
+    /// Which settlement, and which of its people: `villagers::Who::key`.
+    pub key: String,
+    pub name: String,
+    pub times: u32,
 }
 
 fn clean(s: &str) -> String {
@@ -266,6 +310,83 @@ impl Journal {
         self.finds.iter().find(|f| f.item.id == id)
     }
 
+    /// How many times the person known by `key` has been greeted, if they are the one
+    /// called `name` (a world made since may have someone else there).
+    pub fn met(&self, key: &str, name: &str) -> u32 {
+        self.met.iter().find(|m| m.key == key && m.name == name).map_or(0, |m| m.times)
+    }
+
+    /// Everyone greeted so far.
+    #[cfg(test)]
+    pub fn people_met(&self) -> &[Met] {
+        &self.met
+    }
+
+    /// Writes down a greeting of `name` (known by `key`) of `town`, and returns how many
+    /// times they have now been greeted. The first meeting goes in the notes.
+    pub fn meet(&mut self, key: &str, name: &str, town: &str) -> u32 {
+        self.unsaved = true;
+        match self.met.iter_mut().find(|m| m.key == key) {
+            Some(m) if m.name == name => {
+                m.times += 1;
+                m.times
+            }
+            found => {
+                let m = Met { key: key.into(), name: name.into(), times: 1 };
+                match found {
+                    Some(old) => *old = m,
+                    None => self.met.push(m),
+                }
+                self.note(format!("Met {name} of {town}."));
+                1
+            }
+        }
+    }
+
+    /// Writes down a request read on `town`'s notice board, asked by `name`, unless it
+    /// is written already; true if it was new. It goes in the notes too.
+    pub fn offer(&mut self, key: &str, name: &str, town: &str, text: &str) -> bool {
+        if self.offered.iter().any(|o| o.key == key) {
+            return false;
+        }
+        self.offered.push(Offer { key: key.into(), name: name.into(), town: town.into(), text: text.into(), when: self.now });
+        self.note(format!("Read on the notice board at {town}: {text}"));
+        true
+    }
+
+    /// The requests read on notice boards, the first read first.
+    pub fn offered(&self) -> &[Offer] {
+        &self.offered
+    }
+
+    /// Writes down that the wayfarers of `town` (known by `key`) marked the country
+    /// `reach` round `at` on the map, unless they have already; true if it was new.
+    pub fn chart(&mut self, key: &str, town: &str, at: DVec2, reach: f64) -> bool {
+        if self.charted.iter().any(|c| c.key == key) {
+            return false;
+        }
+        self.charted.push(Chart { key: key.into(), town: town.into(), at, reach });
+        self.note(format!("The wayfarers at {town} marked the settlements about on the map."));
+        true
+    }
+
+    /// Writes down that the masons of `town` marked the quarries `reach` round `at` on the
+    /// map (#207), under `key` (`villagers::notices::masons_key`), unless they have
+    /// already; true if it was new. Kept and saved with the wayfarers' charts.
+    pub fn chart_quarries(&mut self, key: &str, town: &str, at: DVec2, reach: f64) -> bool {
+        if self.charted.iter().any(|c| c.key == key) {
+            return false;
+        }
+        self.charted.push(Chart { key: key.into(), town: town.into(), at, reach });
+        self.note(format!("The masons at {town} marked the quarries they know on the map."));
+        true
+    }
+
+    /// What the wayfarers, and the masons, have marked on the map.
+    pub fn charted(&self) -> &[Chart] {
+        &self.charted
+    }
+
     /// Seasons that have turned since the walk began.
     pub fn seasons(&self) -> u32 {
         self.seasons
@@ -274,6 +395,13 @@ impl Journal {
     /// Which day of the walk it is, from 1.
     pub fn day(&self) -> u32 {
         self.days.floor() as u32 + 1
+    }
+
+    /// The world's year as the journal last knew it, from 0, if it has known the world at
+    /// all. Until the world kept its own year the journal counted the springs, so this is
+    /// the year of a world saved before then.
+    pub fn year(&self) -> Option<u32> {
+        self.date.map(|_| self.years)
     }
 
     fn note(&mut self, text: String) {
@@ -285,11 +413,12 @@ impl Journal {
         self.unsaved = true;
     }
 
-    /// Moves the journal's clock on by `days` game days, to time of year `date` and
-    /// `hour` of the day; `snowing` if snow is falling on the player. The seasons and
-    /// the years are read from the date as it changes, so the journal agrees with the
-    /// world however the date came to be what it is.
-    pub fn tick(&mut self, days: f32, date: f32, hour: f32, snowing: bool) {
+    /// Moves the journal's clock on by `days` game days, to time of year `date` in the
+    /// world's `year` (from 0), and `hour` of the day; `snowing` if snow is falling on the
+    /// player. The seasons are read from the date as it changes, and the year is the
+    /// world's, so the journal agrees with the world however its clock came to be where it
+    /// is.
+    pub fn tick(&mut self, days: f32, date: f32, year: u32, hour: f32, snowing: bool) {
         let (date, hour) = (date.rem_euclid(1.0), hour.rem_euclid(24.0));
         if days > 0.0 {
             self.days += days as f64;
@@ -304,9 +433,9 @@ impl Journal {
                 date
             }
         };
-        // Round from winter into spring is a new year.
-        if date + 0.5 < before {
-            self.years += 1;
+        if self.years != year {
+            self.years = year;
+            self.unsaved = true;
         }
         self.now = Stamp { date, hour, day: self.day(), year: self.years + 1 };
         if self.now.quarter() != (Stamp { date: before, ..self.now }).quarter() {
@@ -394,7 +523,8 @@ impl Journal {
                 PlaceKind::Lake => (d <= LAKE_REACH + p.radius * 0.1, true),
                 PlaceKind::River => (d <= RIVER_REACH, true),
                 PlaceKind::Peak => (afoot && (d <= 0.0 || centre <= NEAR), true),
-                PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town => (afoot && d <= NEAR, true),
+                PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_) => (afoot && d <= NEAR, true),
+                PlaceKind::Hamlet | PlaceKind::Village | PlaceKind::Town | PlaceKind::GreatTown => (afoot && d <= NEAR, true),
             };
             if landmark && d <= BESIDE && beside.is_none_or(|b| d < b.0) {
                 beside = Some((d, &p.name));
@@ -406,10 +536,16 @@ impl Journal {
                 self.reach(&p.name, p.kind.key(), region_of(p.at));
             }
         }
+        // Out among a place's fields, the field the player stands in, as its people call
+        // it (#64).
+        let field = || worldgen::settlements::farmland::fieldnames::field_name_at(c, at);
         self.here = match beside {
             Some((_, name)) => format!("by {name}"),
-            None if !region.is_empty() => format!("in {region}"),
-            None => String::new(),
+            None => match field() {
+                Some(name) => format!("in {name}"),
+                None if !region.is_empty() => format!("in {region}"),
+                None => String::new(),
+            },
         };
     }
 
@@ -490,6 +626,15 @@ impl Journal {
         for n in &self.notes {
             out += &format!("note = {}|{}\n", n.when.to_text(), clean(&n.text));
         }
+        for m in &self.met {
+            out += &format!("met = {}|{}|{}\n", clean(&m.key), m.times, clean(&m.name));
+        }
+        for o in &self.offered {
+            out += &format!("offered = {}|{}|{}|{}|{}\n", clean(&o.key), o.when.to_text(), clean(&o.town), clean(&o.name), clean(&o.text));
+        }
+        for c in &self.charted {
+            out += &format!("charted = {}|{},{}|{}|{}\n", clean(&c.key), c.at.x, c.at.y, c.reach, clean(&c.town));
+        }
         out
     }
 
@@ -551,6 +696,37 @@ impl Journal {
                         j.rivers.push(River { name: name.trim().into(), far: far as f32, followed: Stamp::from_text(followed) });
                     }
                 }
+                "met" => {
+                    let parts: Vec<&str> = value.splitn(3, '|').collect();
+                    if let [key, times, name] = parts[..]
+                        && let Ok(times) = times.trim().parse::<u32>()
+                        && !key.trim().is_empty()
+                        && !j.met.iter().any(|m| m.key == key.trim())
+                    {
+                        j.met.push(Met { key: key.trim().into(), name: name.trim().into(), times });
+                    }
+                }
+                "offered" => {
+                    let parts: Vec<&str> = value.splitn(5, '|').collect();
+                    if let [key, when, town, name, text] = parts[..]
+                        && let Some(when) = Stamp::from_text(when)
+                        && !key.trim().is_empty()
+                        && !j.offered.iter().any(|o| o.key == key.trim())
+                    {
+                        j.offered.push(Offer { key: key.trim().into(), name: name.trim().into(), town: town.trim().into(), text: text.trim().into(), when });
+                    }
+                }
+                "charted" => {
+                    let parts: Vec<&str> = value.splitn(4, '|').collect();
+                    if let [key, at, reach, town] = parts[..]
+                        && let Some((x, z)) = at.split_once(',')
+                        && let (Ok(x), Ok(z), Some(reach)) = (x.trim().parse::<f64>(), z.trim().parse::<f64>(), number(reach.trim()))
+                        && !key.trim().is_empty()
+                        && !j.charted.iter().any(|c| c.key == key.trim())
+                    {
+                        j.charted.push(Chart { key: key.trim().into(), town: town.trim().into(), at: DVec2::new(x, z), reach });
+                    }
+                }
                 "note" => {
                     if let Some((when, text)) = value.split_once('|')
                         && let Some(when) = Stamp::from_text(when)
@@ -567,9 +743,10 @@ impl Journal {
 
     /// A journal as it might stand after a walk of some weeks round continent-local `at`
     /// on continent `c`, to `count` of its nearest places, for screenshots.
-    pub fn sample(c: &Continent, at: Vec2, count: usize, catalogue: &[Item]) -> Self {
+    /// It is written in the world's `year` (from 0).
+    pub fn sample(c: &Continent, at: Vec2, count: usize, catalogue: &[Item], year: u32) -> Self {
         let mut j = Self::new();
-        j.tick(0.0, 0.04, 7.5, false);
+        j.tick(0.0, 0.04, year, 7.5, false);
         if count == 0 {
             return j;
         }
@@ -593,8 +770,8 @@ impl Journal {
         for (k, p) in near.iter().enumerate() {
             // A day or so between one place and the next, and the hour moving round.
             let stride = 0.9 + 0.17 * (k % 5) as f32;
-            j.tick(stride, j.now.date + stride / 24.0, j.now.hour + stride * 24.0, false);
-            j.tick(0.0, j.now.date, j.now.hour, j.now.quarter() == 3);
+            j.tick(stride, j.now.date + stride / 24.0, year, j.now.hour + stride * 24.0, false);
+            j.tick(0.0, j.now.date, year, j.now.hour, j.now.quarter() == 3);
             let region = names.region_at(p.at).and_then(|i| names.places.get(i)).map_or("", |r| r.name.as_str());
             j.reach(region, "region", region);
             j.here = format!("by {}", p.name);
@@ -710,11 +887,22 @@ pub struct View {
     /// The find being read about, by its id.
     selected: Option<String>,
     catalogue: Vec<Item>,
+    /// Whose journal it is, if the player has given their name on the figure screen
+    /// (#204): it goes on the cover.
+    pub owner: String,
 }
 
 impl View {
     pub fn new(materials: &voxel::Materials) -> Self {
-        Self { page: Page::default(), selected: None, catalogue: catalogue(materials) }
+        Self { page: Page::default(), selected: None, catalogue: catalogue(materials), owner: String::new() }
+    }
+
+    /// What the journal is headed: the journal, or the journal of whoever keeps it.
+    pub fn heading(&self) -> String {
+        match self.owner.trim() {
+            "" => "Journal".into(),
+            name => format!("The journal of {name}"),
+        }
     }
 
     /// Everything there is to find.
@@ -921,6 +1109,11 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
         1..=3 => followed.join(", "),
         n => format!("{}, and {} more", followed[..3].join(", "), n - 3),
     }));
+    // What the settlements' boards have asked (#207), for errands to come (#46).
+    rows.push(("Asked on the boards", match journal.offered() {
+        [] => "\u{2014}".into(),
+        all @ [.., last] => format!("{}, the latest by {} of {}", all.len(), last.name, last.town),
+    }));
     ui.spacing_mut().item_spacing.y = 9.0;
     for (what, value) in rows {
         ui.horizontal(|ui| {
@@ -977,7 +1170,7 @@ pub fn show(ctx: &egui::Context, journal: &Journal, view: &mut View) {
         egui::Frame::new().fill(PANEL).stroke(egui::Stroke::new(1.0, EDGE)).corner_radius(10).inner_margin(egui::Margin::same(18)).show(ui, |ui| {
             ui.set_width(WIDTH);
             ui.horizontal(|ui| {
-                ui.label(text("Journal", 22.0, INK));
+                ui.label(text(&view.heading(), 22.0, INK));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 18.0;
                     for (page, _, title) in Page::ALL.iter().rev() {
@@ -1021,11 +1214,11 @@ mod tests {
     #[test]
     fn the_first_of_a_kind_is_written_down_once_with_where_and_when() {
         let mut j = Journal::new();
-        j.tick(0.0, 0.8, 19.0, false);
+        j.tick(0.0, 0.8, 0, 19.0, false);
         j.here = "by Carn Hollow".into();
         assert!(j.found(&thing("poppy", "Poppy")));
         assert!(!j.found(&thing("poppy", "Poppy")));
-        j.tick(30.0, 0.05, 9.0, false);
+        j.tick(30.0, 0.05, 1, 9.0, false);
         j.here.clear();
         assert!(j.found(&thing("holly-berries", "Holly berries")));
         assert!(!j.found(&thing("poppy", "Poppy")));
@@ -1045,11 +1238,14 @@ mod tests {
         let c = world();
         let centre = Vec2::splat(c.size as f32 * c.cell_size() * 0.5);
         let mats = mat::build();
-        let j = Journal::sample(&c, centre, 12, &catalogue(&mats));
+        let j = Journal::sample(&c, centre, 12, &catalogue(&mats), 2);
         assert!(j.finds().len() >= 10 && j.places().len() >= 12 && j.notes().count() > 20 && j.walked > 100.0);
+        // Written in the world's year 2, its third.
+        assert!(j.finds().iter().all(|f| f.when.year == 3 && f.when.when().ends_with("of the third year")));
         let text = j.to_text();
         let back = Journal::from_text(&text);
         assert!(!back.unsaved);
+        assert_eq!(back.year(), Some(2));
         assert_eq!(back.to_text(), text);
         assert_eq!((back.finds(), back.places(), back.rivers()), (j.finds(), j.places(), j.rivers()));
         assert_eq!((back.day(), back.seasons(), back.highest.clone()), (j.day(), j.seasons(), j.highest.clone()));
@@ -1065,7 +1261,7 @@ mod tests {
         assert_eq!(back.walked, j.walked);
         // Bars and line ends in what is written cannot break the save.
         let mut odd = Journal::new();
-        odd.tick(0.0, 0.1, 12.0, false);
+        odd.tick(0.0, 0.1, 0, 12.0, false);
         odd.here = "by the | Ford".into();
         odd.found(&Item::new("x", "A | thing", "One\nline.", [1, 2, 3], Shape::Reed));
         odd.reach("Bar | Tor", "tor", "The\rMoor");
@@ -1082,7 +1278,7 @@ mod tests {
         let c = world();
         let names = &c.trails.names;
         let mut j = Journal::new();
-        j.tick(0.0, 0.3, 10.0, false);
+        j.tick(0.0, 0.3, 0, 10.0, false);
         let small = |p: &&worldgen::names::Place| matches!(p.kind, PlaceKind::Landmark(_) | PlaceKind::Falls | PlaceKind::Lake);
         let places: Vec<&worldgen::names::Place> = names.places.iter().filter(small).take(6).collect();
         assert!(places.len() >= 3, "the test world has few places: {}", names.places.len());
@@ -1163,7 +1359,7 @@ mod tests {
         let mut to_sea = 0;
         for p in rivers {
             let mut j = Journal::new();
-            j.tick(0.0, 0.3, 10.0, false);
+            j.tick(0.0, 0.3, 0, 10.0, false);
             // Up from the mouth is not down to it.
             for at in &p.line {
                 j.survey(&c, *at, true);
@@ -1214,24 +1410,31 @@ mod tests {
     fn days_seasons_and_years_pass_and_the_first_snow_is_noted_once_a_winter() {
         let mut j = Journal::new();
         // Begun at six in the evening, in early summer.
-        j.tick(0.0, 0.3, 18.0, false);
-        assert_eq!((j.day(), j.seasons(), j.now.year), (1, 0, 1));
+        assert_eq!(j.year(), None, "a new journal knows no year");
+        j.tick(0.0, 0.3, 0, 18.0, false);
+        assert_eq!((j.day(), j.seasons(), j.now.year, j.year()), (1, 0, 1, Some(0)));
         // Midnight turns the day.
-        j.tick(0.3, 0.3125, 1.2, false);
+        j.tick(0.3, 0.3125, 0, 1.2, false);
         assert_eq!(j.day(), 2);
-        // On into autumn, winter, and the next spring, a step at a time.
-        let mut date = 0.3125f32;
+        // On into autumn, winter, and the next spring, a step at a time, the world's year
+        // turning as the date comes round.
+        let (mut date, mut year) = (0.3125f32, 0);
         for _ in 0..180 {
-            date = (date + 0.1 / 24.0).rem_euclid(1.0);
-            j.tick(0.1, date, 12.0, j.now.quarter() == 3);
+            (date, year) = crate::season::advance_year(date, year, 0.1, 24.0);
+            j.tick(0.1, date, year, 12.0, j.now.quarter() == 3);
         }
-        assert_eq!((j.seasons(), j.now.year), (3, 2));
+        assert_eq!((j.seasons(), j.now.year, j.year()), (3, 2, Some(1)));
         let notes: Vec<&str> = j.notes().map(|n| n.text.as_str()).collect();
         assert_eq!(notes, ["Autumn came in.", "Winter came in.", "First snow.", "Spring came in."]);
-        // The clock comes back from a save.
+        // The clock comes back from a save, and with it the year, for a world saved before
+        // it kept its own.
         let mut back = Journal::from_text(&j.to_text());
-        back.tick(0.0, date, 12.0, false);
+        assert_eq!(back.year(), Some(1));
+        back.tick(0.0, date, year, 12.0, false);
         assert_eq!((back.day(), back.seasons(), back.now), (j.day(), j.seasons(), j.now));
+        // A year set by hand is the journal's year too.
+        back.tick(0.0, date, 6, 12.0, false);
+        assert_eq!(back.now.when(), "early spring of the seventh year");
         assert_eq!(Stamp { date: 0.62, hour: 19.0, day: 3, year: 1 }.when(), "mid-autumn of the first year");
         assert_eq!(Stamp { date: 0.9, hour: 19.0, day: 3, year: 14 }.when(), "midwinter, year 14");
         assert_eq!((Stamp { hour: 19.0, ..Stamp::default() }.time_of_day(), Stamp { hour: 5.5, ..Stamp::default() }.time_of_day()), ("at dusk", "at dawn"));

@@ -104,6 +104,9 @@ enum PKind {
     Spark,
     /// Rising from a fire and thinning as it goes.
     Smoke,
+    /// Rising from a chimney or a smoke hole: as a fire's smoke goes, but thinner and
+    /// soon gone, a hearth banked low for a home rather than a fire built up in the open.
+    Chimney,
 }
 
 /// What a falling leaf looks like, by the tree it came from.
@@ -232,6 +235,9 @@ pub struct Surroundings<'a> {
     /// Fires near the player, out to [`SMOKE_SIGHT`]: the heart of each, and how much it
     /// smokes, 1 for one burning.
     pub fires: &'a [(DVec3, f32)],
+    /// The chimneys of the homes near the player that are smoking (see chimneys.rs): the
+    /// top of each, and how much it smokes at this hour, 0 to 1.
+    pub chimneys: &'a [(DVec3, f32)],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
@@ -320,6 +326,9 @@ const SPARK_SIGHT: f64 = 90.0;
 /// Puffs of smoke in the air at once, at most, so that a row of fires leaves room for
 /// the rain and the leaves.
 const MAX_SMOKE: usize = 1400;
+/// Puffs of chimney smoke in the air at once, at most: a town in view sends up a thread
+/// from each of a couple of dozen chimneys at the busiest hours and stays within this.
+const MAX_CHIMNEY: usize = 500;
 
 impl Particles {
     pub fn new() -> Self {
@@ -610,6 +619,38 @@ impl Particles {
             }
         }
 
+        // Chimneys: a thread of smoke from each, a quarter of a campfire's puffs, shorter
+        // lived, and fainter as drawn (below). How much each sends up, by the hour, is the
+        // caller's (chimneys.rs).
+        let mut puffs = if s.chimneys.is_empty() { 0 } else { self.count(PKind::Chimney) };
+        for &(top, strength) in s.chimneys {
+            let metres = (top - s.camera).length() / VOXELS_PER_METRE as f64;
+            if metres > SMOKE_SIGHT || puffs >= MAX_CHIMNEY {
+                continue;
+            }
+            // Slower than a fire's, rising on a hearth's gentler draught (see the motion),
+            // so that a few puffs a second still make one thread.
+            let rate = if metres <= SPARK_SIGHT { 1.6 } else { 0.8 } * strength;
+            if self.unit() < dt * rate {
+                puffs += 1;
+                let shade = self.range(0.85, 1.1);
+                let particle = Particle {
+                    kind: PKind::Chimney,
+                    pos: top + (Vec3::new(self.range(-0.06, 0.06), self.range(0.0, 0.15), self.range(-0.06, 0.06)) * U).as_dvec3(),
+                    vel: Vec3::new(self.range(-0.08, 0.08), self.range(0.6, 0.9), self.range(-0.08, 0.08)),
+                    age: 0.0,
+                    life: self.range(20.0, 28.0) * (0.5 + 0.5 * strength.min(1.0)),
+                    size: Vec3::splat(self.range(0.18, 0.26)),
+                    color: [0.5 * shade, 0.54 * shade, 0.62 * shade],
+                    phase: self.range(0.0, std::f32::consts::TAU),
+                    settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
+                };
+                self.spawn(particle);
+            }
+        }
+
         // Fireflies in warm, damp country at dusk and through the night.
         let firefly_country = matches!(
             s.biome,
@@ -778,14 +819,16 @@ impl Particles {
                     p.vel += (wind * 0.5 + toss * 1.5 - p.vel * 0.8) * dt;
                     p.pos += (p.vel * U * dt).as_dvec3();
                 }
-                PKind::Smoke => {
+                PKind::Smoke | PKind::Chimney => {
                     // It rises fast off the fire, slows to a steady climb, and goes more
                     // and more the way the wind does as it gets up out of the shelter of
                     // the ground, wandering apart into wisps and spreading slowly.
                     let up = (p.age / 12.0).min(1.0);
                     let curl = Vec3::new((p.age * 0.9 + p.phase).sin(), 0.0, (p.age * 0.7 + p.phase * 2.0).cos()) * (0.15 + 0.35 * up);
                     let drift = 0.3 + 0.4 * up;
-                    p.vel += (Vec3::new(wind.x * drift, 1.4, wind.z * drift) + curl - p.vel) * (0.6 * dt);
+                    // A hearth's smoke has less heat behind it than a fire in the open.
+                    let rise = if p.kind == PKind::Chimney { 0.85 } else { 1.4 };
+                    p.vel += (Vec3::new(wind.x * drift, rise, wind.z * drift) + curl - p.vel) * (0.6 * dt);
                     p.pos += (p.vel * U * dt).as_dvec3();
                     p.size += Vec3::splat(0.09 * dt);
                 }
@@ -1013,7 +1056,7 @@ impl Particles {
             match p.kind {
                 PKind::Mist => alpha *= 0.16,
                 // Smoke thins all the way up; a spark burns out.
-                PKind::Smoke => {
+                PKind::Smoke | PKind::Chimney => {
                     // Thin by the fire, where it is seen through. Far off, the haze takes
                     // the edge off thin smoke and fewer puffs make the column: each is
                     // drawn thicker, and never thinner than a pixel or two, so the column
@@ -1030,7 +1073,13 @@ impl Particles {
                     // Seen by the day's light, and the sky's after sunset, so it is grey
                     // rather than black at dusk; low down by the fire's own.
                     let day = ((s.sun_elevation + 0.12) / 0.45).clamp(0.0, 1.0);
-                    glow = 0.1 + 0.7 * day * day * (3.0 - 2.0 * day) + 0.4 * (1.0 - p.age / 1.6).max(0.0);
+                    glow = 0.1 + 0.7 * day * day * (3.0 - 2.0 * day);
+                    if p.kind == PKind::Smoke {
+                        glow += 0.4 * (1.0 - p.age / 1.6).max(0.0);
+                    } else {
+                        // A chimney's smoke is a thread, its fire out of sight below.
+                        alpha *= 0.55;
+                    }
                 }
                 PKind::Spark => {
                     glow = 5.5 * (1.0 - p.age / p.life).sqrt();
@@ -1540,6 +1589,7 @@ mod leaf_tests {
             leaves: &[],
             flowers: &[],
             fires: &[],
+            chimneys: &[],
             player_entered_water: None,
             leaf_fall: 0.0,
             date: 0.62,
@@ -1597,6 +1647,33 @@ mod leaf_tests {
             }
         }
         panic!("the leaves never came down");
+    }
+
+    /// A town's chimneys send up threads of smoke that rise, thinner than a campfire's
+    /// column, and never more puffs than the cap however many chimneys there are.
+    #[test]
+    fn chimney_smoke_rises_in_threads_and_keeps_to_its_cap() {
+        use super::*;
+        let camera = DVec3::new(0.0, 4.0, 0.0);
+        let run = |chimneys: &[(DVec3, f32)], fires: &[(DVec3, f32)], seconds: u32| {
+            let mut p = Particles::new();
+            for step in 0..60 * seconds {
+                let mut s = still_air(camera, step as f64 / 60.0);
+                (s.chimneys, s.fires) = (chimneys, fires);
+                p.update(1.0 / 60.0, &s, &mut Ground);
+            }
+            p
+        };
+        let top = DVec3::new(20.0, 15.0, 0.0);
+        let one = run(&[(top, 1.0)], &[], 40);
+        let puffs: Vec<_> = one.particles.iter().filter(|q| q.kind == PKind::Chimney).collect();
+        assert!(puffs.len() >= 15 && puffs.iter().all(|q| q.pos.y >= top.y - 0.5), "{} puffs", puffs.len());
+        let fire = run(&[], &[(top, 1.0)], 40).count(PKind::Smoke);
+        assert!(puffs.len() * 3 < fire, "a chimney's {} puffs against a fire's {fire}", puffs.len());
+        // Banked low at night, it all but stops.
+        assert!(run(&[(top, 0.1)], &[], 40).count(PKind::Chimney) * 5 < puffs.len());
+        let town: Vec<(DVec3, f32)> = (0..60).map(|k| (DVec3::new((k % 8) as f64 * 30.0, 15.0, (k / 8) as f64 * 30.0), 1.0)).collect();
+        assert!(run(&town, &[], 60).count(PKind::Chimney) <= MAX_CHIMNEY);
     }
 
     #[test]

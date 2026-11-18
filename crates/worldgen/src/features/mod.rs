@@ -10,7 +10,9 @@ pub mod aquatic;
 pub mod attach;
 pub mod cave;
 pub mod climber;
+pub mod cloth;
 pub mod designs;
+pub mod fittings;
 pub mod landmarks;
 pub mod moorstones;
 pub mod moss;
@@ -35,6 +37,7 @@ use crate::{
     materials as mat,
     noise::{fbm2, hash2, hash3, unit},
     scale::{BLOCK, m, m64},
+    settlements::farmland::orchard::{Fate, Stand},
     surface::{Column, Cover, Sampler},
 };
 use shape::{Template, rotate};
@@ -54,6 +57,12 @@ impl Default for Library {
 }
 
 impl Library {
+    /// The one library of the process, built the first time anyone asks for it.
+    pub fn shared() -> &'static Library {
+        static LIB: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
+        LIB.get_or_init(Library::build)
+    }
+
     pub fn build() -> Self {
         let mut templates: Vec<Vec<Template>> = Species::ALL.iter().map(|_| Vec::new()).collect();
         for sp in Species::ALL {
@@ -70,6 +79,25 @@ impl Library {
         &v[variant % v.len()]
     }
 }
+
+/// A tree planted where people wanted one rather than where the grid would put it: a
+/// village's tree beside its green. At continent-local column `(x, z)`, of the species,
+/// variant and turn chosen for it. [`place`] grows it as it grows a giant, roots and all,
+/// on whatever ground is there, and grows no giant near it nor any tree under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Planted {
+    pub x: i32,
+    pub z: i32,
+    pub species: Species,
+    pub variant: usize,
+    pub turns: u32,
+}
+
+/// How near a planted tree no giant of the grid grows, in voxels across.
+const PLANTED_ROOM: i32 = 12 * BLOCK;
+/// How far beyond the square it is asked about [`place`] needs to know of the planted
+/// trees: the giants that could reach the square, and the room each planted one keeps.
+pub const PLANTED_REACH: i32 = GIANTS.reach + PLANTED_ROOM;
 
 /// One feature to stamp: species variant at a world position (`y` is the ground
 /// surface, where the model's origin goes), turned by quarter turns.
@@ -512,6 +540,21 @@ pub fn winter_green_share(biome: Biome) -> f32 {
     if all > 0.0 { green / all } else { 0.0 }
 }
 
+/// The kind of tree a village of `biome` country plants by its green, by `roll` (0 to 1):
+/// one of the country's giants where it has any, else one of its trees that stands and
+/// lives, else in dry country a palm. None where nothing would grow so.
+pub fn village_species(biome: Biome, roll: f32) -> Option<Species> {
+    let fl = flora(biome);
+    if !fl.giants.is_empty() {
+        return Some(weighted(fl.giants, roll));
+    }
+    let living: Vec<(Species, f32)> = fl.trees.iter().copied().filter(|(sp, _)| !matches!(sp, Species::Cactus | Species::DeadSnag | Species::Stump | Species::FallenLog | Species::Bush)).collect();
+    if !living.is_empty() {
+        return Some(weighted(&living, roll));
+    }
+    biome.arid().then_some(Species::Palm)
+}
+
 fn weighted(list: &[(Species, f32)], roll: f32) -> Species {
     let total: f32 = list.iter().map(|w| w.1).sum();
     let mut r = roll * total;
@@ -587,6 +630,13 @@ pub fn place_trees(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, 
     place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS, TREES], false, None)
 }
 
+/// The giants of [`place`] alone, each where it stands in the world and of the same
+/// species, variant and turn, without their roots: quick enough to look for the big old
+/// trees over a square hundreds of metres across (a village's tree).
+pub fn place_giants(world_seed: u32, lib: &Library, sampler: &Sampler, lx0: i32, lz0: i32, span: i32, macro_origin: (i32, i32)) -> Vec<Placement> {
+    place_in(None, world_seed, lib, sampler, lx0, lz0, span, macro_origin, &[GIANTS], false, None)
+}
+
 /// The features of [`place`] whose species `keep` says yes to, in the same order, each
 /// where it stands in the world and of the same species, variant, turn and lie, but
 /// without the roots bared on a slope. A feature left out is dropped as soon as its
@@ -636,8 +686,27 @@ fn place_in(
     let mut out = Vec::new();
     // Where giants were chosen to stand, across the ground.
     let mut giants: Vec<(i32, i32)> = Vec::new();
+    // The trees planted by hand that reach the square, or keep the room about them in it,
+    // where they stand in the world. Nothing grows under them either.
+    let (wx0, wz0) = (macro_origin.0 + lx0, macro_origin.1 + lz0);
+    let near = |x: i32, z: i32, r: i32| x >= wx0 - r && x <= wx0 + span + r && z >= wz0 - r && z <= wz0 + span + r;
+    let planted: Vec<(i32, i32, Planted)> = sampler
+        .planted()
+        .iter()
+        .map(|t| (macro_origin.0 + t.x, macro_origin.1 + t.z, *t))
+        .filter(|&(x, z, _)| near(x, z, PLANTED_REACH))
+        .collect();
+    giants.extend(planted.iter().map(|&(x, z, _)| (x, z)));
     for &layer in layers {
-        let (wx0, wz0) = (macro_origin.0 + lx0, macro_origin.1 + lz0);
+        if layer.salt == GIANTS.salt {
+            for &(x, z, t) in planted.iter().filter(|&&(x, z, _)| near(x, z, layer.reach)) {
+                if let Some(p) = grow_planted(&t, (x, z), world_seed, lib, sampler, macro_origin, roots)
+                    && keep.is_none_or(|keep| keep(p.species))
+                {
+                    out.push(p);
+                }
+            }
+        }
         let (c0x, c1x) = ((wx0 - layer.reach).div_euclid(layer.cell), (wx0 + span + layer.reach).div_euclid(layer.cell));
         let (c0z, c1z) = ((wz0 - layer.reach).div_euclid(layer.cell), (wz0 + span + layer.reach).div_euclid(layer.cell));
         for cz in c0z..=c1z {
@@ -645,6 +714,10 @@ fn place_in(
                 let cell = Cell::new(world_seed, &layer, cx, cz);
                 // Nothing grows under a giant, whether it would have or not.
                 if layer.salt == TREES.salt && giants.iter().any(|g| (g.0 - cell.x).abs() < 6 * BLOCK && (g.1 - cell.z).abs() < 6 * BLOCK) {
+                    continue;
+                }
+                // Nor does a giant stand by a tree planted by hand.
+                if layer.salt == GIANTS.salt && planted.iter().any(|&(x, z, _)| (x - cell.x).abs() < PLANTED_ROOM && (z - cell.z).abs() < PLANTED_ROOM) {
                     continue;
                 }
                 let key = (macro_origin, layer.salt, cx, cz);
@@ -670,6 +743,27 @@ fn place_in(
         }
     }
     out
+}
+
+/// The tree planted by hand `t`, standing at world column `(x, z)` on the ground as
+/// `sampler` has it, with its roots bared as a giant's are if `with_roots`. None over
+/// water.
+fn grow_planted(t: &Planted, (x, z): (i32, i32), world_seed: u32, lib: &Library, sampler: &Sampler, macro_origin: (i32, i32), with_roots: bool) -> Option<Placement> {
+    let col = sampler.column(t.x, t.z);
+    if col.water_surface().is_some() {
+        return None;
+    }
+    let pos = IVec3::new(x, col.top() + 1, z);
+    let roots = if with_roots {
+        let ground = |x: i32, z: i32| {
+            let c = sampler.column(x - macro_origin.0, z - macro_origin.1);
+            c.water_surface().is_none().then_some(c.top())
+        };
+        roots::find(lib, t.species, t.variant, t.turns, pos, world_seed, GIANTS.reach - 2, ground)
+    } else {
+        None
+    };
+    Some(Placement { pos, species: t.species, variant: t.variant, turns: t.turns, lie: None, roots })
 }
 
 /// One cell of a layer: where in it a feature would stand, and its rolls of the dice.
@@ -702,7 +796,24 @@ impl Cell {
         let nothing = |chosen: bool| Grown { chosen, feature: None };
         let (lx, lz) = (x - macro_origin.0, z - macro_origin.1);
         let col = sampler.column(lx, lz);
-        let Some(mut species) = choose(&col, layer, roll(3), roll(4), x, z, world_seed) else {
+        let chosen = choose(&col, layer, roll(3), roll(4), x, z, world_seed);
+        // About a settlement the land has been worked: its fields cleared of trees, but
+        // for the hedgerows' and the odd old one. Out in the wild this is one lookup, and
+        // changes nothing.
+        let stand = match layer.salt {
+            s if s == GIANTS.salt => Stand::Giant,
+            s if s == TREES.salt => Stand::Tree,
+            _ => Stand::Small,
+        };
+        let worked = crate::settlements::farmland::orchard::fate(sampler.continent(), world_seed, stand, chosen, &col, lx, lz, roll(12), roll(13));
+        let chosen = match worked {
+            Fate::Wild => chosen,
+            Fate::Felled => None,
+            Fate::Stump => Some(Species::Stump),
+            Fate::Coppiced => Some(Species::Bush),
+            Fate::Kept(species) => Some(species),
+        };
+        let Some(mut species) = chosen else {
             return nothing(false);
         };
         // About a landmark the trees have been felled back, the nearer the more, leaving

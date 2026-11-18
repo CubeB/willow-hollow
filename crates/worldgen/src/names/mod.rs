@@ -16,6 +16,7 @@
 //! ("Greywater Falls", "Bogwatch Ruin", "The Long Reach") are mixed in throughout.
 //! The words themselves are data, in `words.txt`.
 
+pub mod folk;
 mod survey;
 mod words;
 
@@ -79,12 +80,14 @@ pub enum PlaceKind {
     Peak,
     Falls,
     Landmark(Landmark),
-    /// Settlements, once there are any; nothing places them yet.
+    /// Settlements (see [`crate::settlements`]). A large village is named as a village.
     /// (Appended after them: a tor on the moor, see `features::tor`.)
     Hamlet,
     Town,
     /// A tor on the moor (see [`crate::features::tor`]).
     Tor,
+    Village,
+    GreatTown,
 }
 
 impl PlaceKind {
@@ -116,12 +119,19 @@ impl PlaceKind {
             PlaceKind::Hamlet => "hamlet",
             PlaceKind::Town => "town",
             PlaceKind::Tor => "tor",
+            PlaceKind::Village => "village",
+            PlaceKind::GreatTown => "greattown",
         }
     }
 
     /// Land and water, rather than anything people built.
     pub fn is_natural(self) -> bool {
-        !matches!(self, PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town)
+        !matches!(self, PlaceKind::Landmark(_)) && !self.is_settlement()
+    }
+
+    /// A hamlet, village or town.
+    pub fn is_settlement(self) -> bool {
+        matches!(self, PlaceKind::Hamlet | PlaceKind::Village | PlaceKind::Town | PlaceKind::GreatTown)
     }
 
     /// Whether things built beside it can take its name ("Greymere Landing").
@@ -136,20 +146,17 @@ impl PlaceKind {
                 | PlaceKind::Peak
                 | PlaceKind::Falls
                 | PlaceKind::Tor
-        )
+        ) || self.is_settlement()
     }
 
     /// Whether it can take the name of something beside it.
     fn borrows_name(self) -> bool {
-        matches!(self, PlaceKind::Falls | PlaceKind::Landmark(_) | PlaceKind::Hamlet | PlaceKind::Town)
+        matches!(self, PlaceKind::Falls | PlaceKind::Landmark(_)) || self.is_settlement()
     }
 
     /// Whether people keep it, so it can be named after one of them ("Marren's Hut").
     fn kept(self) -> bool {
-        matches!(
-            self,
-            PlaceKind::Landmark(Landmark::Hut | Landmark::Camp | Landmark::Landing) | PlaceKind::Hamlet | PlaceKind::Town
-        )
+        matches!(self, PlaceKind::Landmark(Landmark::Hut | Landmark::Camp | Landmark::Landing)) || self.is_settlement()
     }
 
     /// Whether the place spans several macro-cells, so every one of them must give it
@@ -177,6 +184,8 @@ pub struct Place {
     pub importance: f32,
     /// Index in `Network::sites`, for a landmark.
     pub site: Option<usize>,
+    /// Index in `Network::settlements`, for a hamlet, village or town.
+    pub settlement: Option<usize>,
     /// The part of the name that can be lent to things beside it.
     core: Option<String>,
 }
@@ -247,6 +256,8 @@ pub struct Gazetteer {
     regions: Vec<Region>,
     /// Place of each trail site, by site index.
     sites: Vec<Option<usize>>,
+    /// Place of each settlement, by its index in `Network::settlements`.
+    settlements: Vec<Option<usize>>,
     /// Words already in names, and where, so neighbours don't lean on the same one.
     used: Vec<(String, Vec2)>,
 }
@@ -317,20 +328,98 @@ impl Gazetteer {
             line: req.line,
             importance: req.importance,
             site: None,
+            settlement: None,
             core,
         });
         self.places.len() - 1
     }
 
+    /// [`Self::add_site`] for a landmark that takes its name whole from a place already
+    /// named, as a town's port does from the town ("Brynell Harbour"), spending none of
+    /// the words other places are named from.
+    pub(crate) fn add_site_named(&mut self, site: usize, req: Request, name: String) -> usize {
+        self.places.push(Place {
+            name,
+            kind: req.kind,
+            at: req.at,
+            radius: req.radius,
+            line: req.line,
+            importance: req.importance,
+            site: None,
+            settlement: None,
+            core: None,
+        });
+        self.file_site(site, self.places.len() - 1)
+    }
+
     /// [`Self::add`] for the landmark at `site` in `Network::sites`.
     pub(crate) fn add_site(&mut self, site: usize, req: Request) -> usize {
         let i = self.add(req);
+        self.file_site(site, i)
+    }
+
+    /// Files place `i` as the name of the landmark at `site`.
+    fn file_site(&mut self, site: usize, i: usize) -> usize {
         self.places[i].site = Some(site);
         if self.sites.len() <= site {
             self.sites.resize(site + 1, None);
         }
         self.sites[site] = Some(i);
         i
+    }
+
+    /// The place of a settlement, by its index in `Network::settlements`.
+    pub fn settlement(&self, k: usize) -> Option<&Place> {
+        self.places.get((*self.settlements.get(k)?)?)
+    }
+
+    /// [`Self::add`] for the settlement at `k` in `Network::settlements`.
+    pub(crate) fn add_settlement(&mut self, k: usize, req: Request) -> usize {
+        let i = self.add(req);
+        self.places[i].settlement = Some(k);
+        if self.settlements.len() <= k {
+            self.settlements.resize(k + 1, None);
+        }
+        self.settlements[k] = Some(i);
+        i
+    }
+
+    /// `n` given names of the tongue spoken at continent-local `at`, chosen by `salt`:
+    /// the people of a place, for naming it after one of them.
+    pub fn given_names(&self, at: Vec2, salt: u32, n: usize) -> Vec<String> {
+        let tongue = &words().tongues[self.tongue_index(at)];
+        let mut out: Vec<String> = Vec::new();
+        for k in 0..n as i32 * 4 {
+            if out.len() >= n {
+                break;
+            }
+            if let Some(name) = pick(&tongue.given, hash2(salt ^ self.seed, k, 0x9e)).map(String::from)
+                && !out.contains(&name)
+            {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    /// A name for a field of the place at continent-local `at`, as its people call it,
+    /// chosen by `salt`: from the section `kind` of `words.txt` ("field", "meadow",
+    /// "orchard" and the like), its owner one of the people of the tongue spoken there,
+    /// and `by` what it lies beside ("Brook"), if anything. None if `kind` has no words.
+    pub fn field_name(&self, at: Vec2, kind: &str, salt: u32, by: Option<&str>) -> Option<String> {
+        let w = words().kinds.get(kind)?;
+        let tongue = &words().tongues[self.tongue_index(at)];
+        (0..8).find_map(|k| {
+            let h = hash2(salt ^ self.seed, k, 0xf1e1d);
+            let value = |slot: &str| match slot {
+                "type" => pick(&w.kind, hash2(h, 1, 0)).map(String::from),
+                "adj" => pick(&w.adj, hash2(h, 2, 0)).map(String::from),
+                "owner" => pick(&tongue.given, hash2(h, 3, 0)).map(String::from),
+                "by" => by.map(String::from),
+                _ => None,
+            };
+            fill(pick(&w.pattern, h)?, value).map(|(name, _)| name)
+        })
     }
 
     /// The name of the nearest natural feature close enough to lend it.
@@ -399,6 +488,17 @@ impl Gazetteer {
                 }
             };
             let Some((name, slots)) = fill(pattern, value) else { continue };
+            // A name that says its opening twice, as "Caercaerdur" or "Caer Caerwen": the
+            // word just before the root, joined to it or not, must not begin as it does.
+            let echoes = |slot: &str, letters: usize| {
+                pattern.split_once(slot).is_some_and(|(before, _)| {
+                    let lead = before.split_whitespace().last().unwrap_or("").to_lowercase();
+                    lead.len() >= letters && low.len() >= letters && lead.as_bytes()[..letters] == low.as_bytes()[..letters]
+                })
+            };
+            if echoes("{low}", 2) || echoes("{root}", 3) {
+                continue;
+            }
             let has = |s: &str| slots.iter().any(|x| x == s);
             // A role and a type saying the same thing, as in "Watchwatch".
             if let (Some(role), Some(t)) = (role, kind_word)

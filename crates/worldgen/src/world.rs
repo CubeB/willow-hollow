@@ -1,6 +1,7 @@
 //! The real world: continents generated on demand and turned into voxel chunks.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock, RwLock},
 };
@@ -20,9 +21,22 @@ use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
     scale::{BLOCK, m, m64},
+    settlements::{
+        farmland,
+        years::{Boons, Lives, When},
+    },
     surface::{self, Column, Cover, Sampler, node},
     trails,
 };
+
+/// The moment what is built is generated for, and the boons granted, with a count that
+/// goes up each time either changes (#207).
+#[derive(Default)]
+struct Now {
+    when: When,
+    boons: Arc<Boons>,
+    epoch: u64,
+}
 
 type Slot = Arc<OnceLock<Arc<Continent>>>;
 type AfterMade = Arc<OnceLock<Box<dyn Fn(&Arc<Continent>) + Send + Sync>>>;
@@ -45,6 +59,19 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             let mut c = continent::generate(cell_desc(seed, mx, mz), config);
             c.trails = trails::build(&c, seed);
             c.trails.names = crate::names::survey(&c, seed);
+            c.land = farmland::influence::build(&c, seed);
+            farmland::farmstead::raise(&mut c, seed);
+            // S8 (#207): the logging camps out in the woods, beyond the fields and barns.
+            crate::settlements::logging::raise(&mut c, seed);
+            // The quarries, out in the land as the barns are (#203).
+            farmland::quarry::raise(&mut c, seed);
+            // The willows pollarded along the streams through each place's land (#64).
+            let willows = farmland::willows::plant(&c, seed);
+            c.trails.planted.extend(willows);
+            // What stands about the fields, clear of all of those (#64, #206).
+            farmland::fixtures::raise(&mut c, seed);
+            // The lanterns in the old forest's trees, once every tree to be felled is (#203).
+            crate::settlements::tree::hang_lanterns(&mut c, seed);
             Arc::new(c)
         })
         .clone();
@@ -59,7 +86,6 @@ pub struct GameWorld {
     materials: Materials,
     config: SimConfig,
     /// Tree and feature models, built on first use.
-    library: OnceLock<Library>,
     /// Simulated macro-cells. Each slot is filled once, by whichever thread asks first;
     /// others asking for the same cell wait for it rather than simulating it again.
     continents: Mutex<HashMap<(i32, i32), Slot>>,
@@ -76,6 +102,14 @@ pub struct GameWorld {
     /// The columns whose flower has been picked: nothing grows on them until it is
     /// back (see `pick`).
     picked: RwLock<HashSet<(i32, i32)>>,
+    /// Buildings stood by hand where no settlement put them (see `stand`), in world
+    /// voxels and cells, each with its guest beds.
+    stood: RwLock<Vec<(trails::Stamp, Vec<Vec3>)>>,
+    /// The year and season the settlements are seen in, and the boons granted (see
+    /// `set_now`), and how each continent's settlements stand then, by the epoch each
+    /// was worked out for.
+    now: RwLock<Now>,
+    lives: Mutex<HashMap<(i32, i32), (u64, Arc<Lives>)>>,
 }
 
 impl GameWorld {
@@ -88,7 +122,6 @@ impl GameWorld {
             seed,
             materials: mat::build(),
             config,
-            library: OnceLock::new(),
             continents: Mutex::new(HashMap::new()),
             soon: Default::default(),
             after_made: Default::default(),
@@ -97,6 +130,9 @@ impl GameWorld {
             placed: Default::default(),
             tors: Default::default(),
             picked: Default::default(),
+            stood: Default::default(),
+            now: Default::default(),
+            lives: Default::default(),
         }
     }
 
@@ -104,8 +140,86 @@ impl GameWorld {
         self.seed
     }
 
+    /// Sets the year and season what is built is generated for, and the boons granted
+    /// (#207); whether that changes anything, in which case every chunk with a settlement
+    /// or a field in it made before is out of date and wants making again (see
+    /// [`Self::epoch`]). Every season of year 0 is today's world. The game calls this as
+    /// it starts, as each season turns, and when a boon is granted.
+    pub fn set_now(&self, when: When, boons: &Boons) -> bool {
+        let when = when.seen();
+        let mut now = self.now.write().expect("now poisoned");
+        if now.when == when && *now.boons == *boons {
+            return false;
+        }
+        now.when = when;
+        now.boons = Arc::new(boons.clone());
+        now.epoch += 1;
+        drop(now);
+        // Climbers grown on what has changed would otherwise be found again as they were.
+        self.climbers.clear();
+        true
+    }
+
+    /// The moment what is built is generated for (see [`Self::set_now`]).
+    pub fn now(&self) -> When {
+        self.now.read().expect("now poisoned").when
+    }
+
+    /// The boons granted, as last set.
+    pub fn boons(&self) -> Arc<Boons> {
+        self.now.read().expect("now poisoned").boons.clone()
+    }
+
+    /// A count that goes up each time [`Self::set_now`] changes anything: a chunk made
+    /// under an earlier one may be out of date.
+    pub fn epoch(&self) -> u64 {
+        self.now.read().expect("now poisoned").epoch
+    }
+
+    /// How the settlements of continent `c` (macro-cell `(mx, mz)`) stand now: worked
+    /// out once for each moment and boons set, and kept until they change.
+    pub fn lives(&self, mx: i32, mz: i32, c: &Continent) -> Arc<Lives> {
+        let (when, boons, epoch) = {
+            let now = self.now.read().expect("now poisoned");
+            (now.when, now.boons.clone(), now.epoch)
+        };
+        if let Some((e, l)) = self.lives.lock().expect("lives poisoned").get(&(mx, mz))
+            && *e == epoch
+        {
+            return l.clone();
+        }
+        let l = Arc::new(Lives::new(&c.trails, self.seed, (mx, mz), when, &boons));
+        // Never over what was worked out for a later moment meanwhile.
+        let mut kept = self.lives.lock().expect("lives poisoned");
+        if kept.get(&(mx, mz)).is_none_or(|(e, _)| *e < epoch) {
+            kept.insert((mx, mz), (epoch, l.clone()));
+        }
+        l
+    }
+
+    /// Whether anything in the square of world columns from `(x0, z0)`, `span` wide, can
+    /// change with the years: whether a settlement or its fields reach it, or a logging
+    /// camp's clearing. Never blocks: false where the continent is not simulated yet.
+    pub fn changes_with_years(&self, x0: i32, z0: i32, span: i32) -> bool {
+        self.any_continent_over(x0, z0, span, |c, lx0, lz0| !c.land.wild_square(lx0, lz0, span) || c.trails.years.camps.iter().any(|k| k.reaches(lx0, lz0, span)))
+    }
+
+    /// Whether the trees in the square of [`Self::changes_with_years`] can change with
+    /// the years: whether a logging camp's clearing reaches it (see
+    /// `settlements::logging::fell`).
+    pub fn fells_with_years(&self, x0: i32, z0: i32, span: i32) -> bool {
+        self.any_continent_over(x0, z0, span, |c, lx0, lz0| c.trails.years.camps.iter().any(|k| k.reaches(lx0, lz0, span)))
+    }
+
+    /// Whether `f` says yes for any simulated continent the square reaches, given it and
+    /// the square's corner in its own columns.
+    fn any_continent_over(&self, x0: i32, z0: i32, span: i32, f: impl Fn(&Continent, i32, i32) -> bool) -> bool {
+        let (lo, hi) = (cell_of(x0, z0), cell_of(x0 + span - 1, z0 + span - 1));
+        (lo.1..=hi.1).any(|mz| (lo.0..=hi.0).any(|mx| self.continent_if_ready(mx, mz).is_some_and(|c| f(&c, x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE))))
+    }
+
     pub fn library(&self) -> &Library {
-        self.library.get_or_init(Library::build)
+        Library::shared()
     }
 
     /// The tors and moor stonework of continent `c` that reach the world square from
@@ -186,6 +300,29 @@ impl GameWorld {
         Sampler::new(&c, self.seed, lx, lz, 1).column(lx, lz)
     }
 
+    /// How managed the land is at world column `(x, z)`: 0 in the wild, 1 in a
+    /// settlement's yards (see [`farmland::influence`]).
+    pub fn managed(&self, x: i32, z: i32) -> f32 {
+        let (mx, mz) = cell_of(x, z);
+        self.continent(mx, mz).land.managed(x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)
+    }
+
+    /// The ring of land use world column `(x, z)` lies in (see [`farmland::Use`]).
+    pub fn land_use(&self, x: i32, z: i32) -> farmland::Use {
+        let (mx, mz) = cell_of(x, z);
+        self.continent(mx, mz).land.land_use(x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)
+    }
+
+    /// The field world column `(x, z)` is in, if it is in one: its use, the way its rows
+    /// run, and whose it is. Says nothing of whether the column's own ground is worked
+    /// (a trail through a field is still in it): see [`farmland::fields::worked`].
+    pub fn field(&self, x: i32, z: i32) -> Option<farmland::Plot> {
+        let (mx, mz) = cell_of(x, z);
+        let plot = farmland::plot(&self.continent(mx, mz), self.seed, x - mx * MACRO_SIZE, z - mz * MACRO_SIZE)?;
+        // With the crop it carries this year (#207).
+        Some(farmland::rotation::rotated(plot, self.seed, self.now()))
+    }
+
     /// The small delights left beside the trails (see [`trails::delights`]) within
     /// `reach` voxels of the column at `(x, z)`, each with the world voxel its foot
     /// stands in. Never blocks: nothing from a continent not yet simulated. This is how
@@ -206,6 +343,84 @@ impl GameWorld {
         out
     }
 
+    /// The tops of the chimneys and smoke holes of lived-in homes within `reach` voxels
+    /// of the column at `(x, z)`, in world voxels. Never blocks: nothing from a continent
+    /// not yet simulated. This is where the game sends chimney smoke up from.
+    pub fn chimneys_near(&self, x: i32, z: i32, reach: i32) -> Vec<glam::DVec3> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        let (centre, r2) = (glam::DVec2::new(x as f64, z as f64), reach as f64 * reach as f64);
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = glam::DVec3::new((mx * MACRO_SIZE) as f64, 0.0, (mz * MACRO_SIZE) as f64);
+                // Only from homes lived in this year (#207).
+                let lives = self.lives(mx, mz, &c);
+                let lit = c.trails.chimneys.iter().enumerate().filter(|&(i, _)| lives.smokes(&c.trails, i)).map(|(_, p)| p);
+                out.extend(lit.map(|p| p.as_dvec3() + origin).filter(|p| (glam::DVec2::new(p.x, p.z) - centre).length_squared() <= r2));
+            }
+        }
+        out
+    }
+
+    /// The guest beds of the taverns (see [`trails::Network::guest_beds`]) within `reach`
+    /// voxels of the column at `(x, z)`, each the middle of the bed on its boards, in world
+    /// voxels. Never blocks, as [`Self::delights_near`]. The game offers a night's sleep in
+    /// whichever the player stands at.
+    pub fn guest_beds_near(&self, x: i32, z: i32, reach: i32) -> Vec<Vec3> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = Vec3::new((mx * MACRO_SIZE) as f32, 0.0, (mz * MACRO_SIZE) as f32);
+                out.extend(c.trails.guest_beds.iter().map(|&b| b + origin));
+            }
+        }
+        out.extend(self.stood.read().expect("stood poisoned").iter().flat_map(|(_, beds)| beds.iter().copied()));
+        out.retain(|at| {
+            let (dx, dz) = (at.x - x as f32, at.z - z as f32);
+            dx * dx + dz * dz <= (reach * reach) as f32
+        });
+        out
+    }
+
+    /// Stands a building where no settlement put one, for a look at it: its voxels in
+    /// world voxels and its fine parts in world cells, and the guest beds it offers (as
+    /// [`Self::guest_beds_near`] gives them). Chunks made from now on have it; any made
+    /// already are as they were until made again.
+    pub fn stand(&self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>, beds: Vec<Vec3>) {
+        // In one order, as the trails' own stamps are, for chunks the same every run.
+        voxels.sort_by_key(|&(p, _)| (p.y, p.z, p.x));
+        let cells = IVec3::splat(CELLS);
+        let ends = voxels.iter().map(|&(p, _)| p).chain(fine.iter().flat_map(|b| [IVec3::from_array(b.lo).div_euclid(cells), (IVec3::from_array(b.hi) - 1).div_euclid(cells)]));
+        let (lo, hi) = ends.fold((IVec3::MAX, IVec3::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        if lo.x > hi.x {
+            return;
+        }
+        self.stood.write().expect("stood poisoned").push((trails::Stamp { lo, hi, voxels, fine, tag: None }, beds));
+    }
+
+    /// What has been stood by hand over chunk column `(cx, cz)`, moved into the voxels of
+    /// the continent whose corner is `origin`, as its own stamps are. Nothing, and no
+    /// work, in a world where nothing has been.
+    fn stood_at(&self, cx: i32, cz: i32, origin: IVec3) -> Vec<trails::Stamp> {
+        let stood = self.stood.read().expect("stood poisoned");
+        let over = |s: &trails::Stamp| (s.lo.x - 1).div_euclid(CHUNK) <= cx && cx <= (s.hi.x + 1).div_euclid(CHUNK) && (s.lo.z - 1).div_euclid(CHUNK) <= cz && cz <= (s.hi.z + 1).div_euclid(CHUNK);
+        let cells = origin * IVec3::splat(CELLS);
+        stood
+            .iter()
+            .filter(|(s, _)| over(s))
+            .map(|(s, _)| trails::Stamp {
+                lo: s.lo - origin,
+                hi: s.hi - origin,
+                voxels: s.voxels.iter().map(|&(p, v)| (p - origin, v)).collect(),
+                fine: s.fine.iter().map(|b| PlantBox { lo: (IVec3::from_array(b.lo) - cells).to_array(), hi: (IVec3::from_array(b.hi) - cells).to_array(), ..*b }).collect(),
+                tag: None,
+            })
+            .collect()
+    }
+
     /// The wild bees' and wasps' nests (see [`features::nests`]) whose door is within
     /// `reach` voxels of the column at `(x, z)`, nearest first: the same nests the chunks
     /// there are built with, found without building them. Never blocks, and only from
@@ -221,7 +436,9 @@ impl GameWorld {
         let margin = features::MAX_REACH + 1;
         let sampler = Sampler::new(&c, self.seed, lx0 - margin, lz0 - margin, span + 2 * margin);
         let lib = self.library();
-        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        let mut placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        // Nor is there a nest in a tree the loggers have felled (#207).
+        crate::settlements::logging::fell(&c, self.now(), (mx * MACRO_SIZE, mz * MACRO_SIZE), &mut placements);
         // Chunks leave out what stands in a tor's rock; so must this.
         let tors = self.tors.near(self.seed, &c, x0, z0, span);
         let mut out: Vec<_> = placements
@@ -241,6 +458,47 @@ impl GameWorld {
             (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
         });
         // A placement cell can be met from both sides of a square; a nest is one nest.
+        out.dedup();
+        out
+    }
+
+    /// The colonies in the hives people keep (#202) whose door is within `reach` voxels
+    /// of the column at `(x, z)`, nearest first: the skeps and the log and box hives of
+    /// the villages' apiaries and yards, and the rows of skeps out by the fields, as they
+    /// stand this year. A hive gone with its apiary, or one standing empty, has none.
+    /// Never blocks, and only from the continent `(x, z)` is on, as
+    /// [`Self::nests_near`]: its bees fly to the flowers as the wild ones do.
+    pub fn hives_near(&self, x: i32, z: i32, reach: i32) -> Vec<features::nests::Nest> {
+        use crate::settlements::years::{Tag, Yard};
+        let (mx, mz) = cell_of(x, z);
+        let Some(c) = self.continent_if_ready(mx, mz) else { return Vec::new() };
+        let lives = self.lives(mx, mz, &c);
+        let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
+        let (lx, lz) = (x - origin.x, z - origin.z);
+        let mut out = Vec::new();
+        for cz in (lz - reach).div_euclid(CHUNK)..=(lz + reach).div_euclid(CHUNK) {
+            for cx in (lx - reach).div_euclid(CHUNK)..=(lx + reach).div_euclid(CHUNK) {
+                for s in c.trails.stamps_at(cx, cz) {
+                    if matches!(s.tag.as_deref(), Some(Tag::Yard { what: Yard::Hive(_), .. })) && lives.shows(s) {
+                        out.extend(features::nests::in_hive(&s.voxels, &s.fine));
+                    }
+                }
+                out.extend(c.land.fixtures.hives_at(cx, cz, self.seed, &lives));
+            }
+        }
+        let mut out: Vec<features::nests::Nest> = out
+            .into_iter()
+            .map(|n| features::nests::Nest { door: n.door + origin, host_at: n.host_at + origin, ..n })
+            .filter(|n| {
+                let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+                dx * dx + dz * dz <= reach as i64 * reach as i64
+            })
+            .collect();
+        out.sort_by_key(|n| {
+            let (dx, dz) = ((n.door.x - x) as i64, (n.door.z - z) as i64);
+            (dx * dx + dz * dz, n.door.y, n.door.x, n.door.z)
+        });
+        // A stamp is filed with every chunk it touches; a hive is one hive.
         out.dedup();
         out
     }
@@ -493,6 +751,8 @@ fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Vo
         Cover::Dune if matches!(col.biome, crate::biome::Biome::Desert | crate::biome::Biome::DuneSea) => (mat::DUNE_SAND, mat::DUNE_SAND),
         Cover::Dune if col.biome == crate::biome::Biome::Volcanic => (mat::BLACK_SAND, mat::BLACK_SAND),
         Cover::Dune => (mat::SAND, mat::SAND),
+        // The mud under a paddy's water or a ditch's (see settlements::farmland::water).
+        Cover::Land if col.water_surface().is_some() => (mat::MUD, mat::MUD),
         // Wet stone and moss around a spring, with a little mud.
         Cover::Spring => (if roll < 0.4 { mat::MOSSY_STONE } else if roll < 0.6 { mat::STONE } else if roll < 0.88 { mat::MOSS } else { mat::MUD }, mat::STONE),
         // Banks take the ground of the land around them: grass with a little bare earth
@@ -590,6 +850,8 @@ pub(crate) type Inspect<'a> = dyn FnMut(&features::climber::Root, &features::att
 struct ClimberRun<'a> {
     voxels: &'a features::attach::ColumnVoxels<'a>,
     continent: &'a Continent,
+    /// How its settlements stand this year (#207).
+    lives: &'a Lives,
     chunk: (i32, i32),
     local: (i32, i32),
     macro_origin: (i32, i32),
@@ -612,7 +874,9 @@ impl GameWorld {
         // Features up to MAX_REACH from anything a plant might touch.
         let margin = MARGIN + features::MAX_REACH + 1;
         let sampler = Sampler::new(run.continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
-        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        let mut placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        // The trees as the loggers have left them this year (#207).
+        crate::settlements::logging::fell(run.continent, run.lives.when, run.macro_origin, &mut placements);
         // Landmarks anywhere a plant here could reach, visited once each and applied in
         // a fixed order, so overlaps resolve the same way every time.
         let (mcx, mcz) = (run.macro_origin.0.div_euclid(CHUNK), run.macro_origin.1.div_euclid(CHUNK));
@@ -628,12 +892,13 @@ impl GameWorld {
                 }
             }
         }
+        // As they stand this year (#207).
+        let mut found: Vec<Cow<trails::Stamp>> = found.into_iter().filter_map(|s| run.lives.view(s)).collect();
         found.sort_unstable_by_key(|s| (s.lo.y, s.lo.x, s.lo.z, s.hi.y, s.hi.x, s.hi.z, s.voxels.len()));
         let origin = IVec3::new(run.macro_origin.0, 0, run.macro_origin.1);
-        let mut stamped: HashMap<IVec3, Voxel> = HashMap::new();
-        for s in &found {
-            stamped.extend(s.voxels.iter().map(|&(p, v)| (p + origin, v)));
-        }
+        // Looked up in each stamp's own voxels: a settlement's buildings, thousands of
+        // voxels each, would otherwise all be filed afresh for every chunk near.
+        let stamped = climber::Built::new(found.iter().map(|s| (s.voxels.as_slice(), origin, s.lo, s.hi)));
         let world = climber::Surroundings::new(lib, &self.materials, &placements, &sampler, run.macro_origin, &stamped);
         let (mox, moz) = run.macro_origin;
         let edge = REACH + 2;
@@ -650,9 +915,32 @@ impl GameWorld {
         };
         let mut roots = Vec::new();
         finder.trees(&mut roots);
-        finder.stamps(found.iter().map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        // A stamp's roots stand beside its voxels, so only those near where roots are kept
+        // can give any.
+        let near = |s: &&Cow<trails::Stamp>| {
+            let (lo, hi) = (s.lo + origin, s.hi + origin);
+            hi.x >= finder.x0 - 2 && lo.x <= finder.x1 + 2 && hi.z >= finder.z0 - 2 && lo.z <= finder.z1 + 2
+        };
+        // Nor from a barn out in the fields: a root is as likely to be picked on the inner
+        // side of a wall as the outer, and in a barn it would climb its walls indoors.
+        let barn = |s: &&Cow<trails::Stamp>| run.continent.land.steads.iter().any(|b| b.stamped(s.lo, s.hi));
+        // S8 (#207): nor from a logging camp's lean-to and log piles, which are worked.
+        let camp = |s: &&Cow<trails::Stamp>| run.continent.trails.years.camps.iter().any(|k| k.stamped(s.lo, s.hi));
+        // Nor from a quarry's shed or its freshly worked faces (#203).
+        let quarry = |s: &&Cow<trails::Stamp>| run.continent.land.quarries.iter().any(|q| q.worked(s.lo, s.hi));
+        finder.stamps(found.iter().filter(near).filter(|s| !barn(s) && !camp(s) && !quarry(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
         finder.rims(&mut roots);
+        // S8 (#207): nothing creeps over a logging camp's yard and its work, kept bare by
+        // the loggers' feet; judged by where each root is, so every chunk agrees.
+        let camps = &run.continent.trails.years.camps;
+        if !camps.is_empty() {
+            roots.retain(|(r, _)| {
+                let v = r.cell.div_euclid(IVec3::splat(CELLS));
+                let at = glam::vec2((v.x - mox) as f32 + 0.5, (v.z - moz) as f32 + 0.5);
+                !camps.iter().any(|k| at.distance(k.middle()) < k.yard + crate::scale::m(6.0))
+            });
+        }
         let before = plants.len();
         climber::grow_column(roots, run.chunk, run.voxels, &world, &self.materials, self.seed, &self.climbers, plants, inspect);
         taken.extend(plants[before..].iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))));
@@ -704,6 +992,8 @@ impl GameWorld {
         // both sides of the border (see `continent::border`).
         let (mx, mz) = cell_of(cx * CHUNK, cz * CHUNK);
         let continent = self.continent(mx, mz);
+        // How its settlements and fields stand in the year it is seen in (#207).
+        let lives = self.lives(mx, mz, &continent);
         let (wx0, wz0) = (cx * CHUNK - 1, cz * CHUNK - 1);
         let (lx0, lz0) = (wx0 - mx * MACRO_SIZE, wz0 - mz * MACRO_SIZE);
         // Features up to MAX_REACH away can lean into this column, so sample that far.
@@ -745,6 +1035,20 @@ impl GameWorld {
             }
         }
 
+        // The fields about a settlement, if any reach this far, and what stands between
+        // them (see settlements::farmland). Worked out over the wide square, as a column's
+        // boundary depends on its neighbours' fields.
+        let fields = farmland::fields::Patch::new(&continent, self.seed, lx0 - 1, lz0 - 1, WIDE, &wide);
+        let mut edges: Vec<Option<farmland::bounds::Edge>> = Vec::new();
+        // The faces of the terraces' banks, where a stepped column's shelf stands over the
+        // next: the lowest voxel of each face and how it is built.
+        let mut banks: Vec<Option<(i32, farmland::terrace::Riser)>> = Vec::new();
+        // An orchard's trees, in their rows.
+        let orchard = farmland::orchard::trees_near(&continent, self.seed, &sampler, lx0, lz0, PAD as i32, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        for t in &orchard {
+            hi = hi.max(t.top());
+        }
+
         // Surface and subsurface voxel per column.
         let mut skins = Vec::with_capacity(PAD * PAD);
         let mut plants = Vec::new();
@@ -761,11 +1065,19 @@ impl GameWorld {
                 let ground = |x: usize, z: usize| wide[x * WIDE + z].ground;
                 let gx = (ground(px + 2, pz + 1) - ground(px, pz + 1)) * 0.5;
                 let gz = (ground(px + 1, pz + 2) - ground(px + 1, pz)) * 0.5;
-                let steep = gx.hypot(gz);
+                let mut steep = gx.hypot(gz);
                 let roll = unit(hash3(self.seed ^ 0x5cf, wx0 + px as i32, top, wz0 + pz as i32));
                 let (wx, wz) = ((wx0 + px as i32) as f64, (wz0 + pz as i32) as f64);
                 let patch = crate::surface::ground_patch(self.seed, wx, wz);
                 let col = &columns[px * PAD + pz];
+                // A terrace's shelf is the field's soil however its steps measure: the
+                // hillside under it is no steeper than any other field's.
+                let terraced = fields
+                    .at(px + 1, pz + 1)
+                    .and_then(|p| Some((p, farmland::terrace::stepped(&continent.land, p, lx0 + px as i32, lz0 + pz as i32, col)?)));
+                if terraced.is_some() {
+                    steep = steep.min(0.6);
+                }
                 let mut skin = surface_materials(col, steep, roll, patch);
                 let (cx_, cz_) = (wx as i32, wz as i32);
                 if !tors.is_empty() && col.cover == Cover::Land && skin.0 == mat::ground_cover(col.biome) && tors.iter().any(|t| t.turf(cx_, cz_)) {
@@ -776,9 +1088,68 @@ impl GameWorld {
                 if let Some((trails::tread::Step::Stone(v), _, _)) = step {
                     skin.0 = v;
                 }
+                // A way over a ditch goes on a plank bridge (see farmland::ditch).
+                let bridge = col.cover == Cover::Trail && farmland::ditch::bridged(&continent, lx0 + px as i32, lz0 + pz as i32, col);
+                if bridge {
+                    skin.0 = mat::PLANK;
+                }
+                // In a field, the crop is on soil where the wild has grass; a boundary keeps a
+                // strip of grass under it.
+                let mut field = None;
+                let mut fielded = false;
+                if !fields.is_empty() && !rocky && (skin.0 == mat::ground_cover(col.biome) || farmland::paddy::flooded(col))
+                    && let Some(plot) = fields.at(px + 1, pz + 1)
+                {
+                    fielded = true;
+                    if edges.is_empty() {
+                        edges = vec![None; PAD * PAD];
+                    }
+                    let edge = farmland::bounds::edge(&continent.land, &fields, col, px + 1, pz + 1);
+                    edges[px * PAD + pz] = edge;
+                    if edge.is_some() {
+                        hi = hi.max(top + 5);
+                    } else {
+                        // With the crop it carries this year (#207).
+                        let plot = farmland::rotation::rotated(*plot, self.seed, lives.when);
+                        field = Some(plot);
+                        if let Some(ground) = farmland::crops::ground(plot.crop, col) {
+                            skin.0 = ground;
+                        }
+                    }
+                } else if !rocky && skin.0 == mat::ground_cover(col.biome) && fields.old(px + 1, pz + 1).is_some() {
+                    // What is left of the edges of fields given up long ago (see
+                    // farmland::old).
+                    if let Some(edge) = farmland::bounds::edge(&continent.land, &fields, col, px + 1, pz + 1) {
+                        if edges.is_empty() {
+                            edges = vec![None; PAD * PAD];
+                        }
+                        edges[px * PAD + pz] = Some(edge);
+                        hi = hi.max(top + 5);
+                    }
+                }
+                // The edge of a shelf over the next is its bank: a drystone coping or a
+                // lip of turf, which nothing is sown on.
+                if let Some((plot, bank)) = terraced
+                    && fielded
+                {
+                    let low = [(2, 1), (0, 1), (1, 2), (1, 0)].iter().map(|&(i, j)| wide[(px + i) * WIDE + pz + j].top()).min().unwrap_or(top);
+                    if let Some((from, riser)) = farmland::terrace::riser(bank, &continent.land.farms[plot.owner], top, low, col) {
+                        if banks.is_empty() {
+                            banks = vec![None; PAD * PAD];
+                        }
+                        banks[px * PAD + pz] = Some((from, riser));
+                        field = None;
+                        skin.0 = if riser.capped() { riser.at(cx_, top, cz_, top, self.seed) } else { mat::ground_cover(col.biome) };
+                    }
+                }
                 let mut growing = skin.0;
                 if skin.0 == mat::ground_cover(col.biome) && col.cover == Cover::Land
                     && let Some(f) = features::flower(col.biome, wx as i32, wz as i32, self.seed, roll)
+                {
+                    growing = f;
+                }
+                if let Some(plot) = &field
+                    && let Some(f) = farmland::crops::flowers(plot.crop, farmland::crops::roll(self.seed, wx as i32, wz as i32), patch)
                 {
                     growing = f;
                 }
@@ -788,12 +1159,20 @@ impl GameWorld {
                 // or scree.
                 let by_rock = skin.0 == mat::TURF
                     || (0..3).any(|i| (0..3).any(|j| matches!(wide[(px + i) * WIDE + pz + j].cover, Cover::Cliff | Cover::Scree | Cover::Boulders)));
-                let sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
-                wash.push((top, if own { features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed) } else { 0 }, sward));
+                let mut sward = crate::surface::sward::code(&continent, col, lx0 + px as i32, lz0 + pz as i32, steep, by_rock);
+                // Grazed short in a pasture.
+                if let Some(wear) = field.and_then(|p| farmland::crops::grazed(p.crop)) {
+                    sward = (sward & 7) | (sward >> 3).max(wear) << 3;
+                }
+                let crop_wash = field.and_then(|p| farmland::crops::wash(p.crop));
+                wash.push((top, if own { crop_wash.unwrap_or_else(|| features::plants::wash_at(col, growing, wx as i32, wz as i32, self.seed)) } else { 0 }, sward));
                 if planted && !rocky && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz) && !picked.contains(&(wx as i32, wz as i32)) {
                     let grown = plants.len();
-                    features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
-                    if plants.len() == grown {
+                    let cropped = field.is_some_and(|p| farmland::crops::grow(&p, col, wx as i32, wz as i32, self.seed, &mut plants));
+                    if !cropped {
+                        features::plants::grow(col, growing, wx as i32, wz as i32, self.seed, &mut plants);
+                    }
+                    if plants.len() == grown && !cropped {
                         features::aquatic::grow(col, wx as i32, wz as i32, self.seed, &mut plants);
                     }
                     if plants.len() == grown {
@@ -814,13 +1193,19 @@ impl GameWorld {
                     };
                     let foot = step_foot(WIDE, px + 1, pz + 1, nose_at);
                     trails::tread::dress(col, foot, wx as i32, wz as i32, self.seed, &mut plants);
+                    if bridge {
+                        // Its rails, along the edges of the way.
+                        let open = [(2, 1), (0, 1), (1, 2), (1, 0)].map(|(i, j)| wide[(px + i) * WIDE + pz + j].cover != Cover::Trail);
+                        let wood = continent.land.owner(lx0 + px as i32, lz0 + pz as i32).map_or(mat::PLANK_DARK, |o| continent.land.farms[o].wood);
+                        farmland::ditch::rails(wx as i32, top, wz as i32, open, wood, &mut plants);
+                    }
                 }
                 skins.push(skin);
             }
         }
 
         let lib = self.library();
-        let placements = features::place_cached(
+        let mut placements = features::place_cached(
             &self.placed,
             self.seed,
             lib,
@@ -830,6 +1215,8 @@ impl GameWorld {
             PAD as i32,
             (mx * MACRO_SIZE, mz * MACRO_SIZE),
         );
+        // About a logging camp, the trees felled by this year are stumps (#207).
+        crate::settlements::logging::fell(&continent, lives.when, (mx * MACRO_SIZE, mz * MACRO_SIZE), &mut placements);
         // Only the features whose model, or buttresses, can touch this column.
         let mut placements: Vec<_> = placements
             .into_iter()
@@ -850,7 +1237,16 @@ impl GameWorld {
         }
         // Landmarks, bridges and lanterns, whose voxels are continent-local.
         let local_chunk = (cx - mx * (MACRO_SIZE / CHUNK), cz - mz * (MACRO_SIZE / CHUNK));
-        let stamps: Vec<_> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).collect();
+        let stood = self.stood_at(cx, cz, IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE));
+        // Each as it stands this year (#207).
+        let mut stamps: Vec<Cow<trails::Stamp>> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.view(s)).collect();
+        // What stands about the fields, as the season has it, and the ground it keeps
+        // clear of crops and grass (#64).
+        let fixed = continent.land.fixtures.at(local_chunk.0, local_chunk.1, self.seed, &lives);
+        let to_world = glam::IVec2::new(mx, mz) * MACRO_SIZE;
+        let mown: Vec<_> = fixed.iter().map(|&(_, (a, b))| (a + to_world, b + to_world)).collect();
+        stamps.extend(fixed.into_iter().map(|(s, _)| Cow::Borrowed(s)));
+        stamps.extend(stood.iter().map(Cow::Borrowed));
         for s in &stamps {
             hi = hi.max(s.hi.y);
             lo = lo.min(s.lo.y);
@@ -919,6 +1315,11 @@ impl GameWorld {
                                 Some(r) if surface == mat::STONE => rock_at(y, r),
                                 _ => surface,
                             }
+                        } else if let Some(&Some((from, riser))) = banks.get(px * PAD + pz)
+                            && y >= from
+                        {
+                            // The face of a terrace's bank, down to the shelf below.
+                            riser.at(wx, y, wz, top, self.seed)
                         } else if let Some(r) = rock
                             && under == mat::STONE
                         {
@@ -956,6 +1357,10 @@ impl GameWorld {
         for px in 1..PAD - 1 {
             for pz in 1..PAD - 1 {
                 let Some(k) = columns[px * PAD + pz].water_surface() else { continue };
+                // A paddy or a ditch stepping down a voxel only stands still.
+                if columns[px * PAD + pz].cover == Cover::Land {
+                    continue;
+                }
                 let (mut total, mut dir) = (0.0f32, Vec3::ZERO);
                 for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
                     let n = &columns[(px as i32 + dx) as usize * PAD + (pz as i32 + dz) as usize];
@@ -1085,6 +1490,22 @@ impl GameWorld {
         for &(q, v) in &rock {
             put(q, v, true);
         }
+        // The orchards' trees, and the walls, hedges and fences between the fields, after
+        // the wild's trees, so a hedge grows round a hedgerow tree's trunk. The border
+        // columns' too, as the next chunk column builds them: their posts and rails,
+        // blossom and fruit only once, by the column's own chunk.
+        let own = |x: i32, z: i32| (wx0 + 1..=wx0 + CHUNK).contains(&x) && (wz0 + 1..=wz0 + CHUNK).contains(&z);
+        for t in &orchard {
+            farmland::orchard::grow(t, &mut put, planted.then_some(&mut plants), own);
+        }
+        for (i, edge) in edges.iter().enumerate() {
+            let Some(edge) = edge else { continue };
+            let (px, pz) = (i / PAD, i % PAD);
+            let (wx, wz) = (wx0 + px as i32, wz0 + pz as i32);
+            let own = planted && (1..=CHUNK as usize).contains(&px) && (1..=CHUNK as usize).contains(&pz);
+            let farm = continent.land.farm(edge.owner);
+            farmland::bounds::build(edge, farm, &columns[i], wx, wz, self.seed, &mut put, own.then_some(&mut plants));
+        }
         // Built things go last: they clear whatever grew or stood in their way.
         let origin = IVec3::new(mx * MACRO_SIZE, 0, mz * MACRO_SIZE);
         for s in &stamps {
@@ -1093,6 +1514,14 @@ impl GameWorld {
             }
         }
         headroom(&out, &self.materials, &columns, wx0, wz0, &mut plants);
+        if !mown.is_empty() {
+            // Only what grows on the ground there: a cave's plants below are left be.
+            plants.retain(|p| {
+                let q = IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS));
+                !mown.iter().any(|(a, b)| q.x >= a.x && q.x <= b.x && q.z >= a.y && q.z <= b.y)
+                    || q.y < columns[(q.x - wx0) as usize * PAD + (q.z - wz0) as usize].top()
+            });
+        }
         if !planted {
             // Whatever the caves grew goes with the rest of the plants.
             plants.clear();
@@ -1136,10 +1565,12 @@ impl GameWorld {
         // Now the world's shape is final, things can grow on it.
         let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
         let mut standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
+        let grown = plants.len();
         self.grow_climbers(
             &ClimberRun {
                 voxels: &voxels,
                 continent: &continent,
+                lives: &lives,
                 chunk: (cx, cz),
                 local: (lx0, lz0),
                 macro_origin: (mx * MACRO_SIZE, mz * MACRO_SIZE),
@@ -1160,6 +1591,7 @@ impl GameWorld {
         };
         let before_moss = plants.len();
         features::moss::grow(&voxels, &self.materials, &soil, &mut plants);
+        let mossed = plants.len();
         // Bark, twigs and leaf clusters, clear of the moss and climbers already there.
         if placements.iter().any(|p| features::tree_detail::has_detail(p.species)) {
             features::tree_detail::occupied(&plants[before_moss..], &mut standing);
@@ -1171,6 +1603,17 @@ impl GameWorld {
                 taken: &standing,
             };
             features::tree_detail::grow(&voxels, &self.materials, &grove, &mut plants);
+        }
+        // Nor has a home going up again any ivy or moss on it (#207): judged by where each
+        // part is, so every chunk agrees.
+        let rising: Vec<(IVec3, IVec3)> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.rising(s)).collect();
+        if !rising.is_empty() {
+            let mut i = 0;
+            plants.retain(|p| {
+                i += 1;
+                let v = IVec3::from_array(p.lo).div_euclid(cells) - origin;
+                !((grown..mossed).contains(&(i - 1)) && rising.iter().any(|&(lo, hi)| v.cmpge(lo).all() && v.cmple(hi).all()))
+            });
         }
         // What the bushes, the ivy and the reeds bore on a picked column has been taken.
         if !picked.is_empty() {

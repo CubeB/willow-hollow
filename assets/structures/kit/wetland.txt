@@ -1,0 +1,71 @@
+# How the marshes build: the house kit's rules (settlements::kit says how a file reads).
+# Sizes are in voxels of 0.4 m.
+about: Wetland: reed huts on stilts, plank houses on stilts, and stone houses on raised plinths, all under reed.
+
+hut:
+  footprint: rect 2, round 2
+  width: 9 12
+  length: 11 14
+  walls: reed 2, wattle 1, plank 1
+  base: 0
+  wall height: 5 6
+  roof: reed
+  roof shape: gable 1, hip 2
+  round corners: 0.6
+  pitch: 1.1 1.4
+  overhang: 1 2
+  floor: boards
+  raised: 4 6
+  under: stilts
+  veranda: 2 3
+  smoke: hole
+  windows: 0 2
+  door width: 2 3
+
+timber:
+  footprint: rect 4, l 1 rich
+  width: 12 15
+  length: 15 21
+  walls: plank 2, frame 1
+  base: 0
+  wall height: 6 7
+  roof: reed
+  roof shape: gable 3, hip 1
+  pitch: 1.0 1.3
+  overhang: 1 2
+  floor: boards
+  raised: 4 6
+  under: stilts
+  veranda: 2 3
+  smoke: hole
+  windows: 1 3
+
+stone:
+  footprint: rect
+  width: 13 16
+  length: 17 23
+  thick: 2
+  walls: stone
+  base: 0
+  wall height: 6 7
+  roof: reed 2, slate 1 rich
+  roof shape: gable 2, hip 1
+  pitch: 1.0 1.2
+  overhang: 1 2
+  floor: flags
+  raised: 2 3
+  under: plinth
+  veranda: 1 2
+  smoke: chimney
+  windows: 2 3
+
+components:
+  door: rope-rail 2, boardwalk 1, net-rack 1, nothing 2
+  eaves: drying-nets 2, nothing 2
+  wall: eel-traps 1, reed-screen 1, reed-stack 1, nothing 2
+  corner: nothing
+  yard: punt 1, upturned-boat 1, reed-stack 1, driftwood-fence 1, net-rack 1, nothing 2
+  window: nothing
+  gable: nothing
+  ridge: nothing
+  roof: nothing

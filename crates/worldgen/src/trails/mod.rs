@@ -77,6 +77,12 @@ pub struct Pad {
     /// Directions the paths come in from, as `front`.
     pub arrivals: [f32; 4],
     pub arrival_count: u8,
+    /// A garden's bed, worked bare: the continent-local columns from the first corner to
+    /// the second, inclusive. None on a pad with no garden.
+    pub garden: Option<(glam::IVec2, glam::IVec2)>,
+    /// A town's market square (#203): paved all over, so worn all over, the paving
+    /// stamped on it with the settlement.
+    pub paved: bool,
 }
 
 impl Pad {
@@ -96,6 +102,8 @@ impl Pad {
             hub: 0.0,
             arrivals: [0.0; 4],
             arrival_count: 0,
+            garden: None,
+            paved: false,
         }
     }
 
@@ -103,6 +111,16 @@ impl Pad {
     /// the way from each path's arrival round to the door, in front of the door, and
     /// about the hub, ragged at the edges and broken up the less the place is used.
     pub fn worn(&self, seed: u32, p: Vec2, lx: i32, lz: i32) -> bool {
+        // A garden is dug over, so nothing wild grows in it.
+        if let Some((lo, hi)) = self.garden
+            && (lo.x..=hi.x).contains(&lx)
+            && (lo.y..=hi.y).contains(&lz)
+        {
+            return true;
+        }
+        if self.paved {
+            return true;
+        }
         if self.wear <= 0.0 {
             return false;
         }
@@ -172,6 +190,7 @@ pub enum Reason {
 }
 
 /// Voxels to write into the world, in continent-local coordinates.
+#[derive(Clone)]
 pub struct Stamp {
     pub lo: IVec3,
     pub hi: IVec3,
@@ -179,6 +198,9 @@ pub struct Stamp {
     /// Fine parts (lantern frames, chains and the like) in continent-local cells of
     /// 1/CELLS voxel. `lo` and `hi` cover these too.
     pub fine: Vec<PlantBox>,
+    /// What it is, if it changes over the years (#207): what reads it sees it through
+    /// `settlements::years::Lives::view`. None for what is the same in every year.
+    pub tag: Option<Box<crate::settlements::years::Tag>>,
 }
 
 /// Where a boat is tied up.
@@ -232,6 +254,8 @@ pub enum LanternCause {
     Approach,
     /// Somewhere along an otherwise plain stretch.
     Plain,
+    /// Along the main lane of a town or a large village.
+    Lane,
 }
 
 /// A lantern beside a trail.
@@ -269,14 +293,14 @@ pub struct Network {
     /// Filled in once the network itself is built (see [`crate::names::survey`]).
     pub names: crate::names::Gazetteer,
     tiles: HashMap<(i32, i32), Vec<TrailPoint>>,
-    pads: Vec<Pad>,
+    pub(crate) pads: Vec<Pad>,
     stamps: Vec<Stamp>,
     /// Lanterns chosen but not yet built, waiting until every trail is down so none
     /// is built on a trail laid after it: (its index in `lanterns`, voxels, fine parts).
-    held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
+    pub(crate) held_lanterns: Vec<(usize, Vec<(IVec3, Voxel)>, Vec<PlantBox>)>,
     /// Props laid about sites, held in the same way: voxels, fine parts, and the world
     /// columns they stand in.
-    held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
+    pub(crate) held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
     /// Every milestone, bench, waymark and cairn set beside a trail, and where: the
@@ -289,14 +313,68 @@ pub struct Network {
     pub delights: Vec<delights::Standing>,
     /// Delights chosen but not yet built, held like the markers.
     held_delights: Vec<delights::Placed>,
+    /// Every hamlet, village and town, placed before the landmarks: towns first, then
+    /// villages, then hamlets. Each stands about a green, a pad after the landmarks' own
+    /// (so [`Self::gather`] finds it), and is a node of the trails as a landmark is.
+    pub settlements: Vec<crate::settlements::Settlement>,
+    /// Where smoke leaves every lived-in home with a fire: the top of each chimney or
+    /// smoke hole, in continent-local voxels. The game sends chimney smoke up from here.
+    pub chimneys: Vec<Vec3>,
+    /// Every walk-in building of every settlement, in the order they were laid out:
+    /// settlement by settlement, each one's in the order its plots were chosen.
+    pub plots: Vec<crate::settlements::layout::Plot>,
+    /// How each settlement is laid out about its buildings, by index in `settlements`.
+    pub layouts: Vec<crate::settlements::layout::Layout>,
+    /// Where each settlement's tree stands, by index in `settlements`: the foot of its
+    /// trunk, continent-local, or None where it has none.
+    pub village_trees: Vec<Option<IVec3>>,
+    /// Where each settlement's tree has its ribbons tied, and the spare places under its
+    /// limbs a festival hangs its lanterns from (#207; see
+    /// [`crate::settlements::tree::Dressing`]), by index in `settlements`: continent-local
+    /// cells.
+    pub tree_knots: Vec<(Vec<IVec3>, Vec<IVec3>)>,
+    /// Every tree planted by hand, for [`crate::features::place`] to grow.
+    pub planted: Vec<crate::features::Planted>,
+    /// The ground trodden bare round each village tree.
+    pub rings: Vec<crate::settlements::tree::WornRing>,
+    /// Where a traveller may sleep the night: the middle of each guest bed of every
+    /// tavern, on its boards, in continent-local voxels (see
+    /// [`crate::settlements::special::Built::guest_beds_at`]).
+    pub guest_beds: Vec<Vec3>,
+    /// The notice boards on the walls of the taverns and guild houses (#207), the
+    /// player's to read: by index in `plots`, and where.
+    pub boards: Vec<crate::settlements::special::Board>,
+    /// The guilds that share each guild house (#207), by its index in `plots`.
+    pub guild_halls: Vec<(usize, Vec<crate::settlements::special::Guild>)>,
+    /// The quays the boats of the settlements tie up at, the river runs between partners'
+    /// quays and the fishing grounds off the ports (#205).
+    pub waterways: crate::settlements::quay::Waterways,
+    /// What the settlements keep for how they change over the years (#207).
+    pub years: crate::settlements::years::Record,
 }
 
 impl Network {
-    fn add_points(&mut self, points: &[TrailPoint]) {
+    pub(crate) fn add_points(&mut self, points: &[TrailPoint]) {
         for p in points {
             let key = ((p.x as i32).div_euclid(TILE), (p.z as i32).div_euclid(TILE));
             self.tiles.entry(key).or_default().push(*p);
         }
+    }
+
+    /// Takes out one trail point at each of `at` (continent-local x and z, exactly as it
+    /// was laid) and gives back those found: for a stretch of way laid anew, as a town
+    /// does to bring a way in square through its gate (#203).
+    pub(crate) fn take_points(&mut self, at: &[Vec2]) -> Vec<TrailPoint> {
+        let mut out = Vec::new();
+        for p in at {
+            let key = ((p.x as i32).div_euclid(TILE), (p.y as i32).div_euclid(TILE));
+            if let Some(tile) = self.tiles.get_mut(&key)
+                && let Some(k) = tile.iter().position(|t| t.x == p.x && t.z == p.y)
+            {
+                out.push(tile.remove(k));
+            }
+        }
+        out
     }
 
     fn add_stamp(&mut self, voxels: Vec<(IVec3, Voxel)>) {
@@ -304,7 +382,12 @@ impl Network {
     }
 
     /// A stamp with fine parts, in continent-local cells.
-    fn add_stamp_with(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
+    pub(crate) fn add_stamp_with(&mut self, mut voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>) {
+        // Models are built in hash maps, so their voxels come in a different order each
+        // run. The coarse rings and the far boxes keep whichever voxel of a cell comes
+        // last, so put them in one order; a stable sort leaves any voxel written twice at
+        // one place in the order its builder meant.
+        voxels.sort_by_key(|&(p, _)| (p.y, p.z, p.x));
         // Bounds from the voxels, or for a model of fine parts alone, from those.
         let first = match (voxels.first(), fine.first()) {
             (Some(&(p, _)), _) => p,
@@ -327,7 +410,16 @@ impl Network {
                 self.stamp_index.entry((cx, cz)).or_default().push(id);
             }
         }
-        self.stamps.push(Stamp { lo, hi, voxels, fine });
+        self.stamps.push(Stamp { lo, hi, voxels, fine, tag: None });
+    }
+
+    /// [`Self::add_stamp_with`] for what changes over the years (#207), with its `tag`.
+    pub(crate) fn add_stamp_tagged(&mut self, voxels: Vec<(IVec3, Voxel)>, fine: Vec<PlantBox>, tag: crate::settlements::years::Tag) {
+        let n = self.stamps.len();
+        self.add_stamp_with(voxels, fine);
+        if let Some(s) = self.stamps.get_mut(n) {
+            s.tag = Some(Box::new(tag));
+        }
     }
 
     /// Trail points and pads that can affect the square from `lo` to `hi`.
@@ -365,6 +457,11 @@ impl Network {
 
     pub fn stamp_count(&self) -> usize {
         self.stamps.len()
+    }
+
+    /// Every stamp, in the order they were laid: for what is drawn of them from afar.
+    pub fn stamps(&self) -> impl Iterator<Item = &Stamp> {
+        self.stamps.iter()
     }
 
     /// Every trail point; for tests and tools.

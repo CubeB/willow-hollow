@@ -12,7 +12,7 @@ use glam::IVec3;
 use voxel::{AIR, Voxel};
 
 use super::{
-    parts, props,
+    cloth, parts, props,
     shape::{Rng, Shape},
 };
 use crate::{biome::Biome, materials as mat, scale::m};
@@ -231,7 +231,7 @@ fn scatter(s: &mut Shape, rng: &mut Rng, p: &Palette, count: i32, reach: i32) {
     }
 }
 
-fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
+fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette, seed: u32) {
     footing(s, (-7, -7), (7, 7), || p.stone_dark);
     // A paved platform with a step up to the shrine itself.
     cuboid(s, v(-7, 0, -7), v(7, 0, 7), |_| p.stone);
@@ -242,6 +242,8 @@ fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
             }
         }
     }
+    // The height of a gate's tie beam, for the ribbons tied to it.
+    let mut beam = None;
     match rng.int(0, 2) {
         // A stone niche: four pillars with capitals under a gabled roof, an altar between.
         0 => {
@@ -278,6 +280,7 @@ fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
                 cuboid(s, v(x, 2, -1), v(x + 1, h, 0), |_| p.accent);
             }
             cuboid(s, v(-5, h - 3, -1), v(5, h - 3, 0), |_| p.accent);
+            beam = Some(h - 3);
             for x in -9i32..=9 {
                 let up = (x.abs() >= 8) as i32 + (x.abs() >= 9) as i32;
                 cuboid(s, v(x, h + 1 + up, -1), v(x, h + 2 + up, 0), |_| p.wood);
@@ -304,6 +307,33 @@ fn shrine(s: &mut Shape, rng: &mut Rng, p: &Palette) {
         }
     }
     scatter(s, rng, p, 6, 9);
+    // The ribbons draw on a stream of their own, so the stonework weathers as it did
+    // before there were any.
+    if let Some(y) = beam {
+        ribbons(s, &mut Rng::new(seed ^ 0x7269_6262), p, y);
+    }
+}
+
+/// Ribbons tied under a shrine gate's tie beam (at voxel layer `y`) by those who passed
+/// through it, a hand or two apart across the way, in the colours prayer flags are dyed
+/// and never the gate's own, each of its own length and streaming in the wind on its own.
+fn ribbons(s: &mut Shape, rng: &mut Rng, p: &Palette, y: i32) {
+    let colours: Vec<Voxel> = [mat::CLOTH_BLUE, mat::CLOTH_PALE, mat::CLOTH_RED, mat::CLOTH_GREEN, mat::CLOTH_YELLOW].into_iter().filter(|&c| c != p.accent).collect();
+    let n = rng.int(4, 6);
+    let mut last = None;
+    for k in 0..n {
+        // Across the middle of the way, in cells: the posts' inner faces are at -16 and 20.
+        let x = -11 + k * 24 / (n - 1) + rng.int(-1, 1);
+        let z = [-3, -1, 1][rng.int(0, 2) as usize];
+        let mut colour = colours[rng.int(0, colours.len() as i32 - 1) as usize];
+        if Some(colour) == last {
+            colour = colours[(colours.iter().position(|&c| c == colour).unwrap_or(0) + 1) % colours.len()];
+        }
+        last = Some(colour);
+        for b in cloth::ribbon(IVec3::new(x, y * voxel::mesh::CELLS, z), rng.int(8, 13), colour, rng.next_u32()) {
+            s.add_fine(b);
+        }
+    }
 }
 
 /// How many treads make one turn of the stair, and the radii it is laid across.
@@ -496,6 +526,38 @@ fn camp(s: &mut Shape, rng: &mut Rng, p: &Palette) {
     // The tent's mouth and the floor inside it.
     s.keep_clear(v(tx - 5, 0, tz - 5), v(tx + 5, 6, tz + len - 2));
     lamp_post(s, rng, p, 10, 10, 9);
+    if crate::settlements::Region::of(p.biome) == crate::settlements::Region::Desert {
+        sail_shade(s, rng, p);
+    }
+}
+
+/// In hot country, a sail shade over the bench by the fire: a sheet of cloth tied level at
+/// its corners to four poles, well over the head of anyone sitting under it. (Tied level,
+/// it lies smooth; a sloping sheet is built in steps a cell high.)
+fn sail_shade(s: &mut Shape, rng: &mut Rng, p: &Palette) {
+    use voxel::mesh::CELLS;
+    let colour = if rng.unit() < 0.6 { mat::CLOTH_PALE } else { p.accent };
+    // From beside the fire ring back over the bench, in cells: about 4.4 m by 2.8 m.
+    let (x0, x1, z0, z1) = (-9 * CELLS, 2 * CELLS, 5 * CELLS, 12 * CELLS);
+    let high = rng.int(24, 27);
+    let ties = [IVec3::new(x0, high, z0), IVec3::new(x1, high, z0), IVec3::new(x1, high, z1), IVec3::new(x0, high, z1)];
+    for t in &ties {
+        // A pole just outside the corner, sunk a little, standing a hand over the tie.
+        let (px, pz) = (if t.x == x0 { t.x - 2 } else { t.x }, if t.z == z0 { t.z - 2 } else { t.z });
+        s.add_fine(voxel::mesh::PlantBox {
+            lo: [px, -2, pz],
+            hi: [px + 2, t.y + 2, pz + 2],
+            voxel: p.wood,
+            sway_lo: false,
+            sway_hi: false,
+            thin: 0,
+            season: 0,
+            flap: 0,
+        });
+    }
+    for b in cloth::sheet(ties, colour) {
+        s.add_fine(b);
+    }
 }
 
 fn ruins(s: &mut Shape, rng: &mut Rng, p: &Palette) {
@@ -1008,7 +1070,7 @@ fn generate_as(kind: Landmark, palette: &Palette, seed: u32, length: i32, tower:
     let mut rng = Rng::new(seed ^ (kind as u32).wrapping_mul(0x9e37_79b9));
     let mut s = Shape::raw();
     match kind {
-        Landmark::Shrine => shrine(&mut s, &mut rng, palette),
+        Landmark::Shrine => shrine(&mut s, &mut rng, palette, seed),
         Landmark::Lookout => lookout(&mut s, &mut rng, palette),
         Landmark::Camp => camp(&mut s, &mut rng, palette),
         Landmark::Ruins if tower => ruined_tower(&mut s, &mut rng, palette),

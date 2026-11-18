@@ -11,7 +11,13 @@
 //! whatever the lie of the land. A ring of them flares from its foot, tall where they
 //! leave the trunk and sinking as they run out over the ground, in and out of the soil,
 //! so the foot of a redwood or an ancient oak is a thing to walk round and step over. The
-//! bigger the trunk the taller, longer and more of them; a trunk of ordinary size keeps
+//! bigger the trunk the taller, longer and more of them.
+//!
+//! A large tree short of that (a big oak or maple, a yew, a tall pine) has a smaller
+//! flare: a few short roots that leave the trunk a little way up it and step down into the
+//! ground within a metre or two, among any bared on a slope. Under both, the trunk swells
+//! as it meets the ground, a collar that is widest at the soil and follows it down a
+//! slope, so the tree stands anchored rather than stuck in. A trunk of ordinary size keeps
 //! to the roots above.
 
 use glam::{IVec3, Vec2};
@@ -29,6 +35,11 @@ const STEPS: usize = 28;
 /// Radius of trunk, in voxels at the ground, from which a tree stands on buttresses: a
 /// little over a metre across. Every young or middling tree is narrower than this.
 const BUTTRESSED: f32 = 2.9;
+/// Radius of trunk from which a tree's foot flares: the bigger half of the oaks and
+/// maples, the yews and the tall pines, but no birch, spruce or holly.
+const FLARED: f32 = 2.2;
+/// Directions round the trunk the ground is measured in, for its collar.
+const COLLAR_WAYS: usize = 16;
 /// The radius at which buttresses are as big as they get: a redwood's.
 const MIGHTY: f32 = 7.5;
 /// Most roots a tree of ordinary size bares on a slope, and how far they may run.
@@ -56,11 +67,14 @@ struct Root {
     ground: [i8; STEPS + 1],
     /// How far it turns aside per voxel of its run, in radians: a buttress wanders.
     bend: f32,
-    /// A buttress only: how high it stands against the trunk, in voxels above the ground,
-    /// and where along it the soil starts to come over it and let it go (a phase, in
-    /// radians).
+    /// A buttress or a flare only (0 for a root bared on a slope): how high it stands
+    /// against the trunk, in voxels above the ground, and where along it the soil starts to
+    /// come over it and let it go (a phase, in radians).
     fin: f32,
     dip: f32,
+    /// Whether it goes under the soil and comes up again on its way out, as a long
+    /// buttress does; a short flare only sinks into the ground at its end.
+    waves: bool,
 }
 
 impl Root {
@@ -79,16 +93,52 @@ impl Root {
     }
 }
 
+/// The swelling of a big trunk where it meets the ground: from `radius` out to `radius +
+/// swell` round `centre`, standing `height` voxels up the trunk at the bark and sinking
+/// into the soil at its edge, concave like the foot of a real trunk.
+#[derive(Clone, Copy, Debug)]
+struct Collar {
+    centre: Vec2,
+    radius: f32,
+    swell: f32,
+    height: f32,
+    /// The ground's top at the collar's edge, a way at a time round from +x, against the
+    /// tree's own ground: the collar follows it down a slope.
+    ground: [i8; COLLAR_WAYS],
+}
+
+impl Collar {
+    /// The top of the collar over the column whose middle is `p`, and the ground there,
+    /// against the tree's own ground; None outside it.
+    fn at(&self, p: Vec2) -> Option<(f32, f32)> {
+        let rel = p - self.centre;
+        let t = (rel.length() - self.radius) / self.swell;
+        if t >= 1.0 {
+            return None;
+        }
+        let t = t.max(0.0);
+        // The ground between the two ways measured either side, and between the trunk's
+        // own ground at the bark and the collar's edge.
+        let a = rel.y.atan2(rel.x).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * COLLAR_WAYS as f32;
+        let (i, f) = (a.floor() as usize % COLLAR_WAYS, a.fract());
+        let edge = self.ground[i] as f32 * (1.0 - f) + self.ground[(i + 1) % COLLAR_WAYS] as f32 * f;
+        Some((self.height * (1.0 - t) * (1.0 - t), edge * t))
+    }
+}
+
 /// The roots a placed tree shows, if any.
 #[derive(Clone, Copy, Debug)]
 pub struct Roots {
     list: [Option<Root>; MOST],
     bark: Voxel,
-    /// Buttresses, drawn by [`Roots::voxels`] their own way and with no strands.
-    buttress: bool,
-    /// Buttresses only: how far they spread from the tree, in voxels each way across the
-    /// ground, past its model's own reach (0 for roots, which keep within the model).
+    /// Buttresses and flares only: how far they spread from the tree, in voxels each way
+    /// across the ground, past its model's own reach (0 for roots, which keep within the
+    /// model).
     spread: u8,
+    /// A large tree's collar, which it has whenever it stands on buttresses or flares (the
+    /// roots in the list with a `fin`, which [`Roots::voxels`] draws their own way and with
+    /// no strands).
+    collar: Option<Collar>,
 }
 
 /// Whether a species shows roots: trees with a woody trunk. Palms hold the sand with a
@@ -117,7 +167,8 @@ fn rooted(species: Species) -> bool {
     )
 }
 
-fn is_bark(v: Voxel) -> bool {
+/// Whether a voxel of a tree's model is its bark, the wood of its trunk and limbs.
+pub fn is_bark(v: Voxel) -> bool {
     matches!(
         v,
         mat::BARK_OAK
@@ -134,16 +185,10 @@ fn is_bark(v: Voxel) -> bool {
     )
 }
 
-/// Works out the roots of a tree standing at `pos` (its origin, on the first voxel above
-/// the ground). `ground` gives the top of the ground at a world column, or None over
-/// water. `room` is how far from `pos` the roots of a big tree may spread: as far as the
-/// chunks around look for the trees that reach into them. None where the ground is too
-/// level for any to show.
-pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IVec3, seed: u32, room: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<Roots> {
-    if !rooted(species) {
-        return None;
-    }
-    // The foot of the trunk: where it stands and how thick it is.
+/// The foot of a tree's trunk, from its model turned by `turns`: the middle of the bark
+/// at the ground, against the model's origin; how far round it is, in voxels; and the bark.
+/// None for a model with no bark there.
+pub fn foot(lib: &Library, species: Species, variant: usize, turns: u32) -> Option<(Vec2, f32, Voxel)> {
     let t = lib.get(species, variant);
     let row = t.voxels.partition_point(|(p, _)| p.y < 0);
     let (mut sum, mut n, mut bark) = (Vec2::ZERO, 0, None);
@@ -155,15 +200,29 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
             bark = bark.or(Some(v));
         }
     }
-    // Roots wear the trunk's own bark, so a birch's are pale like its trunk.
     let bark = bark?;
-    let centre = Vec2::new(pos.x as f32, pos.z as f32) + sum / n as f32;
-    let radius = (n as f32 / std::f32::consts::PI).sqrt();
+    Some((sum / n as f32, (n as f32 / std::f32::consts::PI).sqrt(), bark))
+}
+
+/// Works out the roots of a tree standing at `pos` (its origin, on the first voxel above
+/// the ground). `ground` gives the top of the ground at a world column, or None over
+/// water. `room` is how far from `pos` the roots of a big tree may spread: as far as the
+/// chunks around look for the trees that reach into them. None where the ground is too
+/// level for any to show.
+pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IVec3, seed: u32, room: i32, ground: impl Fn(i32, i32) -> Option<i32>) -> Option<Roots> {
+    if !rooted(species) {
+        return None;
+    }
+    // The foot of the trunk: where it stands and how thick it is. Roots wear the trunk's
+    // own bark, so a birch's are pale like its trunk.
+    let (offset, radius, bark) = foot(lib, species, variant, turns)?;
+    let centre = Vec2::new(pos.x as f32, pos.z as f32) + offset;
     let base = pos.y - 1;
     let ground_at = |p: Vec2| ground(p.x.floor() as i32, p.y.floor() as i32).map(|g| g - base);
     if radius >= BUTTRESSED {
         return buttresses(room, centre, radius, bark, pos, seed, ground_at);
     }
+    let flared = radius >= FLARED;
 
     // How steeply the ground falls away from the trunk each way round.
     const WAYS: usize = 16;
@@ -178,13 +237,13 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
             (down, steepest) = (a, s);
         }
     }
-    if steepest < BURIED {
+    if steepest < BURIED && !flared {
         return None;
     }
 
     let mut rng = Rng::new(hash3(seed ^ 0x7007, pos.x, pos.y, pos.z));
     // Steeper ground bares more of them.
-    let want = (1 + ((steepest - BURIED) / 0.15) as i32 + rng.int(0, 1)).min(SLOPE_MOST as i32) as usize;
+    let want = if steepest < BURIED { 0 } else { (1 + ((steepest - BURIED) / 0.15) as i32 + rng.int(0, 1)).min(SLOPE_MOST as i32) as usize };
     let mut list = [None; MOST];
     let mut found = 0;
     // Downhill first, then fanning out to either side.
@@ -198,11 +257,11 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
         }
         let dir = heading(a);
         let from = centre + dir * (radius - 0.5).max(0.5);
-        let mut root = Root { from, dir, wood: 0, len: 0, girth: (0.55 + radius * 0.2).min(1.5), ground: [0; STEPS + 1], bend: 0.0, fin: 0.0, dip: 0.0 };
+        let mut root = Root { from, dir, wood: 0, len: 0, girth: (0.55 + radius * 0.2).min(1.5), ground: [0; STEPS + 1], bend: 0.0, fin: 0.0, dip: 0.0, waves: false };
         let mut len = 0;
         let mut last = 0;
         // Within the model's reach, or a chunk the root runs into would not know of it.
-        let most = ((t.reach as f32 - radius - 2.0).max(0.0) as usize).min(SLOPE_STEPS);
+        let most = ((lib.get(species, variant).reach as f32 - radius - 2.0).max(0.0) as usize).min(SLOPE_STEPS);
         for k in 0..=most {
             let Some(g) = ground_at(root.at(k as f32)) else { break };
             // A root follows the ground down, but stops at a rise, a sheer drop or water.
@@ -223,7 +282,82 @@ pub fn find(lib: &Library, species: Species, variant: usize, turns: u32, pos: IV
         list[found] = Some(root);
         found += 1;
     }
-    (found > 0).then_some(Roots { list, bark, buttress: false, spread: 0 })
+    if !flared {
+        return (found > 0).then_some(Roots { list, bark, spread: 0, collar: None });
+    }
+
+    // A large tree's flare: a few short roots round the foot, between those bared down
+    // the slope, if any, and the collar under them all.
+    use std::f32::consts::TAU;
+    let bared: Vec<Vec2> = list.iter().flatten().map(|r: &Root| r.dir).collect();
+    let mut rng = Rng::new(hash3(seed ^ 0xf1a4, pos.x, pos.y, pos.z));
+    let count = 3 + rng.int(0, 2) as usize;
+    let a0 = rng.range(0.0, TAU);
+    for k in 0..count {
+        let a = a0 + (k as f32 + rng.range(-0.3, 0.3)) / count as f32 * TAU;
+        let dir = Vec2::new(a.cos(), a.sin());
+        let girth = 0.55 + rng.range(0.0, 0.3);
+        let fin = radius * rng.range(0.7, 1.0) + 1.0;
+        let length = radius * rng.range(0.8, 1.2) + 2.0;
+        let bend = rng.range(-0.08, 0.08);
+        // Not where a root already runs down the slope, nor past the slots there are.
+        if found == MOST || bared.iter().any(|b| b.dot(dir) > 0.85) {
+            continue;
+        }
+        let from = centre + dir * (radius - 0.8).max(0.5);
+        let mut root = Root { from, dir, wood: 0, len: 0, girth, ground: [0; STEPS + 1], bend, fin, dip: 0.0, waves: false };
+        let most = (room as f32 - from.distance(Vec2::new(pos.x as f32, pos.z as f32)) - girth - 1.5).clamp(0.0, STEPS as f32);
+        let len = lay(&mut root, length.min(most) as usize, &ground_at);
+        if len < 2 {
+            continue;
+        }
+        (root.wood, root.len) = (len as u8, len as u8);
+        list[found] = Some(root);
+        found += 1;
+    }
+    let collar = collar(centre, radius, radius * 0.8 + 1.2, radius * 0.45 + 0.8, &ground_at);
+    Some(Roots { list, bark, spread: spread(&list, &collar, pos), collar: Some(collar) })
+}
+
+/// Measures the ground under `root` a voxel at a time, out to `want` voxels from where it
+/// leaves the trunk, and how far it can run: over a hump of the ground or down a bank, but
+/// not up a wall, over a drop or into water. Down a hillside it follows the ground a long
+/// way: every voxel of it lies on its own column's ground, which that column's chunks hold.
+fn lay(root: &mut Root, want: usize, ground_at: &impl Fn(Vec2) -> Option<i32>) -> usize {
+    let (mut last, mut len) = (0, 0);
+    for s in 0..=want {
+        let Some(g) = ground_at(root.at(s as f32)) else { break };
+        if s > 0 && (g > last + 1 || g < last - 2) || !(-10..=4).contains(&g) {
+            break;
+        }
+        root.ground[s] = g as i8;
+        last = g;
+        len = s;
+    }
+    len
+}
+
+/// How far a tree's buttresses or flares and its collar spread from its `pos`, each way
+/// across the ground (see [`Roots::spread`]).
+fn spread(list: &[Option<Root>], collar: &Collar, pos: IVec3) -> u8 {
+    let spread = list.iter().flatten().filter(|r| r.fin > 0.0).map(|r: &Root| {
+        let end = r.at(r.len as f32);
+        (end.x - pos.x as f32).abs().max((end.y - pos.z as f32).abs()) + r.girth + 1.5
+    });
+    let off = (collar.centre - Vec2::new(pos.x as f32, pos.z as f32)).abs().max_element();
+    spread.fold(off + collar.radius + collar.swell + 1.0, f32::max).ceil() as u8
+}
+
+/// The collar of a trunk `radius` voxels round `centre`, standing `height` up it and
+/// `swell` out from it, with the ground measured round its edge.
+fn collar(centre: Vec2, radius: f32, height: f32, swell: f32, ground_at: &impl Fn(Vec2) -> Option<i32>) -> Collar {
+    let mut ground = [0i8; COLLAR_WAYS];
+    for (k, g) in ground.iter_mut().enumerate() {
+        let a = k as f32 / COLLAR_WAYS as f32 * std::f32::consts::TAU;
+        // Over water, or off the edge of a drop, it stays at the tree's own ground.
+        *g = ground_at(centre + Vec2::new(a.cos(), a.sin()) * (radius + swell)).map_or(0, |g| g.clamp(-8, 4)) as i8;
+    }
+    Collar { centre, radius, swell, height, ground }
 }
 
 /// The buttresses of a big tree, whose trunk at the ground is `radius` voxels round
@@ -258,20 +392,9 @@ fn buttresses(room: i32, centre: Vec2, radius: f32, bark: Voxel, pos: IVec3, see
             bend: rng.range(-0.05, 0.05),
             fin: radius * rng.range(0.7, 1.1) + 1.5,
             dip: rng.range(0.0, TAU),
+            waves: true,
         };
-        let (mut last, mut len) = (0, 0);
-        for s in 0..=want {
-            let Some(g) = ground_at(root.at(s as f32)) else { break };
-            // Over a hump of the ground or down a bank, but not up a wall, over a drop or
-            // into water. Down a hillside it follows the ground a long way: every voxel
-            // of it lies on its own column's ground, which that column's chunks hold.
-            if s > 0 && (g > last + 1 || g < last - 2) || !(-10..=4).contains(&g) {
-                break;
-            }
-            root.ground[s] = g as i8;
-            last = g;
-            len = s;
-        }
+        let len = lay(&mut root, want, &ground_at);
         if len < 3 {
             continue;
         }
@@ -280,29 +403,29 @@ fn buttresses(room: i32, centre: Vec2, radius: f32, bark: Voxel, pos: IVec3, see
         list[found] = Some(root);
         found += 1;
     }
-    let spread = list.iter().flatten().map(|r: &Root| {
-        let end = r.at(r.len as f32);
-        (end.x - pos.x as f32).abs().max((end.y - pos.z as f32).abs()) + r.girth + 1.5
-    });
-    let spread = spread.fold(0.0f32, f32::max).ceil() as u8;
-    (found > 0).then_some(Roots { list, bark, buttress: true, spread })
+    let collar = collar(centre, radius, (radius * 0.9 + 2.0).min(9.0), (radius * 0.5 + 1.5).min(6.0), &ground_at);
+    Some(Roots { list, bark, spread: spread(&list, &collar, pos), collar: Some(collar) })
 }
 
 /// One buttress's voxels. Seen across it, it is a ridge rounded over the top, as high as
 /// it stands and as broad as its girth; along it, a plate high up the trunk that falls
 /// away fast and runs on low over the ground. Past the middle of it the soil comes over
-/// it and lets it go again every few metres, until it goes under for good. It is built
-/// down into the top of the ground a voxel, so where the ground falls away beside it no
-/// daylight shows under its edge.
+/// it and lets it go again every few metres, until it goes under for good; a short flare
+/// just sinks into the soil toward its end. It is built down into the top of the ground a
+/// voxel, so where the ground falls away beside it no daylight shows under its edge.
 fn buttress_voxels(root: &Root, base: i32, bark: Voxel, set: &mut impl FnMut(IVec3, Voxel)) {
     let len = root.len as f32;
     let mut t = 0.0;
     while t <= len {
         let u = t / len;
-        let fin = root.fin * (1.0 - u).powf(2.2);
+        let fin = root.fin * (1.0 - u).powf(1.6);
         let ridge = (root.girth * 0.9 + 0.8) * (1.0 - 0.5 * u);
-        let wave = 0.5 + 0.5 * (t * 0.9 + root.dip).sin();
-        let sunk = (smooth(0.4, 0.7, u) * wave).max(smooth(0.9, 1.0, u));
+        let sunk = if root.waves {
+            let wave = 0.5 + 0.5 * (t * 0.9 + root.dip).sin();
+            (smooth(0.4, 0.7, u) * wave).max(smooth(0.9, 1.0, u))
+        } else {
+            smooth(0.55, 1.0, u)
+        };
         let high = fin.max(ridge) * (1.0 - sunk) - 0.8 * sunk;
         if high >= 0.5 {
             let half = 0.5 + root.girth * (1.0 - u).powf(0.7);
@@ -328,6 +451,35 @@ fn buttress_voxels(root: &Root, base: i32, bark: Voxel, set: &mut impl FnMut(IVe
     }
 }
 
+/// A collar's voxels: each column of it from a little into the ground up to where the
+/// swelling trunk stands over it. It rises into the roots that leave the trunk along
+/// `ways` and dips between them, so the foot is lobed rather than a plinth. Built two
+/// voxels down, so on a slope, where the ground is only measured round the edge, no
+/// daylight shows under it.
+fn collar_voxels(c: &Collar, base: i32, bark: Voxel, ways: &[Vec2], set: &mut impl FnMut(IVec3, Voxel)) {
+    let r = c.radius + c.swell;
+    for vz in (c.centre.y - r).floor() as i32..=(c.centre.y + r).floor() as i32 {
+        for vx in (c.centre.x - r).floor() as i32..=(c.centre.x + r).floor() as i32 {
+            let p = Vec2::new(vx as f32 + 0.5, vz as f32 + 0.5);
+            // Within the trunk, the trunk is there already.
+            if p.distance(c.centre) < c.radius - 1.0 {
+                continue;
+            }
+            let Some((top, floor)) = c.at(p) else { continue };
+            let toward = (p - c.centre).normalize_or_zero();
+            let lobe = ways.iter().map(|w| w.dot(toward).max(0.0).powi(4)).fold(0.0f32, f32::max);
+            let top = top * if ways.is_empty() { 0.7 } else { 0.45 + 0.55 * lobe };
+            let (top, floor) = (base + top.round() as i32, base + floor.round() as i32);
+            if top <= floor {
+                continue;
+            }
+            for vy in floor - 2..=top {
+                set(IVec3::new(vx, vy, vz), bark);
+            }
+        }
+    }
+}
+
 fn smooth(lo: f32, hi: f32, x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -340,16 +492,35 @@ impl Roots {
         self.spread as i32
     }
 
+    /// Whether the tree's foot flares: a large tree's, on a collar, with buttresses or a
+    /// few short flaring roots.
+    pub fn flared(&self) -> bool {
+        self.collar.is_some()
+    }
+
+    /// A flaring foot's collar: the middle of the trunk, in world voxels across the ground,
+    /// and how far out from it the collar comes.
+    pub fn collar(&self) -> Option<(Vec2, f32)> {
+        self.collar.map(|c| (c.centre, c.radius + c.swell))
+    }
+
     /// The wooden voxels of the roots, in world positions.
     pub fn voxels(&self, pos: IVec3, mut set: impl FnMut(IVec3, Voxel)) {
         let base = pos.y - 1;
-        if self.buttress {
-            for root in self.list.iter().flatten() {
-                buttress_voxels(root, base, self.bark, &mut set);
+        if let Some(c) = &self.collar {
+            let mut ways = [Vec2::ZERO; MOST];
+            let mut n = 0;
+            for root in self.list.iter().flatten().filter(|r| r.fin > 0.0) {
+                ways[n] = root.dir;
+                n += 1;
             }
-            return;
+            collar_voxels(c, base, self.bark, &ways[..n], &mut set);
         }
         for root in self.list.iter().flatten() {
+            if root.fin > 0.0 {
+                buttress_voxels(root, base, self.bark, &mut set);
+                continue;
+            }
             let wood = root.wood as f32;
             let mut t = 0.0;
             while t <= wood {
@@ -378,16 +549,13 @@ impl Roots {
         }
     }
 
-    /// The fine strands the roots end in, in world cells. Buttresses have none: they go
-    /// into the ground whole.
+    /// The fine strands the roots end in, in world cells. Buttresses and flares have none:
+    /// they go into the ground whole.
     pub fn strands(&self, pos: IVec3, out: &mut Vec<PlantBox>) {
-        if self.buttress {
-            return;
-        }
         let base = pos.y - 1;
         let wood = self.bark;
         let step = 1.0 / CELLS as f32;
-        for root in self.list.iter().flatten() {
+        for root in self.list.iter().flatten().filter(|r| r.fin == 0.0) {
             let (from, to) = (root.wood as f32 + 0.25, root.len as f32 + 0.5);
             let mut prev: Option<PlantBox> = None;
             let mut t = from;
@@ -449,7 +617,7 @@ mod tests {
         let p = out.trees.iter().find(|p| p.pos == at).expect("the redwood is where it was");
         assert_eq!(p.species, Species::Redwood);
         let roots = p.roots.expect("a redwood always shows its buttresses");
-        assert!(roots.buttress);
+        assert!(roots.flared());
         assert!(roots.list.iter().flatten().count() >= 5, "a ring of them");
         // They reach well out from the trunk, and stand above the ground out there, then
         // go under it.
@@ -462,8 +630,8 @@ mod tests {
         });
         assert!(out_there.len() > 20, "only {} columns of buttress show beyond 5 m of the trunk", out_there.len());
         // And none of a tree of ordinary size: they keep the roots they had.
-        let small: Vec<_> = out.trees.iter().filter(|p| matches!(p.species, Species::Birch | Species::Spruce | Species::Holly | Species::Yew)).collect();
-        assert!(small.iter().all(|p| p.roots.is_none_or(|r| !r.buttress)));
+        let small: Vec<_> = out.trees.iter().filter(|p| matches!(p.species, Species::Birch | Species::Spruce | Species::Holly)).collect();
+        assert!(small.iter().all(|p| p.roots.is_none_or(|r| !r.flared())));
     }
 
     #[test]
@@ -485,7 +653,7 @@ mod tests {
                     rooted_trees += 1;
                     // The ground really falls away from a tree of ordinary size that
                     // shows roots. A big one stands on buttresses anywhere.
-                    if !roots.buttress {
+                    if !roots.flared() {
                         let g = |x: i32, z: i32| w.column(x, z).top();
                         let lowest = (-6..=6).flat_map(|dx| (-6..=6).map(move |dz| (dx, dz))).map(|(dx, dz)| g(p.pos.x + dx, p.pos.z + dz)).min().unwrap();
                         assert!(p.pos.y - 1 - lowest >= 2, "{:?} at {} shows roots on level ground", p.species, p.pos);
@@ -512,5 +680,67 @@ mod tests {
         }
         assert!(rooted_trees > 0 && checked > 0, "no tree showed roots");
         assert!(rooted_trees * 3 < trees, "{rooted_trees} of {trees} trees show roots");
+    }
+
+    #[test]
+    fn large_trees_flare_at_the_foot_and_the_flares_agree_across_chunks() {
+        let w = GameWorld::with_config(11, SimConfig { size: 256 });
+        let centre = crate::macro_layout::MACRO_SIZE / CHUNK / 2;
+        let mut outputs = HashMap::new();
+        let mut seen = HashSet::new();
+        let (mut flared, mut crossing, mut checked) = (0, 0, 0);
+        'search: for cx in (centre - 200..centre + 200).step_by(5) {
+            for cz in (centre - 200..centre + 200).step_by(5) {
+                let out = w.generate_column(cx, cz);
+                for p in &out.trees {
+                    let Some(roots) = p.roots.filter(|r| r.collar.is_some()) else { continue };
+                    if !seen.insert(p.pos) {
+                        continue;
+                    }
+                    flared += 1;
+                    let mut voxels = Vec::new();
+                    roots.voxels(p.pos, |q, _| voxels.push(q));
+                    // It stands up out of the ground, not only under it.
+                    assert!(voxels.iter().any(|q| q.y > w.column(q.x, q.z).top()), "the flare of {:?} at {} is all underground", p.species, p.pos);
+                    // Every voxel is there in the chunk column that holds it, whichever
+                    // column the tree stands in.
+                    let home = (p.pos.x.div_euclid(CHUNK), p.pos.z.div_euclid(CHUNK));
+                    let mut crosses = false;
+                    for q in voxels {
+                        let (ox, oz) = (q.x.div_euclid(CHUNK), q.z.div_euclid(CHUNK));
+                        crosses |= (ox, oz) != home;
+                        let held = outputs.entry((ox, oz)).or_insert_with(|| w.generate_column(ox, oz));
+                        let got = ColumnVoxels::new(&held.chunks, ox * CHUNK - 1, oz * CHUNK - 1).voxel(q);
+                        assert_ne!(got, AIR, "flare voxel of {:?} at {} missing at {q}", p.species, p.pos);
+                        checked += 1;
+                    }
+                    crossing += crosses as u32;
+                    if crossing >= 6 && flared >= 10 {
+                        break 'search;
+                    }
+                }
+            }
+        }
+        assert!(crossing >= 6 && flared >= 10, "only {flared} trees flared, {crossing} of them across a chunk border ({checked} voxels)");
+    }
+
+    #[test]
+    fn a_collar_follows_the_ground_down_a_slope() {
+        // A trunk three voxels round on ground falling a voxel for every two toward +x.
+        let ground_at = |p: Vec2| Some(-(p.x / 2.0).floor() as i32);
+        let c = collar(Vec2::new(0.5, 0.5), 3.0, 3.6, 2.0, &ground_at);
+        let mut lowest: HashMap<(i32, i32), i32> = HashMap::new();
+        collar_voxels(&c, 100, mat::BARK_OAK, &[], &mut |q, _| {
+            let l = lowest.entry((q.x, q.z)).or_insert(q.y);
+            *l = (*l).min(q.y);
+        });
+        assert!(!lowest.is_empty());
+        // Every column of it reaches down into the ground under it, downhill or up.
+        for (&(x, z), &low) in &lowest {
+            let g = 100 + ground_at(Vec2::new(x as f32 + 0.5, z as f32 + 0.5)).unwrap();
+            assert!(low <= g, "the collar at {x},{z} stops at {low}, over the ground at {g}");
+        }
+        // And it reaches further down on the downhill side than up.
+        assert!(lowest[&(4, 0)] < lowest[&(-3, 0)]);
     }
 }

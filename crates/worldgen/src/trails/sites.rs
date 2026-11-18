@@ -11,8 +11,9 @@ use crate::{
     surface::MIN_RIVER_Q,
 };
 
-/// Fewest voxels between any two landmarks.
-const MIN_GAP: f32 = m(720.0);
+/// Fewest voxels between any two landmarks, and between a landmark and a village or
+/// town it is not part of (half that from a hamlet).
+pub(crate) const MIN_GAP: f32 = m(720.0);
 /// Square kilometres of land per landmark.
 const LAND_PER_SITE: f32 = 5.0;
 
@@ -27,9 +28,9 @@ fn weight(kind: Landmark) -> f32 {
 }
 
 /// How much a site draws people, for the traffic on the trails between sites. A trip
-/// between two sites counts the product of theirs. Settlements, when they come, slot in
-/// above all of these (a hamlet about 6, a town 12 or more), and the busiest trails
-/// between them become roads.
+/// between two sites counts the product of theirs. Settlements slot in above all of
+/// these (a hamlet 6, a town 12, see [`crate::settlements::Kind::importance`]), and the
+/// busiest trails between them become roads.
 pub fn importance(kind: Landmark) -> f32 {
     match kind {
         Landmark::Landing => 3.0,

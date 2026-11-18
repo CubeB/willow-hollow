@@ -44,10 +44,14 @@ pub enum Species {
     HollyBush,
     Laurel,
     Gorse,
+    // Added last so the kinds before keep their numbers.
+    /// A willow cut back to a stout trunk for its poles, by a stream through a place's
+    /// land (see `settlements::farmland::willows`).
+    Pollard,
 }
 
 impl Species {
-    pub const ALL: [Species; 30] = [
+    pub const ALL: [Species; 31] = [
         Species::Oak,
         Species::Birch,
         Species::Maple,
@@ -78,6 +82,7 @@ impl Species {
         Species::HollyBush,
         Species::Laurel,
         Species::Gorse,
+        Species::Pollard,
     ];
 
     /// Whether it keeps its leaves through the winter and grows among broadleaves or on
@@ -139,6 +144,7 @@ impl Species {
             Species::HollyBush => holly_bush(&mut s, &mut rng),
             Species::Laurel => laurel(&mut s, &mut rng),
             Species::Gorse => gorse(&mut s, &mut rng),
+            Species::Pollard => pollard(&mut s, &mut rng),
         }
         s.build()
     }
@@ -288,6 +294,21 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
     }
     let r = rng.range(7.0, 9.0);
     s.blob(top + Vec3::Y * (h * 0.3), Vec3::new(r, r * 0.7, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
+    // Two or three low limbs, heavy and reaching out level a few metres up before they turn
+    // up into leaf, as an oak grown old in the open keeps them: what people sit under, and
+    // tie ribbons to. Last, so the rest of the tree is as it was.
+    for _ in 0..rng.int(2, 3) {
+        let (out, _) = rng.heading();
+        let start = Vec3::new(0.5, rng.range(5.0, 7.0), 0.5);
+        let mid = start + out * rng.range(5.0, 7.0) + Vec3::Y * rng.range(0.0, 1.0);
+        let end = mid + out * rng.range(3.5, 5.0) + Vec3::Y * rng.range(2.0, 3.5);
+        s.limb(start, mid, 1.1, 0.75, mat::BARK_OAK);
+        s.limb(mid, end, 0.75, 0.45, mat::BARK_OAK);
+        let fork = rng.range(2.0, 3.0);
+        forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
+        let r = rng.range(4.0, 5.5);
+        s.blob(end + Vec3::Y, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
+    }
 }
 
 fn birch(s: &mut Shape, rng: &mut Rng) {
@@ -484,6 +505,27 @@ fn willow(s: &mut Shape, rng: &mut Rng) {
     s.blob(top + Vec3::Y * 2.0, Vec3::new(r, r * 0.7, r), mat::LEAVES_WILLOW, rng.next_u32(), 0.4);
     // The curtains.
     s.hang(mat::LEAVES_WILLOW, mat::LEAVES_WILLOW, rng, 0.55, (3, 8));
+}
+
+/// A willow pollarded by a stream, as the people of a place keep them for their poles: a
+/// stout trunk cut back at head height, its head knobbled from the cutting, and a crown of
+/// straight young poles standing up out of it in their narrow leaves.
+fn pollard(s: &mut Shape, rng: &mut Rng) {
+    let h = rng.range(2.2, 3.0);
+    let lean = rng.range(0.0, 0.4);
+    let top = trunk(s, rng, h, 0.75, 0.6, lean, mat::BARK_WILLOW);
+    // The head the poles are cut back to every few years.
+    s.blob(top, Vec3::new(1.0, 0.6, 1.0), mat::BARK_WILLOW, rng.next_u32(), 0.35);
+    let poles = rng.int(8, 12);
+    for k in 0..poles {
+        let angle = k as f32 / poles as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let from = top + out * rng.range(0.3, 0.8);
+        let len = rng.range(2.5, 4.5);
+        let end = from + out * (len * rng.range(0.15, 0.35)) + Vec3::Y * len;
+        s.limb(from, end, 0.2, 0.12, mat::BARK_WILLOW);
+        s.blob(from.lerp(end, 0.7), Vec3::new(0.8, len * 0.35, 0.8), mat::LEAVES_WILLOW, rng.next_u32(), 0.45);
+    }
 }
 
 fn palm(s: &mut Shape, rng: &mut Rng) {

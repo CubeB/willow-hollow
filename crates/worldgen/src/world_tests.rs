@@ -326,6 +326,12 @@ fn nothing_small_grows_up_through_a_bridge() {
             if lo.y != ground + 1 || w.materials().get(b.voxel).kind != voxel::Kind::Foliage || !voxels.has_height(hi.y) {
                 continue;
             }
+            // Nor a climber, which clings to what it climbs: the ivy up a willow by the
+            // bank where a road crosses touches its bark by design.
+            use crate::features::climber::{FLOWERING_VINE, IVY, LIANA, TRAILING_CREEPER, VIRGINIA_CREEPER};
+            if [IVY, VIRGINIA_CREEPER, FLOWERING_VINE, LIANA, TRAILING_CREEPER].iter().any(|c| c.leaves.contains(&b.voxel)) {
+                continue;
+            }
             looked += 1;
             if let Some(y) = (lo.y..=hi.y).find(|&y| w.materials().get(voxels.voxel(IVec3::new(lo.x, y, lo.z))).kind == voxel::Kind::Solid) {
                 under += 1;
@@ -382,6 +388,7 @@ fn nests_are_found_where_the_chunks_build_them() {
         let as_said = match nest.host {
             Host::Hollow | Host::Crevice => at(nest.door) == Some(voxel::AIR) && at(nest.door - nest.out) == Some(mat::NEST_HOLLOW),
             Host::Branch => at(nest.door) == Some(mat::NEST_HOLLOW) && at(nest.door + glam::IVec3::Y * 2) == Some(mat::WASP_PAPER),
+            Host::Hive => false,
         };
         if as_said {
             built += 1;

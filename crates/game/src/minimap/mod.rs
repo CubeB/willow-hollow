@@ -54,6 +54,7 @@ use worldgen::{
     macro_layout::MACRO_SIZE,
     names::PlaceKind,
     scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
+    settlements::years::When,
     world::GameWorld,
 };
 
@@ -130,8 +131,39 @@ struct Known {
     checked: bool,
 }
 
+/// What the map's worker is asked to make of a continent: its sheet (waiting for the
+/// continent to be simulated, or not), or its picture painted again, once the year or
+/// the season has turned and its fields carry other crops (#207).
+enum Ask {
+    Sheet(Key, bool),
+    Paint(Key, Arc<Continent>),
+}
+
+/// What of the world's years the map was last made for (#207): the world's epoch, which
+/// moves when the year or the season turns or a boon is granted, and the year and season.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Seen {
+    epoch: u64,
+    when: When,
+}
+
+impl Seen {
+    /// Takes the world's epoch and moment as they are now, and says whether the models
+    /// want making again (the epoch has moved, so what stands and what the loggers have
+    /// felled may be another year's) and whether the pictures want painting again (the
+    /// year or the season has turned, so the fields carry other crops). Neither while
+    /// nothing has moved, so the map is not made again frame after frame.
+    fn follow(&mut self, epoch: u64, when: When) -> (bool, bool) {
+        let remodel = epoch != self.epoch;
+        let repaint = remodel && when != self.when;
+        *self = Seen { epoch, when };
+        (remodel, repaint)
+    }
+}
+
 enum Answer {
     Sheet(Key, Option<Sheet>),
+    Picture(Key, Arc<Vec<u8>>),
     Reveal(Key, Option<Reveal>),
     Relief(Box<Relief>),
 }
@@ -283,7 +315,7 @@ fn xz(v: DVec3) -> DVec2 {
 
 pub struct Minimap {
     world: Arc<GameWorld>,
-    sheets_ask: Sender<(Key, bool)>,
+    sheets_ask: Sender<Ask>,
     disk: Sender<Disk>,
     answers: Receiver<Answer>,
     pending: HashSet<Key>,
@@ -314,6 +346,13 @@ pub struct Minimap {
     pub hour: f32,
     /// Where the player has camped, in world voxels: each is marked.
     pub camps: Vec<DVec2>,
+    /// Where the parties of settlers the player has met have got to, in world voxels.
+    pub met: Vec<DVec2>,
+    /// The country a guild house's wayfarers have charted (#207), its middle in world
+    /// voxels and its reach: every settlement in it shows as if it had been visited.
+    pub charted: Vec<(DVec2, f64)>,
+    /// The same for the quarries a guild house's masons have marked (#207).
+    pub quarried: Vec<(DVec2, f64)>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -322,6 +361,8 @@ pub struct Minimap {
     relief_ask: Sender<Request>,
     relief_pending: bool,
     version: u64,
+    /// What of the world's years the models and pictures were made for (#207).
+    seen: Seen,
     relief_gpu: ReliefGpu,
     /// The corner map's model, as the large map's.
     small: Option<Relief>,
@@ -347,13 +388,25 @@ impl Minimap {
     /// `dir` is where this world's masks live; None keeps nothing.
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, world: Arc<GameWorld>, dir: Option<PathBuf>) -> Self {
         let (reply, answers) = channel();
-        let (sheets_ask, sheets) = channel::<(Key, bool)>();
+        let (sheets_ask, sheets) = channel::<Ask>();
         let (w, to_main) = (world.clone(), reply.clone());
         std::thread::Builder::new()
             .name("map".into())
             .spawn(move || {
                 crate::threads::background();
-                while let Ok((key, wait)) = sheets.recv() {
+                while let Ok(ask) = sheets.recv() {
+                    let (key, wait) = match ask {
+                        Ask::Sheet(key, wait) => (key, wait),
+                        Ask::Paint(key, c) => {
+                            let t = std::time::Instant::now();
+                            let picture = Arc::new(picture::flat(&w, &c));
+                            log::debug!("map of continent {key:?} painted again for {:?}, in {:.2} s", w.now(), t.elapsed().as_secs_f32());
+                            if to_main.send(Answer::Picture(key, picture)).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
                     let c = if wait { Some(w.continent(key.0, key.1)) } else { w.continent_if_ready(key.0, key.1) };
                     let t = std::time::Instant::now();
                     let made = c.map(|c| sheet(&w, c));
@@ -411,6 +464,7 @@ impl Minimap {
                 }
             })
             .expect("map disk thread");
+        let seen = Seen { epoch: world.epoch(), when: world.now() };
         Self {
             world,
             sheets_ask,
@@ -434,11 +488,15 @@ impl Minimap {
             aim: None,
             hour: 12.0,
             camps: Vec::new(),
+            met: Vec::new(),
+            charted: Vec::new(),
+            quarried: Vec::new(),
             season: None,
             relief: None,
             relief_ask,
             relief_pending: false,
             version: 0,
+            seen,
             relief_gpu: ReliefGpu::new(gpu, format),
             small: None,
             small_pending: false,
@@ -621,7 +679,7 @@ impl Minimap {
         if self.asked.get(&key).is_some_and(|&t| self.clock - t < RETRY) {
             return;
         }
-        if self.sheets_ask.send((key, wait)).is_ok() {
+        if self.sheets_ask.send(Ask::Sheet(key, wait)).is_ok() {
             self.pending.insert(key);
             self.asked.insert(key, self.clock);
         }
@@ -657,6 +715,12 @@ impl Minimap {
                     self.known.insert(key, Known { sheet, places, visited: vec![false; n], checked: false });
                     self.reveal_mut(key);
                     self.check_visits(key);
+                    self.version += 1;
+                }
+            }
+            Answer::Picture(key, picture) => {
+                if let Some(k) = self.known.get_mut(&key) {
+                    k.sheet.picture = picture;
                     self.version += 1;
                 }
             }
@@ -696,6 +760,25 @@ impl Minimap {
         }
     }
 
+    /// Shows what stands in the year it is now (#207): once the year or the season has
+    /// turned, or a boon been granted, both maps' models are made again, and the pictures
+    /// of the continents with fields, which the large map is coloured from when it is
+    /// zoomed out, are painted again on the map's worker. Shown as they were until then.
+    fn follow_years(&mut self) {
+        let (remodel, repaint) = self.seen.follow(self.world.epoch(), self.world.now());
+        if !remodel {
+            return;
+        }
+        self.version += 1;
+        if repaint {
+            for (&key, k) in &self.known {
+                if !k.sheet.continent.land.farms.is_empty() {
+                    let _ = self.sheets_ask.send(Ask::Paint(key, k.sheet.continent.clone()));
+                }
+            }
+        }
+    }
+
     /// Keeps the map up to date with where the player is: `eye` the camera, `forward`
     /// its direction, `walked` unless flying free.
     pub fn update(&mut self, gpu: &Gpu, eye: DVec3, forward: Vec3, walked: bool, dt: f32) {
@@ -708,6 +791,7 @@ impl Minimap {
         while let Ok(a) = self.answers.try_recv() {
             self.take(gpu, a);
         }
+        self.follow_years();
         let here = key_of(xz(eye));
         self.want(here, true);
         let look = if self.open { self.look } else { xz(eye) };
@@ -748,13 +832,14 @@ impl Minimap {
             let at = (xz(eye) - origin(here)).as_vec2();
             self.region = names.region_at(at).and_then(|i| names.places.get(i)).map(|p| p.name.clone());
             // The place stood at: the smallest that reaches here, a thing people built
-            // only once it has been visited. Islands and ranges are too large to stand at.
+            // only once it has been visited (but a village's name is known to all). Islands
+            // and ranges are too large to stand at.
             let visited = |name: &str| k.sheet.marks.iter().zip(&k.visited).any(|(m, &v)| v && m.name.as_deref() == Some(name));
             self.near = names
                 .places
                 .iter()
-                .filter(|p| matches!(p.kind, PlaceKind::Lake | PlaceKind::River | PlaceKind::Peak | PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_)))
-                .filter(|p| p.distance(at) <= NAMED && (p.kind.is_natural() || visited(&p.name)))
+                .filter(|p| matches!(p.kind, PlaceKind::Lake | PlaceKind::River | PlaceKind::Peak | PlaceKind::Falls | PlaceKind::Tor | PlaceKind::Landmark(_)) || p.kind.is_settlement())
+                .filter(|p| p.distance(at) <= NAMED && (p.kind.is_natural() || p.kind.is_settlement() || visited(&p.name)))
                 .min_by(|a, b| a.radius.total_cmp(&b.radius))
                 .map(|p| p.name.clone());
             self.region_timer = 1.0;
@@ -917,6 +1002,24 @@ impl Minimap {
         log::info!("stage: map ready after {:.2} s", began.elapsed().as_secs_f32());
         self.last_seen = None;
         self.update(gpu, eye, forward, false, 0.0);
+    }
+
+    /// Shows the land `radius` voxels round each of `places` (world x, z) as seen, not
+    /// walked: what a guild house's wayfarers mark from their charts (#207).
+    pub fn reveal_about(&mut self, places: &[DVec2], radius: f32) {
+        for &at in places {
+            let key = key_of(at);
+            let local = (at - origin(key)).as_vec2();
+            match self.reveal_mut(key) {
+                Some(r) => r.see(local, radius, false),
+                None => {
+                    if let Some(q) = self.loading.get_mut(&key) {
+                        q.push((local, radius, false));
+                    }
+                }
+            }
+        }
+        self.version += 1;
     }
 
     /// As if the player had walked along `path` (world x, z), for screenshots.
@@ -1195,6 +1298,9 @@ impl Minimap {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
             for ((mark, &visited), known) in k.sheet.marks.iter().zip(&k.visited).zip(&k.places) {
+                // A settlement the wayfarers have charted is known as if it were visited,
+                // and a quarry the masons have.
+                let visited = visited || told_of(mark, known.is_some_and(|(kind, _)| kind.is_settlement()), &self.charted, &self.quarried);
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
@@ -1206,7 +1312,7 @@ impl Minimap {
                     && (visited || seen)
                     && let Some(named) = named.as_deref_mut()
                     && let (Some(name), Some((kind, importance))) = (&mark.name, known)
-                    && (visited || kind.is_natural())
+                    && (visited || kind.is_natural() || kind.is_settlement())
                 {
                     let rank = names::rank(*kind);
                     let fade = names::fade(rank, *importance, span);
@@ -1216,12 +1322,14 @@ impl Minimap {
                         // Over its place, as a pin's flag is; a lake's lies on its water.
                         on_water = *kind == PlaceKind::Lake;
                         let lift = if on_water { 0.0 } else { icon + 9.0 * f.s + if modelled { 8.0 * f.s } else { 0.0 } };
+                        let size = names::size(rank, *importance) * f.s;
+                        let (at, or) = clear_of_player(Vec2::new(p.x, p.y - lift), Vec2::new(p.x, p.y + icon + 10.0 * f.s), me_px, size, f.s);
                         named.push(Name {
                             text: name.clone(),
-                            at: Vec2::new(p.x, p.y - lift),
+                            at: if on_water { Vec2::new(p.x, p.y - lift) } else { at },
                             // Under its place, if there is no room over it.
-                            or: (!on_water).then(|| Vec2::new(p.x, p.y + icon + 10.0 * f.s)),
-                            size: names::size(rank, *importance) * f.s,
+                            or: (!on_water).then_some(or),
+                            size,
                             weight: rank as u8 as f32 * 100.0 + importance + if visited { 40.0 } else { 0.0 },
                             color: [ink[0], ink[1], ink[2], (strength * fade) as u8],
                         });
@@ -1278,7 +1386,21 @@ impl Minimap {
             {
                 icons.push(Instance::new(gpu::TRIANGLE, p.into(), icon * 0.9, [0.93, 0.50, 0.16, 1.0]));
                 if let Some(named) = named.as_deref_mut() {
-                    named.push(Name { text: "Camp".into(), at: Vec2::new(p.x, p.y - icon - 9.0 * f.s), or: Some(Vec2::new(p.x, p.y + icon + 9.0 * f.s)), size: 13.5 * f.s, weight: 1.5, color: [255, 226, 184, 255] });
+                    let (at, or) = clear_of_player(Vec2::new(p.x, p.y - icon - 9.0 * f.s), Vec2::new(p.x, p.y + icon + 9.0 * f.s), me_px, 13.5 * f.s, f.s);
+                    named.push(Name { text: "Camp".into(), at, or: Some(or), size: 13.5 * f.s, weight: 1.5, color: [255, 226, 184, 255] });
+                }
+            }
+        }
+        // The settlers met on the road, where they have got to (#205).
+        for &party in &self.met {
+            if let Some((p, true)) = place(party)
+                && f.edge(p) < -3.0
+            {
+                // Rust red, to stand out from the pale trails they walk.
+                icons.push(Instance::new(gpu::TRIANGLE, p.into(), icon * 0.75, [0.70, 0.30, 0.12, 1.0]));
+                if let Some(named) = named.as_deref_mut() {
+                    let (at, or) = clear_of_player(Vec2::new(p.x, p.y - icon - 9.0 * f.s), Vec2::new(p.x, p.y + icon + 9.0 * f.s), me_px, 12.5 * f.s, f.s);
+                    named.push(Name { text: "Settlers".into(), at, or: Some(or), size: 12.5 * f.s, weight: 1.2, color: [236, 222, 190, 255] });
                 }
             }
         }
@@ -1334,6 +1456,23 @@ impl Minimap {
     }
 }
 
+/// Where the name of a place goes, over it or else under it, moved clear of the player
+/// where they stand on it. Names give way to the player (see `draw`), so the name of
+/// the very place they stand in, written just over or under its icon, would have no
+/// room at all: a great town's, the largest, was never written while they were there.
+fn clear_of_player(mut over: Vec2, mut under: Vec2, me: Option<Vec2>, size: f32, s: f32) -> (Vec2, Vec2) {
+    if let Some(me) = me
+        && (me - (over + under) * 0.5).abs().max_element() < 30.0 * s
+    {
+        // The player's own rectangle, 9 either way, and the gap names keep, 5, and a
+        // little more; a name is 1.2 of its size tall.
+        let clear = 15.0 * s + size * 0.6;
+        over.y = over.y.min(me.y - clear);
+        under.y = under.y.max(me.y + clear);
+    }
+    (over, under)
+}
+
 /// The icon a visited place shows as.
 fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
     let water = [0.24, 0.50, 0.74, 1.0];
@@ -1346,8 +1485,20 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         // Granite grey, and smaller than a peak.
         Kind::Tor => (gpu::TRIANGLE, [0.50, 0.50, 0.48, 1.0], 0.85),
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
+        // Brick red, as the map in the shops would show one.
+        Kind::Settlement => (gpu::CIRCLE, [0.66, 0.30, 0.22, 1.0], 1.2),
+        // A pit, in the pale grey of cut stone.
+        Kind::Quarry => (gpu::RING, [0.62, 0.60, 0.55, 1.0], 0.95),
     };
     Instance::new(kind, p.into(), size * scale, color)
+}
+
+/// Whether a mark not visited is known as if it were (#207): a settlement (`settlement`)
+/// in the country a guild house's wayfarers have `charted`, or a quarry its masons have
+/// marked (`quarried`), each a middle and a reach.
+pub(crate) fn told_of(mark: &Mark, settlement: bool, charted: &[(DVec2, f64)], quarried: &[(DVec2, f64)]) -> bool {
+    let within = |about: &[(DVec2, f64)]| about.iter().any(|&(c, r)| mark.at.distance(c) <= r);
+    (settlement && within(charted)) || (mark.kind == Kind::Quarry && within(quarried))
 }
 
 /// The whole continent under `pos` (world voxels) as the map draws it, all of it seen:
@@ -1362,6 +1513,34 @@ pub fn build(world: &GameWorld, pos: DVec3) -> image::RgbaImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_map_is_made_again_when_the_year_turns_and_only_then() {
+        use worldgen::settlements::years::{Boon, Boons, Granted};
+        let world = GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
+        let mut seen = Seen { epoch: world.epoch(), when: world.now() };
+        let follow = |seen: &mut Seen| seen.follow(world.epoch(), world.now());
+        // Frame after frame with nothing turning, nothing is made again.
+        for _ in 0..3 {
+            assert_eq!(follow(&mut seen), (false, false));
+        }
+        // Every season of year 0 is the same world.
+        world.set_now(When::new(0, 2), &Boons::default());
+        assert_eq!(follow(&mut seen), (false, false));
+        // The year turns: the models are made again and the pictures painted again, once.
+        assert!(world.set_now(When::new(1, 0), &Boons::default()));
+        assert_eq!(follow(&mut seen), (true, true));
+        assert_eq!(follow(&mut seen), (false, false));
+        // And the season.
+        assert!(world.set_now(When::new(1, 1), &Boons::default()));
+        assert_eq!(follow(&mut seen), (true, true));
+        // A boon changes what stands, not what the fields carry.
+        let mut boons = Boons::default();
+        boons.grant(Granted { cell: (0, 0), settlement: 0, boon: Boon::SecondWell, year: 1 });
+        assert!(world.set_now(When::new(1, 1), &boons));
+        assert_eq!(follow(&mut seen), (true, false));
+        assert_eq!(follow(&mut seen), (false, false));
+    }
 
     fn frame(round: bool) -> Frame {
         Frame {

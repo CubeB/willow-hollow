@@ -24,6 +24,7 @@ use crate::{
     materials as mat,
     noise::{hash2, perlin2, unit},
     scale::{BLOCK, OLD_VOXEL, m},
+    settlements::Kind as SettlementKind,
     surface::{Column, Cover, Sampler},
 };
 
@@ -32,9 +33,10 @@ const SIGNPOST: Vec2 = Vec2::splat(m(2.4));
 /// Half-width of the worn strip by the traffic a trail carries: (traffic, metres). A
 /// remote trace is a single broken line, a footpath a narrow one, a track a broad firm
 /// strip, and a road between busy places wider still. Widths blend between these.
-/// Today's landmarks bring well-used trails up to tracks; it takes settlements, whose
-/// trips count many times more, to make roads.
-const WIDTHS: [(f32, f32); 4] = [(5.0, 0.25), (20.0, 0.55), (90.0, 0.95), (500.0, 1.5)];
+/// Landmarks alone bring well-used trails up to tracks. Settlements, whose trips count
+/// many times more, wear the ways between villages into broad tracks, and only the
+/// busiest of all, the trunk carrying the trips between towns, into a road.
+const WIDTHS: [(f32, f32); 5] = [(5.0, 0.25), (20.0, 0.55), (90.0, 0.95), (1000.0, 1.25), (4000.0, 1.6)];
 /// Narrower than this, a trail is a trace that comes and goes.
 const TRACE: f32 = m(0.4);
 /// Trails at least this wide get lanterns.
@@ -67,7 +69,7 @@ pub(crate) const LANTERN_CLEAR: f32 = m(9.0);
 pub(crate) const JUNCTION_CLEAR: f32 = m(16.0);
 
 /// Quarter turns that best point a model's +X along `d`.
-fn turns_toward(d: Vec2) -> u32 {
+pub(crate) fn turns_toward(d: Vec2) -> u32 {
     // rotate() takes +X to (0,1), (-1,0) and (0,-1) for one, two and three turns.
     let axes = [vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(-1.0, 0.0), vec2(0.0, -1.0)];
     (0..4).max_by(|&a, &b| axes[a].dot(d).total_cmp(&axes[b].dot(d))).unwrap() as u32
@@ -82,7 +84,7 @@ const NEAR_SITE: f32 = m(240.0);
 
 /// Columns under a list of points. Reads the bare terrain: the network being built is
 /// not attached to the continent yet.
-fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
+pub(crate) fn sample(c: &Continent, seed: u32, pts: &[Vec2]) -> Vec<Column> {
     let mut out = Vec::with_capacity(pts.len());
     for run in pts.chunks(48) {
         let (mut lo, mut hi) = (Vec2::MAX, Vec2::MIN);
@@ -136,7 +138,7 @@ pub fn river_width_at(c: &Continent, p: Vec2) -> f32 {
     if best < m(20.0) { width } else { 0.0 }
 }
 
-fn is_wet(col: &Column) -> bool {
+pub(crate) fn is_wet(col: &Column) -> bool {
     col.water_surface().is_some()
 }
 
@@ -972,7 +974,7 @@ fn find_shore(c: &Continent, seed: u32, cell: usize) -> Option<Shore> {
 
 /// The building materials of the place at continent-local column `(lx, lz)` and height
 /// `y`: stone from the rock in the ground there, timber from the trees of the country.
-pub(super) fn palette_at(c: &Continent, seed: u32, biome: crate::biome::Biome, lx: i32, y: i32, lz: i32) -> Palette {
+pub(crate) fn palette_at(c: &Continent, seed: u32, biome: crate::biome::Biome, lx: i32, y: i32, lz: i32) -> Palette {
     use crate::macro_layout::MACRO_SIZE;
     Palette::at(seed, biome, c.desc.mx * MACRO_SIZE + lx, y, c.desc.mz * MACRO_SIZE + lz)
 }
@@ -981,7 +983,74 @@ fn absolute(voxels: Vec<(IVec3, Voxel)>, origin: IVec3, turns: u32) -> Vec<(IVec
     voxels.into_iter().map(|(p, v)| (origin + rotate(p, turns), v)).collect()
 }
 
-/// Settled sites with their map cell, and the land sites still to build.
+/// How far beyond a settlement's buildings a landing or a shrine may stand and still be
+/// part of it.
+const ABSORB: f32 = m(150.0);
+
+/// What the landmarks need to know of a settlement: where it is, how far it reaches,
+/// and whether it has taken a port or a shrine yet.
+struct Host {
+    at: Vec2,
+    kind: SettlementKind,
+    radius: f32,
+    green: f32,
+    coast: bool,
+    port: bool,
+    shrine: bool,
+}
+
+impl Host {
+    /// How far other landmarks keep from it.
+    fn gap(&self) -> f32 {
+        if self.kind == SettlementKind::Hamlet { sites::MIN_GAP * 0.5 } else { sites::MIN_GAP }
+    }
+
+    /// Whether a landmark of `kind` at `p` can become part of it.
+    fn takes(&self, kind: Landmark, p: Vec2) -> bool {
+        let d = self.at.distance(p);
+        let room = match kind {
+            Landmark::Landing => self.coast && !self.port,
+            Landmark::Shrine => !self.shrine,
+            _ => false,
+        };
+        room && d <= self.radius + ABSORB
+    }
+}
+
+/// Which settlement a landmark of `kind` would stand in at `p`: none if it keeps clear of
+/// them all, or the one it is close enough to become part of. Err if it would crowd one
+/// it cannot join.
+fn host_of(hosts: &[Host], kind: Landmark, p: Vec2) -> Result<Option<usize>, ()> {
+    let mut host = None;
+    for (t, h) in hosts.iter().enumerate() {
+        if h.at.distance(p) >= h.gap() {
+            continue;
+        }
+        if host.is_some() || !h.takes(kind, p) {
+            return Err(());
+        }
+        host = Some(t);
+    }
+    Ok(host)
+}
+
+/// Whether a landmark of `kind` that settled at `(x, z)` may stand there: inside the
+/// settlement it joins, clear of its green, or out of every settlement if it joins none.
+fn fits(hosts: &[Host], host: Option<usize>, kind: Landmark, x: i32, z: i32) -> bool {
+    let p = vec2(x as f32 + 0.5, z as f32 + 0.5);
+    hosts.iter().enumerate().all(|(t, h)| {
+        let d = h.at.distance(p);
+        if Some(t) == host {
+            h.takes(kind, p) && d >= h.green + kind.radius() + m(4.0)
+        } else {
+            d >= h.radius + ABSORB
+        }
+    })
+}
+
+/// Settled sites with their map cell, and the land sites still to build. Landmarks keep
+/// clear of the settlements already placed, except that a landing beside a coastal one
+/// becomes its port, and a shrine in or beside one its shrine.
 fn place_sites(c: &Continent, seed: u32, comp: &[u32], net: &mut Network) -> (Vec<usize>, Vec<PendingSite>) {
     let mut pending = Vec::new();
     let mut lists = sites::candidates(c, comp);
@@ -990,6 +1059,56 @@ fn place_sites(c: &Continent, seed: u32, comp: &[u32], net: &mut Network) -> (Ve
     let mut remaining: Vec<usize> = lists.iter().map(|l| l.1).collect();
     let mut cursor = vec![0usize; lists.len()];
     let cs = c.cell_size();
+    let centre = |cell: usize| vec2(((cell % c.size) as f32 + 0.5) * cs, ((cell / c.size) as f32 + 0.5) * cs);
+    let mut hosts: Vec<Host> = net
+        .settlements
+        .iter()
+        .map(|s| Host { at: s.at(), kind: s.kind, radius: s.radius, green: s.kind.green(), coast: s.coast, port: false, shrine: false })
+        .collect();
+    // Every town on the coast has its landing first, for a port: on the nearest shore
+    // within its reach that has open water off it.
+    if let Some(k) = lists.iter().position(|l| l.0 == Landmark::Landing) {
+        for t in 0..hosts.len() {
+            if hosts[t].kind < SettlementKind::Town || !hosts[t].coast {
+                continue;
+            }
+            let (hx, hz) = ((hosts[t].at.x / cs) as i32, (hosts[t].at.y / cs) as i32);
+            let reach = ((hosts[t].radius + ABSORB) / cs) as i32;
+            let n = c.size as i32;
+            let mut near: Vec<(i32, usize)> = Vec::new();
+            for dz in (-reach..=reach).step_by(2) {
+                for dx in (-reach..=reach).step_by(2) {
+                    let (x, z) = (hx + dx, hz + dz);
+                    if x < 2 || z < 2 || x >= n - 2 || z >= n - 2 {
+                        continue;
+                    }
+                    let cell = (z * n + x) as usize;
+                    let shore = !c.ocean[cell] && (-2..=2).any(|j: i32| (-2..=2).any(|i: i32| c.ocean[((z + j) * n + x + i) as usize]));
+                    if shore && hosts[t].takes(Landmark::Landing, centre(cell)) {
+                        near.push((dx * dx + dz * dz, cell));
+                    }
+                }
+            }
+            near.sort_unstable();
+            for (_, cell) in near.into_iter().take(16) {
+                let p = centre(cell);
+                if !sites::spaced(&placed, p.x, p.y) {
+                    continue;
+                }
+                let site_seed = hash2(c.desc.seed ^ 0x517e, cell as i32, k as i32);
+                let keep = |x: i32, z: i32| fits(&hosts, Some(t), Landmark::Landing, x, z);
+                if let Some(site) = place_landing(c, seed, cell, site_seed, net, &keep) {
+                    placed.push((site.x as f32, site.z as f32));
+                    net.settlements[t].port = Some(net.sites.len());
+                    hosts[t].port = true;
+                    net.sites.push(site);
+                    cells.push(cell);
+                    remaining[k] = remaining[k].saturating_sub(1);
+                    break;
+                }
+            }
+        }
+    }
     // Take turns, so scarce kinds are not crowded out by whichever scores highest.
     let mut progress = true;
     while progress {
@@ -1005,13 +1124,24 @@ fn place_sites(c: &Continent, seed: u32, comp: &[u32], net: &mut Network) -> (Ve
                 if !sites::spaced(&placed, wx, wz) {
                     continue;
                 }
+                let Ok(host) = host_of(&hosts, list.0, vec2(wx, wz)) else { continue };
+                let keep = |x: i32, z: i32| fits(&hosts, host, list.0, x, z);
                 let site_seed = hash2(c.desc.seed ^ 0x517e, cell as i32, k as i32);
                 let site = if list.0 == Landmark::Landing {
-                    place_landing(c, seed, cell, site_seed, net)
+                    place_landing(c, seed, cell, site_seed, net, &keep)
                 } else {
-                    place_land(c, seed, list.0, cell, site_seed, net, &mut pending)
+                    place_land(c, seed, list.0, cell, site_seed, net, &mut pending, &keep)
                 };
                 if let Some(site) = site {
+                    if let Some(t) = host {
+                        if list.0 == Landmark::Landing {
+                            net.settlements[t].port = Some(net.sites.len());
+                            hosts[t].port = true;
+                        } else {
+                            net.settlements[t].shrine = Some(net.sites.len());
+                            hosts[t].shrine = true;
+                        }
+                    }
                     placed.push((site.x as f32, site.z as f32));
                     net.sites.push(site);
                     cells.push(cell);
@@ -1046,9 +1176,13 @@ fn place_land(
     site_seed: u32,
     net: &mut Network,
     pending: &mut Vec<PendingSite>,
+    keep: &dyn Fn(i32, i32) -> bool,
 ) -> Option<Site> {
     let found = siting::settle(c, seed, kind, cell)?;
     let (x, z) = (found.x, found.z);
+    if !keep(x, z) {
+        return None;
+    }
     let biome = Sampler::new(c, seed, x, z, 1).column(x, z).biome;
     let y = found.y.round();
     let palette = palette_at(c, seed, biome, x, y as i32, z);
@@ -1150,8 +1284,11 @@ fn ruin_path(c: &Continent, seed: u32, pad: &Pad, from: Vec2, cells: &[u32], sal
     wet_runs(&cols).iter().all(|&(s, e)| e - s < 10).then_some(pts)
 }
 
-fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mut Network) -> Option<Site> {
+fn place_landing(c: &Continent, seed: u32, cell: usize, site_seed: u32, net: &mut Network, keep: &dyn Fn(i32, i32) -> bool) -> Option<Site> {
     let shore = find_shore(c, seed, cell)?;
+    if !keep(shore.x, shore.z) {
+        return None;
+    }
     let biome = Sampler::new(c, seed, shore.x, shore.z, 1).column(shore.x, shore.z).biome;
     let palette = palette_at(c, seed, biome, shore.x, shore.level, shore.z);
     let y = shore.level as f32 + 0.5;
@@ -1206,7 +1343,7 @@ fn links(sites_at: &[(f32, f32, u32)]) -> Vec<(usize, usize, f32)> {
 
 /// Heights along a trail: terrain smoothed by a moving average, then clamped so the
 /// slope never exceeds what is comfortable to walk.
-fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
+pub(crate) fn profile(cols: &[Column], pins: &[(usize, f32)]) -> Vec<f32> {
     const WINDOW: usize = 12;
     let max_step = MAX_SLOPE * OLD_VOXEL;
     let n = cols.len();
@@ -1452,6 +1589,7 @@ impl Layer<'_> {
                     LanternCause::Approach => 0.4,
                     LanternCause::Bridge | LanternCause::Junction => 0.25,
                     LanternCause::Plain => 0.15,
+                    LanternCause::Lane => 0.3,
                 };
             let (q, turns) = (pts[i] + normal * side * (widths[i] + m(1.0)), turns_toward(-normal * side));
             let clear = if cause == LanternCause::Junction { JUNCTION_CLEAR } else { LANTERN_CLEAR };
@@ -1519,15 +1657,24 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         return net;
     }
     let comp = sites::land_components(c);
+    // The settlements first: the landmarks keep clear of them, or become part of them.
+    let towns = crate::settlements::place::place(c, world_seed, &comp);
+    net.settlements = towns.settlements;
     let (cells, land_sites) = place_sites(c, world_seed, &comp, &mut net);
+    // From here on the settlements are nodes of the trails after the landmarks, node
+    // `first + k` being settlement k, with its green the pad of the same index.
+    let first = net.sites.len();
+    net.pads.extend(towns.greens);
     let at: Vec<(f32, f32, u32)> = net
         .sites
         .iter()
         .zip(&cells)
         .map(|(s, &cell)| (s.x as f32 + 0.5, s.z as f32 + 0.5, comp[cell]))
+        .chain(net.settlements.iter().zip(&towns.cells).map(|(s, &cell)| (s.x as f32 + 0.5, s.z as f32 + 0.5, comp[cell])))
         .collect();
+    let heights: Vec<i32> = net.sites.iter().map(|s| s.y).chain(net.settlements.iter().map(|s| s.y)).collect();
 
-    let ruin = |k: usize| net.sites[k].kind == Landmark::Ruins;
+    let ruin = |k: usize| k < first && net.sites[k].kind == Landmark::Ruins;
     let layer = Layer {
         c,
         seed: world_seed,
@@ -1551,7 +1698,12 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     /// height, end height, id, the sites it starts and ends at).
     type Pending = (Vec<Vec2>, Vec<u32>, Option<f32>, Option<f32>, u32, (Option<usize>, Option<usize>));
     let mut pending: Vec<Pending> = Vec::new();
-    let importance: Vec<f32> = net.sites.iter().map(|s| sites::importance(s.kind)).collect();
+    let importance: Vec<f32> = net
+        .sites
+        .iter()
+        .map(|s| sites::importance(s.kind))
+        .chain(net.settlements.iter().map(|s| s.kind.importance()))
+        .collect();
 
     // The links between the most important places first, so that lesser trails come
     // to join them rather than the other way about.
@@ -1559,6 +1711,14 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     // between other places go round them rather than through.
     let mut order = links(&at);
     order.retain(|&(a, b, _)| !ruin(a) && !ruin(b));
+    // Every hamlet has its track to the village or town it grew from.
+    for (k, s) in net.settlements.iter().enumerate() {
+        let Some(parent) = s.parent else { continue };
+        let (a, b) = ((first + parent).min(first + k), (first + parent).max(first + k));
+        if at[a].2 == at[b].2 && !order.iter().any(|&(x, y, _)| (x, y) == (a, b)) {
+            order.push((a, b, (at[a].0 - at[b].0).hypot(at[a].1 - at[b].1)));
+        }
+    }
     for (k, &(x, z, _)) in at.iter().enumerate() {
         if ruin(k) {
             router.avoid(cell_of(x, z), RUIN_CLEAR, 8.0);
@@ -1569,7 +1729,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         key(p).total_cmp(&key(q))
     });
     for (a, b, _) in order {
-        let (sa, sb) = (net.sites[a], net.sites[b]);
+        let (ya, yb) = (heights[a], heights[b]);
         let (ca, cb) = (cell_of(at[a].0, at[a].1), cell_of(at[b].0, at[b].1));
         let Some(path) = router.search(ca, cb) else {
             net.unlinked += 1;
@@ -1613,8 +1773,8 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             if !to_site {
                 net.junctions.push(end);
             }
-            let start_y = from_site.then_some(sa.y as f32 - 1.0);
-            let end_y = to_site.then_some(sb.y as f32 - 1.0);
+            let start_y = from_site.then_some(ya as f32 - 1.0);
+            let end_y = to_site.then_some(yb as f32 - 1.0);
             let id = next_id;
             next_id += 1;
             lines.insert(id, pts.clone());
@@ -1633,11 +1793,18 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     let traffic = traffic(c, &router.used, &site_cells);
     let mut stretches = Vec::with_capacity(pending.len());
     // Where each trail comes in to each site, and how busy it is there.
-    let mut arrivals: Vec<Vec<(Vec2, f32)>> = vec![Vec::new(); net.sites.len()];
+    let mut arrivals: Vec<Vec<(Vec2, f32)>> = vec![Vec::new(); at.len()];
     for (pts, cells_here, start_y, end_y, id, ends) in pending {
         // Each point takes the traffic of the map cell it was routed through, averaged
-        // along the way so the width changes gradually.
-        let raw: Vec<f32> = (0..pts.len()).map(|k| traffic[cells_here[k * cells_here.len() / pts.len()] as usize]).collect();
+        // along the way so the width changes gradually. Trips are counted along the
+        // shortest way through the cells, which cuts across the corner wherever a trail
+        // turns and leaves the cell in the corner uncounted; so each cell takes the
+        // busier of those either side of it along the trail, or a road would dwindle to
+        // a trace at every turn and widen again after.
+        let busy: Vec<f32> = (0..cells_here.len())
+            .map(|k| cells_here[k.saturating_sub(1)..(k + 2).min(cells_here.len())].iter().map(|&i| traffic[i as usize]).fold(0.0, f32::max))
+            .collect();
+        let raw: Vec<f32> = (0..pts.len()).map(|k| busy[k * busy.len() / pts.len()]).collect();
         const BLEND: usize = 40;
         let widths: Vec<f32> = (0..raw.len())
             .map(|k| {
@@ -1713,7 +1880,37 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             spurs.push((spur, pad.y));
         }
     }
+    // Each settlement's green, worn across from every way in to the middle, with a
+    // path down to its water.
+    for (k, water) in towns.water.iter().enumerate() {
+        let node = first + k;
+        let ways = &arrivals[node];
+        let pad = &mut net.pads[node];
+        if let Some(main) = ways.iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|w| w.0) {
+            pad.front = main.y.atan2(main.x);
+        }
+        for w in ways.iter().take(pad.arrivals.len()) {
+            pad.arrivals[pad.arrival_count as usize] = w.0.y.atan2(w.0.x);
+            pad.arrival_count += 1;
+        }
+        if let Some(water) = *water
+            && let Some(spur) = water_path(c, world_seed, pad, water)
+        {
+            if (pad.arrival_count as usize) < pad.arrivals.len() {
+                let d = spur[1] - spur[0];
+                pad.arrivals[pad.arrival_count as usize] = d.y.atan2(d.x);
+                pad.arrival_count += 1;
+            }
+            spurs.push((spur, pad.y));
+        }
+    }
 
+    // The ways a settlement's lanes follow, kept before they are laid.
+    let ways: Vec<(Vec<Vec2>, Vec<f32>)> = stretches
+        .iter()
+        .map(|s| (s.0.clone(), s.1.clone()))
+        .chain(spurs.iter().map(|s| (s.0.clone(), vec![m(0.45); s.0.len()])))
+        .collect();
     for (pts, widths, start_y, end_y, id) in stretches {
         layer.lay(pts, &widths, start_y, end_y, id, &mut net);
     }
@@ -1729,18 +1926,46 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         layer.lay(pts, &widths, None, Some(y), after + k as u32, &mut net);
     }
 
+    // Each settlement's lanes, plots and buildings, now the trails that arrive are down.
+    // Whatever the trails left about the place before it was laid out (a lantern, a
+    // milestone, a landmark's prop) gives way to its buildings.
+    let (held_before, plots_from) = (net.held_props.len(), net.pads.len());
+    crate::settlements::layout::lay_out(c, world_seed, &mut net, first, &ways);
+    let plots: Vec<(Vec2, f32)> = net.pads[plots_from..].iter().map(|p| (vec2(p.x, p.z), p.radius + 1.0)).collect();
+    let on_plot = |c: IVec2| {
+        let c = c.as_vec2() + 0.5;
+        plots.iter().any(|&(p, r)| p.distance_squared(c) < r * r)
+    };
+
     // Lanterns, now every trail is down, except any a later trail runs over.
     let walked: Vec<Vec2> = net.points().filter(|p| p.half_width > 0.0).map(|p| vec2(p.x, p.z)).collect();
     let widths: Vec<f32> = net.points().filter(|p| p.half_width > 0.0).map(|p| p.half_width).collect();
+    // The walked points filed by square, so each thing looks only at those about it.
+    const SQUARE: f32 = m(16.0);
+    let square = |p: Vec2| ((p.x / SQUARE).floor() as i32, (p.y / SQUARE).floor() as i32);
+    let mut squares: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (n, p) in walked.iter().enumerate() {
+        squares.entry(square(*p)).or_default().push(n);
+    }
+    let within = |at: Vec2, r: f32| -> Vec<usize> {
+        let (lo, hi) = (square(at - Vec2::splat(r)), square(at + Vec2::splat(r)));
+        let mut out = Vec::new();
+        for sz in lo.1..=hi.1 {
+            for sx in lo.0..=hi.0 {
+                out.extend(squares.get(&(sx, sz)).into_iter().flatten().copied().filter(|&n| walked[n].distance_squared(at) < r * r));
+            }
+        }
+        out
+    };
     let mut keep = vec![false; net.lanterns.len()];
     for (k, voxels, fine) in std::mem::take(&mut net.held_lanterns) {
         let l = &net.lanterns[k];
-        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(l.at) < m(12.0).powi(2)).collect();
+        let near = within(l.at, m(12.0));
         let on_way = l.footprint.iter().any(|c| {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
-        if !on_way {
+        if !on_way && !(l.cause != LanternCause::Lane && l.footprint.iter().any(|&c| on_plot(c))) {
             keep[k] = true;
             net.add_stamp_with(voxels, fine);
         }
@@ -1752,27 +1977,36 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     });
 
     // Site props, except any standing where a trail runs.
-    for (voxels, fine, foot) in std::mem::take(&mut net.held_props) {
+    for (n, (voxels, fine, foot)) in std::mem::take(&mut net.held_props).into_iter().enumerate() {
         let Some(first) = foot.first() else { continue };
+        if n < held_before && foot.iter().any(|&c| on_plot(c)) {
+            continue;
+        }
         let first = first.as_vec2() + 0.5;
-        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(first) < m(12.0).powi(2)).collect();
+        let near = within(first, m(12.0));
         let on_way = foot.iter().any(|c| {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
         if !on_way {
-            net.add_stamp_with(voxels, fine);
+            // What was set about a plot keeps its tag for the years (#207).
+            match net.years.held.remove(&n) {
+                Some(tag) => net.add_stamp_tagged(voxels, fine, tag),
+                None => net.add_stamp_with(voxels, fine),
+            }
         }
     }
+    net.years.held.clear();
+    net.years.kinds.clear();
 
     // Trail markers, likewise.
     for marker in std::mem::take(&mut net.held_markers) {
-        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(marker.at) < m(12.0).powi(2)).collect();
+        let near = within(marker.at, m(12.0));
         let on_way = marker.footprint.iter().any(|c| {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
-        if !on_way {
+        if !on_way && !marker.footprint.iter().any(|&c| on_plot(c)) {
             net.markers.push((marker.kind, marker.origin));
             net.add_stamp_with(marker.voxels, marker.fine);
         }
@@ -1782,7 +2016,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     // two near each other, so that each stays a surprise.
     for d in std::mem::take(&mut net.held_delights) {
         use super::delights::{APART, APART_SAME, Standing};
-        let near: Vec<usize> = (0..walked.len()).filter(|&n| walked[n].distance_squared(d.at) < m(16.0).powi(2)).collect();
+        let near = within(d.at, m(16.0));
         let on_way = d.footprint.iter().any(|c| {
             let c = c.as_vec2() + 0.5;
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
@@ -1805,7 +2039,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         if !junction_cells.insert(((j.x / m(6.4)) as i32, (j.y / m(6.4)) as i32)) {
             continue;
         }
-        let near: Vec<f32> = lines
+        let mut near: Vec<f32> = lines
             .values()
             .filter_map(|line| {
                 let k = line.iter().position(|p| p.distance_squared(j) < m(16.0).powi(2) && p.distance_squared(j) > m(5.6).powi(2))?;
@@ -1813,8 +2047,14 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
                 Some(d.y.atan2(d.x))
             })
             .collect();
+        // In one order, whatever order the lines are kept in, so the signpost is the same
+        // on every run.
+        near.sort_by(f32::total_cmp);
         let x = (j.x + SIGNPOST.x) as i32;
         let z = (j.y + SIGNPOST.y) as i32;
+        if on_plot(IVec2::new(x, z)) {
+            continue;
+        }
         let col = Sampler::new(c, world_seed, x, z, 1).column(x, z);
         if is_wet(&col) || col.river < m(2.4) {
             continue;
@@ -1830,6 +2070,11 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
         net.add_stamp(absolute(voxels, IVec3::new(x, trail_y.floor() as i32 + 1, z), 0));
     }
 
+    // The quays the boats tie up at, clear of everything above (#205).
+    crate::settlements::quay::build(c, world_seed, &mut net);
+    // Each settlement's tree, last, so that it is found among what is left standing once
+    // everything else is down, and the ribbons tied to it are stamped with the rest.
+    crate::settlements::tree::plant_all(c, world_seed, &mut net);
     terrace_walls(c, world_seed, &mut net);
     net
 }
@@ -1841,52 +2086,72 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
 /// drop. Read from the finished ground, trails and all, so each wall meets the ground the
 /// game will make. On a neglected site the coping has fallen here and there.
 fn terrace_walls(c: &Continent, seed: u32, net: &mut Network) {
-    let mut walls = Vec::new();
-    for pad in net.pads.iter().filter(|p| p.walled) {
-        let centre = vec2(pad.x, pad.z);
-        let reach = (pad.radius + crate::surface::TERRACE_RING).ceil() as i32 + 1;
-        let (cx, cz) = (pad.x.floor() as i32, pad.z.floor() as i32);
-        let s = Sampler::with_network(c, seed, cx - reach - 1, cz - reach - 1, 2 * reach + 3, net);
-        // The same stone as the place it holds up (see `place_land`).
-        let pal = palette_at(c, seed, s.column(cx, cz).biome, cx, pad.y.round() as i32, cz);
-        let mut rng = Rng::new(hash2(seed ^ 0x07e4_4ace, cx, cz));
-        let pad_top = pad.y.floor() as i32;
-        let mut voxels = Vec::new();
-        for z in cz - reach..=cz + reach {
-            for x in cx - reach..=cx + reach {
-                let d = vec2(x as f32 + 0.5, z as f32 + 0.5).distance(centre) - pad.radius;
-                if !(0.0..crate::surface::TERRACE_RING).contains(&d) {
-                    continue;
-                }
-                let col = s.column(x, z);
-                if is_wet(&col) {
-                    continue;
-                }
-                let g = col.top();
-                let mut top = g;
-                for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    let n = s.column(x + dx, z + dz);
-                    if !is_wet(&n) {
-                        top = top.max(n.top());
-                    }
-                }
-                if top - g < 2 {
-                    continue;
-                }
-                let worn = rng.unit() < pad.neglect * 0.5;
-                let cap = if worn { top - 1 } else { top };
-                for y in g - 1..=cap {
-                    voxels.push((IVec3::new(x, y, z), if y == top { pal.stone_dark } else { pal.block(&mut rng) }));
-                }
-                // Built out over a drop: a kerb along the edge.
-                if top == pad_top && top - g >= 4 && !worn {
-                    voxels.push((IVec3::new(x, top + 1, z), pal.stone_dark));
-                }
-            }
-        }
-        walls.push(voxels);
-    }
+    let pads: Vec<&Pad> = net.pads.iter().filter(|p| p.walled).collect();
+    // Each pad's wall is found from the ground about it alone, so they are found side by
+    // side: a settlement's buildings each stand on a pad or a few.
+    let walls = in_parallel(&pads, |pad| terrace_wall(c, seed, net, pad));
     for voxels in walls {
         net.add_stamp(voxels);
     }
+}
+
+/// The wall that holds one terraced pad (see [`terrace_walls`]).
+fn terrace_wall(c: &Continent, seed: u32, net: &Network, pad: &Pad) -> Vec<(IVec3, Voxel)> {
+    let centre = vec2(pad.x, pad.z);
+    let reach = (pad.radius + crate::surface::TERRACE_RING).ceil() as i32 + 1;
+    let (cx, cz) = (pad.x.floor() as i32, pad.z.floor() as i32);
+    let s = Sampler::with_network(c, seed, cx - reach - 1, cz - reach - 1, 2 * reach + 3, net);
+    // The same stone as the place it holds up (see `place_land`).
+    let pal = palette_at(c, seed, s.column(cx, cz).biome, cx, pad.y.round() as i32, cz);
+    let mut rng = Rng::new(hash2(seed ^ 0x07e4_4ace, cx, cz));
+    let pad_top = pad.y.floor() as i32;
+    let mut voxels = Vec::new();
+    for z in cz - reach..=cz + reach {
+        for x in cx - reach..=cx + reach {
+            let d = vec2(x as f32 + 0.5, z as f32 + 0.5).distance(centre) - pad.radius;
+            if !(0.0..crate::surface::TERRACE_RING).contains(&d) {
+                continue;
+            }
+            let col = s.column(x, z);
+            if is_wet(&col) {
+                continue;
+            }
+            let g = col.top();
+            let mut top = g;
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let n = s.column(x + dx, z + dz);
+                if !is_wet(&n) {
+                    top = top.max(n.top());
+                }
+            }
+            if top - g < 2 {
+                continue;
+            }
+            let worn = rng.unit() < pad.neglect * 0.5;
+            let cap = if worn { top - 1 } else { top };
+            for y in g - 1..=cap {
+                voxels.push((IVec3::new(x, y, z), if y == top { pal.stone_dark } else { pal.block(&mut rng) }));
+            }
+            // Built out over a drop: a kerb along the edge.
+            if top == pad_top && top - g >= 4 && !worn {
+                voxels.push((IVec3::new(x, top + 1, z), pal.stone_dark));
+            }
+        }
+    }
+    voxels
+}
+
+/// `f` of each of `items`, in their order, worked out on as many threads as there are
+/// cores (up to eight). For work of which each piece stands alone, so the result is the
+/// same however it is shared out.
+pub(crate) fn in_parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    if threads < 2 || items.len() < 4 {
+        return items.iter().map(&f).collect();
+    }
+    let (per, f) = (items.len().div_ceil(threads), &f);
+    std::thread::scope(|s| {
+        let parts: Vec<_> = items.chunks(per).map(|part| s.spawn(move || part.iter().map(f).collect::<Vec<R>>())).collect();
+        parts.into_iter().flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    })
 }
