@@ -344,9 +344,11 @@ fn a_greeting_names_real_places() {
             let met = (k % 6) as u32;
             let line = talk::greeting(town, r, met, 6.0 + (k % 16) as f32, (k % 4) as f32 * 0.25 + 0.1);
             assert!(!line.contains('{') && !line.contains('}'), "{line}");
-            let named = real.iter().any(|n| line.contains(n.as_str())) || line.contains(&town.name) || line.contains("village tree");
+            // A name with its own article is said without it after "the".
+            let named = real.iter().any(|n| line.contains(n.trim_start_matches("The "))) || line.contains(&town.name) || line.contains("village tree");
             assert!(named, "{} of {} says '{line}', naming nowhere", r.person.name, town.name);
-            assert!(["spring", "summer", "autumn", "winter"].iter().any(|s| line.contains(s)) || line.contains(&town.name) || town.near.as_ref().is_some_and(|n| line.contains(n.as_str())) || town.river.as_ref().is_some_and(|n| line.contains(n.as_str())) || line.contains("tree"), "{line}");
+            assert!(["spring", "summer", "autumn", "winter"].iter().any(|s| line.contains(s)) || line.contains(&town.name) || town.near.as_ref().is_some_and(|n| line.contains(n.as_str())) || town.river.as_ref().is_some_and(|n| line.contains(n.trim_start_matches("The "))) || line.contains("tree"), "{line}");
+            assert!(!line.to_lowercase().contains("the the "), "an article twice: {line}");
         }
         assert!(real.contains(&town.name), "{} is not a name of the gazetteer", town.name);
     }

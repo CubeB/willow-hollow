@@ -59,6 +59,12 @@ fn fill(line: &str, town: &Town, r: &Resident, hour: f32, date: f32) -> Option<S
             },
             _ => return None,
         };
+        // "the {river}" of a river whose name has its own article: "the Nantdur", not
+        // "the The Nantdur".
+        let word = match word.strip_prefix("The ") {
+            Some(bare) if out.to_lowercase().ends_with("the ") => bare.to_string(),
+            _ => word,
+        };
         out.push_str(&word);
         rest = &rest[close + 1..];
     }
