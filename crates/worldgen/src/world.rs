@@ -65,6 +65,9 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             crate::settlements::logging::raise(&mut c, seed);
             // The quarries, out in the land as the barns are (#203).
             farmland::quarry::raise(&mut c, seed);
+            // The willows pollarded along the streams through each place's land (#64).
+            let willows = farmland::willows::plant(&c, seed);
+            c.trails.planted.extend(willows);
             // What stands about the fields, clear of all of those (#64, #206).
             farmland::fixtures::raise(&mut c, seed);
             // The lanterns in the old forest's trees, once every tree to be felled is (#203).

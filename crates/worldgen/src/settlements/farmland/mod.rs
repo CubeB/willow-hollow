@@ -24,6 +24,7 @@
 //!   plank bridges where the lanes cross them.
 //! - [`water`]: both of those, shaped into the ground column by column.
 //! - [`fieldnames`]: what the people of a place call each of its fields.
+//! - [`willows`]: the rows of pollarded willows along the streams through the land.
 //! - [`old`]: the fields given up long ago beyond the ancient places' fields of today and
 //!   about the ruins, gone back to the wild, their edges going from hedgerow to scrub to
 //!   a stone or two.
@@ -47,6 +48,7 @@ pub mod quarry;
 pub mod rotation;
 pub mod terrace;
 pub mod water;
+pub mod willows;
 
 pub use fields::{Crop, Plot, plot};
 pub use influence::{Farm, Land, Use};
