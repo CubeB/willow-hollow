@@ -1602,16 +1602,19 @@ fn cell_beside(air: IVec3, out: IVec3) -> IVec3 {
 
 /// Roots along the foot of a built thing: walks from sampled voxels of `stamp` down to
 /// the ground on an open side.
-pub fn stamp_roots(voxels: &[(IVec3, Voxel)], world: &impl Voxels, mats: &Materials, seed: u32) -> Vec<Root> {
+/// `voxels` are the stamp's own, `offset` from them to the world's.
+pub fn stamp_roots(voxels: &[(IVec3, Voxel)], offset: IVec3, world: &impl Voxels, mats: &Materials, seed: u32) -> Vec<Root> {
     let mut roots = Vec::new();
     if voxels.len() < 40 {
         return roots;
     }
     let attempts = (voxels.len() / 300).clamp(1, 10);
+    let first = voxels[0].0 + offset;
     for k in 0..attempts {
-        let h = hash3(seed ^ 0x57a3, voxels[0].0.x, voxels[0].0.z, k as i32);
+        let h = hash3(seed ^ 0x57a3, first.x, first.z, k as i32);
         let mut rng = Rng::new(h);
         let (p, v) = voxels[(rng.next_u32() as usize) % voxels.len()];
+        let p = p + offset;
         if v == voxel::AIR || !climbable(v) {
             continue;
         }
@@ -1627,6 +1630,13 @@ pub fn stamp_roots(voxels: &[(IVec3, Voxel)], world: &impl Voxels, mats: &Materi
             depth += 1;
         }
         if depth >= 48 || !solid(world.voxel(air - side), mats) {
+            continue;
+        }
+        // Not indoors: the wall's open side must be out under the sky, not in a room of
+        // the same building. Three out from the wall clears the eaves; anything of the
+        // stamp over that is its roof or floor above.
+        let out = air + side * 3 - offset;
+        if voxels.iter().any(|&(q, v)| v != voxel::AIR && q.x == out.x && q.z == out.z && q.y > out.y) {
             continue;
         }
         roots.push(Root { cell: cell_beside(air, side), out: side, age: rng.range(0.3, 1.0), seed: h, wind: 0.0 });
@@ -1773,8 +1783,7 @@ impl RootFinder<'_> {
     /// from its coordinates to the world's.
     pub fn stamps<'b>(&self, stamps: impl Iterator<Item = (&'b [(IVec3, Voxel)], IVec3)>, out: &mut Vec<(Root, Climber)>) {
         for (voxels, offset) in stamps {
-            let world: Vec<(IVec3, Voxel)> = voxels.iter().map(|&(p, v)| (p + offset, v)).collect();
-            for root in stamp_roots(&world, self.world, self.mats, self.seed) {
+            for root in stamp_roots(voxels, offset, self.world, self.mats, self.seed) {
                 let (x, z) = (root.cell.x.div_euclid(CELL), root.cell.z.div_euclid(CELL));
                 if !self.within(x, z) || unit(root.seed) >= self.chance(x, z) {
                     continue;
