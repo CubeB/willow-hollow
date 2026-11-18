@@ -1003,7 +1003,10 @@ fn scan_surroundings(
     let sticks = fallen::near(world, voxels, camera);
     // The nests in sight, and the flowers in bloom a bee from each could fly to: a few
     // nests at most, so it is a few small squares of the world to look over.
-    let nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    let mut nests = world.nests_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32);
+    // And the nearest of the hives people keep, whose bees work the same flowers (#202):
+    // a few, as an apiary's row would otherwise fill the air with bees.
+    nests.extend(world.hives_near(cx, cz, m(insects::NEST_SIGHT as f32) as i32).into_iter().take(4));
     let mut forage = Vec::new();
     for n in nests.iter().filter(|n| n.kind == worldgen::features::nests::NestKind::Bees && insects::on_the_wing(n.kind, date)).take(3) {
         let reach = m(insects::FORAGE as f32) as i32;
