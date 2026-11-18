@@ -1476,6 +1476,7 @@ impl GameWorld {
         // Now the world's shape is final, things can grow on it.
         let voxels = features::attach::ColumnVoxels::new(&out, wx0, wz0);
         let mut standing: HashSet<IVec3> = plants.iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))).collect();
+        let grown = plants.len();
         self.grow_climbers(
             &ClimberRun {
                 voxels: &voxels,
@@ -1501,6 +1502,7 @@ impl GameWorld {
         };
         let before_moss = plants.len();
         features::moss::grow(&voxels, &self.materials, &soil, &mut plants);
+        let mossed = plants.len();
         // Bark, twigs and leaf clusters, clear of the moss and climbers already there.
         if placements.iter().any(|p| features::tree_detail::has_detail(p.species)) {
             features::tree_detail::occupied(&plants[before_moss..], &mut standing);
@@ -1512,6 +1514,17 @@ impl GameWorld {
                 taken: &standing,
             };
             features::tree_detail::grow(&voxels, &self.materials, &grove, &mut plants);
+        }
+        // Nor has a home going up again any ivy or moss on it (#207): judged by where each
+        // part is, so every chunk agrees.
+        let rising: Vec<(IVec3, IVec3)> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.rising(s)).collect();
+        if !rising.is_empty() {
+            let mut i = 0;
+            plants.retain(|p| {
+                i += 1;
+                let v = IVec3::from_array(p.lo).div_euclid(cells) - origin;
+                !((grown..mossed).contains(&(i - 1)) && rising.iter().any(|&(lo, hi)| v.cmpge(lo).all() && v.cmple(hi).all()))
+            });
         }
         // What the bushes, the ivy and the reeds bore on a picked column has been taken.
         if !picked.is_empty() {

@@ -179,6 +179,13 @@ pub struct Building {
     ground: i32,
     eaves: i32,
     walls: (IVec2, IVec2),
+    /// The level of its floor (the voxel stood on), the top course of its walls, and which
+    /// of the columns of `walls` its walls stand on, a bit each, row by row from
+    /// `walls.0`: for its walls rising inside scaffolding as it is built again (see
+    /// [`frame`]).
+    floor: i32,
+    plate: i32,
+    wall: Vec<u64>,
     /// Its roof's thatch, if it is thatched: as it is new, before it weathers.
     pub thatch: Option<Voxel>,
 }
@@ -231,9 +238,11 @@ fn key(p: IVec3) -> (i32, i32, i32) {
 
 impl Tag {
     /// The tag of a plot's building, whose `voxels` are its shell's `shell` and then its
-    /// furnishing's. Puts `voxels` in the order the stamp keeps them (as `Network::add_stamp_with`
-    /// sorts them: stably, so to the same order), to mark which are the furnishing's.
-    pub(crate) fn building(plot: usize, voxels: &mut Vec<(IVec3, Voxel)>, shell: usize, ground: i32, walls: (IVec2, IVec2)) -> Tag {
+    /// furnishing's, and `room` the voxels of its floor (the kit's `Inside::floor`), all
+    /// where they stand. Puts `voxels` in the order the stamp keeps them (as
+    /// `Network::add_stamp_with` sorts them: stably, so to the same order), to mark which
+    /// are the furnishing's.
+    pub(crate) fn building(plot: usize, voxels: &mut Vec<(IVec3, Voxel)>, shell: usize, ground: i32, walls: (IVec2, IVec2), room: &[IVec3]) -> Tag {
         let mut order: Vec<u32> = (0..voxels.len() as u32).collect();
         order.sort_by_key(|&i| key(voxels[i as usize].0));
         let mut inside = vec![0u64; voxels.len().div_ceil(64)];
@@ -256,8 +265,68 @@ impl Tag {
             }
         }
         let most = (0..3).max_by_key(|&i| (counts[i], std::cmp::Reverse(i))).filter(|&i| counts[i] > 0);
-        Tag::Building(Building { plot: plot as u32, inside, ground, eaves, walls, thatch: most.map(|i| THATCHES[i][0]) })
+        let (floor, plate, wall) = frame(shell_of(), ground, walls, room, eaves);
+        Tag::Building(Building { plot: plot as u32, inside, ground, eaves, walls, floor, plate, wall, thatch: most.map(|i| THATCHES[i][0]) })
     }
+}
+
+/// How a building's walls stand, from its shell's voxels (`shell`), the columns inside
+/// its outer walls (`walls`, inclusive) and the voxels of its floor (`room`): the level of
+/// its floor (`ground` with none), the top course of its walls, and which columns of
+/// `walls` they stand on, a bit each (see [`Building::wall`]).
+///
+/// The walls stand on the columns outside the room with something solid at the floor's
+/// level: a wall's foot, or a raised floor run out under it, and the doorway's threshold
+/// with them, so that they close the room in. Their top is a voxel under the lowest of
+/// the roof's covering over them, which sits on them. A wall of reeds is covered as a roof
+/// is, so only covering as high as the roof over the room is taken for the roof's: a
+/// voxel or two over the walls' top, as the roof rises from the walls inward.
+fn frame(shell: impl Iterator<Item = (IVec3, Voxel)> + Clone, ground: i32, (lo, hi): (IVec2, IVec2), room: &[IVec3], eaves: i32) -> (i32, i32, Vec<u64>) {
+    let (w, d) = ((hi.x - lo.x + 1).max(0) as usize, (hi.y - lo.y + 1).max(0) as usize);
+    let at = |p: IVec3| (p.x >= lo.x && p.x <= hi.x && p.z >= lo.y && p.z <= hi.y).then(|| (p.z - lo.y) as usize * w + (p.x - lo.x) as usize);
+    let floor = room.iter().map(|q| q.y).min().unwrap_or(ground);
+    let mut indoors = vec![false; w * d];
+    for &q in room {
+        if let Some(i) = at(q) {
+            indoors[i] = true;
+        }
+    }
+    // The cheap tests first: most of a shell is its rooms' air and its walls' lower courses.
+    let mut wall = vec![0u64; (w * d).div_ceil(64)];
+    let mut over_room = i32::MAX;
+    for (p, v) in shell.clone() {
+        let Some(i) = at(p) else { continue };
+        if indoors[i] {
+            if p.y > floor && p.y < over_room && v != AIR && mat::ROOFING.contains(&v) {
+                over_room = p.y;
+            }
+        } else if p.y == floor && v != AIR && !mat::ROOFING.contains(&v) {
+            wall[i / 64] |= 1 << (i % 64);
+        }
+    }
+    let on_wall = |i: usize| wall[i / 64] >> (i % 64) & 1 != 0;
+    // Without a room to go by, the walls stand at least a person's height.
+    let low = if over_room == i32::MAX { floor + 5 } else { over_room - 1 };
+    let mut on_walls = i32::MAX;
+    for (p, v) in shell {
+        if p.y >= low
+            && p.y < on_walls
+            && let Some(i) = at(p)
+            && on_wall(i)
+            && v != AIR
+            && mat::ROOFING.contains(&v)
+        {
+            on_walls = p.y;
+        }
+    }
+    let plate = if on_walls < i32::MAX {
+        on_walls - 1
+    } else if over_room < i32::MAX {
+        over_room - 2
+    } else {
+        eaves - 1
+    };
+    (floor, plate.max(floor + 3), wall)
 }
 
 /// Tags everything held back while plot `plot` was dressed: the props from `from` on.
@@ -504,6 +573,18 @@ impl Lives {
         }
     }
 
+    /// If stamp `s` is a home going up again in scaffolding, the box its walls and the
+    /// scaffolding about them stand in, continent-local: walls this new have had no time
+    /// for ivy to climb them or moss to take on the floor laid open to the sky.
+    pub fn rising(&self, s: &Stamp) -> Option<(IVec3, IVec3)> {
+        let Some(Tag::Building(b)) = s.tag.as_deref() else { return None };
+        if self.lives.is_empty() || self.state(b.plot as usize) != State::Scaffold {
+            return None;
+        }
+        let (lo, hi) = (b.walls.0 - IVec2::ONE, b.walls.1 + IVec2::ONE);
+        Some((IVec3::new(lo.x, s.lo.y, lo.y), IVec3::new(hi.x, s.hi.y, hi.y)))
+    }
+
     fn building<'a>(&self, s: &'a Stamp, b: &Building) -> Option<Cow<'a, Stamp>> {
         let inside = |j: usize| b.inside.get(j / 64).is_some_and(|w| w >> (j % 64) & 1 != 0);
         let seed = hash2(self.seed ^ 0x0b5e, b.plot as i32, 7);
@@ -550,18 +631,7 @@ impl Lives {
                 Some(Cow::Owned(out))
             }
             State::Cleared => None,
-            State::Scaffold => {
-                // The walls two thirds up, no roof yet, nothing inside, nothing hung.
-                let cut = b.ground + ((b.eaves - b.ground) * 2 / 3).max(2);
-                let voxels = s
-                    .voxels
-                    .iter()
-                    .enumerate()
-                    .filter(|&(j, &(p, v))| !inside(j) && (v == AIR || (p.y < cut && !mat::ROOFING.contains(&v))))
-                    .map(|(_, &pv)| pv)
-                    .collect();
-                Some(Cow::Owned(Stamp { lo: s.lo, hi: s.hi, voxels, fine: scaffold(s, b, cut), tag: None }))
-            }
+            State::Scaffold => Some(Cow::Owned(rising(s, b, inside))),
         }
     }
 
@@ -777,58 +847,195 @@ fn weeds(s: &Stamp, b: &Building, seed: u32) -> Vec<PlantBox> {
     out
 }
 
-/// The scaffolding about walls rising to `cut`: poles a voxel out from the walls every
-/// few voxels and at the corners, standing up past the walls to where the roof will
-/// be, and boards along them to stand on, within what the stamp covers.
-fn scaffold(s: &Stamp, b: &Building, cut: i32) -> Vec<PlantBox> {
-    let (lo, hi) = b.walls;
-    let (x0, x1) = ((lo.x - 1).max(s.lo.x), (hi.x + 1).min(s.hi.x));
-    let (z0, z1) = ((lo.y - 1).max(s.lo.z), (hi.y + 1).min(s.hi.z));
-    if x1 <= x0 || z1 <= z0 {
-        return Vec::new();
-    }
-    let part = |lo: [i32; 3], hi: [i32; 3], voxel: Voxel| PlantBox { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
-    // Poles stand a good way past the eaves: on a hut whose thatch comes down near the
-    // ground the walls are low, and poles no taller than them would read as a fence.
-    let tall = (b.eaves + 4).min(s.hi.y).max(cut + 1);
-    let (y0, top) = (b.ground * CELLS, tall * CELLS);
-    let along = |a: i32, b: i32| -> Vec<i32> {
-        let mut v: Vec<i32> = (a..=b).step_by(3).collect();
-        if v.last() != Some(&b) {
-            v.push(b);
+/// The highest course of a building's walls laid while it rises in scaffolding: three
+/// quarters of the way up them, never their top, and high enough that the windows show
+/// as gaps in them and the doorway as a gap from the floor up.
+fn rising_to(b: &Building) -> i32 {
+    let h = b.plate - b.floor;
+    b.floor + ((h * 3 + 2) / 4).min(h - 1).max(3)
+}
+
+/// Which side of a building's walls a column is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Wall,
+    Within,
+    Out,
+}
+
+/// Where a building's walls stand, over the columns inside its outer walls and one more
+/// all round: each column one of its walls', within them, or out of doors, which is what
+/// can be reached from the edge without crossing a wall.
+struct Lie {
+    lo: IVec2,
+    w: i32,
+    d: i32,
+    of: Vec<Side>,
+}
+
+impl Lie {
+    fn new(b: &Building) -> Lie {
+        let (lo, hi) = (b.walls.0 - IVec2::ONE, b.walls.1 + IVec2::ONE);
+        let (w, d) = ((hi.x - lo.x + 1).max(0), (hi.y - lo.y + 1).max(0));
+        let inner = b.walls.1.x - b.walls.0.x + 1;
+        let mut of = vec![Side::Within; (w * d) as usize];
+        for z in 1..d - 1 {
+            for x in 1..w - 1 {
+                let i = ((z - 1) * inner + x - 1) as usize;
+                if b.wall.get(i / 64).is_some_and(|m| m >> (i % 64) & 1 != 0) {
+                    of[(z * w + x) as usize] = Side::Wall;
+                }
+            }
         }
-        v
-    };
-    let mut out = Vec::new();
-    let mut poles = Vec::new();
-    for x in along(x0, x1) {
-        poles.extend([(x, z0), (x, z1)]);
+        let mut todo: Vec<(i32, i32)> = (0..w).flat_map(|x| [(x, 0), (x, d - 1)]).chain((0..d).flat_map(|z| [(0, z), (w - 1, z)])).collect();
+        while let Some((x, z)) = todo.pop() {
+            if x < 0 || z < 0 || x >= w || z >= d || of[(z * w + x) as usize] != Side::Within {
+                continue;
+            }
+            of[(z * w + x) as usize] = Side::Out;
+            todo.extend([(x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)]);
+        }
+        Lie { lo, w, d, of }
     }
-    for z in along(z0, z1).into_iter().filter(|&z| z != z0 && z != z1) {
-        poles.extend([(x0, z), (x1, z)]);
+
+    fn at(&self, x: i32, z: i32) -> Side {
+        let (x, z) = (x - self.lo.x, z - self.lo.y);
+        if x < 0 || z < 0 || x >= self.w || z >= self.d { Side::Out } else { self.of[(z * self.w + x) as usize] }
     }
-    for (x, z) in poles {
-        out.push(part([x * CELLS + 1, y0, z * CELLS + 1], [x * CELLS + 3, top, z * CELLS + 3], mat::BARK_PINE));
+
+    /// Whether column `(x, z)` is beside one of the walls', on a side or at a corner.
+    fn beside(&self, x: i32, z: i32) -> bool {
+        (-1..=1).any(|dz| (-1..=1).any(|dx| self.at(x + dx, z + dz) == Side::Wall))
     }
-    let mut levels = vec![b.ground + 2];
-    if cut > b.ground + 3 {
-        levels.push(cut);
+}
+
+/// A building rising again inside scaffolding, the summer after it was taken down: its
+/// walls three quarters up in their own material, the doorway and the windows open in
+/// them, and its floor laid; no roof yet, nothing inside and nothing hung. A wall of reeds
+/// is its frame woven with wattle, the reeds to be tied on after. Out of doors, what
+/// stands up from the ground (its steps, a yard's wall) and what is built onto the walls
+/// (the crossed ends of a log wall's logs) are as high as the walls, and nothing of the
+/// eaves is left in the air: no roof comes down so low beside its walls. `inside` says
+/// which of the stamp's voxels are the furnishing's.
+fn rising(s: &Stamp, b: &Building, inside: impl Fn(usize) -> bool) -> Stamp {
+    let top = rising_to(b);
+    let lie = Lie::new(b);
+    // How high each column out of doors stands solid from the ground, as the voxels are
+    // gone through from the lowest up.
+    let sw = s.hi.x - s.lo.x + 1;
+    let mut stands = vec![i32::MIN; (sw * (s.hi.z - s.lo.z + 1)).max(0) as usize];
+    let mut voxels = Vec::with_capacity(s.voxels.len());
+    for (j, &(p, v)) in s.voxels.iter().enumerate() {
+        if inside(j) {
+            continue;
+        }
+        let roofing = v != AIR && mat::ROOFING.contains(&v);
+        let kept = match lie.at(p.x, p.z) {
+            _ if v == AIR => Some(v),
+            Side::Wall if p.y > top => None,
+            // A wall's reeds, whose frame stands woven ready for them.
+            Side::Wall if roofing => (p.y > b.floor).then_some(mat::WATTLE),
+            Side::Wall => Some(v),
+            Side::Within => (p.y <= b.floor && !roofing).then_some(v),
+            Side::Out => {
+                let c = ((p.z - s.lo.z) * sw + p.x - s.lo.x) as usize;
+                let grounded = !roofing && (p.y <= b.ground || stands[c] == p.y - 1);
+                if grounded {
+                    stands[c] = p.y;
+                }
+                (!roofing && (p.y <= b.floor || p.y <= top && (grounded || lie.beside(p.x, p.z)))).then_some(v)
+            }
+        };
+        if let Some(v) = kept {
+            voxels.push((p, v));
+        }
     }
+    // The scaffolding stands a voxel out from the walls, which may be a voxel past what
+    // the stamp covered (a flat roof with no eaves): the chunks a voxel beyond a stamp
+    // read it too, so it is drawn whole.
+    let (lo, hi) = (b.walls.0 - IVec2::ONE, b.walls.1 + IVec2::ONE);
+    let lo = IVec3::new(s.lo.x.min(lo.x), s.lo.y, s.lo.z.min(lo.y));
+    let hi = IVec3::new(s.hi.x.max(hi.x), s.hi.y, s.hi.z.max(hi.y));
+    Stamp { lo, hi, voxels, fine: scaffold(s, b, top, &lie), tag: None }
+}
+
+/// The scaffolding about walls rising to `top`: poles a voxel out from the walls every
+/// few voxels, standing past the walls to where the roof will be, and boards between
+/// them to stand on every few voxels up. About a rectangle they stand in straight runs
+/// with a pole at each corner; about a round hut, or one whose corners are cut or that
+/// has a wing, they follow its walls round.
+fn scaffold(s: &Stamp, b: &Building, top: i32, lie: &Lie) -> Vec<PlantBox> {
+    let part = |lo: [i32; 3], hi: [i32; 3], voxel: Voxel| PlantBox { lo, hi, voxel, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
+    // Poles stand a good way past the walls: on a hut whose thatch comes down near the
+    // ground the walls are low, and poles no taller than them would read as a fence.
+    let tall = (b.plate + 3).min(s.hi.y).max(top + 2);
+    let (y0, y1) = (b.ground * CELLS, tall * CELLS);
+    let pole = |x: i32, z: i32| part([x * CELLS + 1, y0, z * CELLS + 1], [x * CELLS + 3, y1, z * CELLS + 3], mat::BARK_PINE);
     // And one up by the poles' tops, for those who will set the roof's timbers.
-    if tall - 1 > levels[levels.len() - 1] + 2 {
+    let mut levels: Vec<i32> = (b.ground + 2..tall - 2).step_by(3).collect();
+    if levels.last().is_none_or(|&l| tall - 1 > l + 2) {
         levels.push(tall - 1);
+    }
+    let (lo, hi) = b.walls;
+    let walled = |x: i32, z: i32| lie.at(x, z) == Side::Wall;
+    let boxed = (lo.x..=hi.x).all(|x| walled(x, lo.y) && walled(x, hi.y)) && (lo.y..=hi.y).all(|z| walled(lo.x, z) && walled(hi.x, z));
+    let mut out = Vec::new();
+    // A rectangle, or walls that do not close (which no home has).
+    if boxed || !lie.of.contains(&Side::Within) {
+        let (x0, x1, z0, z1) = (lo.x - 1, hi.x + 1, lo.y - 1, hi.y + 1);
+        let along = |a: i32, b: i32| -> Vec<i32> {
+            let mut v: Vec<i32> = (a..=b).step_by(3).collect();
+            if v.last() != Some(&b) {
+                v.push(b);
+            }
+            v
+        };
+        for x in along(x0, x1) {
+            out.extend([pole(x, z0), pole(x, z1)]);
+        }
+        for z in along(z0, z1).into_iter().filter(|&z| z != z0 && z != z1) {
+            out.extend([pole(x0, z), pole(x1, z)]);
+        }
+        for h in levels {
+            let y = h * CELLS;
+            for x in x0..=x1 {
+                for z in [z0, z1] {
+                    out.push(part([x * CELLS, y, z * CELLS + 1], [x * CELLS + CELLS, y + 1, z * CELLS + 3], mat::PLANK_PALE));
+                }
+            }
+            for z in z0 + 1..z1 {
+                for x in [x0, x1] {
+                    out.push(part([x * CELLS + 1, y, z * CELLS], [x * CELLS + 3, y + 1, z * CELLS + CELLS], mat::PLANK_PALE));
+                }
+            }
+        }
+        return out;
+    }
+    // Round the walls: every column out of doors beside one of them, taken round in turn.
+    let mut ring: Vec<IVec2> = Vec::new();
+    for z in lo.y - 1..=hi.y + 1 {
+        for x in lo.x - 1..=hi.x + 1 {
+            if lie.at(x, z) == Side::Out && lie.beside(x, z) {
+                ring.push(IVec2::new(x, z));
+            }
+        }
+    }
+    let mid = (lo + hi + IVec2::ONE).as_vec2() * 0.5;
+    let angle = |c: &IVec2| {
+        let v = c.as_vec2() + 0.5 - mid;
+        v.y.atan2(v.x)
+    };
+    ring.sort_by(|a, b| angle(a).total_cmp(&angle(b)));
+    let n = ring.len();
+    let poles = ((n + 1) / 3).max(4).min(n);
+    for i in 0..poles {
+        let c = ring[i * n / poles];
+        out.push(pole(c.x, c.y));
     }
     for h in levels {
         let y = h * CELLS;
-        for x in x0..=x1 {
-            for z in [z0, z1] {
-                out.push(part([x * CELLS, y, z * CELLS + 1], [x * CELLS + CELLS, y + 1, z * CELLS + 3], mat::PLANK_PALE));
-            }
-        }
-        for z in z0 + 1..z1 {
-            for x in [x0, x1] {
-                out.push(part([x * CELLS + 1, y, z * CELLS], [x * CELLS + 3, y + 1, z * CELLS + CELLS], mat::PLANK_PALE));
-            }
+        for c in &ring {
+            out.push(part([c.x * CELLS, y, c.y * CELLS], [c.x * CELLS + CELLS, y + 1, c.y * CELLS + CELLS], mat::PLANK_PALE));
         }
     }
     out

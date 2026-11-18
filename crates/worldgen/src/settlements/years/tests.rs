@@ -8,6 +8,7 @@ use voxel::{CHUNK, PAD};
 use super::*;
 use crate::{
     continent::{Continent, SimConfig},
+    settlements::kit,
     world::GameWorld,
 };
 
@@ -210,6 +211,99 @@ fn a_home_rising_again_stands_in_scaffolding_without_its_roof() {
     assert!(!v.voxels.iter().any(|&(_, v)| mat::ROOFING.contains(&v)), "roofed already");
     assert!(v.fine.iter().any(|f| f.voxel == mat::BARK_PINE), "no poles");
     assert!(v.voxels.iter().filter(|&&(_, v)| v != AIR).count() < s.voxels.iter().filter(|&&(_, v)| v != AIR).count());
+    // Its walls are up past the floor.
+    let Some(Tag::Building(b)) = s.tag.as_deref() else { unreachable!() };
+    assert!(v.voxels.iter().any(|&(p, v)| v != AIR && p.y >= b.floor + 3), "no walls rising");
+}
+
+/// A home of the kit laid at `origin`, turned by `turns`, as a tagged stamp without its
+/// furnishing; and the home as it was built, turned.
+fn laid(region: crate::settlements::Region, step: kit::Step, seed: u32, turns: u32, origin: IVec3) -> (Stamp, kit::Building) {
+    let b = kit::build(&kit::tests::spec(region, step, seed), &kit::tests::palette(region)).turned(turns);
+    let flat = |q: IVec2| q + IVec2::new(origin.x, origin.z);
+    let mut voxels: Vec<(IVec3, Voxel)> = b.voxels.iter().map(|&(q, v)| (q + origin, v)).collect();
+    let room: Vec<IVec3> = b.inside.floor.iter().map(|&q| q + origin).collect();
+    let n = voxels.len();
+    let tag = Tag::building(0, &mut voxels, n, origin.y, (flat(b.walls.lo), flat(b.walls.hi)), &room);
+    let lo = voxels.iter().fold(IVec3::MAX, |a, &(p, _)| a.min(p));
+    let hi = voxels.iter().fold(IVec3::MIN, |a, &(p, _)| a.max(p));
+    (Stamp { lo, hi, voxels, fine: Vec::new(), tag: Some(Box::new(tag)) }, b)
+}
+
+/// Every kind of home the kit builds, in every region, rises again as a house going up:
+/// its walls stand three courses and more over its floor all round, in its own walls'
+/// material (a reed wall's frame woven with wattle), with the doorway and the windows
+/// open in them, short of their full height and with no roof; and the scaffolding stands
+/// out of doors.
+#[test]
+fn every_kind_of_home_rises_with_its_walls_part_way_up_and_its_openings_in_them() {
+    use std::collections::{HashMap, HashSet};
+    let rising = Lives { when: When::new(1, 1), lives: vec![Life { built: 1, fell: None, state: State::Scaffold }], hives: vec![HIVES], capacity: Vec::new(), granted: Vec::new(), settlement: vec![0], seed: 1 };
+    let origin = IVec3::new(400, 60, 300);
+    let (mut homes, mut round, mut reeds, mut raised) = (0, 0, 0, 0);
+    for region in crate::settlements::Region::ALL {
+        for step in kit::Step::ALL {
+            for seed in 0..6 {
+                let (s, b) = laid(region, step, seed, seed % 4, origin);
+                let what = format!("{} {} seed {seed}, {}", region.word(), step.word(), b.style.describe());
+                let v = rising.view(&s).expect("scaffolding stands");
+                let was: HashMap<IVec3, Voxel> = s.voxels.iter().copied().collect();
+                let now: HashMap<IVec3, Voxel> = v.voxels.iter().copied().collect();
+                let solid = |m: &HashMap<IVec3, Voxel>, q: IVec3| m.get(&q).is_some_and(|&v| v != AIR);
+                assert!(!v.voxels.iter().any(|&(_, v)| mat::ROOFING.contains(&v)), "{what}: roofed already");
+                for (q, &x) in &now {
+                    let w = was[q];
+                    assert!(x == w || (x == mat::WATTLE && mat::ROOFING.contains(&w)), "{what}: {x:?} at {q} where it was built of {w:?}");
+                }
+                // The columns of its walls: outside its room, inside its outer walls,
+                // standing from its floor.
+                let floor = b.inside.floor.iter().map(|q| q.y).min().unwrap_or(0) + origin.y;
+                let room: HashSet<IVec2> = b.inside.floor.iter().map(|q| IVec2::new(q.x + origin.x, q.z + origin.z)).collect();
+                let (lo, hi) = (b.walls.lo + IVec2::new(origin.x, origin.z), b.walls.hi + IVec2::new(origin.x, origin.z));
+                let columns: Vec<IVec2> = (lo.y..=hi.y)
+                    .flat_map(|z| (lo.x..=hi.x).map(move |x| IVec2::new(x, z)))
+                    .filter(|c| !room.contains(c) && solid(&was, IVec3::new(c.x, floor + 1, c.y)))
+                    .collect();
+                assert!(columns.len() >= 12, "{what}: {} wall columns", columns.len());
+                // How high a column stands, its roof's covering apart.
+                let up = |m: &HashMap<IVec3, Voxel>, c: IVec2| {
+                    (floor + 1..floor + 40).filter(|&y| m.get(&IVec3::new(c.x, y, c.y)).is_some_and(|&v| v != AIR && !mat::ROOFING.contains(&v))).max().unwrap_or(floor)
+                };
+                for &c in &columns {
+                    for y in floor + 1..=floor + 3 {
+                        let q = IVec3::new(c.x, y, c.y);
+                        assert_eq!(solid(&now, q), solid(&was, q), "{what}: the wall at {q} not up to three courses");
+                    }
+                }
+                // Short of the top of the walls, all round.
+                let (built, now_up) = (columns.iter().map(|&c| up(&was, c)).max().unwrap(), columns.iter().map(|&c| up(&now, c)).max().unwrap());
+                assert!(now_up < built && now_up >= floor + 3, "{what}: walls up to {} of {} over the floor", now_up - floor, built - floor);
+                // The doorway open, and each window a gap in a wall standing under it.
+                if b.door.floor.y >= 0 {
+                    let d = b.door.floor + origin;
+                    assert!(!solid(&now, d + IVec3::Y) && !solid(&now, d + IVec3::Y * 2), "{what}: the doorway at {d} shut");
+                }
+                for w in &b.inside.windows {
+                    let q = w.lo + origin;
+                    if q.y <= now_up {
+                        assert!(!solid(&now, q) && solid(&now, q - IVec3::Y), "{what}: no window at {q}");
+                    }
+                }
+                // Poles round it, none of them in the room.
+                let poles: Vec<&PlantBox> = v.fine.iter().filter(|f| f.voxel == mat::BARK_PINE).collect();
+                assert!(poles.len() >= 4, "{what}: {} poles", poles.len());
+                for p in poles {
+                    let c = IVec2::new(p.lo[0].div_euclid(CELLS), p.lo[2].div_euclid(CELLS));
+                    assert!(!room.contains(&c) && !columns.contains(&c), "{what}: a pole at {c} in the house");
+                }
+                homes += 1;
+                round += (b.style.form == kit::Form::Round) as usize;
+                reeds += (b.style.walls == kit::WallKind::Reed) as usize;
+                raised += (b.style.raised > 0) as usize;
+            }
+        }
+    }
+    assert!(round > 0 && reeds > 0 && raised > 0, "of {homes} homes {round} round, {reeds} of reeds, {raised} raised");
 }
 
 #[test]
@@ -368,5 +462,39 @@ fn list_years() {
                 println!("  field {} at {},{}: {:?}", plot.id, lx + ox, lz + oz, crops);
             }
         }
+    }
+}
+
+/// The homes standing in scaffolding in the summers of a world's first years on the
+/// continent of a place, nearest it first, with what each is and where its door is: for
+/// screenshots (`SEED=1 AT=50524,27324 cargo test -p worldgen -- list_scaffolds --ignored --nocapture`).
+#[test]
+#[ignore]
+fn list_scaffolds() {
+    use crate::macro_layout::{MACRO_SIZE, cell_of};
+    let seed = std::env::var("SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let (x, z) = std::env::var("AT").ok().and_then(|s| s.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))).unwrap_or((50524, 27324));
+    // REGION=Wetland and the like keeps to the settlements of one region.
+    let region = std::env::var("REGION").ok();
+    let w = GameWorld::new(seed);
+    let (mx, mz) = cell_of(x, z);
+    let c = w.continent(mx, mz);
+    let net = &c.trails;
+    let (ox, oz) = (mx * MACRO_SIZE, mz * MACRO_SIZE);
+    let mut found = Vec::new();
+    for year in 1..=16 {
+        let l = Lives::new(net, seed, (mx, mz), When::new(year, 1), &Boons::default());
+        for (i, p) in net.plots.iter().enumerate() {
+            let of = &net.settlements[p.settlement];
+            if l.state(i) == State::Scaffold && region.as_ref().is_none_or(|r| *r == format!("{:?}", of.region)) {
+                let (dx, dz) = (p.door.x + ox, p.door.z + oz);
+                let far = ((dx - x) as f32).hypot((dz - z) as f32);
+                found.push((far, format!("year {year}: plot {i} {:?} {:?}{} of {:?} {} ({:?}), door {dx},{},{dz} facing {:?}", p.purpose, p.step, if p.round { " (round)" } else { "" }, of.kind, p.settlement, of.region, p.door.y, p.facing)));
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (far, line) in found.iter().take(40) {
+        println!("{far:6.0} away: {line}");
     }
 }

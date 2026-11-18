@@ -1408,7 +1408,8 @@ impl<'a> Town<'a> {
         // is as built.
         let plot = net.plots.len() + self.plots.len();
         let inner = turn_rect((b.walls.lo, b.walls.hi), t);
-        let tag = years::Tag::building(plot, &mut voxels, b.voxels.len(), origin.y, (inner.0 + flat(origin), inner.1 + flat(origin)));
+        let room: Vec<IVec3> = b.inside.floor.iter().map(|&q| origin + rotate(q, t)).collect();
+        let tag = years::Tag::building(plot, &mut voxels, b.voxels.len(), origin.y, (inner.0 + flat(origin), inner.1 + flat(origin)), &room);
         net.add_stamp_tagged(voxels, fine, tag);
         if let Some(own) = &own {
             net.guest_beds.extend(own.guest_beds_at(origin, t));
