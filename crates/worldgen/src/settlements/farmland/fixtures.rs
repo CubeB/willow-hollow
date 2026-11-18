@@ -912,7 +912,9 @@ mod tests {
             for p in &c.trails.plots[layout.plots.clone()] {
                 let Some((glo, ghi)) = p.garden else { continue };
                 if let Some(&(_, at, turns)) = layout.things.iter().find(|&&(f, at, _)| f == Fitting::ChickenCoop && (glo.x..=ghi.x).contains(&at.x) && (glo.y..=ghi.y).contains(&at.z)) {
-                    println!("HenRun of settlement {k} at {} {} {}, turned {turns}, garden {}..{}", at.x + ox, at.y, at.z + oz, glo + IVec2::new(ox, oz), ghi + IVec2::new(ox, oz));
+                    let o = IVec2::new(ox, oz);
+                    let yard = p.coop.map_or("none".to_string(), |y| format!("{} {}", y.x + ox, y.z + oz));
+                    println!("HenRun of settlement {k} at {} {} {}, turned {turns}, garden {}..{}, the yard's coop {yard}", at.x + ox, at.y, at.z + oz, glo + o, ghi + o);
                 }
             }
         }

@@ -1739,11 +1739,20 @@ impl<'a> Town<'a> {
         let top = origin.y - 1;
         let crop = if unit(seed ^ 0xc409) < 0.5 { mat::TUFT_LUSH } else { mat::TUFT };
         // The hens' coop, turned to lie along the garden, where it is deep enough to keep
-        // a row of bed besides. A household that lets its coop fall in keeps no hens.
+        // a row of bed besides. A household that lets its coop fall in keeps no hens, nor
+        // does one with a coop already: one built beside the home (its plot's `coop` by
+        // now), or one in its yard, which `dress` picks from the same seed after the
+        // garden, the coop first of a home's six things.
         let mut bed_hi = hi.y;
         let coop = Fitting::ChickenCoop;
         let (a, b) = coop.room(IVec3::ZERO, 1);
-        if hi.y - lo.y + 1 > b.z - a.z && hi.x - lo.x + 1 >= b.x - a.x && unit(seed ^ 0x4e75) < 0.4 {
+        let here = {
+            let (a, b) = turn_rect((lo, hi), t);
+            (a + flat(origin), b + flat(origin))
+        };
+        let built = self.plots.iter().any(|p| p.garden == Some(here) && p.coop.is_some());
+        let yard_hens = built || seed % 6 == 0 || (unit(seed ^ 0x2c) < 0.5 && (seed >> 8) % 6 == 0);
+        if hi.y - lo.y + 1 > b.z - a.z && hi.x - lo.x + 1 >= b.x - a.x && !yard_hens && unit(seed ^ 0x4e75) < 0.5 {
             let f = self.fitting(coop, hash2(seed ^ 0x4e76, 1, 2));
             if !f.decayed {
                 let at = IVec3::new(lo.x - a.x, 0, hi.y + 1 - b.z);
