@@ -58,12 +58,12 @@ stone:
   windows: 3 5
 
 components:
-  door: porch 2 rich, bench 2, rain-butt 1, nothing 3
-  eaves: drying-herbs 1, nothing 3
-  wall: woodpile 2, trellis 1 rich, nothing 2
-  corner: rain-butt 2, nothing 3
-  yard: hen-coop 1, hives 1 rich, nothing 2
-  window: window-box 2 rich, nothing 3
-  gable: dovecote 1 rich, nothing 4
+  door: porch 2 rich, bench 2, climbing-rose 1, rain-butt 1, nothing 2
+  eaves: herbs 1, nothing 3
+  wall: woodpile 2, climbing-rose 1 rich, ivy 1, rain-butt 1, nothing 2
+  corner: rain-butt 2, ivy 1, nothing 2
+  yard: hen-coop 1, hives 1 rich, nothing 3
+  window: window-box 2 rich, shutters 2, nothing 2
+  gable: dovecote 1 rich, banner 1 rich, nothing 3
   ridge: nothing
   roof: nothing

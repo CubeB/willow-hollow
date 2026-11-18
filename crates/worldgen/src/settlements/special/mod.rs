@@ -335,6 +335,7 @@ pub fn copy(spec: &SpecialSpec, pal: &Palette, name: &str) -> Option<Design> {
             sway_hi: f.sway_hi,
             thin: f.thin,
             season: f.season,
+            flap: f.flap,
         });
     }
     d.clear = b.clear.clone();

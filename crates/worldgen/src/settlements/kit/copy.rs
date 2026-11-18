@@ -308,15 +308,7 @@ pub fn copy(spec: &Spec, pal: &Palette, rules: &Rules, kind: Kind, name: &str) -
     for (k, f) in b.fine.iter().enumerate() {
         let tag = same_fine.then(|| t.fine[k]).filter(|g| g.lo == f.lo && g.hi == f.hi).map(|g| g.voxel);
         let lo = IVec3::from_array(f.lo);
-        d.fine.push(Fine {
-            lo,
-            hi: IVec3::from_array(f.hi),
-            cell: cell(f.voxel, tag, lo.div_euclid(IVec3::splat(CELLS))),
-            sway_lo: f.sway_lo,
-            sway_hi: f.sway_hi,
-            thin: f.thin,
-            season: f.season,
-        });
+        d.fine.push(Fine::of(f, cell(f.voxel, tag, lo.div_euclid(IVec3::splat(CELLS)))));
     }
     d.clear = b.clear.clone();
     d.home = Some(Home::of(&b));
@@ -332,17 +324,11 @@ pub fn from_design(d: &Design, pal: &Palette, seed: u32) -> Option<Building> {
     let fine = s.take_fine();
     let voxels = s.into_voxels();
     // Every column it covers above the ground, its walls at least, as the kit counts it.
-    let (mut lo, mut hi) = (home.walls.lo, home.walls.hi);
-    for (q, v) in &voxels {
-        if *v != AIR && q.y >= 0 {
-            lo = lo.min(IVec2::new(q.x, q.z));
-            hi = hi.max(IVec2::new(q.x, q.z));
-        }
-    }
+    let footprint = super::footprint(home.walls, &voxels, &fine);
     let mut b = Building {
         voxels,
         fine,
-        footprint: Area { lo, hi },
+        footprint,
         walls: home.walls,
         door: home.door,
         anchors: home.anchors.clone(),

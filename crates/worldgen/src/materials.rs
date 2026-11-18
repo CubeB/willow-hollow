@@ -393,6 +393,13 @@ palette! {
     MEADOW_TUFT       = (150, 176,  92), Foliage, 3;
     // A hedge seen from far off, as the coarse ground draws the line of it across a field.
     HEDGE_FAR         = ( 50,  86,  42), Solid, 2;
+    // Paint for door frames and shutters (settlements::kit::components), added last so
+    // existing ids keep their numbers: the blue and green of a desert door, the red and
+    // ochre of a lowland shutter, each a little chalky as limewash paint is.
+    PAINT_BLUE        = ( 58, 104, 150), Solid, 1;
+    PAINT_GREEN       = ( 70, 118,  92), Solid, 1;
+    PAINT_RED         = (150,  62,  52), Solid, 1;
+    PAINT_OCHRE       = (196, 150,  70), Solid, 1;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,

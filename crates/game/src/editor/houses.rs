@@ -20,7 +20,10 @@ use worldgen::{
     noise::{hash2, unit},
     settlements::{
         Region,
-        kit::{self, Building, Rules, Spec, Step},
+        kit::{
+            self, Building, Rules, Spec, Step,
+            components::{Attached, Dress},
+        },
         special::{self, Built, Facts, SpecialSpec},
     },
 };
@@ -266,11 +269,14 @@ impl Kit {
 pub struct Houses {
     pub household: Household,
     pub kit: Kit,
+    /// The homes are shown with their region's components on them (porches, awnings,
+    /// woodpiles), as the world builds them, or bare, as the kit makes them first.
+    pub components: bool,
 }
 
 impl Houses {
     pub fn new(dir: &Path) -> Self {
-        Houses { household: Household::default(), kit: Kit::new(dir) }
+        Houses { household: Household::default(), kit: Kit::new(dir), components: true }
     }
 
     /// What the kit is asked for: the variant's household, with whatever is set by hand.
@@ -283,10 +289,17 @@ impl Houses {
     /// The kit's own home, of the stone and timber of its region's country, and its voxels
     /// and fine parts to draw.
     pub fn build(&self, house: House, variant: u32) -> (Building, Vec<(IVec3, Voxel)>, Vec<PlantBox>) {
-        let s = self.spec(house, variant);
-        let b = kit::generate(&s, &palette(s.region, variant), self.kit.rules(s.region));
+        let (b, _) = self.dressed(house, variant);
         let (voxels, fine) = (b.voxels.clone(), b.fine.clone());
         (b, voxels, fine)
+    }
+
+    /// The kit's own home with its components or bare, as [`Houses::components`] says,
+    /// and the components set on it.
+    fn dressed(&self, house: House, variant: u32) -> (Building, Vec<Attached>) {
+        let s = self.spec(house, variant);
+        let (pal, rules) = (palette(s.region, variant), self.kit.rules(s.region));
+        if self.components { kit::generate_dressed(&s, &pal, rules, &Dress::default()) } else { (kit::generate_bare(&s, &pal, rules), Vec::new()) }
     }
 
     /// The home on view as a house of one's own, named `name`.
@@ -332,10 +345,33 @@ impl Houses {
         if !about.is_empty() {
             ui.small(about);
         }
+        let components = self.components_ui(ui, house, *variant);
         ui.add_space(6.0);
         let reread = self.kit.ui(ui, Region::ALL[house.0]);
         ui.add_space(6.0);
-        ((next != house).then_some(next), *variant != was || household || reread)
+        ((next != house).then_some(next), *variant != was || household || reread || components)
+    }
+
+    /// Whether the home is shown with its components, and which went where. Returns
+    /// whether that was changed.
+    fn components_ui(&mut self, ui: &mut egui::Ui, house: House, variant: u32) -> bool {
+        ui.add_space(4.0);
+        let changed = ui.checkbox(&mut self.components, "Components").on_hover_text("The region's porches, awnings, woodpiles and the rest, set at the kit's anchors as the world sets them. Off, the home is shown as the kit makes it first").changed();
+        if self.components {
+            let (_, attached) = self.dressed(house, variant);
+            let mut said: Vec<String> = Vec::new();
+            for a in &attached {
+                let one = match &a.design {
+                    Some(name) => format!("{} (\u{201c}{name}\u{201d}) at the {}", a.component.label().to_lowercase(), a.anchor.kind.word()),
+                    None => format!("{} at the {}", a.component.label().to_lowercase(), a.anchor.kind.word()),
+                };
+                if !said.contains(&one) {
+                    said.push(one);
+                }
+            }
+            ui.small(if said.is_empty() { "None went on this one: what its kit file chose did not fit, or it chose nothing.".to_string() } else { format!("On it: {}.", said.join("; ")) });
+        }
+        changed
     }
 
     /// Age, wealth and how many sleep there: as the variant has them until set by hand.

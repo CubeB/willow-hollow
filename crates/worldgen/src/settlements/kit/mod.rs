@@ -73,8 +73,11 @@
 //!
 //! Under `components:` each line is a kind of anchor (`door`, `eaves`, `gable`, `ridge`,
 //! `wall`, `corner`, `roof`, `yard`, `window`) and a weighted list of the components that
-//! go there, by name, with `nothing` for none. The kit only carries these weights for now;
-//! the components come with #203.
+//! go there, by name, with `nothing` for none: a porch, an awning, a woodpile (the list is
+//! [`components::Component`], and what each is, its documentation). A component named
+//! where it cannot go is a fault in the file. The door, the windows, the gables, eaves,
+//! ridge and roof each take one choice for the whole building, the door two; each
+//! stretch of wall, corner and spot in the yard takes its own (see [`components`]).
 //!
 //! Whatever the rules say, the kit keeps a building walk-in: doorways at least two
 //! voxels wide and five high, five voxels of headroom over every floor cell and under the
@@ -91,7 +94,9 @@
 //! and step, each by its weight (see [`crate::features::designs`]). A saved house keeps
 //! the door, beds and the rest the kit gave it ([`Home`]), and its floor is found again by
 //! walking in ([`walk`]) whenever it is built. With nothing saved, [`build`] is the kit.
+//! A saved house is built as it was drawn, its components and all, and takes no more.
 
+pub mod components;
 pub mod rules;
 pub mod walk;
 
@@ -102,7 +107,10 @@ mod plan;
 pub(crate) mod tests;
 
 use glam::{IVec2, IVec3};
-use voxel::{Voxel, mesh::PlantBox};
+use voxel::{
+    AIR, Voxel,
+    mesh::{CELLS, PlantBox},
+};
 
 use crate::{
     features::{designs, landmarks::Palette, parts, shape::rotate},
@@ -375,14 +383,53 @@ pub fn build(spec: &Spec, pal: &Palette) -> Building {
 /// household it has a bed for each of; it is built as it was drawn, whatever the age and
 /// wealth asked for.
 pub fn build_with(spec: &Spec, pal: &Palette, rules: &Rules) -> Building {
-    designs::pick_house(spec.region, spec.step, spec.seed, spec.sleepers)
-        .and_then(|d| from_design(d, pal, spec.seed))
-        .unwrap_or_else(|| generate(spec, pal, rules))
+    build_dressed(spec, pal, rules, &components::Dress::default())
 }
 
-/// The kit's own home for `spec` by `rules`, never a saved house.
+/// [`build_with`] for a home where it stands, which can dress it beyond its region's
+/// rules: a great town's (see [`components::Dress`]).
+pub fn build_dressed(spec: &Spec, pal: &Palette, rules: &Rules, how: &components::Dress) -> Building {
+    designs::pick_house(spec.region, spec.step, spec.seed, spec.sleepers)
+        .and_then(|d| from_design(d, pal, spec.seed))
+        .unwrap_or_else(|| generate_dressed(spec, pal, rules, how).0)
+}
+
+/// The kit's own home for `spec` by `rules`, never a saved house, with its region's
+/// components set on it.
 pub fn generate(spec: &Spec, pal: &Palette, rules: &Rules) -> Building {
+    generate_dressed(spec, pal, rules, &components::Dress::default()).0
+}
+
+/// [`generate`] dressed as `how` says, and what went where.
+pub fn generate_dressed(spec: &Spec, pal: &Palette, rules: &Rules, how: &components::Dress) -> (Building, Vec<components::Attached>) {
+    let mut b = generate_bare(spec, pal, rules);
+    let attached = components::dress(&mut b, spec, pal, rules, how);
+    (b, attached)
+}
+
+/// The kit's own home for `spec` by `rules` as it is built, before any component is set
+/// on it.
+pub fn generate_bare(spec: &Spec, pal: &Palette, rules: &Rules) -> Building {
     make::make(spec, pal, rules.step(spec.step))
+}
+
+/// Every column a building covers above the ground: inside its walls, under any of its
+/// voxels from the first layer up, and under any fine part reaching above the ground (an
+/// awning, a sail shade), as [`Building::footprint`] counts it.
+pub(crate) fn footprint(walls: Area, voxels: &[(IVec3, Voxel)], fine: &[PlantBox]) -> Area {
+    let (mut lo, mut hi) = (walls.lo, walls.hi);
+    for (q, v) in voxels {
+        if *v != AIR && q.y >= 0 {
+            lo = lo.min(IVec2::new(q.x, q.z));
+            hi = hi.max(IVec2::new(q.x, q.z));
+        }
+    }
+    for p in fine.iter().filter(|p| p.hi[1] > 0) {
+        let (a, b) = (IVec3::from(p.lo).div_euclid(IVec3::splat(CELLS)), (IVec3::from(p.hi) - 1).div_euclid(IVec3::splat(CELLS)));
+        lo = lo.min(IVec2::new(a.x, a.z));
+        hi = hi.max(IVec2::new(b.x, b.z));
+    }
+    Area { lo, hi }
 }
 
 impl PartialEq for Building {

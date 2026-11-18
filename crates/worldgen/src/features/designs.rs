@@ -59,6 +59,18 @@
 //!   folder of its own. Their generators are `settlements::special` (#203), and any of
 //!   their buildings can be copied in the editor to draw on; the world builds the
 //!   generators' own, not these.
+//! - **Components** (`kind: component`, in `assets/structures/component/`), the porches,
+//!   awnings, woodpiles and the rest the house kit sets on its homes
+//!   ([`kit::components`]). A component file says which it is (`component: porch`) and
+//!   is drawn in the frame of the anchor it goes at: the anchor's voxel is the origin,
+//!   +X (east) is out from the building, and the wall it stands against is at x = -1. It
+//!   is chosen against the generator's own of that component wherever one goes, by
+//!   weight; the generator's weight is in `component/generator.txt`, or [`KIT_WEIGHT`]
+//!   when that is missing, as for houses. One that does not fit where it is chosen (it
+//!   would stand in a wall, or block the door) gives way to the generator there.
+//!
+//! A fine part can be cloth (`flap N` after it in a file, as the kit's awnings and
+//! banners are), which moves in the wind; only houses and components keep it.
 
 use std::{collections::HashMap, fmt::Write as _, sync::OnceLock};
 
@@ -74,7 +86,7 @@ use crate::{
     noise::{hash2, hash3, unit},
     settlements::{
         Region,
-        kit::{self, Step},
+        kit::{self, Step, components::Component},
     },
 };
 
@@ -254,6 +266,15 @@ pub struct Fine {
     pub sway_hi: bool,
     pub thin: u8,
     pub season: u8,
+    /// What it is as cloth, if it is (see [`PlantBox::cloth`]): 0 for none.
+    pub flap: u8,
+}
+
+impl Fine {
+    /// A fine part as built, of `cell`.
+    pub fn of(b: &PlantBox, cell: Cell) -> Fine {
+        Fine { lo: IVec3::from_array(b.lo), hi: IVec3::from_array(b.hi), cell, sway_lo: b.sway_lo, sway_hi: b.sway_hi, thin: b.thin, season: b.season, flap: b.flap }
+    }
 }
 
 /// One saved structure.
@@ -360,6 +381,8 @@ pub enum Kind {
     House(Region, Step),
     /// One of a settlement's own buildings.
     Special(Special),
+    /// A regional component, against its generator's own wherever it goes.
+    Component(Component),
 }
 
 impl From<Landmark> for Kind {
@@ -375,6 +398,7 @@ impl Kind {
             Kind::Landmark(k) => kind_word(k),
             Kind::House(..) => "house",
             Kind::Special(s) => s.word(),
+            Kind::Component(_) => "component",
         }
     }
 
@@ -383,6 +407,9 @@ impl Kind {
     pub fn by_word(word: &str) -> Option<Kind> {
         if word.eq_ignore_ascii_case("house") {
             return Some(Kind::House(Region::Temperate, Step::Hut));
+        }
+        if word.eq_ignore_ascii_case("component") {
+            return Some(Kind::Component(Component::ALL[0]));
         }
         kind_by_word(word).map(Kind::Landmark).or_else(|| Special::ALL.into_iter().find(|s| s.word().eq_ignore_ascii_case(word)).map(Kind::Special))
     }
@@ -406,17 +433,19 @@ impl Kind {
             Kind::Landmark(k) => k as i32,
             Kind::House(r, s) => 0x100 + r as i32 * 8 + s as i32,
             Kind::Special(s) => 0x200 + s as i32,
+            Kind::Component(c) => 0x300 + c as i32,
         }
     }
 }
 
 /// Every folder of saved structures, a kind to each, in the order the editor lists them:
 /// the landmarks, then the homes (any region and step: each file says which), then the
-/// settlement buildings.
+/// settlement buildings, then the components (each file says which).
 pub fn folders() -> Vec<Kind> {
     let mut out: Vec<Kind> = KINDS.into_iter().map(Kind::Landmark).collect();
     out.push(Kind::House(Region::Temperate, Step::Hut));
     out.extend(Special::ALL.map(Kind::Special));
+    out.push(Kind::Component(Component::ALL[0]));
     out
 }
 
@@ -507,6 +536,7 @@ impl Design {
                 thin: b.thin,
                 // A design keeps no cloth, and what cloth keeps here is not a season.
                 season: if b.cloth() == voxel::mesh::Cloth::None { b.season } else { 0 },
+                flap: 0,
             });
         }
         d
@@ -534,7 +564,7 @@ impl Design {
                 sway_hi: f.sway_hi,
                 thin: f.thin,
                 season: f.season,
-                flap: 0,
+                flap: f.flap,
             });
         }
         for &(lo, hi) in &self.clear {
@@ -564,6 +594,9 @@ impl Design {
         if let Kind::House(region, step) = self.kind {
             let _ = writeln!(out, "region: {}", region.word());
             let _ = writeln!(out, "step: {}", step.word());
+        }
+        if let Kind::Component(c) = self.kind {
+            let _ = writeln!(out, "component: {}", c.word());
         }
         let _ = writeln!(out, "name: {}", one_line(&self.name));
         let _ = writeln!(out, "weight: {}", self.weight);
@@ -634,6 +667,9 @@ impl Design {
                 if f.season != 0 {
                     let _ = write!(out, " season {}", f.season);
                 }
+                if f.flap != 0 {
+                    let _ = write!(out, " flap {}", f.flap);
+                }
                 out.push('\n');
             }
         }
@@ -662,7 +698,7 @@ impl Design {
         }
         let mut d = Design::new(Landmark::Shrine, "");
         let mut kind = None;
-        let (mut region, mut step) = (None, None);
+        let (mut region, mut step, mut component) = (None, None, None);
         let mut home: Option<kit::Home> = None;
         let mut corner = (0, 0);
         let mut key: HashMap<char, Cell> = HashMap::new();
@@ -684,6 +720,7 @@ impl Design {
                         region = Some(Region::ALL.into_iter().find(|r| r.word().eq_ignore_ascii_case(value)).ok_or_else(|| at(format!("`{value}` is not a region (one of {})", Region::ALL.map(|r| r.word()).join(", "))))?)
                     }
                     "step" => step = Some(Step::ALL.into_iter().find(|s| s.word().eq_ignore_ascii_case(value)).ok_or_else(|| at(format!("`{value}` is not a step (hut, timber or stone)")))?),
+                    "component" => component = Some(Component::by_word(value).ok_or_else(|| at(format!("`{value}` is not a component (such as porch, awning or woodpile)")))?),
                     "home" => {
                         section = Section::Home;
                         home.get_or_insert_with(kit::Home::blank);
@@ -735,7 +772,7 @@ impl Design {
                     let v = v.filter(|v| v.len() == 6).ok_or_else(|| at("a fine part starts with six whole numbers, its two corners".into()))?;
                     let word = words.next().ok_or_else(|| at("a fine part needs its material after its corners".into()))?;
                     let cell = Cell::parse(word).ok_or_else(|| at(format!("`{word}` is not a role or a material")))?;
-                    let mut f = Fine { lo: IVec3::new(v[0], v[1], v[2]), hi: IVec3::new(v[3], v[4], v[5]), cell, sway_lo: false, sway_hi: false, thin: 0, season: 0 };
+                    let mut f = Fine { lo: IVec3::new(v[0], v[1], v[2]), hi: IVec3::new(v[3], v[4], v[5]), cell, sway_lo: false, sway_hi: false, thin: 0, season: 0, flap: 0 };
                     while let Some(w) = words.next() {
                         let mut number = || words.next().and_then(|w| w.parse().ok()).ok_or_else(|| at(format!("`{w}` needs a number after it")));
                         match w {
@@ -743,6 +780,7 @@ impl Design {
                             "sway-high" => f.sway_hi = true,
                             "thin" => f.thin = number()?,
                             "season" => f.season = number()?,
+                            "flap" => f.flap = number()?,
                             _ => return Err(at(format!("`{w}` is not something a fine part can have"))),
                         }
                     }
@@ -775,6 +813,8 @@ impl Design {
                 Kind::House(region, step)
             }
             _ if region.is_some() || step.is_some() => return Err("only a house has a `region:` and a `step:`".into()),
+            Kind::Component(_) => Kind::Component(component.ok_or("a component says which it is, as in `component: porch`")?),
+            _ if component.is_some() => return Err("only a component has a `component:` line".into()),
             k => k,
         };
         d.home = home;
@@ -898,7 +938,7 @@ fn choose_from<'a>(generator: u32, designs: impl Iterator<Item = &'a Design> + C
 pub fn gather<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> (HashMap<Kind, Choices>, Vec<(String, String)>) {
     let mut out: HashMap<Kind, Choices> = HashMap::new();
     let mut problems = Vec::new();
-    let mut kit_weight = None;
+    let (mut kit_weight, mut component_weight) = (None, None);
     let mut files: Vec<(&str, &str)> = files.into_iter().collect();
     // In a fixed order, so the world does not depend on how a folder was listed.
     files.sort_unstable();
@@ -919,6 +959,7 @@ pub fn gather<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> (HashM
             match parse_generator(text) {
                 // One weight for the kit in every region and step.
                 Ok(w) if matches!(kind, Kind::House(..)) => kit_weight = Some(w),
+                Ok(w) if matches!(kind, Kind::Component(..)) => component_weight = Some(w),
                 Ok(w) => out.entry(kind).or_default().generator = Some(w),
                 Err(e) => problems.push((path.clone(), e)),
             }
@@ -931,8 +972,12 @@ pub fn gather<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> (HashM
         }
     }
     for (kind, choices) in &mut out {
-        if let Kind::House(..) = kind {
-            choices.generator = Some(kit_weight.unwrap_or(KIT_WEIGHT));
+        match kind {
+            Kind::House(..) => choices.generator = Some(kit_weight.unwrap_or(KIT_WEIGHT)),
+            // Components are many, as homes are, and one saved should not take every place
+            // its kind goes.
+            Kind::Component(..) => choices.generator = Some(component_weight.unwrap_or(KIT_WEIGHT)),
+            _ => {}
         }
     }
     (out, problems)
@@ -958,6 +1003,13 @@ pub fn problems() -> Vec<(String, String)> {
 /// generator builds it.
 pub fn pick(kind: impl Into<Kind>, seed: u32) -> Option<&'static Design> {
     let kind = kind.into();
+    library().get(&kind)?.choose(kind, seed)
+}
+
+/// The saved design a component going in with `seed` is built from, or None when its
+/// generator builds it.
+pub fn pick_component(c: Component, seed: u32) -> Option<&'static Design> {
+    let kind = Kind::Component(c);
     library().get(&kind)?.choose(kind, seed)
 }
 
@@ -1070,6 +1122,15 @@ mod tests {
         let problems = problems();
         assert!(problems.is_empty(), "{problems:?}");
         for (kind, choices) in library() {
+            // A saved component must go on some home of a region that has it, or it is
+            // never built.
+            if let Kind::Component(c) = *kind {
+                let pal = |r: crate::settlements::Region, _: u32| Palette::local(r.biome(), mat::bedrock(r.biome()).0);
+                for d in &choices.designs {
+                    let fits = (0..12).any(|v| kit::components::stand(c, v, Some(d), pal).is_some());
+                    assert!(fits, "{}: the component fits on none of the homes tried", d.file_name());
+                }
+            }
             let Kind::House(region, _) = *kind else { continue };
             let biome = region.biome();
             let pal = Palette::local(biome, mat::bedrock(biome).0);

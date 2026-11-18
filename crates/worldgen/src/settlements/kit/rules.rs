@@ -306,8 +306,8 @@ pub struct Rules {
     /// The hut, the timber house and the stone house, in [`Step::ALL`] order.
     pub steps: [StepRules; 3],
     /// For each kind of anchor, the components that can go there and how often, by name
-    /// (`nothing` for none). The components themselves come later (#203); the kit only
-    /// carries the weights.
+    /// (`nothing` for none): each a [`super::components::Component`] that goes at that
+    /// kind of anchor.
     pub components: Vec<(AnchorKind, Vec<Choice<String>>)>,
 }
 
@@ -371,7 +371,9 @@ impl Rules {
                         .into_iter()
                         .find(|a| a.word() == head)
                         .ok_or_else(|| at(format!("`{head}` is not a kind of anchor ({})", AnchorKind::ALL.map(|a| a.word()).join(", "))))?;
-                    let list = choices(value, |w| Some(w.to_string())).map_err(at)?;
+                    // Only a component that goes at this kind of anchor, or nothing.
+                    let fits = |w: &str| w == "nothing" || super::components::Component::by_word(w).is_some_and(|c| c.takes(kind));
+                    let list = choices(value, |w| fits(w).then(|| w.to_string())).map_err(at)?;
                     rules.components.retain(|(a, _)| *a != kind);
                     rules.components.push((kind, list));
                 }

@@ -57,12 +57,12 @@ stone:
   windows: 2 4
 
 components:
-  door: carved-post 1 rich, bench 1, nothing 2
-  eaves: lanterns 1 rich, nothing 3
-  wall: woodpile 2, nothing 2
-  corner: mushroom-logs 1, nothing 3
-  yard: hives 1, nothing 2
+  door: carved-posts 1 rich, bench 1, nothing 2
+  eaves: lanterns 2 rich, nothing 2
+  wall: woodpile 2, ivy 1, nothing 2
+  corner: mushroom-logs 1, nothing 2
+  yard: hives 1, mushroom-logs 1, nothing 2
   window: nothing
   gable: carved-boards 2, nothing 2
-  ridge: nothing
-  roof: nothing
+  ridge: mossy-roof 3, nothing 1
+  roof: mossy-roof 1, nothing 2

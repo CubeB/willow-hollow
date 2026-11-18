@@ -60,11 +60,11 @@ stone:
   windows: 2 3
 
 components:
-  door: boat 2, net-rack 1, nothing 2
+  door: rope-rail 2, boardwalk 1, net-rack 1, nothing 2
   eaves: drying-nets 2, nothing 2
-  wall: eel-traps 1, nothing 2
+  wall: eel-traps 1, reed-screen 1, reed-stack 1, nothing 2
   corner: nothing
-  yard: boat 1, reed-stack 2, nothing 2
+  yard: punt 1, upturned-boat 1, reed-stack 1, driftwood-fence 1, net-rack 1, nothing 2
   window: nothing
   gable: nothing
   ridge: nothing

@@ -59,12 +59,12 @@ stone:
   windows: 2 4
 
 components:
-  door: water-jar 1, bench 1, nothing 2
+  door: carved-posts 2 rich, water-jar 1, bench 1, nothing 2
   eaves: hanging-baskets 2, nothing 2
   wall: woodpile 1, nothing 2
   corner: nothing
-  yard: garden-plot 2, banana 1, nothing 2
-  window: nothing
+  yard: hammock 2, palm-shade 1, nothing 2
+  window: woven-screen 2, nothing 1
   gable: carved-boards 1 rich, nothing 3
   ridge: horns 1 rich, nothing 3
   roof: nothing

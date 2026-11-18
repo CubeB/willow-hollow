@@ -57,11 +57,11 @@ stone:
 
 components:
   door: bench 2, woodpile 1, nothing 2
-  eaves: woodpile 2, nothing 2
-  wall: woodpile 3, nothing 1
-  corner: nothing
-  yard: hay-rack 1, nothing 2
-  window: window-box 3 rich, nothing 2
-  gable: balcony 1 rich, carved-boards 1, nothing 2
-  ridge: bell 1 rich, nothing 4
+  eaves: herbs 1, nothing 2
+  wall: woodpile 4, nothing 1
+  corner: woodpile 1, nothing 3
+  yard: hay-rack 2, nothing 2
+  window: window-box 3 rich, shutters 2, nothing 1
+  gable: balcony 2, carved-boards 1, banner 1 rich, nothing 1
+  ridge: bell 1 rich, nothing 3
   roof: nothing

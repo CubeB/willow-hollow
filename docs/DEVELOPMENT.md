@@ -329,6 +329,34 @@ was. `--structure house/<name>` opens a saved house. To try a hand edit on a hou
 without the editor, `KIT_COPY="temperate hut 5" cargo test --release -p worldgen --lib
 kit::copy::tests::print -- --ignored --nocapture` prints a copy of one.
 
+**Components.** What makes a region's homes its own (#203), set on the kit's homes at
+the anchors the kit marks: a desert house's cloth awning and water jars, a lowland
+cottage's porch, window boxes and climbing rose, a northern woodpile to the eaves and
+flowers on the turf roof, a marsh hut's rope rails, boardwalk and punt. Each is a small
+generator in `crates/worldgen/src/settlements/kit/components/` (its module says how they
+go on and what the kit already builds itself), and each region's kit file says which go
+at which kind of anchor and how often, under `components:` (a name in the wrong place is
+named in red as any wrong line is). The editor shows the homes with theirs on; untick
+*Components* in the Houses panel, or add `/bare` (`--structure
+house/temperate/timber/bare`), to see one as the kit first makes it, and the panel lists
+what went where. *Components* in the list has a gallery of every one, or a region's, each
+on a stretch of a home it goes on, new and let go (`--structure components/desert`), and
+each component's own (`--structure component/porch`), whose variants set it on other
+homes. Every awning, sail, banner and hide is cloth and moves in the wind in the game, as
+washing does; the editor draws it still.
+
+*Copy this variant to edit* turns one into a component of your own, saved as
+`assets/structures/component/<name>.txt` with a `component:` line saying which it is. It
+is drawn in its anchor's frame: the anchor's voxel is the origin, out from the house is
+east (+x), and the wall is at x = -1, so whatever home it is chosen for it is turned to
+fit. Wherever its component goes it is chosen against the generator's own by weight
+(`component/generator.txt`, 10 if left out, as for houses), and if it does not fit there
+(it would stand in a wall, hang in the air or block the way in) the generator's goes
+instead; the panel says when a saved one fits on none of the homes tried. To look into a
+component that never goes on, `COMPONENT_SHOW="rope-rail wetland" cargo test --release
+-p worldgen --lib components::tests::trace -- --ignored --nocapture` tries it on that
+region's homes and says what stopped it.
+
 **Settlement buildings.** The tavern, smithy, sawmill, granary, market hall, guild house,
 well head and gate are kinds of their own (`designs::Special`), listed under *Settlement
 buildings*, each with its folder (`tavern/`, `market-hall/`, `guild-house/`,

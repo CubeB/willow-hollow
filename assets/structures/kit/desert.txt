@@ -56,12 +56,12 @@ stone:
   parapet: 1 2
 
 components:
-  door: water-jar 2, awning 2 rich, nothing 2
+  door: awning 3 rich, water-jar 2, door-frame 2, nothing 1
   eaves: nothing
-  wall: bench 2, water-jar 1, nothing 2
+  wall: water-jar 1, palm-shade 1, bench 1, nothing 2
   corner: water-jar 1, nothing 3
-  yard: date-palm 1, oven 2, sail-shade 1 rich, nothing 2
-  window: lattice 1 rich, nothing 3
+  yard: oven 2, sail-shade 1 rich, palm-shade 1, nothing 2
+  window: lattice 1 rich, awning 1, nothing 2
   gable: nothing
   ridge: nothing
-  roof: terrace-awning 1 rich, drying-mats 1, nothing 2
+  roof: terrace 1 rich, sail-shade 1 rich, drying-mats 1, wind-catcher 2, nothing 2   # wind catchers in great towns only

@@ -54,11 +54,11 @@ stone:
   windows: 2 4
 
 components:
-  door: peat-stack 2, bench 1, nothing 3
-  eaves: nothing
-  wall: peat-stack 2, woodpile 1, nothing 2
-  corner: water-trough 1, nothing 3
-  yard: sheep-fold 2, nothing 2
+  door: wind-porch 2, turf-bench 1, peat-stack 1, nothing 2
+  eaves: thatch-weights 3, nothing 1
+  wall: peat-stack 2, turf-bench 1, woodpile 1, nothing 2
+  corner: water-trough 1, peat-stack 1, nothing 2
+  yard: lee-wall 2, sheep-fold 2, nothing 2
   window: nothing
   gable: nothing
   ridge: nothing

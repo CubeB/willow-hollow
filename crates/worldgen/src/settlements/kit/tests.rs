@@ -215,10 +215,15 @@ fn nothing_floats() {
         };
         let touch = |a: &PlantBox, b: &PlantBox| (0..3).all(|i| a.lo[i] <= b.hi[i] && b.lo[i] <= a.hi[i]);
         let mut fixed: Vec<bool> = b.fine.iter().map(on_voxel).collect();
-        for _ in 0..3 {
+        // Until nothing more is found held: a rope rail's rope hangs from its posts, a
+        // lantern from its chain, through many parts.
+        let mut more = true;
+        while more {
+            more = false;
             for i in 0..b.fine.len() {
                 if !fixed[i] && (0..b.fine.len()).any(|j| fixed[j] && touch(&b.fine[i], &b.fine[j])) {
                     fixed[i] = true;
+                    more = true;
                 }
             }
         }
@@ -293,8 +298,10 @@ fn anchors_are_in_the_open() {
         for a in &b.anchors {
             assert!(!site.solid(a.at), "{}: {a:?} is inside something", name(&s));
         }
+        // Built bare, before components take some of them, every home has these.
+        let bare = generate_bare(&s, &palette(s.region), rules::rules(s.region));
         for kind in [AnchorKind::Door, AnchorKind::RoofTop, AnchorKind::Yard] {
-            assert!(b.anchors.iter().any(|a| a.kind == kind), "{}: a {} anchor", name(&s), kind.word());
+            assert!(bare.anchors.iter().any(|a| a.kind == kind), "{}: a {} anchor", name(&s), kind.word());
         }
     }
 }

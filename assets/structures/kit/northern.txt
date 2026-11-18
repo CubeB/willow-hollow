@@ -53,12 +53,12 @@ stone:
   windows: 2 4
 
 components:
-  door: woodpile 2, bench 1, nothing 2
-  eaves: fish-rack 1, nothing 3
-  wall: woodpile 3, nothing 2
+  door: hide-curtain 2, woodpile 1, bench 1, nothing 2
+  eaves: nothing
+  wall: woodpile 4, nothing 1
   corner: woodpile 1, nothing 3
-  yard: drying-rack 1, sauna 1 rich, nothing 3
+  yard: raised-store 2 rich, fish-rack 1, drying-rack 1, nothing 2
   window: shutters 1, nothing 2
-  gable: carved-boards 1 rich, nothing 3
-  ridge: nothing
-  roof: nothing
+  gable: carved-boards 2, nothing 1
+  ridge: turf-flowers 3, horns 1 rich, nothing 1
+  roof: turf-flowers 1, nothing 2
