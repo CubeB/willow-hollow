@@ -146,6 +146,12 @@ pub struct Plot {
     /// and inclusive.
     pub lo: IVec2,
     pub hi: IVec2,
+    /// The columns of its outer walls and all within them, continent-local and inclusive:
+    /// what a walker goes round, where `lo` and `hi` take in its porch, steps and yard too.
+    pub walls: (IVec2, IVec2),
+    /// Whether its walls are round, within the ellipse that fills `walls`: its corners
+    /// are open ground.
+    pub round: bool,
     /// How many live there: its beds, but for a tavern's guests.
     pub sleepers: u8,
     /// The levelled pads it stands on with its garden and yard, as each one's middle and
@@ -1335,6 +1341,7 @@ impl<'a> Town<'a> {
             net.chimneys.push(Vec3::new(q.x as f32 + 0.5, q.y as f32, q.z as f32 + 0.5));
         }
         let (lo, hi) = turn_rect((b.footprint.lo, b.footprint.hi), t);
+        let walls = turn_rect((b.walls.lo, b.walls.hi), t);
         self.plots.push(Plot {
             settlement: self.k,
             purpose: want.purpose,
@@ -1345,6 +1352,8 @@ impl<'a> Town<'a> {
             facing: flat(rotate(b.door.facing, t)),
             lo: lo + flat(origin),
             hi: hi + flat(origin),
+            walls: (walls.0 + flat(origin), walls.1 + flat(origin)),
+            round: b.style.form == kit::Form::Round,
             // Those who live in one of stage 3's own: its beds, but for a tavern's guests.
             sleepers: own.as_ref().map_or(want.residents, |o| b.inside.beds.len().saturating_sub(o.guest_beds.len()) as u8),
             pads: spot.discs.clone(),

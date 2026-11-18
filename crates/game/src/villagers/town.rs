@@ -62,11 +62,14 @@ pub struct Building {
     /// The feet in the doorway, and the way out of it.
     pub doorway: Vec3,
     pub out: Vec2,
-    /// Every column it covers, inclusive, and its floor's level (the layer the feet are
-    /// in), for telling whether someone is inside it.
+    /// The columns of its walls and a column more all round, under the eaves, inclusive
+    /// (its porch, steps and yard are walked through, so are left out); and its floor's
+    /// level (the layer the feet are in), for telling whether someone is inside it.
     pub lo: IVec2,
     pub hi: IVec2,
     pub floor: i32,
+    /// Whether its walls are round, within the ellipse that fills them.
+    pub round: bool,
     pub beds: Vec<(Vec3, Vec2)>,
     pub seats: Vec<(Vec3, Vec2)>,
     pub yard: Option<(IVec2, IVec2)>,
@@ -77,10 +80,16 @@ pub struct Building {
 }
 
 impl Building {
-    /// Whether feet at `p` (continent-local) are inside it.
+    /// Whether feet at `p` (continent-local) are inside it, or under its eaves.
     pub fn holds(&self, p: Vec3) -> bool {
-        let c = IVec2::new(p.x.floor() as i32, p.z.floor() as i32);
-        c.cmpge(self.lo).all() && c.cmple(self.hi).all() && (p.y - self.floor as f32).abs() < 3.5
+        self.within(Vec2::new(p.x, p.z), 1.0) && (p.y - self.floor as f32).abs() < 3.5
+    }
+
+    /// Whether ground point `p` (continent-local) is within its walls grown by `grow` all
+    /// round (shrunk where `grow` is less than 0): within their rectangle, or for a round
+    /// house within the ellipse in it, whose corners are open ground.
+    pub fn within(&self, p: Vec2, grow: f32) -> bool {
+        in_walls(self.lo, self.hi, self.round, p, grow)
     }
 }
 
@@ -194,6 +203,32 @@ pub fn trade_of(l: Livelihood) -> Trade {
     }
 }
 
+/// [`Building::within`], for a building whose walls and eaves cover `lo` to `hi`.
+fn in_walls(lo: IVec2, hi: IVec2, round: bool, p: Vec2, grow: f32) -> bool {
+    // From the first wall column's edge to the last's.
+    let (lo, hi) = (lo.as_vec2() + 1.0, hi.as_vec2());
+    let (mid, half) = ((lo + hi) * 0.5, (hi - lo) * 0.5 + grow);
+    if half.min_element() <= 0.0 {
+        return false;
+    }
+    let d = (p - mid).abs();
+    if round { (d / half).length_squared() < 1.0 } else { d.cmplt(half).all() }
+}
+
+/// The first point out of plot `p`'s walls from `from` going `out`, across the ground, as
+/// [`Building::within`] tells them.
+fn outside(p: &worldgen::settlements::layout::Plot, from: Vec2, out: Vec2) -> Vec2 {
+    let (lo, hi) = (p.walls.0 - IVec2::ONE, p.walls.1 + IVec2::ONE);
+    let mut at = from;
+    for _ in 0..24 {
+        if !in_walls(lo, hi, p.round, at, 0.0) {
+            break;
+        }
+        at += out * 0.25;
+    }
+    at
+}
+
 /// Where the village tree stands, for its haunt: the foot of its trunk where one was
 /// planted (`Network::village_trees`), else the middle of the ground kept for it; and
 /// the reach of that ground.
@@ -264,7 +299,10 @@ impl Town {
         for p in plots {
             let out = p.facing.as_vec2().normalize_or(Vec2::X);
             let doorway = Vec3::new(p.door.x as f32 + 0.5, p.door.y as f32 + 1.0, p.door.z as f32 + 0.5);
-            let porch = doorway + Vec3::new(out.x, 0.0, out.y) * 2.5;
+            // Two paces out from the outside of its walls: a thick wall's doorway, or a
+            // round one's, is a step or two in from where the wall meets the open air.
+            let face = outside(p, flat(doorway), out);
+            let porch = Vec3::new(face.x, 0.0, face.y) + Vec3::new(out.x, 0.0, out.y) * 2.0;
             let porch = Vec3::new(porch.x, p.origin.y as f32, porch.z);
             let at = place(Where::Door(buildings.len()), porch, &mut places);
             if let Some(i) = at {
@@ -278,9 +316,10 @@ impl Town {
                 place: at.unwrap_or(green_place),
                 doorway,
                 out,
-                lo: p.lo,
-                hi: p.hi,
+                lo: p.walls.0 - IVec2::ONE,
+                hi: p.walls.1 + IVec2::ONE,
                 floor: p.door.y + 1,
+                round: p.round,
                 beds: p.beds.iter().map(|&(h, d)| (h, d.as_vec2())).collect(),
                 seats: p.seats.iter().map(|&(q, d)| (Vec3::new(q.x as f32 + 0.5, q.y as f32, q.z as f32 + 0.5), d.as_vec2())).collect(),
                 yard: p.yard,
@@ -615,7 +654,7 @@ impl Town {
 
     /// Whether `p` is within the walls of any building, or less than a step from them.
     fn walled(&self, p: Vec2) -> bool {
-        self.plots.iter().any(|b| p.cmpgt(b.lo.as_vec2() + 0.5).all() && p.cmplt(b.hi.as_vec2() + 0.5).all())
+        self.plots.iter().any(|b| b.within(p, 0.5))
     }
 
     /// A place to stand in the garden bed `g`, among the rows, by `k`.
@@ -704,7 +743,7 @@ impl Town {
         let b = &self.plots[i];
         // Its walls, within the eaves and steps.
         let (lo, hi) = (b.lo.as_vec2() + 1.0, b.hi.as_vec2());
-        let crosses = |a: Vec2, c: Vec2| (1..16).any(|k| a.lerp(c, k as f32 / 16.0).cmpgt(lo).all() && a.lerp(c, k as f32 / 16.0).cmplt(hi).all());
+        let crosses = |a: Vec2, c: Vec2| (1..16).any(|k| b.within(a.lerp(c, k as f32 / 16.0), 0.0));
         if !crosses(flat(from), flat(to)) {
             return Vec::new();
         }

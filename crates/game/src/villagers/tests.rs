@@ -218,11 +218,10 @@ fn walking_keeps_to_the_lanes_and_paths() {
                     assert!(d < 1.5 || near_end || on_green, "{}: a walk strays {d:.1} voxels from the lanes at {p}", town.name);
                     // And never through a wall: into a building only by its door.
                     for x in &town.plots {
-                        let (lo, hi) = (x.lo.as_vec2() + 1.3, x.hi.as_vec2() - 0.3);
-                        let within = p2.cmpgt(lo).all() && p2.cmplt(hi).all();
+                        let within = x.within(p2, -0.3);
                         assert!(
                             !within || p2.distance(flat(x.doorway)) < 3.0,
-                            "{}: a walk from {} ({:?}) to {} ({:?}) goes through the walls of a {} ({}..{}) at {p}",
+                            "{}: a walk from {} ({:?}) to {} ({:?}) goes through the walls of a {} ({}..{}, round {}, door {} out {}) at {p}",
                             town.name,
                             town.place_word(a.place),
                             a.spot,
@@ -230,7 +229,10 @@ fn walking_keeps_to_the_lanes_and_paths() {
                             b.spot,
                             x.purpose.word(),
                             x.lo,
-                            x.hi
+                            x.hi,
+                            x.round,
+                            x.doorway,
+                            x.out
                         );
                     }
                     checked += 1;
