@@ -81,6 +81,28 @@ pub struct Park {
     pub benches: Vec<IVec3>,
 }
 
+/// A sail shade across a lane of a hot country's town (see `shades`), tied to the walls
+/// of the buildings either side, or to poles where no wall stands to its ties.
+#[derive(Clone, Debug)]
+pub struct Shade {
+    /// The open voxels it is tied at either side of its lane, against the walls, at the
+    /// height of its ties: higher at `a`, where its cloth comes to the top of the voxel.
+    pub a: IVec3,
+    pub b: IVec3,
+    /// How many columns it spans along its lane.
+    pub wide: i32,
+    /// The lane it is across, by index in [`super::Layout::lanes`].
+    pub lane: usize,
+    /// The columns it spans, continent-local and inclusive.
+    pub lo: IVec2,
+    pub hi: IVec2,
+    /// The lowest cell its cloth hangs to at rest, continent-local.
+    pub low: i32,
+    /// Whether it is tied to poles at `a`'s side and at `b`'s, the wall there standing
+    /// too low to tie to.
+    pub poles: [bool; 2],
+}
+
 /// What a town's edges are planned with between keeping their ground and building them.
 #[derive(Default)]
 pub(super) struct Edges {

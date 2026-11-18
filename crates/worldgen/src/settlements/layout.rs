@@ -213,6 +213,8 @@ pub struct Layout {
     pub park: Option<Park>,
     /// #207: each of `stalls` as the game dresses it on market day, in the same order.
     pub market: Vec<super::calendar::Stall>,
+    /// #203: the sail shades across the lanes of a hot country's town (see `shades`).
+    pub shades: Vec<Shade>,
 }
 
 /// Lays out every settlement on the continent, in order. `first` is the index of the
@@ -784,6 +786,8 @@ impl<'a> Town<'a> {
         self.wells(net, &fin);
         self.stalls(net);
         self.lanterns(net);
+        // Stage 3 (#203): sail shades across the lanes near the green in hot country.
+        self.shades(net, &fin);
         // S8 (#207): what a boon would add, laid last of all so that nothing else is
         // moved by it, and unseen until the boon is granted (see `boons`).
         self.boon_sites(net, &fin);
@@ -2057,7 +2061,8 @@ mod edges;
 mod gates;
 mod park;
 mod port;
-pub use edges::{Gate, Harbour, Park, Shed};
+mod shades;
+pub use edges::{Gate, Harbour, Park, Shade, Shed};
 #[cfg(test)]
 mod edge_tests;
 
