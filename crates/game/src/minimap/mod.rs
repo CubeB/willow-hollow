@@ -351,6 +351,8 @@ pub struct Minimap {
     /// The country a guild house's wayfarers have charted (#207), its middle in world
     /// voxels and its reach: every settlement in it shows as if it had been visited.
     pub charted: Vec<(DVec2, f64)>,
+    /// The same for the quarries a guild house's masons have marked (#207).
+    pub quarried: Vec<(DVec2, f64)>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -488,6 +490,7 @@ impl Minimap {
             camps: Vec::new(),
             met: Vec::new(),
             charted: Vec::new(),
+            quarried: Vec::new(),
             season: None,
             relief: None,
             relief_ask,
@@ -1295,8 +1298,9 @@ impl Minimap {
             let (Some(k), Some(r)) = (self.known.get(key), self.reveals.get(key)) else { continue };
             let o = origin(*key);
             for ((mark, &visited), known) in k.sheet.marks.iter().zip(&k.visited).zip(&k.places) {
-                // A settlement the wayfarers have charted is known as if it were visited.
-                let visited = visited || (known.is_some_and(|(kind, _)| kind.is_settlement()) && self.charted.iter().any(|&(c, r)| mark.at.distance(c) <= r));
+                // A settlement the wayfarers have charted is known as if it were visited,
+                // and a quarry the masons have.
+                let visited = visited || told_of(mark, known.is_some_and(|(kind, _)| kind.is_settlement()), &self.charted, &self.quarried);
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
@@ -1483,8 +1487,18 @@ fn icon_of(mark: &Mark, p: Vec2, size: f32) -> Instance {
         Kind::Landmark => (gpu::DIAMOND, [0.74, 0.53, 0.26, 1.0], 1.1),
         // Brick red, as the map in the shops would show one.
         Kind::Settlement => (gpu::CIRCLE, [0.66, 0.30, 0.22, 1.0], 1.2),
+        // A pit, in the pale grey of cut stone.
+        Kind::Quarry => (gpu::RING, [0.62, 0.60, 0.55, 1.0], 0.95),
     };
     Instance::new(kind, p.into(), size * scale, color)
+}
+
+/// Whether a mark not visited is known as if it were (#207): a settlement (`settlement`)
+/// in the country a guild house's wayfarers have `charted`, or a quarry its masons have
+/// marked (`quarried`), each a middle and a reach.
+pub(crate) fn told_of(mark: &Mark, settlement: bool, charted: &[(DVec2, f64)], quarried: &[(DVec2, f64)]) -> bool {
+    let within = |about: &[(DVec2, f64)]| about.iter().any(|&(c, r)| mark.at.distance(c) <= r);
+    (settlement && within(charted)) || (mark.kind == Kind::Quarry && within(quarried))
 }
 
 /// The whole continent under `pos` (world voxels) as the map draws it, all of it seen:

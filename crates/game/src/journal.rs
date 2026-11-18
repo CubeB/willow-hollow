@@ -215,7 +215,9 @@ pub struct Offer {
     pub when: Stamp,
 }
 
-/// The settlements about a guild house, marked on the map by its wayfarers (#207).
+/// The settlements about a guild house, marked on the map by its wayfarers (#207); or,
+/// under a key of their own (`villagers::notices::masons_key`), the quarries its masons
+/// mark.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chart {
     /// The settlement the guild house is in: `villagers::Town::key`, and its name.
@@ -368,7 +370,19 @@ impl Journal {
         true
     }
 
-    /// What the wayfarers have marked on the map.
+    /// Writes down that the masons of `town` marked the quarries `reach` round `at` on the
+    /// map (#207), under `key` (`villagers::notices::masons_key`), unless they have
+    /// already; true if it was new. Kept and saved with the wayfarers' charts.
+    pub fn chart_quarries(&mut self, key: &str, town: &str, at: DVec2, reach: f64) -> bool {
+        if self.charted.iter().any(|c| c.key == key) {
+            return false;
+        }
+        self.charted.push(Chart { key: key.into(), town: town.into(), at, reach });
+        self.note(format!("The masons at {town} marked the quarries they know on the map."));
+        true
+    }
+
+    /// What the wayfarers, and the masons, have marked on the map.
     pub fn charted(&self) -> &[Chart] {
         &self.charted
     }

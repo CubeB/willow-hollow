@@ -2100,8 +2100,8 @@ impl Running {
 
     /// Reads the board looked at, if one is near enough (#207): its page is shown until
     /// it is put down, a notice board's requests go in the journal as offered, and at a
-    /// guild house with wayfarers the settlements about are marked on the map. False with
-    /// none in reach.
+    /// guild house with wayfarers the settlements about are marked on the map, with masons
+    /// the quarries. False with none in reach.
     fn read_board(&mut self) -> bool {
         let Some((which, _)) = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()) else { return false };
         let journal = &self.journal;
@@ -2114,6 +2114,13 @@ impl Running {
         {
             let at: Vec<glam::DVec2> = places.iter().map(|p| p.1).collect();
             self.map.reveal_about(&at, m(CHARTED_LAND));
+        }
+        // And the masons the quarries they know (#207).
+        if let Some(town) = self.villagers.towns().nth(which.0)
+            && let Some((pits, at, reach)) = villagers::notices::quarry_chart(town, which.1)
+            && self.journal.chart_quarries(&villagers::notices::masons_key(&read.key), &read.town, at, reach)
+        {
+            self.map.reveal_about(&pits, m(CHARTED_LAND));
         }
         log::info!("read: {}", read.page.text());
         self.reading = Some((read.page, self.player.pos));
@@ -2514,7 +2521,9 @@ impl Running {
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
         self.map.met = self.travellers.marks();
-        self.map.charted = self.journal.charted().iter().map(|c| (c.at, c.reach)).collect();
+        let (quarried, charted): (Vec<_>, Vec<_>) = self.journal.charted().iter().partition(|c| villagers::notices::by_masons(&c.key));
+        self.map.charted = charted.iter().map(|c| (c.at, c.reach)).collect();
+        self.map.quarried = quarried.iter().map(|c| (c.at, c.reach)).collect();
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
         self.sub.lap(10);
@@ -3344,10 +3353,22 @@ fn main() -> Result<()> {
         }
         // The board the camera looks at, read, its page over the view (#207).
         let mut read_page = None;
+        // What it marks on the map, for a shot of the map as well: the country the
+        // wayfarers chart, the quarries the masons know, and the places to show the land of.
+        let (mut charted, mut quarried, mut shown) = (Vec::new(), Vec::new(), Vec::new());
         if opts.shot_read {
-            match folk.board_in_sight(camera.pos, camera.forward()).and_then(|(which, _)| folk.read(which, |_| false)) {
-                Some(r) => {
+            match folk.board_in_sight(camera.pos, camera.forward()).and_then(|(which, _)| Some((which, folk.read(which, |_| false)?))) {
+                Some((which, r)) => {
                     log::info!("read: {}", r.page.text());
+                    if let Some((places, at, reach)) = &r.chart {
+                        charted.push((*at, *reach));
+                        shown.extend(places.iter().map(|p| p.1));
+                    }
+                    if let Some((pits, at, reach)) = folk.towns().nth(which.0).and_then(|t| villagers::notices::quarry_chart(t, which.1)) {
+                        log::info!("the masons mark {} quarries, {:.0} m round {:.0} {:.0}", pits.len(), reach / m64(1.0), at.x, at.y);
+                        quarried.push((at, reach));
+                        shown.extend(pits);
+                    }
                     read_page = Some(r.page);
                 }
                 None => log::warn!("read: no board in reach of the camera and looked at"),
@@ -3406,6 +3427,9 @@ fn main() -> Result<()> {
             }
             map.camps = camp.camps();
             map.met = met.clone();
+            map.charted = charted.clone();
+            map.quarried = quarried.clone();
+            map.reveal_about(&shown, m(CHARTED_LAND));
             map.settle(&gpu, camera.pos, camera.forward());
             map
         });

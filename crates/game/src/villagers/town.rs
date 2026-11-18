@@ -332,6 +332,8 @@ pub struct Town {
     pub hens: Vec<Hens>,
     /// Its hamlets, whose folk come in on market day (#207).
     pub hamlets: Vec<Hamlet>,
+    /// The quarries of its continent, nearest first: what its guild house's masons know.
+    pub quarries: Vec<super::notices::Pit>,
 }
 
 /// A yard's hens (#206), and who feeds them of a morning, where.
@@ -907,10 +909,12 @@ impl Town {
             droves: out.droves,
             hens: Vec::new(),
             hamlets: out.hamlets,
+            quarries: Vec::new(),
         };
         town.extent = town.places.iter().map(|p| flat(p.at).distance(flat(centre))).fold(town.radius, f32::max);
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
         town.dressing(c, k, lives, &things, &mut |p| height(p));
+        town.quarries = super::notices::quarries_about(c, world_seed, flat(town.centre));
         town.near = net
             .settlements
             .iter()
