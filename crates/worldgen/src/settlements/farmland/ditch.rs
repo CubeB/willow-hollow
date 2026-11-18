@@ -136,6 +136,28 @@ pub(super) fn field(c: &Continent, _seed: u32, p: Vec2, owner: usize) -> Option<
     Some(Found { plot, field: id, p, q: p, site, edge })
 }
 
+/// The fields between the ditches of settlement `owner` of `c`, as
+/// [`super::fields::fields_of`] has the rest.
+pub(super) fn fields_of(c: &Continent, owner: usize) -> Vec<(u32, Vec2, super::Crop)> {
+    let farm = &c.land.farms[owner];
+    if !drains(farm) {
+        return Vec::new();
+    }
+    let n = ((farm.radius + farm.reach * 1.3) / SPACE.1).ceil() as i32 + 1;
+    let mut out = Vec::new();
+    for a in -n..=n {
+        for b in -n..=n {
+            if drained(c, owner, a, b) {
+                let mid = point(farm, a as f32 + 0.5, b as f32 + 0.5);
+                if let Some(found) = field(c, c.desc.world_seed, mid, owner) {
+                    out.push((found.field, mid, found.plot.crop));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// How far continent-local `p` is from the water's middle of the nearest ditch of the
 /// settlement `owner`, if one is within a ditch and its banks of it.
 fn nearest(c: &Continent, owner: usize, p: Vec2) -> Option<f32> {

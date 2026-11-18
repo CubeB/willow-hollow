@@ -418,6 +418,34 @@ pub fn locate(c: &Continent, seed: u32, lx: i32, lz: i32) -> Option<Found> {
     Some(Found { plot: Plot { id: id | 1, crop, rows: along, managed, owner: farm_index, terrace }, field, p, q, site: s, edge })
 }
 
+/// The fields of settlement `owner` of `c`, each once: its own number (as [`Found::field`]
+/// has it), its middle, and the crop it was first sown with, for naming them (see
+/// [`super::fieldnames`]). The fields cut between ditches are [`super::ditch::fields_of`]'s.
+pub(super) fn fields_of(c: &Continent, owner: usize) -> Vec<(u32, Vec2, Crop)> {
+    let land = &c.land;
+    let farm = &land.farms[owner];
+    let key = c.desc.seed ^ 0x6f1e_1d5;
+    let far = farm.radius + farm.reach * 1.3 + m(15.0);
+    let (lo, hi) = (((farm.at - far) / LATTICE).floor().as_ivec2(), ((farm.at + far) / LATTICE).ceil().as_ivec2());
+    let mut out: Vec<(u32, Vec2, Crop)> = Vec::new();
+    for j in lo.y..=hi.y {
+        for i in lo.x..=hi.x {
+            let (i, j) = merged(land, key, i, j);
+            let s = site(key, i, j);
+            let managed = land.managed_at(s);
+            if managed < EDGE || land.owner(s.x as i32, s.y as i32) != Some(owner) || farm.holds(s) {
+                continue;
+            }
+            let field = hash3(key, i, j, 0x1d) | 1;
+            if out.iter().any(|f| f.0 == field) {
+                continue;
+            }
+            out.push((field, s, crop_for(c, farm, s, managed, roll(key, i, j, 3))));
+        }
+    }
+    out
+}
+
 /// The fields of a square of columns, worked out together for a chunk: the field each
 /// column is in, if its ground is worked.
 pub struct Patch {

@@ -23,6 +23,7 @@
 //! - [`ditch`]: the straight ditches that drain the wet ground about an old place, with
 //!   plank bridges where the lanes cross them.
 //! - [`water`]: both of those, shaped into the ground column by column.
+//! - [`fieldnames`]: what the people of a place call each of its fields.
 //! - [`old`]: the fields given up long ago beyond the ancient places' fields of today and
 //!   about the ruins, gone back to the wild, their edges going from hedgerow to scrub to
 //!   a stone or two.
@@ -34,6 +35,7 @@ pub mod bounds;
 pub mod crops;
 pub mod ditch;
 pub mod farmstead;
+pub mod fieldnames;
 pub mod fields;
 pub mod fixtures;
 pub mod influence;

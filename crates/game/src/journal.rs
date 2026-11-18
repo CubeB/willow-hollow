@@ -536,10 +536,16 @@ impl Journal {
                 self.reach(&p.name, p.kind.key(), region_of(p.at));
             }
         }
+        // Out among a place's fields, the field the player stands in, as its people call
+        // it (#64).
+        let field = || worldgen::settlements::farmland::fieldnames::field_name_at(c, at);
         self.here = match beside {
             Some((_, name)) => format!("by {name}"),
-            None if !region.is_empty() => format!("in {region}"),
-            None => String::new(),
+            None => match field() {
+                Some(name) => format!("in {name}"),
+                None if !region.is_empty() => format!("in {region}"),
+                None => String::new(),
+            },
         };
     }
 

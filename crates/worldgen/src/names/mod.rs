@@ -402,6 +402,26 @@ impl Gazetteer {
         out
     }
 
+    /// A name for a field of the place at continent-local `at`, as its people call it,
+    /// chosen by `salt`: from the section `kind` of `words.txt` ("field", "meadow",
+    /// "orchard" and the like), its owner one of the people of the tongue spoken there,
+    /// and `by` what it lies beside ("Brook"), if anything. None if `kind` has no words.
+    pub fn field_name(&self, at: Vec2, kind: &str, salt: u32, by: Option<&str>) -> Option<String> {
+        let w = words().kinds.get(kind)?;
+        let tongue = &words().tongues[self.tongue_index(at)];
+        (0..8).find_map(|k| {
+            let h = hash2(salt ^ self.seed, k, 0xf1e1d);
+            let value = |slot: &str| match slot {
+                "type" => pick(&w.kind, hash2(h, 1, 0)).map(String::from),
+                "adj" => pick(&w.adj, hash2(h, 2, 0)).map(String::from),
+                "owner" => pick(&tongue.given, hash2(h, 3, 0)).map(String::from),
+                "by" => by.map(String::from),
+                _ => None,
+            };
+            fill(pick(&w.pattern, h)?, value).map(|(name, _)| name)
+        })
+    }
+
     /// The name of the nearest natural feature close enough to lend it.
     fn near_core(&self, req: &Request) -> Option<&str> {
         if !req.kind.borrows_name() {

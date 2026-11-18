@@ -284,6 +284,54 @@ type = Landing | Quay | Haven | Jetty
 role = haven
 pattern = {near} {type} | {word} {type} | {root} {type} | {owner}'s {type} | {word}{role}
 
+# The fields about a place (settlements/farmland/fieldnames.rs), as its people call them:
+# by their shape, where they lie, what grows there or whose they are. {by} is what a
+# field lies beside, such as Brook; {owner} one of the people of the place.
+[kind field]
+type = Field | Field | Acre | Acres | Furlong | Close | Piece | Ground
+adj = Long | Long | Broad | Great | Little | Hither | Far | Middle | Upper | Lower | Nether | Short | Crooked | Stony | Sandy | Red | Black | Barley | Oat | Bean | Pease | Windmill | Hungry | Five | Ten | Twelve
+pattern = {adj} {type} | {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind meadow]
+type = Meadow | Meadow | Mead | Ings | Hams
+adj = Long | Broad | Great | Little | Lower | Wet | Cuckoo | Lammas | Lady | Flood | Far | Kingcup
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind pasture]
+type = Pasture | Leaze | Ground | Close | Leys
+adj = Cow | Ox | Horse | Calf | Sheep | Bull | Long | Great | Little | Far | Hill | Rough
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind common]
+type = Common | Heath | Moor | Rough | Down
+adj = Great | Little | Far | High | Gorse | Bracken | Broad | Cold
+pattern = {adj} {type} | {adj} {type} | {by} {type}
+
+[kind orchard]
+type = Orchard | Orchard | Garth
+adj = Old | Little | Long | Cider | Home | Crab
+pattern = {owner}'s {type} | {owner}'s {type} | {adj} {type} | {by} {type}
+
+[kind vineyard]
+type = Vineyard | Vines | Terraces
+adj = Old | South | Sunny | Little | Upper | Lower | Stony
+pattern = {owner}'s {type} | {adj} {type} | {adj} {type}
+
+[kind olives]
+type = Olive Grove | Olives | Grove
+adj = Old | Grey | Little | Upper | Lower | Stony
+pattern = {owner}'s {type} | {adj} {type} | {adj} {type}
+
+[kind copse]
+type = Copse | Spinney | Coppice | Withy Bed | Hanger
+adj = Hazel | Ash | Long | Little | Round | Fox | Bluebell
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
+[kind paddy]
+type = Paddies | Wet Field | Water Field
+adj = Long | Lower | Upper | Broad | Old | Little | Great | Far
+pattern = {adj} {type} | {adj} {type} | {owner}'s {type} | {by} {type}
+
 # Settlements (see settlements/place.rs). A hamlet is often named for the family that
 # farms it; villages of either size share their words; a great town has grander ones
 # than a town.
