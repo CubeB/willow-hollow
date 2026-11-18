@@ -332,11 +332,14 @@ pub(crate) fn generate_with(world: &GameWorld, models: &Models, level: u8, cx: i
 
     let lib = world.library();
     let origin = (mx * MACRO_SIZE, mz * MACRO_SIZE);
-    let found = if every_feature {
+    let mut found = if every_feature {
         features::place(world.seed(), lib, &sampler, lx0, lz0, width, origin)
     } else {
         features::place_only(world.seed(), lib, &sampler, lx0, lz0, width, origin, stands_tall)
     };
+    // About a logging camp, what the loggers have felled by this year is left out below
+    // as the stump it is (#207).
+    worldgen::settlements::logging::fell(&continent, lives.when, origin, &mut found);
     let placements: Vec<_> = found
         .into_iter()
         .filter(|p| {

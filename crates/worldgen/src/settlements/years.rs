@@ -206,6 +206,9 @@ pub struct Record {
     pub chimney_plot: Vec<u32>,
     /// Where each boon would add what it builds, by settlement.
     pub sites: Vec<Site>,
+    /// The logging camps out in the woods, whose clearings grow by the year (see
+    /// `settlements::logging`).
+    pub camps: Vec<super::logging::Camp>,
     /// Tags for props held back until the lanes are worn, by their index among the
     /// network's held props, and what each prop held while dressing a plot is.
     pub(crate) held: HashMap<usize, Tag>,

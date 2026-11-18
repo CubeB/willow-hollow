@@ -576,6 +576,13 @@ it cannot yet. The parsing and the console's history and completion have tests t
   the old meshes until the new are up, while the far boxes and the villagers are made
   again on their own threads. Nothing of a chunk is ever saved, so there is nothing to
   undo: the save keeps the year and the boons (`boons-N.txt`), and the rest follows.
+  A settlement that lives by logging works a camp out in the woods beyond its fields
+  (`settlements::logging`, raised after the barns and kept in `Network::years`), whose
+  clearing is felled back a ring a year as far as the land lets it.
+  `logging::fell` turns the trees felled by the year to stumps. Every reader of the
+  trees calls it: chunks, climbers, nests, the coarse rings, the far trees and the
+  map. The far trees a clearing reaches are made again when the year turns
+  (`GameWorld::fells_with_years`).
 
 ## How work gets in
 

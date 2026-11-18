@@ -61,6 +61,8 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             c.trails.names = crate::names::survey(&c, seed);
             c.land = farmland::influence::build(&c, seed);
             farmland::farmstead::raise(&mut c, seed);
+            // S8 (#207): the logging camps out in the woods, beyond the fields and barns.
+            crate::settlements::logging::raise(&mut c, seed);
             Arc::new(c)
         })
         .clone();
@@ -187,13 +189,24 @@ impl GameWorld {
     }
 
     /// Whether anything in the square of world columns from `(x0, z0)`, `span` wide, can
-    /// change with the years: whether a settlement or its fields reach it. Never blocks:
-    /// false where the continent is not simulated yet.
+    /// change with the years: whether a settlement or its fields reach it, or a logging
+    /// camp's clearing. Never blocks: false where the continent is not simulated yet.
     pub fn changes_with_years(&self, x0: i32, z0: i32, span: i32) -> bool {
+        self.any_continent_over(x0, z0, span, |c, lx0, lz0| !c.land.wild_square(lx0, lz0, span) || c.trails.years.camps.iter().any(|k| k.reaches(lx0, lz0, span)))
+    }
+
+    /// Whether the trees in the square of [`Self::changes_with_years`] can change with
+    /// the years: whether a logging camp's clearing reaches it (see
+    /// `settlements::logging::fell`).
+    pub fn fells_with_years(&self, x0: i32, z0: i32, span: i32) -> bool {
+        self.any_continent_over(x0, z0, span, |c, lx0, lz0| c.trails.years.camps.iter().any(|k| k.reaches(lx0, lz0, span)))
+    }
+
+    /// Whether `f` says yes for any simulated continent the square reaches, given it and
+    /// the square's corner in its own columns.
+    fn any_continent_over(&self, x0: i32, z0: i32, span: i32, f: impl Fn(&Continent, i32, i32) -> bool) -> bool {
         let (lo, hi) = (cell_of(x0, z0), cell_of(x0 + span - 1, z0 + span - 1));
-        (lo.1..=hi.1).any(|mz| {
-            (lo.0..=hi.0).any(|mx| self.continent_if_ready(mx, mz).is_some_and(|c| !c.land.wild_square(x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE, span)))
-        })
+        (lo.1..=hi.1).any(|mz| (lo.0..=hi.0).any(|mx| self.continent_if_ready(mx, mz).is_some_and(|c| f(&c, x0 - mx * MACRO_SIZE, z0 - mz * MACRO_SIZE))))
     }
 
     pub fn library(&self) -> &Library {
@@ -414,7 +427,9 @@ impl GameWorld {
         let margin = features::MAX_REACH + 1;
         let sampler = Sampler::new(&c, self.seed, lx0 - margin, lz0 - margin, span + 2 * margin);
         let lib = self.library();
-        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        let mut placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0, lz0, span, (mx * MACRO_SIZE, mz * MACRO_SIZE));
+        // Nor is there a nest in a tree the loggers have felled (#207).
+        crate::settlements::logging::fell(&c, self.now(), (mx * MACRO_SIZE, mz * MACRO_SIZE), &mut placements);
         // Chunks leave out what stands in a tor's rock; so must this.
         let tors = self.tors.near(self.seed, &c, x0, z0, span);
         let mut out: Vec<_> = placements
@@ -807,7 +822,9 @@ impl GameWorld {
         // Features up to MAX_REACH from anything a plant might touch.
         let margin = MARGIN + features::MAX_REACH + 1;
         let sampler = Sampler::new(run.continent, self.seed, lx0 - margin, lz0 - margin, PAD as i32 + 2 * margin);
-        let placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        let mut placements = features::place_cached(&self.placed, self.seed, lib, &sampler, lx0 - MARGIN, lz0 - MARGIN, PAD as i32 + 2 * MARGIN, run.macro_origin);
+        // The trees as the loggers have left them this year (#207).
+        crate::settlements::logging::fell(run.continent, run.lives.when, run.macro_origin, &mut placements);
         // Landmarks anywhere a plant here could reach, visited once each and applied in
         // a fixed order, so overlaps resolve the same way every time.
         let (mcx, mcz) = (run.macro_origin.0.div_euclid(CHUNK), run.macro_origin.1.div_euclid(CHUNK));
@@ -855,9 +872,21 @@ impl GameWorld {
         // Nor from a barn out in the fields: a root is as likely to be picked on the inner
         // side of a wall as the outer, and in a barn it would climb its walls indoors.
         let barn = |s: &&Cow<trails::Stamp>| run.continent.land.steads.iter().any(|b| b.stamped(s.lo, s.hi));
-        finder.stamps(found.iter().filter(near).filter(|s| !barn(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        // S8 (#207): nor from a logging camp's lean-to and log piles, which are worked.
+        let camp = |s: &&Cow<trails::Stamp>| run.continent.trails.years.camps.iter().any(|k| k.stamped(s.lo, s.hi));
+        finder.stamps(found.iter().filter(near).filter(|s| !barn(s) && !camp(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
         finder.rims(&mut roots);
+        // S8 (#207): nothing creeps over a logging camp's yard and its work, kept bare by
+        // the loggers' feet; judged by where each root is, so every chunk agrees.
+        let camps = &run.continent.trails.years.camps;
+        if !camps.is_empty() {
+            roots.retain(|(r, _)| {
+                let v = r.cell.div_euclid(IVec3::splat(CELLS));
+                let at = glam::vec2((v.x - mox) as f32 + 0.5, (v.z - moz) as f32 + 0.5);
+                !camps.iter().any(|k| at.distance(k.middle()) < k.yard + crate::scale::m(6.0))
+            });
+        }
         let before = plants.len();
         climber::grow_column(roots, run.chunk, run.voxels, &world, &self.materials, self.seed, &self.climbers, plants, inspect);
         taken.extend(plants[before..].iter().map(|p| IVec3::from_array(p.lo).div_euclid(IVec3::splat(CELLS))));
@@ -1101,7 +1130,7 @@ impl GameWorld {
         }
 
         let lib = self.library();
-        let placements = features::place_cached(
+        let mut placements = features::place_cached(
             &self.placed,
             self.seed,
             lib,
@@ -1111,6 +1140,8 @@ impl GameWorld {
             PAD as i32,
             (mx * MACRO_SIZE, mz * MACRO_SIZE),
         );
+        // About a logging camp, the trees felled by this year are stumps (#207).
+        crate::settlements::logging::fell(&continent, lives.when, (mx * MACRO_SIZE, mz * MACRO_SIZE), &mut placements);
         // Only the features whose model, or buttresses, can touch this column.
         let mut placements: Vec<_> = placements
             .into_iter()

@@ -340,7 +340,10 @@ pub fn build(world: &GameWorld, req: &Request) -> Relief {
                 for t in &tors {
                     rocks.entry(t.origin).or_insert_with(|| t.clone());
                 }
-                for p in features::place_trees(world.seed(), world.library(), &sampler, lx0, lz0, span, (ox, oz)) {
+                let mut trees = features::place_trees(world.seed(), world.library(), &sampler, lx0, lz0, span, (ox, oz));
+                // Less those the loggers have felled by this year (#207).
+                worldgen::settlements::logging::fell(c, world.now(), (ox, oz), &mut trees);
+                for p in trees {
                     // Each tree belongs to the square its trunk is in; the world leaves out
                     // those a tor's rock would be in.
                     let inside = (0..span).contains(&(p.pos.x - ox - lx0)) && (0..span).contains(&(p.pos.z - oz - lz0));
@@ -1097,7 +1100,9 @@ mod tests {
                     for sx in (x0..x0 + side).step_by(32) {
                         let sampler = Sampler::new(&c, world.seed(), sx - margin, sz - margin, 32 + 2 * margin);
                         let tors = world.tors_near(&c, sx, sz, 32);
-                        for p in features::place(world.seed(), world.library(), &sampler, sx, sz, 32, (0, 0)) {
+                        let mut found = features::place(world.seed(), world.library(), &sampler, sx, sz, 32, (0, 0));
+                        worldgen::settlements::logging::fell(&c, world.now(), (0, 0), &mut found);
+                        for p in found {
                             let inside = (sx..sx + 32).contains(&p.pos.x) && (sz..sz + 32).contains(&p.pos.z);
                             if inside &&crate::lod::stands_tall(p.species) && !tors.iter().any(|t| t.crowds(p.pos)) {
                                 grown.push((p.pos.x, p.pos.z));

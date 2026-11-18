@@ -16,6 +16,7 @@ pub mod travel;
 // Market days and festivals (#207).
 pub mod calendar;
 pub mod years;
+pub mod logging;
 
 use glam::Vec2;
 
