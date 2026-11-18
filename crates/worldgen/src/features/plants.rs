@@ -1605,6 +1605,16 @@ fn build_flower(p: &mut Plot, rng: &mut Rng, kind: Flower) {
     }
 }
 
+/// A flower of `kind` planted by hand in the voxel `at` (x, y, z), standing on the one
+/// below, built as the ground grows it, its bloom and leaves keeping their seasons: for
+/// beds of flowers in a park or a garden. A water lily is not grown this way.
+pub fn plant_flower(kind: Flower, at: [i32; 3], seed: u32, out: &mut Vec<PlantBox>) {
+    let mut rng = Rng::new(seed);
+    let mut plot = Plot::new([at[0] * CELLS, at[1] * CELLS, at[2] * CELLS], out);
+    plot.flower = Some(kind);
+    build_flower(&mut plot, &mut rng, kind);
+}
+
 /// Adds whatever grows on the column at world position `(x, z)`. `surface` is its top
 /// voxel, or the flower the ground carries there.
 pub fn grow(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, out: &mut Vec<PlantBox>) {

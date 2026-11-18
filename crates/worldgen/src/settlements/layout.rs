@@ -193,6 +193,19 @@ pub struct Layout {
     pub water: Option<Vec2>,
     /// Its buildings, by index in `Network::plots`.
     pub plots: Range<usize>,
+    // What stands at its edges and in it besides its buildings (#203), none of it
+    // counted among them (see `edges`).
+    /// The gates on its main ways in, or an ancient town's gatehouses.
+    pub gates: Vec<Gate>,
+    /// An ancient town's old wall: the line of columns each piece still standing runs
+    /// along, continent-local.
+    pub wall: Vec<Vec<IVec2>>,
+    /// The fishers' boat sheds, where each meets the water.
+    pub sheds: Vec<Shed>,
+    /// A coastal great town's harbour wall.
+    pub harbour: Option<Harbour>,
+    /// A great town's park.
+    pub park: Option<Park>,
 }
 
 /// Lays out every settlement on the continent, in order. `first` is the index of the
@@ -552,6 +565,8 @@ struct Town<'a> {
     raised: Vec<Raised>,
     plots: Vec<Plot>,
     layout: Layout,
+    /// Stage 3's edges (#203) between keeping their ground and building them.
+    edge: edges::Edges,
 }
 
 impl<'a> Town<'a> {
@@ -597,6 +612,7 @@ impl<'a> Town<'a> {
             raised: Vec::new(),
             plots: Vec::new(),
             layout: Layout::default(),
+            edge: edges::Edges::default(),
             s,
         };
         town.arrivals(ways);
@@ -694,8 +710,16 @@ impl<'a> Town<'a> {
 
     fn build(&mut self, net: &mut Network) {
         self.keep_for_tree();
+        // Stage 3 (#203): a great town's park kept round the tree, before the lanes go
+        // round it.
+        self.keep_for_park();
         self.lay_lanes(net);
-        let wants = self.wants();
+        // Stage 3 (#203): the gates' ground kept from every plot.
+        self.keep_for_gates(net);
+        let mut wants = self.wants();
+        // Stage 3 (#203): the fishers' workplace a boat shed, where there is water.
+        self.choose_shed(&mut wants);
+        let shed = self.edge.shed;
         // The kit's buildings are most of the work, and each stands alone, so they are
         // built side by side.
         // The tavern, the smithy and the rest are stage 3's own (see [`special`]), each
@@ -715,7 +739,8 @@ impl<'a> Town<'a> {
             }
         };
         let kits = in_parallel(&wants, |w| {
-            let own = w.purpose.which().and_then(|which| special::build(&SpecialSpec { which, region, age: w.age, wealth: w.wealth, seed: w.seed, stream: None, facts }, pal));
+            let which = w.purpose.which().or((Some(w.seed) == shed).then_some(Special::BoatShed));
+            let own = which.and_then(|which| special::build(&SpecialSpec { which, region, age: w.age, wealth: w.wealth, seed: w.seed, stream: None, facts }, pal));
             match own {
                 Some(own) => (own.building.clone(), Some(own), None),
                 None => {
@@ -737,6 +762,12 @@ impl<'a> Town<'a> {
             self.dress(net, r, k);
         }
         self.raised = raised;
+        // Stage 3 (#203): the gates, the old wall, the water side and the park, built
+        // now every plot and path is down.
+        self.raise_gates(net, &fin);
+        self.raise_wall(net, &fin);
+        self.harbour(net, &fin);
+        self.park(net, &fin);
         self.wells(net, &fin);
         self.stalls(net);
         self.lanterns(net);
@@ -1203,6 +1234,10 @@ impl<'a> Town<'a> {
                 d + r <= big && d - r >= gr + PAD_GAP
             };
             if !discs.iter().all(inside) || !discs.iter().all(|&(c, r)| self.room_for(c, r)) {
+                continue;
+            }
+            // Stage 3 (#203): a boat shed's open back on the water.
+            if !self.backs_on_water(lot, want, origin, turns) {
                 continue;
             }
             // A path from a door off the lanes must not cross another plot to reach one.
@@ -1958,6 +1993,15 @@ fn awning(f: &Fitted, colour: Voxel) -> Vec<PlantBox> {
     let corners = [back, IVec3::new(front.x, back.y, back.z), front, IVec3::new(back.x, front.y, front.z)];
     cloth::sheet(corners, colour)
 }
+
+// Stage 3's edges (#203): the gates and old walls, the water side and the park.
+mod edges;
+mod gates;
+mod park;
+mod port;
+pub use edges::{Gate, Harbour, Park, Shed};
+#[cfg(test)]
+mod edge_tests;
 
 #[cfg(test)]
 mod tests;
