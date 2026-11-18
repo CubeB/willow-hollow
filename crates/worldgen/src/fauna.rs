@@ -368,8 +368,8 @@ pub struct Kept {
 
 /// The animals settlement `k` of continent `c` keeps (see [`kept_by`]), and where: hens
 /// (or ducks or geese by water) in the yards with a coop, pigs in some others, and on a
-/// pasture or two (more for a bigger place) a flock or a herd of what grazes there.
-/// `seed` is the world's. The same every time, so the same animals stand in the same
+/// pasture or two (more for a bigger place) a flock or a herd of what grazes there, and
+/// a few cattle beside each of its byres out in the fields. `seed` is the world's. The same every time, so the same animals stand in the same
 /// places for every player.
 pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
     use crate::settlements::{farmland::fields::Crop, layout::Purpose};
@@ -426,6 +426,27 @@ pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
     let half = Vec2::splat(m(9.0));
     let field = |p: Vec2| crate::settlements::farmland::plot(c, seed, p.x.floor() as i32, p.y.floor() as i32);
     let mut taken: Vec<Vec2> = Vec::new();
+    // The cattle of a byre out in the fields graze beside it: behind it, to one side or
+    // at a corner, wherever a square of one field lies clear of it (#64).
+    let close = Vec2::splat(m(5.0));
+    let byres = c.land.steads.iter().enumerate().filter(|(_, b)| b.owner == k && b.kind == crate::settlements::special::BarnKind::Byre);
+    for (n, b) in byres.filter(|_| has(Kind::Cattle)) {
+        let (lo, hi) = (b.footprint.0.as_vec2(), b.footprint.1.as_vec2() + 1.0);
+        let (mid, size) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
+        let (back, side) = (-Vec2::new(b.facing.x as f32, b.facing.z as f32), Vec2::new(-(b.facing.z as f32), b.facing.x as f32));
+        let ways = [back, side, -side, back + side, back - side, -back + side, -back - side];
+        let spot = ways.into_iter().map(|d| mid + d * (size + m(1.5) + close)).find(|&at| {
+            let Some(f) = field(at) else { return false };
+            [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)]
+                .iter()
+                .all(|&(x, z)| field(at + close * Vec2::new(x, z)).is_some_and(|g| g.id == f.id))
+        });
+        let Some(at) = spot else { continue };
+        let roll = unit(hash2(seed ^ 0xb7e, at.x as i32, at.y as i32));
+        let door = Vec2::new(b.door.x as f32 + 0.5, b.door.z as f32 + 0.5);
+        taken.push(at);
+        out.push(Kept { key: key(2000 + n as u32), kind: Kind::Cattle, count: 2 + (roll * 997.0) as usize % 2, middle: origin + at, half: close, gate_toward: origin + door });
+    }
     let turn0 = unit(hash2(seed ^ 0x9a57, s.x, s.z)) * std::f32::consts::TAU;
     'look: for ring in 0..4 {
         let r = s.radius + m(25.0) + ring as f32 * m(30.0);
@@ -436,6 +457,10 @@ pub fn kept_about(c: &Continent, seed: u32, k: usize) -> Vec<Kept> {
             let at = middle + Vec2::from_angle(turn0 + d as f32 * std::f32::consts::TAU / 12.0) * r;
             let Some(f) = field(at) else { continue };
             if !matches!(f.crop, Crop::Pasture | Crop::Rough) || taken.iter().any(|t| t.distance(at) < m(40.0)) {
+                continue;
+            }
+            // Nor about a barn out in the fields.
+            if c.land.steads.iter().any(|b| ((b.walls.0 + b.walls.1).as_vec2() * 0.5).distance(at) < m(20.0)) {
                 continue;
             }
             let whole = [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0), (-1.0, 0.0), (1.0, 0.0), (-1.0, 1.0), (0.0, 1.0), (1.0, 1.0)]

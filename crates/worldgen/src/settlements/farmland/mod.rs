@@ -12,12 +12,15 @@
 //! - [`orchard`]: the fruit and olive trees standing in rows in an orchard.
 //! - [`terrace`]: an old place's steep fields stepped into shelves, each held up by a
 //!   low bank of drystone or turf.
+//! - [`farmstead`]: the barns, byres and field sheds out among the fields far from the
+//!   houses.
 //!
 //! Inside a settlement's radius the village layout has the ground; nothing here is laid
 //! there, nor on a trail, in water, on a cliff or in a bog.
 
 pub mod bounds;
 pub mod crops;
+pub mod farmstead;
 pub mod fields;
 pub mod influence;
 pub mod orchard;

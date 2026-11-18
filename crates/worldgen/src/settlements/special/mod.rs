@@ -369,3 +369,8 @@ pub fn copy(spec: &SpecialSpec, pal: &Palette, name: &str) -> Option<Design> {
     d.home = Some(super::kit::Home::of(&b));
     Some(d)
 }
+
+// The barns out in the fields (#64): outlying farm buildings, built with the same frame
+// but kept apart from the settlement's own buildings above, and left out of its count.
+pub mod barn;
+pub use barn::{Barn, BarnKind, BarnSpec};

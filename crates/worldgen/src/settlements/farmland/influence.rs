@@ -165,6 +165,9 @@ pub struct Land {
     tiles: Vec<Option<Box<Tile>>>,
     /// One for each settlement, in the order of `Network::settlements`.
     pub farms: Vec<Farm>,
+    /// The barns out in the fields, each with the settlement it serves (see
+    /// [`super::farmstead`]); raised once the land is worked out.
+    pub steads: Vec<super::farmstead::Stead>,
 }
 
 impl Land {
@@ -461,7 +464,7 @@ pub fn build(c: &Continent, seed: u32) -> Land {
             }
         }
     }
-    Land { tiles, farms }
+    Land { tiles, farms, steads: Vec::new() }
 }
 
 #[cfg(test)]

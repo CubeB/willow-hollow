@@ -47,6 +47,7 @@ fn fill(slot: &Slot, seed: u32, config: SimConfig, (mx, mz): (i32, i32), after: 
             c.trails = trails::build(&c, seed);
             c.trails.names = crate::names::survey(&c, seed);
             c.land = farmland::influence::build(&c, seed);
+            farmland::farmstead::raise(&mut c, seed);
             Arc::new(c)
         })
         .clone();
@@ -754,7 +755,10 @@ impl GameWorld {
             let (lo, hi) = (s.lo + origin, s.hi + origin);
             hi.x >= finder.x0 - 2 && lo.x <= finder.x1 + 2 && hi.z >= finder.z0 - 2 && lo.z <= finder.z1 + 2
         };
-        finder.stamps(found.iter().filter(near).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
+        // Nor from a barn out in the fields: a root is as likely to be picked on the inner
+        // side of a wall as the outer, and in a barn it would climb its walls indoors.
+        let barn = |s: &&&crate::trails::Stamp| run.continent.land.steads.iter().any(|b| b.stamped(s.lo, s.hi));
+        finder.stamps(found.iter().filter(near).filter(|s| !barn(s)).map(|s| (s.voxels.as_slice(), origin)), &mut roots);
         finder.ground(&mut roots);
         finder.rims(&mut roots);
         let before = plants.len();

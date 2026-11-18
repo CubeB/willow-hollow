@@ -873,6 +873,7 @@ fn main() -> Result<()> {
     c.trails.names = worldgen::names::survey(&c, o.seed);
     // The fields about the settlements, which clear the trees as the game does.
     c.land = worldgen::settlements::farmland::influence::build(&c, o.seed);
+    worldgen::settlements::farmland::farmstead::raise(&mut c, o.seed);
     println!(
         "  {} landmarks, {} settlements, {} trails, {} crossings, {} structures, {} links unrouted, in {:.2} s ({built:.2} s building, the rest naming)",
         c.trails.sites.len(),
