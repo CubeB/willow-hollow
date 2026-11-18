@@ -1118,6 +1118,15 @@ impl Plan {
         }
     }
 
+    /// How many settlers are on the road together, those asleep in the tents too; None
+    /// for the others, who are all in sight.
+    pub fn party(&self) -> Option<usize> {
+        match self {
+            Plan::Settlers(p) => Some(p.members.len()),
+            _ => None,
+        }
+    }
+
     /// Where the party is and what they are doing at `hour` of the day planned for, on
     /// `date` (for the dawn), the boats keeping in if the water is not `calm`. None while
     /// they are not out at all: settlers before they set off and once they are in.

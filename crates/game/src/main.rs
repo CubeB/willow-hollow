@@ -33,6 +33,7 @@ mod settings;
 mod weather;
 mod terrain;
 mod threads;
+mod travellers;
 mod vehicles;
 mod villagers;
 
@@ -1100,6 +1101,8 @@ struct Running {
     beds: Vec<DVec3>,
     /// The people of the settlements near the player (#204).
     villagers: villagers::Villagers,
+    /// The campers, settlers and boats about the player, as their timetables have them (#205).
+    travellers: travellers::Travellers,
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
@@ -1303,6 +1306,7 @@ impl Running {
         let mut chimneys = chimneys::Chimneys::new();
         let foot = camera.pos.y - player::EYE_HEIGHT;
         chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
+        let travellers = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(travellers::Travellers::new, |s| travellers::Travellers::from_text(&s.travellers(settings.seed)));
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
         let mut map = Minimap::new(&gpu, surface.config.format, world.clone(), map_dir);
         map.corner = settings.minimap;
@@ -1376,6 +1380,7 @@ impl Running {
             chimneys,
             beds: Vec::new(),
             villagers: villagers::Villagers::new(),
+            travellers,
             rest,
             lowered: 0.0,
             hand_word: HAND_WORD,
@@ -1911,6 +1916,9 @@ impl Running {
             if self.placed.unsaved && store.write_placed(self.settings.seed, &self.placed.to_text()) {
                 self.placed.unsaved = false;
             }
+            if self.travellers.unsaved && store.write_travellers(self.settings.seed, &self.travellers.to_text()) {
+                self.travellers.unsaved = false;
+            }
         }
         self.map.save(false);
     }
@@ -2237,6 +2245,9 @@ impl Running {
         fires.extend(self.embers.iter().map(|&e| (e, 1.0)));
         self.chimneys.update(dt, &self.world, self.camera.pos, self.env.time);
         self.villagers.update(dt, &self.world, self.camera.pos, self.env.time, self.env.date, self.env.year, self.settings.year_days);
+        let when = travellers::When { hour: self.env.time, date: self.env.date, year: self.env.year, year_days: self.settings.year_days, day_minutes: self.settings.day_minutes };
+        self.travellers.update(&self.world, self.camera.pos, when, travellers::calm(&self.weather.now));
+        fires.extend(self.travellers.smoking());
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -2292,6 +2303,7 @@ impl Running {
         self.crows.draw(self.camera.pos, &mut self.props);
         people::draw_all(&self.people, false, self.camera.pos, &mut self.props);
         self.animals.draw(self.camera.pos, &mut self.props);
+        self.travellers.draw(self.camera.pos, clock, &mut self.props);
         if self.walking {
             match self.player.mode {
                 Mode::Boat => vehicles::draw_boat(self.player.pos, self.player.heading, clock, self.camera.pos, &mut self.props),
@@ -2335,6 +2347,7 @@ impl Running {
         self.sub.lap(9);
         self.map.corner = self.settings.minimap;
         self.map.hour = self.env.time;
+        self.map.met = self.travellers.marks();
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
         self.sub.lap(10);
@@ -2343,6 +2356,7 @@ impl Running {
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let mut lamps: Vec<(DVec3, f32)> = self.streamer.lamps_near(self.camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(burning.iter().map(|&heart| firelight(heart, clock)));
+        lamps.extend(self.travellers.burning(self.camera.pos).into_iter().map(|heart| firelight(heart, clock)));
         lamps.extend(held_light);
         let mut lit = self.env.clone();
         self.weather.apply(&mut lit);
@@ -3032,6 +3046,11 @@ fn main() -> Result<()> {
         // Smoke rises from them, and from the embers of the camps that were here already.
         let mut smoking = camp.smoking(camera.pos, m64(particles::SMOKE_SIGHT), 1.0);
         smoking.extend(embers_near(&streamer, &mut voxels, camera.pos).into_iter().map(|e| (e, 1.0)));
+        // The travellers about, where their timetables have them at this hour (#205).
+        let mut travellers = travellers::Travellers::new();
+        let when = travellers::When { hour: env.time, date: env.date, year: env.year, year_days: settings.year_days, day_minutes: settings.day_minutes };
+        travellers.settle(&world, camera.pos, when, travellers::calm(&weather.now));
+        smoking.extend(travellers.smoking());
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         // And from the chimneys about, and any set out ahead by hand.
         let mut chimneys = chimneys::Chimneys::new();
@@ -3100,6 +3119,12 @@ fn main() -> Result<()> {
         if let Some(animals) = &animals {
             animals.draw(camera.pos, &mut props);
         }
+        // Their legs and oars at the renderer's clock, so two stills can show them moving.
+        travellers.draw(camera.pos, std::env::var("VOXEL_CLOCK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.6), &mut props);
+        for s in &travellers.seen {
+            log::info!("{} {:.0} m off: {} ({} people)", s.scene.kind.word(), s.distance / m64(1.0), s.scene.doing, s.scene.people.len());
+        }
+        log::info!("{} parties of travellers near, drawn in {} boxes", travellers.seen.len(), travellers.drawn);
         // The people of the settlements about, where they are at this hour (#204); the
         // nearest greeted, if asked, turned to the figure and saying their word.
         let mut folk = villagers::Villagers::new();
@@ -3139,6 +3164,8 @@ fn main() -> Result<()> {
         }
         let mut lamps: Vec<(DVec3, f32)> = streamer.lamps_near(camera.pos, m(24.0)).map(|p| (p.as_dvec3() + DVec3::splat(0.5), 1.0)).collect();
         lamps.extend(fires.iter().map(|&heart| firelight(heart, 0.6)));
+        lamps.extend(travellers.burning(camera.pos).into_iter().map(|heart| firelight(heart, 0.6)));
+        let met = travellers.marks();
         // A lit lantern in the hand: of the figure if there is one, else of whoever's eyes
         // the camera is, standing (seen only by its light).
         if opts.shot_lantern {
@@ -3169,6 +3196,7 @@ fn main() -> Result<()> {
                 }
             }
             map.camps = camp.camps();
+            map.met = met.clone();
             map.settle(&gpu, camera.pos, camera.forward());
             map
         });
@@ -3433,6 +3461,16 @@ impl commands::Game for Running {
         nearest_settlements(&self.world, eye, kind, n)
     }
 
+    fn travellers(&self, kind: Option<worldgen::settlements::travel::Kind>, quays: bool, n: usize) -> Vec<travellers::Listed> {
+        let eye = if self.walking { self.player.eye() } else { self.camera.pos };
+        let when = travellers::When { hour: self.env.time, date: self.env.date, year: self.env.year, year_days: self.settings.year_days, day_minutes: self.settings.day_minutes };
+        travellers::listing(&self.world, eye, when, travellers::calm(&self.weather.now), kind, quays, n)
+    }
+
+    fn face(&mut self, yaw: f32) {
+        (self.camera.yaw, self.camera.pitch) = (yaw, -0.15);
+    }
+
     fn fly(&mut self, on: Option<bool>) -> commands::Reply {
         if on.is_none_or(|on| on == self.walking) {
             if self.walking && self.player.mode == Mode::Boat {
@@ -3568,6 +3606,7 @@ struct Shot<'a> {
     opts: &'a mut Options,
     world: &'a GameWorld,
     seed: u32,
+    /// How many days the world's year has, for the travellers' timetables.
     year_days: f32,
 }
 
@@ -3638,6 +3677,16 @@ impl commands::Game for Shot<'_> {
 
     fn settlements(&self, kind: Option<worldgen::settlements::Kind>, n: usize) -> Vec<commands::Settlement> {
         nearest_settlements(self.world, self.eye(), kind, n)
+    }
+
+    fn travellers(&self, kind: Option<worldgen::settlements::travel::Kind>, quays: bool, n: usize) -> Vec<travellers::Listed> {
+        let (hour, date) = commands::Game::clock(self);
+        let when = travellers::When { hour, date, year: commands::Game::year(self), year_days: self.year_days, day_minutes: 40.0 };
+        travellers::listing(self.world, self.eye(), when, travellers::calm(&weather::Weather::new(self.opts.weather).now), kind, quays, n)
+    }
+
+    fn face(&mut self, yaw: f32) {
+        self.opts.look = (yaw.to_degrees(), -8.0);
     }
 
     fn spawn(&mut self, what: commands::Spawn) -> commands::Reply {

@@ -312,6 +312,16 @@ impl Store {
         self.report(write_whole(&self.dir, &path, text))
     }
 
+    /// The travellers met in a world, as they were saved: none if none were (#205).
+    pub fn travellers(&self, seed: u32) -> String {
+        fs::read_to_string(self.dir.join(format!("travellers-{seed}.txt"))).unwrap_or_default()
+    }
+
+    pub fn write_travellers(&self, seed: u32, text: &str) -> bool {
+        let path = PathBuf::from(format!("travellers-{seed}.txt"));
+        self.report(write_whole(&self.dir, &path, text))
+    }
+
     /// Where the map of what has been seen of each world is kept.
     pub fn map_dir(&self, seed: u32) -> PathBuf {
         self.dir.join(format!("map-{seed}"))

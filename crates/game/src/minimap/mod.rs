@@ -314,6 +314,8 @@ pub struct Minimap {
     pub hour: f32,
     /// Where the player has camped, in world voxels: each is marked.
     pub camps: Vec<DVec2>,
+    /// Where the parties of settlers the player has met have got to, in world voxels.
+    pub met: Vec<DVec2>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -434,6 +436,7 @@ impl Minimap {
             aim: None,
             hour: 12.0,
             camps: Vec::new(),
+            met: Vec::new(),
             season: None,
             relief: None,
             relief_ask,
@@ -1283,6 +1286,19 @@ impl Minimap {
                 if let Some(named) = named.as_deref_mut() {
                     let (at, or) = clear_of_player(Vec2::new(p.x, p.y - icon - 9.0 * f.s), Vec2::new(p.x, p.y + icon + 9.0 * f.s), me_px, 13.5 * f.s, f.s);
                     named.push(Name { text: "Camp".into(), at, or: Some(or), size: 13.5 * f.s, weight: 1.5, color: [255, 226, 184, 255] });
+                }
+            }
+        }
+        // The settlers met on the road, where they have got to (#205).
+        for &party in &self.met {
+            if let Some((p, true)) = place(party)
+                && f.edge(p) < -3.0
+            {
+                // Rust red, to stand out from the pale trails they walk.
+                icons.push(Instance::new(gpu::TRIANGLE, p.into(), icon * 0.75, [0.70, 0.30, 0.12, 1.0]));
+                if let Some(named) = named.as_deref_mut() {
+                    let (at, or) = clear_of_player(Vec2::new(p.x, p.y - icon - 9.0 * f.s), Vec2::new(p.x, p.y + icon + 9.0 * f.s), me_px, 12.5 * f.s, f.s);
+                    named.push(Name { text: "Settlers".into(), at, or: Some(or), size: 12.5 * f.s, weight: 1.2, color: [236, 222, 190, 255] });
                 }
             }
         }

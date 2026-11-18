@@ -345,6 +345,31 @@ fn quays_never_sit_on_a_plot_or_lane_and_never_block_a_river() {
     assert!(quays > 0);
 }
 
+/// Prints the falls of a world nearest the trade boats' runs and the river quays, where
+/// the boats never go, for looking at by hand (`PROBE_SEED`, `PROBE_SIZE`).
+#[test]
+#[ignore]
+fn probe_falls() {
+    let size = std::env::var("PROBE_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let seed = std::env::var("PROBE_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let c = GameWorld::with_config(seed, SimConfig { size }).continent(0, 0);
+    let ways = &c.trails.waterways;
+    let wet: Vec<Vec2> = ways.runs.iter().flat_map(|r| r.line.iter().map(|p| vec2(p.x, p.z))).chain(ways.quays.iter().filter(|q| q.serves == Serves::River).map(|q| q.head)).collect();
+    let mut falls: Vec<(f32, Vec2, Vec2, f32)> = (0..c.size * c.size)
+        .filter(|&i| fall_drop(c.as_ref(), i) > 0.0)
+        .map(|i| {
+            let (p, below) = (crate::surface::node(c.as_ref(), i), crate::surface::node(c.as_ref(), c.rcv[i] as usize));
+            let near = wet.iter().map(|w| w.distance(p)).fold(f32::INFINITY, f32::min);
+            (near, p, below, fall_drop(c.as_ref(), i))
+        })
+        .collect();
+    falls.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!("{} falls in all", falls.len());
+    for (near, p, below, drop) in falls.iter().take(8) {
+        println!("a fall at ({:.0}, {:.0}) to ({:.0}, {:.0}), dropping {drop:.1}, {:.0} m from the nearest run or river quay", p.x, p.y, below.x, below.y, near / m(1.0));
+    }
+}
+
 /// Prints where the runs of the small worlds leave the water, for looking at by hand.
 #[test]
 #[ignore]

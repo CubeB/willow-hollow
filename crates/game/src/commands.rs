@@ -133,6 +133,13 @@ pub trait Game {
     fn greet(&mut self) -> Reply {
         cannot("greeting")
     }
+    /// The travellers nearest, of a kind if one is given, or with `quays` the quays they
+    /// tie up at (#205).
+    fn travellers(&self, _kind: Option<worldgen::settlements::travel::Kind>, _quays: bool, _n: usize) -> Vec<crate::travellers::Listed> {
+        Vec::new()
+    }
+    /// Turns the view to look along `yaw` (radians), as after a `tp` to something to see.
+    fn face(&mut self, _yaw: f32) {}
 }
 
 fn cannot(what: &str) -> Reply {
@@ -182,7 +189,50 @@ pub const COMMANDS: &[Spec] = &[
     Spec { name: "give", also: &[], usage: "give <thing> [n]", about: "put things in the pack: sticks, lantern, a flower (poppy, bluebell...), holly-berries...", words: item_words, run: give },
     Spec { name: "speed", also: &[], usage: "speed [times]", about: "walk, run and swim this many times faster (1 is usual)", words: none, run: speed },
     Spec { name: "seed", also: &[], usage: "seed", about: "say which world this is", words: none, run: |_, game| Ok(format!("world seed {0} (run with --seed {0} to come back to it)", game.seed())) },
+    Spec { name: "travellers", also: &["travelers"], usage: "travellers [camper|settlers|riverboat|fishingboat|quay]", about: "who is on the road or the water nearest, and what they are doing, or the quays: tp goes to them by the same words", words: traveller_words, run: travellers },
 ];
+
+/// The words `travellers` and `tp` take for the travellers (#205).
+fn traveller_words() -> Vec<&'static str> {
+    let mut words: Vec<&str> = worldgen::settlements::travel::Kind::ALL.iter().map(|k| k.key()).collect();
+    words.push("quay");
+    words
+}
+
+/// What a word names among the travellers: a kind of them, or the quays.
+fn traveller_kind(word: &str) -> Option<(Option<worldgen::settlements::travel::Kind>, bool)> {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "quay" | "quays" | "jetty" => Some((None, true)),
+        // A camp is the player's own, or a place's name.
+        "camp" => None,
+        w => worldgen::settlements::travel::Kind::named(w).map(|k| (Some(k), false)),
+    }
+}
+
+fn travellers(args: &[&str], game: &mut dyn Game) -> Reply {
+    let words = args.join(" ");
+    let (kind, quays) = match words.trim() {
+        "" => (None, false),
+        w => traveller_kind(w).ok_or_else(|| format!("'{w}' is not a kind of traveller: {}", traveller_words().join(", ")))?,
+    };
+    let found = game.travellers(kind, quays, 8);
+    if found.is_empty() {
+        return Err(if quays { "no quays in this part of the world".into() } else { "no travellers out in this part of the world just now".into() });
+    }
+    let here = game.here().eye;
+    let mut out = String::new();
+    for t in found {
+        let (dx, dz) = (t.at.x - here.x, t.at.z - here.z);
+        let metres = dx.hypot(dz) / worldgen::scale::VOXELS_PER_METRE as f64;
+        let far = if metres >= 1000.0 { format!("{:.1} km", metres / 1000.0) } else { format!("{metres:.0} m") };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        // The look is the yaw `--look` takes, for a still of them from where tp puts you.
+        out += &format!("{}, {far} {}   tp {:.0},{:.0} look {:.0}\n  {} (at {:.0},{:.0},{:.0})", t.what, compass(dx, dz), t.stand.x, t.stand.y, t.look.to_degrees(), t.doing, t.at.x, t.at.y, t.at.z);
+    }
+    Ok(out)
+}
 
 /// The command a word names, by its name or another it answers to.
 pub fn find(word: &str) -> Option<&'static Spec> {
@@ -377,6 +427,8 @@ pub enum Goto {
     Place(String),
     /// The nearest settlement of a kind.
     Nearest(worldgen::settlements::Kind),
+    /// The nearest travellers, of a kind or any, or the nearest quay (#205).
+    Traveller(Option<worldgen::settlements::travel::Kind>, bool),
 }
 
 /// Reads `tp`'s words: two or three numbers, apart or joined by commas as `pos` and
@@ -388,6 +440,10 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
         [] => Err("where to? tp x z, tp x,z,h, tp home, or the name of a place".into()),
         ["home"] => Ok(Goto::Home),
         ["back"] => Ok(Goto::Back),
+        [word] if traveller_kind(word).is_some() => {
+            let (kind, quays) = traveller_kind(word).expect("a traveller's word");
+            Ok(Goto::Traveller(kind, quays))
+        }
         [x, ..] if x.parse::<f64>().is_err() => Ok(match worldgen::settlements::Kind::named(&joined) {
             Some(kind) => Goto::Nearest(kind),
             None => Goto::Place(joined.trim().to_string()),
@@ -401,6 +457,7 @@ pub fn goto(args: &[&str]) -> Result<Goto, String> {
 fn tp_words() -> Vec<&'static str> {
     let mut words = vec!["home", "back"];
     words.extend(kind_words());
+    words.extend(traveller_words());
     words
 }
 
@@ -427,6 +484,14 @@ fn tp(args: &[&str], game: &mut dyn Game) -> Reply {
             let s = found.first().ok_or_else(|| format!("no {} in this part of the world", kind.word()))?;
             let (x, z, said) = (s.x, s.z, format!("{} ({})", s.name, s.kind));
             game.teleport(x, z, None).map(|line| format!("{said}: {line}"))
+        }
+        Goto::Traveller(kind, quays) => {
+            let found = game.travellers(kind, quays, 1);
+            let t = found.first().ok_or_else(|| format!("no {} out in this part of the world just now", if quays { "quay" } else { kind.map_or("travellers", |k| k.word()) }))?;
+            let (x, z, look, said) = (t.stand.x, t.stand.y, t.look, format!("{}, {}", t.what, t.doing));
+            let line = game.teleport(x, z, None)?;
+            game.face(look);
+            Ok(format!("{said}: {line}"))
         }
     }
 }
