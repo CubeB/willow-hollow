@@ -151,7 +151,9 @@ impl Placed {
     pub fn near(&self, pos: DVec3, radius: f64) -> impl Iterator<Item = (Handle, &Thing)> + '_ {
         let (lo, hi) = (column_of(pos - DVec3::splat(radius)), column_of(pos + DVec3::splat(radius)));
         // A few things in a wide view are quicker gone through than the view's columns.
-        let all = self.columns.len() < ((hi.0 - lo.0 + 1) * (hi.1 - lo.1 + 1)) as usize;
+        // Counted in 64 bits: the columns of a view wide enough to take in everything are
+        // more than 32 hold.
+        let all = (self.columns.len() as i64) < (hi.0 - lo.0 + 1) as i64 * (hi.1 - lo.1 + 1) as i64;
         let columns: Box<dyn Iterator<Item = (&(i32, i32), &Vec<Thing>)>> = if all {
             Box::new(self.columns.iter().filter(move |(c, _)| (lo.0..=hi.0).contains(&c.0) && (lo.1..=hi.1).contains(&c.1)))
         } else {
