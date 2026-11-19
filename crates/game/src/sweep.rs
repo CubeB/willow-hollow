@@ -198,7 +198,9 @@ fn days(town: &Town) -> Vec<f32> {
             if n % 5 == (d % 5) as usize {
                 for pair in plan.stays.windows(2) {
                     out.push(town.walk_length((pair[0].place, &pair[0].spot), (pair[1].place, &pair[1].spot)));
-                    out.extend(town.last_steps(pair[1].place, &pair[1].spot).iter().flat_map(|p| p.to_array()));
+                    let (cut, steps) = town.last_steps(pair[1].place, &pair[1].spot);
+                    out.push(cut as f32);
+                    out.extend(steps.iter().flat_map(|p| p.to_array()));
                 }
             }
         }

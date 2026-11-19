@@ -595,14 +595,16 @@ fn play(town: &Town, w: &mut Vec<Want>, from: f32, until: f32, seed: u32, k: i32
     }
 }
 
-/// The `k`th spot about place `p`, for someone at `task` there: before it, in a row
-/// across the way it faces and then a row behind.
-fn around(town: &Town, p: usize, k: usize, task: Task) -> Spot {
+/// The `k`th spot about place `p`, for someone at `task` there: before it, two by two in
+/// rows across the way it faces, row behind row, either side of a way up the middle that
+/// those coming and going keep to (see [`Town::last_steps`]), so that nobody stands where
+/// the others come by (#206).
+pub(super) fn around(town: &Town, p: usize, k: usize, task: Task) -> Spot {
     let place = &town.places[p];
     let face = place.face;
     let across = face.perp();
-    let (row, col) = ((k / 3) as f32, [0.0, -1.0, 1.0][k % 3]);
-    let off = across * (col * 1.8 + row * 0.6) - face * (row * 1.9);
+    let (row, col) = ((k / 2) as f32, [-1.0, 1.0][k % 2]);
+    let off = across * (col * 1.8) - face * (row * 1.9);
     let at = place.at + Vec3::new(off.x, 0.0, off.y);
     Spot::new(at, (face + across * col * -0.25).normalize_or(face), task)
 }

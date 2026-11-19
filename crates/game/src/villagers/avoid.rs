@@ -355,6 +355,17 @@ pub(super) fn outline(spot: &Spot, lying: f32) -> (Vec2, Vec2, f32) {
     }
 }
 
+/// How far across the way to ease a change of side over, for someone coming across it
+/// `goes` fast (the sine of the angle their way makes with the walker's): from `least`,
+/// wider the faster they come across, so that it takes them about as long however fast;
+/// but growing by no more than two thirds again for each tenth faster, so that someone
+/// turning, as they do at a corner of their walk or going back on themselves, does not
+/// swing it all at once.
+fn easing(goes: f32, least: f32) -> f32 {
+    let goes = goes.abs();
+    (goes * 5.0).max(least).min(least * (goes * 5.0).exp())
+}
+
 /// Eases from 0 to 1 as `x` goes from 0 to 1.
 fn ramp(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
@@ -592,7 +603,7 @@ fn aside(route: &Route, n: usize, d: f32, near: &[u32], bodies: &[Body], still: 
         beside(walk, d, from, to, o.at, o.at, |rel, _, lat, _, _, t| {
             let (lo, hi) = (lat - clear, lat + clear);
             let goes = o.heading.dot(t.perp());
-            let soft = (goes.abs() * 5.0).max(0.3);
+            let soft = easing(goes, 0.3);
             let deep = depth(lo, hi, soft);
             if deep <= 0.0 {
                 return;
@@ -615,7 +626,7 @@ fn aside(route: &Route, n: usize, d: f32, near: &[u32], bodies: &[Body], still: 
                 let w = 1.0 - ramp((rel.abs() - BODY * 2.0) / 0.6);
                 let tie = if n < o.n { TIE } else { -TIE };
                 let lean = lat + tie;
-                let by = ramp(lean.abs() / (goes.abs() * 5.0).max(TIE));
+                let by = ramp(lean.abs() / easing(goes, TIE));
                 let s = if lean > 0.0 { -((clear - lat) * 0.5).max(0.0) } else { ((clear + lat) * 0.5).max(0.0) };
                 ask(moving * following * w * by * deep * s);
             }

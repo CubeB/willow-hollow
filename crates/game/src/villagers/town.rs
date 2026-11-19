@@ -36,6 +36,10 @@ use crate::{
 /// plot set off the lanes has its own path, and nothing further is reached.
 const SPUR: f32 = 60.0;
 
+/// How far back from a well, a stall, the tree, the shrine or the water's edge the way
+/// in runs straight up the middle of those standing there (#206): past the third row.
+const AISLE: f32 = 6.0;
+
 /// What a place of the settlement is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Where {
@@ -90,6 +94,12 @@ impl Where {
     pub fn out(self) -> bool {
         matches!(self, Where::Field(_) | Where::Camp | Where::Quarry | Where::Pasture(_))
     }
+
+    /// Whether those there stand in rows before it, either side of a way up the middle
+    /// (see [`Town::last_steps`]).
+    pub fn crowd(self) -> bool {
+        matches!(self, Where::Well | Where::Stall(_) | Where::Tree | Where::Shrine | Where::Water)
+    }
 }
 
 /// A field worked by the settlement's farmers (#64): which it is, and where they stand
@@ -122,11 +132,16 @@ pub struct Place {
     pub what: Where,
     /// Where the way in ends, continent-local, feet level.
     pub at: Vec3,
-    /// The lane node it is reached from, and the straight path from there to `at`.
+    /// The lane node it is reached from, and the path from there to `at`: straight, or
+    /// turning in behind those who stand before it (see `aisle`).
     pub anchor: u32,
     pub spur: Vec<Vec3>,
     /// The way someone there faces: toward the well, the stall, the tree.
     pub face: Vec2,
+    /// How far back from `at` the spur comes in straight along the way they face, up the
+    /// middle of those standing there in rows: none where it comes from before them, or
+    /// cannot turn in behind them.
+    pub aisle: f32,
 }
 
 /// A building of the settlement, as its people use it.
@@ -538,7 +553,7 @@ fn out_in_land(
             Some(last) => *last = to,
             None => spur.push(to),
         }
-        places.push(Place { what, at: to, anchor: anchor as u32, spur, face });
+        places.push(Place { what, at: to, anchor: anchor as u32, spur, face, aisle: 0.0 });
         Some(places.len() - 1)
     };
 
@@ -699,6 +714,19 @@ impl Town {
             let n = ((a.distance(b) / 0.5).ceil() as usize).max(1);
             (1..n).all(|k| !walls.iter().any(|&(lo, hi, round)| in_walls(lo, hi, round, a.lerp(b, k as f32 / n as f32), 0.0)))
         };
+        // A straight path from `from` to `at`, `d` long, a point every two paces or so
+        // after `from`.
+        let leg = |from: Vec3, at: Vec3, d: f32| -> Vec<Vec3> {
+            let steps = (d / 2.0).ceil().max(1.0) as usize;
+            (1..=steps)
+                .map(|i| {
+                    let p = from.lerp(at, i as f32 / steps as f32);
+                    // The ground along it, but at the ends their own level.
+                    let y = if i == steps { at.y } else { height(flat(p)).max(from.y.min(at.y) - 2.0) };
+                    Vec3::new(p.x, y, p.z)
+                })
+                .collect()
+        };
         // A path in from the nearest lane it can come straight from without going through a
         // house (from the nearest of all where none can); on the green, from its middle.
         let place = |what: Where, at: Vec3, places: &mut Vec<Place>| -> Option<usize> {
@@ -708,17 +736,9 @@ impl Town {
                 return None;
             }
             let from = lanes.nodes[anchor as usize];
-            let steps = (d / 2.0).ceil().max(1.0) as usize;
-            let spur = (1..=steps)
-                .map(|i| {
-                    let p = from.lerp(at, i as f32 / steps as f32);
-                    // The ground along it, but at the ends their own level.
-                    let y = if i == steps { at.y } else { height(flat(p)).max(from.y.min(at.y) - 2.0) };
-                    Vec3::new(p.x, y, p.z)
-                })
-                .collect();
+            let spur = leg(from, at, d);
             let face = (flat(at) - flat(from)).normalize_or(Vec2::X);
-            places.push(Place { what, at, anchor, spur, face });
+            places.push(Place { what, at, anchor, spur, face, aisle: 0.0 });
             Some(places.len() - 1)
         };
         let green_place = place(Where::Green, centre, &mut places)?;
@@ -844,6 +864,33 @@ impl Town {
             places[i].face = (w - p).normalize_or(Vec2::X);
             Some(i)
         });
+
+        // Those at a well, a stall, the tree, the shrine or the water stand in rows before
+        // it either side of a way up the middle (#206), and the path in from behind them
+        // comes up that way, so that nobody coming or going walks through them: where it
+        // comes from off to one side it turns in behind them first. One from before them
+        // comes to the front as it is.
+        for q in places.iter_mut().filter(|q| q.what.crowd()) {
+            let from = lanes.nodes[q.anchor as usize];
+            let back = flat(q.at) - flat(from);
+            let (deep, wide) = (back.dot(q.face), back.dot(q.face.perp()).abs());
+            if deep <= 0.0 {
+                continue;
+            }
+            if wide < 0.3 {
+                q.aisle = deep;
+                continue;
+            }
+            let turn = flat(q.at) - q.face * AISLE;
+            // Not through a wall, nor turning where one stands.
+            if !clear(flat(from), turn) || !clear(turn, flat(q.at)) || !clear(turn + q.face, turn - q.face) {
+                continue;
+            }
+            let turn = Vec3::new(turn.x, height(turn).max(from.y.min(q.at.y) - 2.0), turn.y);
+            q.spur = leg(from, turn, flat(from).distance(flat(turn)));
+            q.spur.extend(leg(turn, q.at, AISLE));
+            q.aisle = AISLE;
+        }
 
         // Out in the land (#64, #206): its fields, its logging camp and its quarry, and
         // the folds of its flocks, each reached by a way found across the land once.
@@ -1451,42 +1498,64 @@ impl Town {
         if self.across(pa, a, pb, b) {
             return Walk::new(vec![a.at, b.at]);
         }
-        let mut pts = Vec::new();
         let (qa, qb) = (&self.places[pa], &self.places[pb]);
-        let door = |p: &Place| match p.what {
-            Where::Door(i) => Some(self.plots[i].doorway),
-            _ => None,
+        // How many of the last points of its place's spur each end leaves out, and the
+        // steps from the spur to it.
+        let end = |p: usize, s: &Spot| match (s.inside, self.places[p].what) {
+            (Some(_), Where::Door(i)) => (0, vec![self.plots[i].doorway]),
+            (Some(_), _) => (0, Vec::new()),
+            (None, _) => self.last_steps(p, s),
         };
-        match a.inside {
-            Some(_) => pts.extend(door(qa)),
-            None => pts.extend(self.last_steps(pa, a).into_iter().rev()),
-        }
-        pts.push(qa.at);
+        let ((ca, ea), (cb, eb)) = (end(pa, a), end(pb, b));
+        let mut pts: Vec<Vec3> = ea.into_iter().rev().collect();
         if pa != pb {
-            pts.extend(qa.spur.iter().rev().skip(1));
+            if ca == 0 {
+                pts.push(qa.at);
+                pts.extend(qa.spur.iter().rev().skip(1));
+            } else {
+                pts.extend(qa.spur[..qa.spur.len() - ca].iter().rev());
+            }
             if let Some(route) = self.lanes.route(qa.anchor, qb.anchor) {
                 pts.extend(route.iter().map(|&n| self.lanes.nodes[n as usize]));
             }
-            pts.extend(qb.spur.iter());
+            pts.extend(&qb.spur[..qb.spur.len() - cb]);
+        } else if ca == 0 || cb == 0 {
+            pts.push(qa.at);
         }
-        match b.inside {
-            Some(_) => pts.extend(door(qb)),
-            None => pts.extend(self.last_steps(pb, b)),
-        }
+        pts.extend(eb);
         Walk::new(pts)
     }
 
-    /// The last steps from place `p` to `s` there, outdoors, after its own `at`: straight
-    /// to it, or round the building whose door it is when that stands in the way, as it
-    /// does of a garden behind.
-    pub fn last_steps(&self, p: usize, s: &Spot) -> Vec<Vec3> {
+    /// The last steps to `s` at place `p`, outdoors: how many of the last points of the
+    /// place's spur are left out (none when the way goes on to its `at`), and the steps
+    /// from where it leaves the spur. To a house's garden behind they go round the house;
+    /// to a place among those standing before a well, a stall, the tree, the shrine or the
+    /// water they keep to the way up the middle until they are abreast of its row, and
+    /// then step aside into it, so as not to walk through those in front (#206).
+    pub fn last_steps(&self, p: usize, s: &Spot) -> (usize, Vec<Vec3>) {
         let q = &self.places[p];
+        let deep = (flat(q.at) - flat(s.at)).dot(q.face);
+        if q.what.crowd() && deep > 0.01 {
+            let up = |d: f32| q.at - Vec3::new(q.face.x, 0.0, q.face.y) * d;
+            let short = deep.min(q.aisle);
+            let cut = if short > 0.01 { q.spur.iter().rev().take_while(|&&r| (flat(q.at) - flat(r)).dot(q.face) < short + 0.01).count() } else { 0 };
+            let mut out = Vec::new();
+            if cut > 0 {
+                out.push(up(short));
+            }
+            // Further back than the way comes up, they go on back along it.
+            if deep > short + 0.01 {
+                out.push(up(deep));
+            }
+            out.push(s.at);
+            return (cut, out);
+        }
         let mut out = match q.what {
             Where::Door(i) => self.round(i, q.at, s.at),
             _ => Vec::new(),
         };
         out.push(s.at);
-        out
+        (0, out)
     }
 
     /// The corners to go by from `from` to `to` round building `i`, a step clear of its
@@ -1512,12 +1581,16 @@ impl Town {
         steps
     }
 
-    /// How far the last steps to `s` at `p` are, from the place's `at`.
+    /// How far the last steps to `s` at `p` are, from the place's `at`: less the spur not
+    /// walked, where they leave it short of `at`.
     fn last_length(&self, p: usize, s: &Spot) -> f32 {
+        let (cut, steps) = self.last_steps(p, s);
         let mut d = 0.0;
         let mut last = self.places[p].at;
-        for step in self.last_steps(p, s) {
-            d += step.distance(last);
+        for (k, step) in steps.into_iter().enumerate() {
+            // The first step is then back along the spur from `at` to where they leave it.
+            let leg = step.distance(last);
+            d += if k == 0 && cut > 0 { -leg } else { leg };
             last = step;
         }
         d
@@ -1533,6 +1606,10 @@ impl Town {
         };
         if self.across(pa, a, pb, b) {
             return a.at.distance(b.at);
+        }
+        // From row to row of those before a well or a stall, up or down the way between.
+        if pa == pb && self.places[pa].what.crowd() {
+            return self.walk((pa, a), (pb, b)).length();
         }
         end(pa, a) + self.dist[pa][pb] + end(pb, b)
     }
