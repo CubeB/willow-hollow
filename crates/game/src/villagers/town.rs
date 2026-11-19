@@ -1225,7 +1225,8 @@ impl Town {
                     (_, Trade::None | Trade::Merchant) => Role::Homemaker,
                     _ => Role::Worker,
                 };
-                let stall = (role == Role::Seller).then_some(sellers - 1);
+                // Counted only for a seller: with no seller yet there is no one less than none.
+                let stall = (role == Role::Seller).then(|| sellers - 1);
                 // A new household is known apart from the one before it.
                 let id = known + j + rebuilt as usize * (1 << 20);
                 let mut r = Resident { n, id, person, home: i, member: j, bed, role, jobs: Vec::new(), stall, from: None };
