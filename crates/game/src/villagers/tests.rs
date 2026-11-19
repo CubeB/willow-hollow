@@ -853,6 +853,9 @@ struct Crowding {
     /// the water, or leaving one, touched someone standing in it, was a little into them
     /// and more than half a body into them, wherever along their walk they were (#206).
     crowd: [usize; 3],
+    /// Moments a walker coming to their own spot in such a crowd, or leaving it, touched
+    /// someone standing on that very spot (#206).
+    shared: usize,
 }
 
 /// How far into each other two people are, edge to edge, before their figures meet, in
@@ -942,9 +945,13 @@ fn crowding(town: &Town, day: i64, keep_off: bool) -> Crowding {
                             // Not someone come to the very spot another is still at, as
                             // those who come later to a stall take the places of those gone.
                             let same = flat(mine.at).distance(flat(plans[m].stays[*s].spot.at)) < avoid::BODY * 2.0;
-                            if town.places[there].what.crowd() && !same && (plans[n].stays[*i].place == there || coming) {
-                                for (k, deep) in [0.0, -INTO, -avoid::BODY].into_iter().enumerate() {
-                                    c.crowd[k] += (gap < deep) as usize;
+                            if town.places[there].what.crowd() && (plans[n].stays[*i].place == there || coming) {
+                                if same {
+                                    c.shared += 1;
+                                } else {
+                                    for (k, deep) in [0.0, -INTO, -avoid::BODY].into_iter().enumerate() {
+                                        c.crowd[k] += (gap < deep) as usize;
+                                    }
                                 }
                             }
                         }
@@ -1036,7 +1043,7 @@ fn walkers_keep_out_of_each_others_way() {
                 let mut w: Vec<(&String, &usize)> = c.worst.iter().collect();
                 w.sort_by(|a, b| b.1.cmp(a.1));
                 let top: Vec<String> = w.iter().take(8).map(|(k, v)| format!("    {v} {k}  [{}]", c.example[*k])).collect();
-                format!("still {:?}, passing {:?}, at ends {}, indoors {}, with room {}, nearest {:.2}, met {:?}, crowd {:?}, jumps {}, jump {:.3} ({}), looks {}, {:.1} us a look ({:.0} at most, {} walking at most)\n{}", c.still, c.passing, c.at_ends, c.indoors, c.with_room, c.nearest, c.met, c.crowd, c.jumps, c.jump, c.jump_at, c.looks, c.took / c.looks.max(1) as f64, c.most, c.walkers, top.join("\n"))
+                format!("still {:?}, passing {:?}, at ends {}, indoors {}, with room {}, nearest {:.2}, met {:?}, crowd {:?}, shared {}, jumps {}, jump {:.3} ({}), looks {}, {:.1} us a look ({:.0} at most, {} walking at most)\n{}", c.still, c.passing, c.at_ends, c.indoors, c.with_room, c.nearest, c.met, c.crowd, c.shared, c.jumps, c.jump, c.jump_at, c.looks, c.took / c.looks.max(1) as f64, c.most, c.walkers, top.join("\n"))
             };
             println!("{} ({} people) on day {day}{}:\n  before {}\n  after  {}", town.name, town.residents.len(), if Some(day) == market { " (market)" } else { "" }, show(&before), show(&after));
             let on = format!("{} on day {day}", town.name);
@@ -1053,6 +1060,8 @@ fn walkers_keep_out_of_each_others_way() {
             // Those coming to a crowd before a well or a stall, or leaving one, keep to the way
             // up its middle and hardly ever go deep into anyone standing in it (#206).
             assert!(after.crowd[2] <= 2, "{on}: walkers go deep into those standing before a well or a stall {} times ({:?})", after.crowd[2], after.crowd);
+            // Nor does anyone come to a spot in it that someone is still standing on.
+            assert!(before.shared + after.shared == 0, "{on}: walkers come to the spot of someone still standing on it {} times", after.shared);
             // Nobody darts across the ground much faster than a quick step aside; and the
             // worst of those, looked at more and more often, moves less and less between
             // looks, as nobody who leaps from one place to another would.
@@ -1067,6 +1076,32 @@ fn walkers_keep_out_of_each_others_way() {
             }
         }
     }
+}
+
+#[test]
+fn nobody_comes_to_a_spot_another_still_stands_on() {
+    // Before a well, a stall, the tree, the shrine or the water, whoever comes takes a
+    // spot nobody is standing on until they have gone, every day of the week (#206).
+    let mut all: Vec<String> = Vec::new();
+    for town in towns() {
+        let mut shared: Vec<String> = Vec::new();
+        for day in WORKDAY..WORKDAY + 7 {
+            let plans = plans_of(town, day);
+            let stood: Vec<(usize, &day::Stay)> = plans.iter().enumerate().flat_map(|(n, p)| p.stays.iter().map(move |s| (n, s))).filter(|(_, s)| s.spot.inside.is_none() && town.places[s.place].what.crowd()).collect();
+            for (i, &(n, a)) in stood.iter().enumerate() {
+                for &(m, b) in &stood[i + 1..] {
+                    let near = flat(a.spot.at).distance(flat(b.spot.at)) < avoid::BODY * 2.0;
+                    if a.place == b.place && near && a.arrive < b.leave && b.arrive < a.leave {
+                        let ((n, a), (m, b)) = if a.arrive <= b.arrive { ((n, a), (m, b)) } else { ((m, b), (n, a)) };
+                        shared.push(format!("{} on day {day}: {m} comes to {} at {:.3} h where {n} stands {:.3} to {:.3} h", town.name, town.place_word(b.place), b.arrive, a.arrive, a.leave));
+                    }
+                }
+            }
+        }
+        println!("{}: {} come to a spot another stands on", town.name, shared.len());
+        all.extend(shared);
+    }
+    assert!(all.is_empty(), "{} come to a spot another stands on, as {}", all.len(), all.iter().take(4).cloned().collect::<Vec<_>>().join("; "));
 }
 
 #[test]
