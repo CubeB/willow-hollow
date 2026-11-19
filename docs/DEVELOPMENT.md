@@ -107,6 +107,12 @@ The tests check the world as well as the code: drainage reaches the sea, rivers 
 grow on the way down, lakes are flat, chunk edges line up. Run them before pushing. The
 worldgen tests take about a minute.
 
+Many tests build whole continents, about 600 MB for each test running at once. With a
+test thread on every core (12 here) that came to some 7 GB, and on a 16 GB machine with a
+browser open it ran out of memory. So `.cargo/config.toml` runs four tests at once
+unless told otherwise: `--test-threads=N`, or `RUST_TEST_THREADS` set in the
+environment, overrides it.
+
 One test is known to fail at the time of writing:
 `world_tests::overhangs_hang_from_faces_and_agree_across_chunks` in `worldgen` finds a
 mismatch across one chunk border. Any other failure is new.
