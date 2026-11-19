@@ -26,7 +26,7 @@ fn every(seeds: u32) -> Vec<SpecialSpec> {
                     2 => Some(IVec3::NEG_Z),
                     _ => Some(IVec3::NEG_X),
                 };
-                let facts = Facts { willows: seed % 2 == 0, stone: seed % 3 == 0, trade: seed % 5 < 2, colour: seed % 7 < 3, water: seed % 3 != 1 };
+                let facts = Facts { willows: seed % 2 == 0, stone: seed % 3 == 0, trade: seed % 5 < 2, colour: seed % 7 < 3, water: seed % 3 != 1, ancient: seed % 4 == 0 };
                 out.push(SpecialSpec { which, region, age: h(1), wealth: h(2), seed: seed * 7919 + 13, stream, facts });
             }
         }
@@ -243,13 +243,21 @@ fn guild_houses_take_the_guilds_their_place_suits() {
         assert!((2..=3).contains(&g.len()));
         assert!(g.contains(&Guild::Wayfarers), "wayfarers are everywhere");
         assert!(!g.contains(&Guild::Weavers) && !g.contains(&Guild::Masons));
-        let all = Facts { willows: true, stone: true, trade: true, colour: true, water: true };
+        let all = Facts { willows: true, stone: true, trade: true, colour: true, water: true, ancient: true };
         assert_eq!(guilds(&all, 0.1, seed).len(), 2);
         assert_eq!(guilds(&all, 0.9, seed).len(), 3);
         let weavers = Facts { willows: true, ..none };
         assert!(guilds(&weavers, 0.2, seed).iter().all(|g| g.suits(&weavers) || *g == Guild::Merchants || *g == Guild::Painters));
+        // An ancient place keeps masons for its old walls, on soft ground or stony, poor or
+        // rich, however many other guilds suit it.
+        for wealth in [0.1, 0.9] {
+            assert!(guilds(&Facts { ancient: true, ..none }, wealth, seed).contains(&Guild::Masons));
+            assert!(guilds(&all, wealth, seed).contains(&Guild::Masons));
+        }
+        // And a place neither ancient nor on stone has none.
+        assert!(!guilds(&Facts { ancient: false, stone: false, ..all }, 0.9, seed).contains(&Guild::Masons));
     }
-    let spec = SpecialSpec { facts: Facts { willows: true, stone: true, trade: false, colour: false, water: false }, wealth: 0.2, ..SpecialSpec::new(Special::GuildHouse, Region::Temperate, 9) };
+    let spec = SpecialSpec { facts: Facts { willows: true, stone: true, trade: false, colour: false, water: false, ancient: false }, wealth: 0.2, ..SpecialSpec::new(Special::GuildHouse, Region::Temperate, 9) };
     let built = build(&spec, &palette(spec.region, spec.seed)).unwrap();
     assert_eq!(built.guilds, guilds(&spec.facts, spec.wealth, spec.seed));
 }

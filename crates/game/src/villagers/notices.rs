@@ -363,7 +363,8 @@ fn quarries_near(town: &Town) -> Vec<&Pit> {
     town.quarries.iter().filter(|p| p.far <= QUARRY_REACH).collect()
 }
 
-/// What the masons' roll says of the quarries about `town` and of their master.
+/// What the masons' roll says of the quarries about `town`, of the old walls of an
+/// ancient town, and of their master.
 fn masons(town: &Town) -> String {
     let middle = Vec2::new(town.centre.x, town.centre.z);
     let whence = |p: &Pit| {
@@ -386,6 +387,9 @@ fn masons(town: &Town) -> String {
             format!(" They work {count} quarries within a long day's walk: {}. Each is marked on your map.", each.join("; "))
         }
     };
+    if town.ancient {
+        text += " Most of their days go on the old walls, setting back the stones the frost has thrown down and cutting new ones where the old are past mending.";
+    }
     match master(town) {
         Some(r) => text += &format!(" Their master is {}.", r.person.name),
         None => {
@@ -531,6 +535,9 @@ mod tests {
             assert!(p.stone.iter().all(|s| line.contains(s)), "{line}: {:?}", p.stone);
         }
         assert!(line.contains("marked on your map"), "{line}");
+        // Only an ancient town's masons keep its old walls.
+        let walls = |ancient: bool| masons_line(&Town { ancient, ..town.clone() }).contains("the old walls");
+        assert!(walls(true) && !walls(false), "{line}");
         // A quarry beyond a long day's walk is not among them.
         for p in town.quarries.iter().filter(|p| p.far > QUARRY_REACH) {
             assert!(!line.contains(&p.town), "{line}");

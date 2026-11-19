@@ -293,6 +293,8 @@ pub struct Town {
     /// The settlement's seed and region: its market days, and what its stalls sell.
     pub seed: u32,
     pub region: Region,
+    /// Whether it is ancient, with old walls its masons keep.
+    pub ancient: bool,
     /// Each of `stalls` as it is dressed on market day, in the same order.
     pub market: Vec<Dress>,
     /// Where the village tree's ribbons are tied, and the spare places under its limbs a
@@ -892,6 +894,7 @@ impl Town {
             river: None,
             seed: s.seed,
             region: s.region,
+            ancient: s.age == worldgen::settlements::Age::Ancient,
             market,
             knots: Vec::new(),
             spare: Vec::new(),
@@ -1144,10 +1147,12 @@ impl Town {
                 herding.push((i, d));
             }
         }
-        // Where the settlement works a quarry and no mason keeps a yard among its houses,
-        // a household or two of masons, who walk out to it.
+        // Where the settlement works a quarry, or its guild house keeps masons (an ancient
+        // town's, for its old walls), and no mason keeps a yard among its houses, a
+        // household or two of masons, who walk out to the quarry if there is one.
         let mut quarrying: Vec<usize> = Vec::new();
-        if self.quarry.is_some() && !plots.iter().any(|p| p.purpose == Purpose::Workplace(Livelihood::Quarry)) {
+        let guild = self.guilds.as_ref().is_some_and(|g| g.1.contains(&Guild::Masons));
+        if (self.quarry.is_some() || guild) && !plots.iter().any(|p| p.purpose == Purpose::Workplace(Livelihood::Quarry)) {
             let mut homes: Vec<usize> = (0..plots.len())
                 .filter(|&i| plots[i].purpose == Purpose::Home && plots[i].sleepers >= 2 && door_of[i].is_some() && lives.standing(first + i) && !herding.iter().any(|h| h.0 == i))
                 .collect();
