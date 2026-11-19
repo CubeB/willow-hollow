@@ -371,3 +371,11 @@ fn climate_is_sane() {
         }
     }
 }
+
+/// A dammed lake whose barrier comes near the edge of the grid stops it there: seed 38's
+/// first continent, at full size, once reached off the top and panicked.
+#[test]
+fn a_dam_by_the_edge_of_the_grid_stays_on_it() {
+    let c = generate(cell_desc(38, 0, 0), SimConfig::default());
+    assert!(c.height.iter().all(|h| h.is_finite()));
+}

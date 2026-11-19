@@ -540,10 +540,13 @@ fn dam_lakes(level: &Level, flow: &Flow, height: &mut [f32], seed: u32) {
         for dz in -r..=r {
             for dx in -r..=r {
                 let d = ((dx * dx + dz * dz) as f32).sqrt();
-                if d > radius {
+                // A barrier by the edge of the grid stops at it: it neither reaches off
+                // the top or bottom nor wraps round onto the far side.
+                let (cx, cz) = (x as i32 + dx, z as i32 + dz);
+                if d > radius || cx < 0 || cz < 0 || cx >= w as i32 || cz as usize >= height.len() / w {
                     continue;
                 }
-                let j = ((z as i32 + dz) * w as i32 + x as i32 + dx) as usize;
+                let j = (cz * w as i32 + cx) as usize;
                 if !level.ocean[j] && height[j] < crest + 1.5 {
                     height[j] = crest + 1.5;
                 }
