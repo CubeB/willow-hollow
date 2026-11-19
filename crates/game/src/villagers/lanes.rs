@@ -259,4 +259,84 @@ impl Walk {
             }
         }
     }
+
+    /// Which way the walk is going `d` voxels along it, across the ground, eased round its
+    /// corners: the way of each stretch of it from `over` voxels back to as far on, taken
+    /// by how much of that each makes up (the first and last stretches as if they ran on
+    /// beyond the ends). It turns smoothly as the walk goes, even back on itself, where
+    /// [`Walk::at`]'s way turns all at once at each corner.
+    pub fn heading(&self, d: f32, over: f32) -> Vec2 {
+        let n = self.pts.len();
+        if n < 2 {
+            return Vec2::X;
+        }
+        let (from, to) = (d - over, d + over);
+        let (mut sum, mut total, mut last) = (0.0, 0.0, None::<f32>);
+        let first = self.along.partition_point(|&a| a <= from).clamp(1, n - 1);
+        for i in first..n {
+            if self.along[i - 1] > to && i > 1 {
+                break;
+            }
+            let lo = if i == 1 { f32::NEG_INFINITY } else { self.along[i - 1] };
+            let hi = if i == n - 1 { f32::INFINITY } else { self.along[i] };
+            let share = hi.min(to) - lo.max(from);
+            let v = flat(self.pts[i]) - flat(self.pts[i - 1]);
+            if share <= 0.0 || v.length_squared() < 1e-8 {
+                continue;
+            }
+            // Each way's angle taken on from the last, so that a turn of more than half
+            // round is not taken as one the other way.
+            let raw = v.y.atan2(v.x);
+            let angle = last.map_or(raw, |l| l + (raw - l + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI);
+            last = Some(angle);
+            sum += angle * share;
+            total += share;
+        }
+        if total > 0.0 { Vec2::from_angle(sum / total) } else { self.at(d).1 }
+    }
+
+    /// Each point of the walk between `from` and `to` voxels along it where it comes
+    /// nearest `q` (across the ground) as it goes, nearer than just before and just after,
+    /// and how far along it is: where it passes `q`, a corner it turns away from `q` at,
+    /// and either end if it would come nearer beyond it. A walk that comes back the way it
+    /// went passes `q` twice; and as `q`, or the stretch asked about, moves, each such
+    /// point moves with it, rather than the nearest of all leaping from one to the other.
+    pub fn passing(&self, q: Vec2, from: f32, to: f32, mut each: impl FnMut(f32, Vec2)) {
+        let n = self.pts.len();
+        if n < 2 {
+            return;
+        }
+        let (from, to) = (from.clamp(0.0, self.length()), to.clamp(0.0, self.length()));
+        let within = |d: f32| d >= from && d <= to;
+        let first = self.along.partition_point(|&a| a <= from).clamp(1, n - 1);
+        // Whether the walk was still coming nearer `q` at the end of the last stretch that
+        // went anywhere: at the start, as if it had come from beyond it.
+        let mut nearing = first == 1;
+        for i in first..n {
+            if self.along[i - 1] > to {
+                break;
+            }
+            let (a, b) = (flat(self.pts[i - 1]), flat(self.pts[i]));
+            let ab = b - a;
+            if ab.length_squared() < 1e-8 {
+                continue;
+            }
+            let t = (q - a).dot(ab) / ab.length_squared();
+            // A corner it comes to coming nearer `q` and leaves going away.
+            if nearing && t <= 0.0 && within(self.along[i - 1]) {
+                each(self.along[i - 1], a);
+            }
+            if t > 0.0 && t < 1.0 {
+                let d = self.along[i - 1] + (self.along[i] - self.along[i - 1]) * t;
+                if within(d) {
+                    each(d, a.lerp(b, t));
+                }
+            }
+            nearing = t >= 1.0;
+            // The end, coming nearer `q` all the way to it, as if it went on beyond it.
+            if i == n - 1 && nearing && within(self.along[i]) {
+                each(self.along[i], b);
+            }
+        }
+    }
 }

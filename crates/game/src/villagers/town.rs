@@ -336,6 +336,8 @@ pub struct Town {
     pub hamlets: Vec<Hamlet>,
     /// The quarries of its continent, nearest first: what its guild house's masons know.
     pub quarries: Vec<super::notices::Pit>,
+    /// What nobody steps aside onto as they pass each other (#206, avoid.rs).
+    pub ground: super::avoid::Ground,
 }
 
 /// A yard's hens (#206), and who feeds them of a morning, where.
@@ -913,6 +915,7 @@ impl Town {
             hens: Vec::new(),
             hamlets: out.hamlets,
             quarries: Vec::new(),
+            ground: super::avoid::Ground::default(),
         };
         town.extent = town.places.iter().map(|p| flat(p.at).distance(flat(centre))).fold(town.radius, f32::max);
         town.tavern = (0..town.plots.len()).find(|&i| town.plots[i].purpose == Purpose::Tavern && door_of[i].is_some());
@@ -938,6 +941,18 @@ impl Town {
         town.keepers();
         town.feeders(c, world_seed);
         town.visitors(s, tongue);
+        // What nobody steps aside onto as they pass each other (#206): what stands about
+        // it, and the water and the banks beside its lanes and the paths to its places.
+        let mut ways: Vec<Vec<Vec2>> = layout.lanes.clone();
+        let paths = town.places.iter().filter(|p| !p.what.out() && !matches!(p.what, Where::Away(_)));
+        ways.extend(paths.map(|p| std::iter::once(flat(town.lanes.nodes[p.anchor as usize])).chain(p.spur.iter().map(|&q| flat(q))).collect()));
+        let rough = super::avoid::rough_beside(&ways, &mut |p| {
+            let col = sam.column(p.x.floor() as i32, p.y.floor() as i32);
+            let boards = layout.boardwalks.deck_at(p.floor().as_ivec2()).is_some();
+            ((height)(p), (col.water_surface().is_some() || col.river < 0.0) && !boards)
+        });
+        let trunk = net.village_trees.get(k).copied().flatten().map(|t| Vec2::new(t.x as f32 + 0.5, t.z as f32 + 0.5));
+        town.ground = super::avoid::Ground::new(&town, layout, &things, trunk, rough);
         Some(town)
     }
 
