@@ -96,7 +96,7 @@ pub fn plant(c: &Continent, seed: u32) -> Vec<Planted> {
                     continue;
                 }
                 let at = (p.x.floor() as i32, p.y.floor() as i32);
-                let room = |x: i32, z: i32| ((x - at.0).pow(2) + (z - at.1).pow(2)) as f32 >= (SPACING * 0.6).powi(2);
+                let room = |x: i32, z: i32| apart(at, (x, z), SPACING * 0.6);
                 // Clear of the row's last, of another stream's, and of a village's tree.
                 if !out.iter().chain(c.trails.planted.iter().filter(|t| t.species != Species::Pollard)).all(|t| room(t.x, t.z)) {
                     continue;
@@ -106,6 +106,15 @@ pub fn plant(c: &Continent, seed: u32) -> Vec<Planted> {
         }
     }
     out
+}
+
+/// Whether columns `a` and `b` are `least` or more apart. Worked out in 64 bits: two
+/// trees at opposite ends of a continent are far enough apart that the square of the
+/// distance between them does not fit in 32, and wrapped round to a small number or a
+/// negative one, which made them neighbours.
+fn apart(a: (i32, i32), b: (i32, i32), least: f32) -> bool {
+    let (dx, dz) = ((a.0 - b.0) as i64, (a.1 - b.1) as i64);
+    (dx * dx + dz * dz) as f32 >= least * least
 }
 
 /// Whether a willow can stand on column `col`, at continent-local `p`: dry, level ground a
@@ -128,6 +137,20 @@ fn stands(c: &Continent, sampler: &Sampler, col: &Column, p: Vec2) -> bool {
 mod tests {
     use super::*;
     use crate::{continent::SimConfig, world::GameWorld};
+
+    /// A tree across the continent leaves a willow its room: the distance between them
+    /// once overflowed, and a village's tree some 18 km to the east or west could keep a
+    /// willow from its stream.
+    #[test]
+    fn a_tree_far_across_the_continent_is_not_in_a_willows_way() {
+        for far in [46_341, 50_000, 65_535] {
+            assert!(apart((0, 0), (far, 3), SPACING * 0.6), "{far} voxels east");
+            assert!(apart((far, 20), (0, 0), SPACING * 0.6), "{far} voxels west");
+            assert!(apart((7, far), (0, 0), SPACING * 0.6), "{far} voxels south");
+        }
+        assert!(!apart((100, 100), (103, 102), SPACING * 0.6));
+        assert!(apart((100, 100), (100, 100 + SPACING as i32), SPACING * 0.6));
+    }
 
     /// Willows stand in rows a little way back from the streams through the land a place
     /// works, each a row's spacing or more from the next, and the same every time.
