@@ -118,7 +118,8 @@ pub fn grow(t: &OrchardTree, put: &mut impl FnMut(IVec3, Voxel, bool), fine: Opt
     let (across, up) = if t.olive { (2.3 + r(4) * 0.5, 1.4) } else { (2.2 + r(4) * 0.7, 1.8 + r(5) * 0.4) };
     // The main limbs, which a bare winter tree shows.
     for (dx, dz) in [(1, 1), (-1, -1), (1, -1), (-1, 1)] {
-        if r(6 + dx as u32 + 2 * (dz + 1) as u32) < 0.7 {
+        // Summed before it is made unsigned: -1 as a u32 is no small number to add to.
+        if r((6 + dx + 2 * (dz + 1)) as u32) < 0.7 {
             put(middle + IVec3::new(dx, -1, dz), bark, true);
         }
     }
