@@ -1136,6 +1136,13 @@ pub fn add_pieces(c: &Continent, i: usize, out: &mut Vec<Piece>) {
     if !is_river(i) {
         return;
     }
+    // A node on the outermost ring of the grid is land only where a range crosses into
+    // the next continent, and is where its water leaves this one: no channel runs on
+    // from it, and it has no neighbours beyond the grid to look for feeders among.
+    let (x, z) = (i % c.size, i / c.size);
+    if x == 0 || z == 0 || x == c.size - 1 || z == c.size - 1 {
+        return;
+    }
     let r = c.rcv[i] as usize;
     let (pi, pr) = (node(c, i), node(c, r));
     let exit = (pi + pr) * 0.5;
@@ -1749,6 +1756,23 @@ mod tests {
         eprintln!("{wet}/{checked} springs hold water at the centre, {rims} rim columns");
         assert!(wet * 10 >= checked * 8, "{wet}/{checked} springs hold water");
         assert!(rims > 0);
+    }
+
+    #[test]
+    fn a_river_leaving_over_the_edge_of_the_grid_has_no_piece_from_its_last_node() {
+        // Seed 66's continent at -1,-2 has a range running out over its edge, and water
+        // leaving with it. Asking for the pieces of a node on the edge, as the far view
+        // does of every node, once looked for feeders off the grid and panicked.
+        let c = generate(cell_desc(66, -1, -2), SimConfig { size: 256 });
+        let n = c.size;
+        let edge = |i: usize| i % n == 0 || i / n == 0 || i % n == n - 1 || i / n == n - 1;
+        let leaving: Vec<usize> = (0..n * n).filter(|&i| edge(i) && !c.ocean[i] && c.discharge[i] >= MIN_RIVER_Q).collect();
+        assert!(!leaving.is_empty(), "no river leaves this continent over its edge");
+        let mut pieces = Vec::new();
+        for i in leaving {
+            add_pieces(&c, i, &mut pieces);
+        }
+        assert!(pieces.is_empty());
     }
 
     #[test]
