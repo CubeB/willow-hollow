@@ -985,7 +985,11 @@ impl Town {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| p.name.clone());
         town.people(c, tongue, s, &door_of, lives);
-        town.fishers();
+        // Dry ground, and how high it is, for the fishers' places along the bank.
+        town.fishers(&|p| {
+            let col = sam.column(p.x.floor() as i32, p.y.floor() as i32);
+            (col.water_surface().is_none() && col.river > 0.0).then(|| height(p))
+        });
         town.keepers();
         town.feeders(c, world_seed);
         town.visitors(s, tongue);
@@ -1029,16 +1033,41 @@ impl Town {
     /// who stand at the water and clear of them, the next two a little further along,
     /// and so on: nobody fishing stands on the way up the middle that everyone coming to
     /// the water walks, and each comes to their place from behind the others (see
-    /// [`Town::last_steps`]).
-    fn fishers(&mut self) {
+    /// [`Town::last_steps`]). Where the water's edge bends in toward the land, a place
+    /// on it is drawn back from the water onto the dry ground, as far as the one nearer the
+    /// middle on that side at least, so that those going further along still pass behind
+    /// it; one with no dry ground near is let be. `dry` is how high the ground is at a
+    /// point, if it is dry.
+    fn fishers(&mut self, dry: &dyn Fn(Vec2) -> Option<f32>) {
         let Some(w) = self.water else { return };
-        let (at, face) = (self.places[w].at, self.places[w].face);
+        let (at, face) = (flat(self.places[w].at), self.places[w].face);
+        let wanted = self.residents.iter().filter(|r| r.jobs.iter().any(|j| j.place == w && j.spot.task == Task::Fish)).count();
+        let mut places: Vec<Spot> = Vec::new();
+        let mut back = [0.0f32; 2];
+        for k in 0..12 {
+            if places.len() >= wanted {
+                break;
+            }
+            let side = k % 2;
+            let along = at + face.perp() * [1.0, -1.0][side] * (3.6 + 2.5 * (k / 2) as f32);
+            let found = (0..=6).map(|j| back[side] + j as f32 * 0.5).find_map(|b| {
+                let p = along - face * b;
+                dry(p).map(|y| (b, Vec3::new(p.x, y, p.y)))
+            });
+            if let Some((b, p)) = found {
+                back[side] = b;
+                places.push(Spot::new(p, face, Task::Fish));
+            }
+        }
         let mut k = 0;
-        for r in self.residents.iter_mut().filter(|r| r.person.trade == Trade::Fisher) {
-            let Some(job) = r.jobs.iter_mut().find(|j| j.place == w && j.spot.task == Task::Fish) else { continue };
-            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
-            let along = face.perp() * side * (3.6 + 2.5 * (k / 2) as f32);
-            job.spot = Spot::new(at + Vec3::new(along.x, 0.0, along.y), face, Task::Fish);
+        for r in self.residents.iter_mut() {
+            let Some(i) = r.jobs.iter().position(|j| j.place == w && j.spot.task == Task::Fish) else { continue };
+            match places.get(k) {
+                Some(&spot) => r.jobs[i].spot = spot,
+                None => {
+                    r.jobs.remove(i);
+                }
+            }
             k += 1;
         }
     }

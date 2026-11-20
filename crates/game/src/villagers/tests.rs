@@ -1153,7 +1153,15 @@ fn nobody_in_a_crowd_stands_in_the_way_of_the_others() {
                     }
                 }
             }
-            println!("{}: {} fishers, {} walks to the water past one", town.name, fishers.len(), near.len() - before);
+            // Each of them stands on the dry ground of the bank, at its own level.
+            for (j, f) in fishers.iter().enumerate() {
+                let (x, z) = (f.at.x.floor() as i32, f.at.z.floor() as i32);
+                let col = worldgen::surface::Sampler::new(continent(), SEED, x - 1, z - 1, 3).column(x, z);
+                if col.water_surface().is_some() || col.river <= 0.0 || (f.at.y - (col.top() + 1) as f32).abs() > 1.5 {
+                    near.push(format!("{}: the {j}th fisher stands at {:?}, over ground at {} (water {:?}, river {})", town.name, f.at, col.top() + 1, col.water_surface(), col.river));
+                }
+            }
+            println!("{}: {} fishers, {} walks to the water past one or places off the bank", town.name, fishers.len(), near.len() - before);
         }
     }
     assert!(near.is_empty(), "{}", near.join("; "));
