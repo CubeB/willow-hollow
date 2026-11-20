@@ -31,6 +31,9 @@ pub const WEEK: i64 = 7;
 pub const REST_DAY: i64 = 6;
 /// The least anyone stays anywhere, in hours.
 const LEAST: f32 = 0.05;
+/// How long before someone comes to a spot before a stall and after they leave it that
+/// nobody else is given it: the while it takes to walk a few steps.
+const ROOM: f32 = 5.0 / PACE;
 
 /// Somewhere someone is for a while: from when they get there to when they set off.
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +103,9 @@ struct Taken {
     tree: usize,
     shrine: usize,
     water: usize,
+    /// Each spot before a stall that someone stands on, and from and until what hour: the
+    /// place, where the spot is, and when they come and go.
+    stood: Vec<(usize, Vec2, f32, f32)>,
 }
 
 /// The day numbered `day` (from the world's first, in a year of `year_days` days) for
@@ -194,7 +200,8 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
     };
     // A stall to buy at, when they are kept: any on market day, and on another day one of
     // those set out every day, which a few go to (#203). Those at one at once stand in a
-    // few rows before it; those who come later take the places of those gone.
+    // few rows before it; those who come later take the places of those gone, or another
+    // when the one they would take is not free yet (see `make_room`).
     let stall = |taken: &mut Taken, k: i32| -> Option<Want> {
         let open: Vec<usize> = (0..town.stalls.len()).filter(|&i| market || town.kept_daily(i)).collect();
         if open.is_empty() || (!market && d(k + 40) > 0.25) {
@@ -543,7 +550,7 @@ fn plan(town: &Town, r: &Resident, day: i64, date: f32, taken: &mut Taken) -> Pl
             x.spot.stool = true;
         }
     }
-    settle(town, w)
+    settle(town, w, taken)
 }
 
 /// The day of `r`, in from one of the hamlets (#207), `d` their day's dice: away all
@@ -570,7 +577,7 @@ fn visit(town: &Town, r: &Resident, market: bool, d: &dyn Fn(i32) -> f32, taken:
         // Home again in the afternoon, before the stalls are packed away.
         w.push(Want { start: 13.4 + 1.8 * d(5), ..away });
     }
-    settle(town, w)
+    settle(town, w, taken)
 }
 
 /// Children at play on the green from `from` to `until`: running from spot to spot,
@@ -595,14 +602,16 @@ fn play(town: &Town, w: &mut Vec<Want>, from: f32, until: f32, seed: u32, k: i32
     }
 }
 
-/// The `k`th spot about place `p`, for someone at `task` there: before it, in a row
-/// across the way it faces and then a row behind.
-fn around(town: &Town, p: usize, k: usize, task: Task) -> Spot {
+/// The `k`th spot about place `p`, for someone at `task` there: before it, two by two in
+/// rows across the way it faces, row behind row, either side of a way up the middle that
+/// those coming and going keep to (see [`Town::last_steps`]), so that nobody stands where
+/// the others come by (#206).
+pub(super) fn around(town: &Town, p: usize, k: usize, task: Task) -> Spot {
     let place = &town.places[p];
     let face = place.face;
     let across = face.perp();
-    let (row, col) = ((k / 3) as f32, [0.0, -1.0, 1.0][k % 3]);
-    let off = across * (col * 1.8 + row * 0.6) - face * (row * 1.9);
+    let (row, col) = ((k / 2) as f32, [-1.0, 1.0][k % 2]);
+    let off = across * (col * 1.8) - face * (row * 1.9);
     let at = place.at + Vec3::new(off.x, 0.0, off.y);
     Spot::new(at, (face + across * col * -0.25).normalize_or(face), task)
 }
@@ -624,11 +633,17 @@ fn talking(town: &Town, k: usize, task: Task) -> Spot {
 /// Works out when each want is met: each walk set off from the one before in time to
 /// arrive at its start, but no sooner than its least stay is up. Where the evening runs
 /// late, its outings are given up until everyone is in bed by [`BED_BY`].
-fn settle(town: &Town, mut w: Vec<Want>) -> Plan {
+fn settle(town: &Town, mut w: Vec<Want>, taken: &mut Taken) -> Plan {
     loop {
-        let plan = resolve(town, &w);
+        let plan = make_room(town, &mut w, taken);
         let late = plan.stays.last().is_some_and(|s| s.arrive > BED_BY);
         if !late || w.len() <= 2 {
+            // The spots they stand on before the stalls are theirs while they are there.
+            for (x, s) in w.iter().zip(&plan.stays) {
+                if before_stall(town, x) {
+                    taken.stood.push((x.place, flat(s.spot.at), s.arrive, s.leave));
+                }
+            }
             return plan;
         }
         // The last outing before bed goes; failing any, the last stay of all.
@@ -636,6 +651,45 @@ fn settle(town: &Town, mut w: Vec<Want>) -> Plan {
         let drop = (1..n - 1).rev().find(|&i| w[i].spot.inside.is_none()).unwrap_or(n - 2);
         w.remove(drop);
     }
+}
+
+/// Whether `x` is to stand before a stall, to buy there, rather than behind it to keep it.
+fn before_stall(town: &Town, x: &Want) -> bool {
+    matches!(town.places[x.place].what, Where::Stall(i) if x.spot.inside.is_none() && x.spot.at != town.behind[i].at)
+}
+
+/// The day that `w` makes, with each spot before a stall in it one that nobody of the
+/// days made already stands on from a little before they come to it until a little after
+/// they leave (#206), so that nobody comes to a spot someone else is still standing on:
+/// the spot they were given if it is free then, else the first free from the front, in
+/// a row behind the others if those are all taken. A spot moved changes the walks to it
+/// and from it, and so the hours they come and go a little, and is looked at again.
+fn make_room(town: &Town, w: &mut [Want], taken: &Taken) -> Plan {
+    let mut plan = resolve(town, w);
+    for _ in 0..4 {
+        let mut moved = false;
+        for (x, s) in w.iter_mut().zip(&plan.stays) {
+            if !before_stall(town, x) {
+                continue;
+            }
+            let (place, task) = (x.place, x.spot.task);
+            let free = |at: Vec3| {
+                !taken.stood.iter().any(|&(p, by, from, until)| p == place && by.distance(flat(at)) < 1.0 && from < s.leave + ROOM && s.arrive < until + ROOM)
+            };
+            if free(x.spot.at) {
+                continue;
+            }
+            // Each spot taken keeps one of these from being free, so one of them is.
+            let k = (0..=taken.stood.len()).find(|&k| free(around(town, place, k, task).at)).unwrap_or(0);
+            x.spot = around(town, place, k, task);
+            moved = true;
+        }
+        if !moved {
+            break;
+        }
+        plan = resolve(town, w);
+    }
+    plan
 }
 
 fn resolve(town: &Town, w: &[Want]) -> Plan {

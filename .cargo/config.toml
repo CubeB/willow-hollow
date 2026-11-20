@@ -1,0 +1,5 @@
+# Many tests build whole continents, about 600 MB for each test running at once, and a
+# test thread on every core ran a 16 GB machine out of memory. Four at once unless
+# `--test-threads=N` or RUST_TEST_THREADS says otherwise (see docs/DEVELOPMENT.md).
+[env]
+RUST_TEST_THREADS = { value = "4", force = false }

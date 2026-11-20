@@ -31,6 +31,8 @@ mod reading;
 mod render;
 mod season;
 mod starlings;
+#[cfg(test)]
+mod sweep;
 mod settings;
 mod weather;
 mod terrain;

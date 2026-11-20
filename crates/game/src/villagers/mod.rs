@@ -12,6 +12,8 @@
 //! off each is shown where they are going. Indoors they are out of sight unless the
 //! player is in there with them.
 
+// Keeping out of each other's way as they walk (#206).
+pub mod avoid;
 pub mod day;
 pub mod land;
 // What a settlement puts out on market days and festivals (#207).
@@ -24,10 +26,7 @@ pub mod town;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, mpsc},
-};
+use std::sync::{Arc, mpsc};
 
 use glam::{DVec3, Vec2, Vec3};
 use worldgen::{
@@ -42,8 +41,9 @@ use crate::{
     character::{self, Carried, Doing, Gait, Task},
     particles::{self, ParticleInstance},
 };
+use avoid::{Route, Routes, State};
 use day::{Now, Plan};
-use lanes::{Walk, flat};
+use lanes::flat;
 pub use town::{Resident, Town};
 
 /// The most of a frame's props the settlements' people take: the nearest drawn whole and
@@ -107,7 +107,7 @@ struct Near {
     day: i64,
     plans: Vec<Plan>,
     /// The walks being drawn, by who is walking and from which of their stays.
-    routes: HashMap<(usize, usize), Walk>,
+    routes: Routes,
 }
 
 /// Someone stopped to talk to the player.
@@ -189,6 +189,10 @@ pub struct Villagers {
     year_days: f32,
     /// How many boxes the dressing took last frame.
     pub dressed: usize,
+    /// Where everyone of a settlement is this frame, and what stepping round each other
+    /// keeps from one frame to the next, so as not to allocate afresh.
+    placed: Vec<Option<(Placed, State)>>,
+    scratch: avoid::Scratch,
 }
 
 impl Default for Villagers {
@@ -250,6 +254,8 @@ impl Villagers {
             date: 0.0,
             year_days: 1.0,
             dressed: 0,
+            placed: Vec::new(),
+            scratch: avoid::Scratch::default(),
         }
     }
 
@@ -292,7 +298,7 @@ impl Villagers {
         }
         let plans = day::plans(&town, day, self.year_days);
         log::debug!("the people of {} are about: {}", town.name, town.residents.len());
-        self.near.push(Near { town: Arc::new(town), epoch, day, plans, routes: HashMap::new() });
+        self.near.push(Near { town: Arc::new(town), epoch, day, plans, routes: Routes::new() });
     }
 
     /// Whether the people of settlement `k` of continent `cell` are about as the world
@@ -378,7 +384,8 @@ impl Villagers {
     }
 
     /// Where everyone near enough to be drawn is at `hour`, seen from `cam` by the player
-    /// standing at `player`, nearest the camera first.
+    /// standing at `player`, nearest the camera first: each where their day has them, but
+    /// stepping round each other as they walk (avoid.rs).
     fn place_all(&mut self, player: DVec3, cam: DVec3, hour: f32) {
         self.seen.clear();
         let reach = m(character::SIGHT);
@@ -394,10 +401,12 @@ impl Villagers {
             }
             let feet = (player - town.origin).as_vec3();
             let indoors = town.inside(feet);
+            let placed = &mut self.placed;
+            placed.clear();
             for r in &town.residents {
                 let who = Who { cell: town.cell, k: town.k, n: r.n, id: r.id };
-                let Some(mut f) = figure(town, &near.plans[r.n], r, hour, eye, &mut near.routes) else { continue };
-                if let Some(s) = self.stopped.as_ref().filter(|s| s.who == who) {
+                let mut f = figure(town, &near.plans[r.n], r, hour, eye, &mut near.routes);
+                if let (Some(s), Some((f, state))) = (self.stopped.as_ref().filter(|s| s.who == who), f.as_mut()) {
                     let t = clock - s.since;
                     let local = (f.0, f.1);
                     if t < STOP {
@@ -406,7 +415,13 @@ impl Villagers {
                         let k = ((t - STOP) / EASE).clamp(0.0, 1.0);
                         f.0 = s.at.lerp(local.0, k);
                     }
+                    *state = State::Held;
                 }
+                placed.push(f);
+            }
+            avoid::keep_off(town, &near.plans, eye, &mut near.routes, placed, &mut self.scratch);
+            for (r, f) in town.residents.iter().zip(placed.iter()) {
+                let Some((f, _)) = f else { continue };
                 // Indoors, only for someone in there with them.
                 if f.6.is_some() && f.6 != indoors {
                     continue;
@@ -414,6 +429,7 @@ impl Villagers {
                 if f.0.distance(eye) > reach {
                     continue;
                 }
+                let who = Who { cell: town.cell, k: town.k, n: r.n, id: r.id };
                 self.seen.push(Figure { who, feet: town.origin + f.0.as_dvec3(), facing: f.1, task: f.2, stride: f.3, carried: f.4, stool: f.5, inside: f.6 });
             }
         }
@@ -519,8 +535,8 @@ impl Villagers {
         let (at, inside) = match self.seen.iter().find(|f| f.who == who) {
             Some(f) => ((f.feet - town.origin).as_vec3(), f.inside),
             None => {
-                let mut routes = HashMap::new();
-                let f = figure(town, &near.plans[who.n], r, hour, (feet - town.origin).as_vec3(), &mut routes)?;
+                let mut routes = Routes::new();
+                let (f, _) = figure(town, &near.plans[who.n], r, hour, (feet - town.origin).as_vec3(), &mut routes)?;
                 (f.0, f.6)
             }
         };
@@ -665,13 +681,13 @@ impl Villagers {
     }
 }
 
-/// Where `r` is at `hour` by their `plan`, seen from `eye` (all continent-local): their
-/// feet, facing, task, steps, what they carry, whether on a stool, and the building they
-/// are inside; None when they are on the way somewhere indoors, too far off to be seen
-/// walking.
-type Placed = (Vec3, f32, Option<Task>, f32, Carried, bool, Option<usize>);
+/// Where someone is at a moment, as drawn: their feet, facing, task, steps, what they
+/// carry, whether on a stool, and the building they are inside (all continent-local).
+pub(crate) type Placed = (Vec3, f32, Option<Task>, f32, Carried, bool, Option<usize>);
 
-fn figure(town: &Town, plan: &Plan, r: &Resident, hour: f32, eye: Vec3, routes: &mut HashMap<(usize, usize), Walk>) -> Option<Placed> {
+/// Where `r` is at `hour` by their `plan`, seen from `eye`, and where they are in their
+/// day; None when they are on the way somewhere indoors, too far off to be seen walking.
+pub(crate) fn figure(town: &Town, plan: &Plan, r: &Resident, hour: f32, eye: Vec3, routes: &mut Routes) -> Option<(Placed, State)> {
     let own = r.person.look.carried;
     let at = |s: &day::Stay| -> Placed {
         let spot = &s.spot;
@@ -683,27 +699,27 @@ fn figure(town: &Town, plan: &Plan, r: &Resident, hour: f32, eye: Vec3, routes: 
         (feet, spot.facing, Some(spot.task), 0.0, spot.task.carried(own), spot.stool, spot.inside)
     };
     match plan.now(hour) {
-        Now::At(i) => Some(at(&plan.stays[i])),
+        Now::At(i) => Some((at(&plan.stays[i]), State::At(i))),
         Now::Walking(i, t) => {
             let (a, b) = (&plan.stays[i], &plan.stays[i + 1]);
             let rough = a.spot.at.lerp(b.spot.at, t);
             if rough.distance(eye) > m(WALK_SIGHT) {
                 // Too far to be seen walking: where they are going, if it is outdoors.
                 let there = at(b);
-                return there.6.is_none().then_some(there);
+                return there.6.is_none().then_some((there, State::At(i + 1)));
             }
-            routes.entry((r.n, i)).or_insert_with(|| town.walk((a.place, &a.spot), (b.place, &b.spot)));
+            // Going from room to room, they are still indoors.
+            let inside = a.spot.inside.filter(|_| a.spot.inside == b.spot.inside);
+            routes.entry((r.n, i)).or_insert_with(|| Route::new(town.walk((a.place, &a.spot), (b.place, &b.spot)), inside));
             if routes.len() > 4096 {
                 routes.clear();
                 return None;
             }
-            let walk = &routes[&(r.n, i)];
+            let walk = &routes[&(r.n, i)].walk;
             let along = t * walk.length();
             let (feet, way) = walk.at(along);
             let carried = a.spot.task.carried_off(own);
-            // Going from room to room, they are still indoors.
-            let inside = a.spot.inside.filter(|_| a.spot.inside == b.spot.inside);
-            Some((feet, way.y.atan2(way.x), None, along / m(STEP), carried, false, inside))
+            Some(((feet, way.y.atan2(way.x), None, along / m(STEP), carried, false, inside), State::Going(i, along)))
         }
     }
 }

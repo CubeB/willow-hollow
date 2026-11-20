@@ -88,7 +88,7 @@ pub fn special(kind: Special, region: Region, variant: u32) -> Option<SpecialSpe
     }
     let h = |k: i32| unit(hash2(variant ^ 0x5a1d_57e5, k, 0));
     let stream = [None, Some(IVec3::Z), Some(IVec3::NEG_Z), Some(IVec3::NEG_X)][(variant % 4) as usize];
-    let facts = Facts { willows: h(3) < 0.5, stone: h(4) < 0.5, trade: h(5) < 0.5, colour: h(6) < 0.4, water: h(7) < 0.6 };
+    let facts = Facts { willows: h(3) < 0.5, stone: h(4) < 0.5, trade: h(5) < 0.5, colour: h(6) < 0.4, water: h(7) < 0.6, ancient: h(8) < 0.25 };
     Some(SpecialSpec { which: kind, region, age: h(1), wealth: h(2), seed: variant, stream, facts })
 }
 

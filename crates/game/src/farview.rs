@@ -1238,6 +1238,20 @@ fn build_cell(c: &Continent, mats: &voxel::Materials, canopies: &[Option<Canopy>
     }
 }
 
+/// The far view of continent `c` as its thread builds it, at the finest stride and a
+/// coarse one, for the sweep for crashes (see `crate::sweep`): every corner's place, so
+/// that one which is not a number can be found.
+#[cfg(test)]
+pub fn swept(world: &GameWorld, c: &Continent, cell: (i32, i32)) -> Vec<f32> {
+    let canopies = canopies(world);
+    let mut out = Vec::new();
+    for stride in [1, 4] {
+        let mesh = build_cell(c, world.materials(), &canopies, cell, stride, world.now());
+        out.extend(mesh.tiles.iter().flat_map(|t| &t.verts).chain(&mesh.rivers).flat_map(|v| v.pos));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

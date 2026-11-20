@@ -94,6 +94,9 @@ pub struct Facts {
     /// It stands on the coast or by a river boats work, so iron comes to its smith by
     /// water and the smithy keeps a stack of bars by the forge (#205).
     pub water: bool,
+    /// It is ancient: an old stone core and old walls, partly tumbled, that want keeping,
+    /// so it always has its masons, whatever its ground.
+    pub ancient: bool,
 }
 
 impl Facts {
@@ -105,6 +108,7 @@ impl Facts {
             trade: s.coast || s.port.is_some() || s.has(Livelihood::Port) || s.partners.len() >= 2,
             colour: s.age == Age::Ancient || s.prosperity > 0.6,
             water: s.coast || s.river.is_some(),
+            ancient: s.age == Age::Ancient,
         }
     }
 }
@@ -114,7 +118,7 @@ impl Facts {
 pub enum Guild {
     /// Where willows grow (#50).
     Weavers,
-    /// On stone country (#38).
+    /// On stone country (#38), or in an ancient place, to keep its old walls.
     Masons,
     /// #51.
     Painters,
@@ -153,7 +157,7 @@ impl Guild {
     pub fn suits(self, f: &Facts) -> bool {
         match self {
             Guild::Weavers => f.willows,
-            Guild::Masons => f.stone,
+            Guild::Masons => f.stone || f.ancient,
             Guild::Painters => f.colour,
             Guild::Merchants => f.trade,
             Guild::Wayfarers => true,
@@ -163,7 +167,8 @@ impl Guild {
 
 /// The two or three guilds that share a guild house: those the place suits, in an order
 /// the seed gives, three of them in a richer town. Where too few suit, merchants (every
-/// great town trades) and then painters make up two.
+/// great town trades) and then painters make up two. An ancient place's masons are
+/// always among them.
 pub fn guilds(facts: &Facts, wealth: f32, seed: u32) -> Vec<Guild> {
     let mut suits: Vec<Guild> = Guild::ALL.into_iter().filter(|g| g.suits(facts)).collect();
     for fill in [Guild::Merchants, Guild::Painters] {
@@ -171,7 +176,7 @@ pub fn guilds(facts: &Facts, wealth: f32, seed: u32) -> Vec<Guild> {
             suits.push(fill);
         }
     }
-    suits.sort_by_key(|&g| crate::noise::hash2(seed ^ 0x6a11_d5e5, g as i32, 0));
+    suits.sort_by_key(|&g| (!(facts.ancient && g == Guild::Masons), crate::noise::hash2(seed ^ 0x6a11_d5e5, g as i32, 0)));
     suits.truncate(if wealth > 0.45 { 3 } else { 2 });
     suits.sort_by_key(|&g| g as u8);
     suits
