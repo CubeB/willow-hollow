@@ -732,6 +732,13 @@ fn stained(rock: Voxel) -> Voxel {
 fn surface_materials(col: &Column, steepness: f32, roll: f32, patch: f32) -> (Voxel, Voxel) {
     let cover = mat::ground_cover(col.biome);
     match col.cover {
+        // Between the mangroves' roots the flats are dark mud, flooded and not, the
+        // wettest darkest, with a patch of sand here and there the tide has washed clean.
+        // Under the water in broad patches only, as any bed is.
+        Cover::Bank | Cover::Beach | Cover::SeaFloor | Cover::LakeBed if col.biome == crate::biome::Biome::Mangrove && col.ground > -m(2.0) => {
+            let dark = if col.water_surface().is_some() { patch < 0.62 } else { col.ground + roll * m(0.8) < m(0.9) };
+            (if patch > 0.9 { mat::SAND } else if dark { mat::MUD_TIDAL } else { mat::MANGROVE_MUD }, mat::MUD)
+        }
         // Beds change in broad patches: speckle shows through the water as static.
         Cover::RiverBed => (if patch < 0.62 { mat::GRAVEL } else { mat::SAND }, mat::GRAVEL),
         Cover::LakeBed => (if patch < 0.55 { mat::MUD } else { mat::SAND }, mat::MUD),

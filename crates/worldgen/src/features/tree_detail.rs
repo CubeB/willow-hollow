@@ -140,6 +140,8 @@ fn is_leaf(v: Voxel) -> bool {
             | mat::NEEDLES_JUNIPER
             | mat::LEAVES_LAUREL
             | mat::GORSE
+            | mat::LEAVES_MANGROVE
+            | mat::LEAVES_MANGROVE_LIT
     )
 }
 
@@ -159,6 +161,8 @@ fn is_evergreen(v: Voxel) -> bool {
             | mat::NEEDLES_JUNIPER
             | mat::LEAVES_LAUREL
             | mat::GORSE
+            | mat::LEAVES_MANGROVE
+            | mat::LEAVES_MANGROVE_LIT
     )
 }
 

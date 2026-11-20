@@ -417,6 +417,16 @@ palette! {
     // as the far view draws it, the sky in it.
     RICE              = (212, 184, 104), Foliage, 2;
     PADDY_FAR         = (132, 156, 164), Solid, 1;
+    // Mangroves (#69), added last so existing ids keep their numbers: small dark leathery
+    // leaves, and a few of them catching the light as their gloss does; the grey bark of
+    // the trunk and the stilts, dark and wet as far up them as the tide comes; the pencil
+    // roots standing up out of the mud; and the dark mud of the flats between them.
+    LEAVES_MANGROVE   = ( 34,  78,  46), Foliage, 2;
+    LEAVES_MANGROVE_LIT = ( 72, 116,  68), Foliage, 2;
+    BARK_MANGROVE     = (110,  96,  80), Solid, 2;
+    BARK_MANGROVE_WET = ( 66,  56,  46), Solid, 1;
+    PNEUMATOPHORE     = (112,  98,  80), Solid, 2;
+    MUD_TIDAL         = ( 64,  56,  44), Solid, 1;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,
@@ -591,7 +601,7 @@ fn classify(m: &mut Materials) {
         (&[CREEPER_LEAF_DARK, CREEPER_LEAF, CREEPER_LEAF_RED, CREEPER_GREEN, CREEPER_GREEN_DARK, CREEPER_SCARLET], pk::DECIDUOUS),
         // Ivy is evergreen; vines and lianas keep their leaves.
         (&[IVY_LEAF_DARK, IVY_LEAF, IVY_LEAF_PALE, IVY_LEAF_RED, VINE_LEAF, IVY_GLOSS, IVY_GLOSS_LIT, IVY_GLOSS_NEW, VINE_GREEN], pk::VINE),
-        (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB], pk::EVERGREEN),
+        (&[NEEDLES, NEEDLES_REDWOOD, LEAVES_JUNGLE, LEAVES_PALM, LEAVES_BAOBAB, LEAVES_MANGROVE, LEAVES_MANGROVE_LIT], pk::EVERGREEN),
         // Holly, yew and the rest keep their leaves and carry snow as the conifers do; so
         // do the ferns, wood-rush and heather under them, which the snow does not bury.
         (
@@ -640,6 +650,7 @@ fn classify(m: &mut Materials) {
                 BARK_OAK_RIDGE, BARK_REDWOOD_RIDGE, BARK_PINE_PLATE, BARK_BIRCH_MARK, BARK_BIRCH_PEEL, BARK_PALM_RING, TWIG, TWIG_PALE,
                 IVY_TWIG, IVY_ROPE, IVY_ROPE_DARK,
                 BARK_HOLLY, BARK_YEW, BARK_SCOTS, BARK_YEW_FLAKE,
+                BARK_MANGROVE, BARK_MANGROVE_WET, PNEUMATOPHORE,
             ],
             pk::VINE,
         ),

@@ -8,7 +8,7 @@ use glam::{IVec3, Vec3};
 use voxel::{Kind, Materials, Voxel};
 
 use super::shape::{Rng, Shape, Template};
-use crate::materials as mat;
+use crate::{materials as mat, scale::OLD_VOXEL};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Species {
@@ -48,10 +48,12 @@ pub enum Species {
     /// A willow cut back to a stout trunk for its poles, by a stream through a place's
     /// land (see `settlements::farmland::willows`).
     Pollard,
+    /// A red mangrove of the tropical shallows, standing on its stilt roots (#69).
+    Mangrove,
 }
 
 impl Species {
-    pub const ALL: [Species; 31] = [
+    pub const ALL: [Species; 32] = [
         Species::Oak,
         Species::Birch,
         Species::Maple,
@@ -83,6 +85,7 @@ impl Species {
         Species::Laurel,
         Species::Gorse,
         Species::Pollard,
+        Species::Mangrove,
     ];
 
     /// Whether it keeps its leaves through the winter and grows among broadleaves or on
@@ -145,6 +148,7 @@ impl Species {
             Species::Laurel => laurel(&mut s, &mut rng),
             Species::Gorse => gorse(&mut s, &mut rng),
             Species::Pollard => pollard(&mut s, &mut rng),
+            Species::Mangrove => mangrove(&mut s, &mut rng),
         }
         s.build()
     }
@@ -528,6 +532,100 @@ fn pollard(s: &mut Shape, rng: &mut Rng) {
     }
 }
 
+/// How high up a mangrove's stilts the tide leaves them dark and wet, in voxels above
+/// the mud: about as deep as the water it grows in comes (see `features::mangrove_stand`).
+const MANGROVE_TIDE: i32 = 3;
+
+/// A root a voxel thick along `curve` (in blocks, from 0 to 1), each voxel sharing a face
+/// with the one before: drawn as a limb, a root that thin breaks up into a string of
+/// beads touching at their corners.
+fn root_line(s: &mut Shape, curve: impl Fn(f32) -> Vec3, v: Voxel) {
+    const STEPS: i32 = 64;
+    let at = |k: i32| (curve(k as f32 / STEPS as f32) * OLD_VOXEL).floor().as_ivec3();
+    let mut p = at(0);
+    s.paint(p, v);
+    for k in 1..=STEPS {
+        let q = at(k);
+        // Out first and down last, so a root plunging into the mud steps the way it bends.
+        while p != q {
+            if p.x != q.x {
+                p.x += (q.x - p.x).signum();
+            } else if p.z != q.z {
+                p.z += (q.z - p.z).signum();
+            } else {
+                p.y += (q.y - p.y).signum();
+            }
+            s.paint(p, v);
+        }
+    }
+}
+
+fn mangrove(s: &mut Shape, rng: &mut Rng) {
+    // A red mangrove: a short trunk held up off the mud on a ring of stilt roots, which
+    // leave it well above the water and arch out and down, and over it a low, dense dome
+    // of small dark leaves, wider than the tree is tall.
+    let h = rng.range(6.5, 10.0);
+    // Where the roots leave the trunk: above the highest water it stands in.
+    let knee = rng.range(2.4, 3.2);
+    let lean = rng.range(0.0, 0.6);
+    let (dir, _) = rng.heading();
+    let axis = Vec3::new(0.5, 0.0, 0.5);
+    let top = axis + Vec3::Y * (h * 0.62) + dir * lean;
+    // Below the knee the trunk tapers away into the roots: there is no foot to it.
+    let foot = axis + Vec3::Y * (knee - 0.4);
+    s.limb(foot, top, 0.5, 0.42, mat::BARK_MANGROVE);
+    // The stilts, in a ring, each from its own height on the trunk (a few from higher up,
+    // as the tree has grown) arching out and plunging into the mud, some forking once on
+    // the way down. Quadratic curves drawn in short straight pieces.
+    let n = rng.int(6, 8);
+    let a0 = rng.range(0.0, std::f32::consts::TAU);
+    for i in 0..n {
+        let angle = a0 + i as f32 / n as f32 * std::f32::consts::TAU + rng.range(-0.25, 0.25);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let high = if rng.unit() < 0.3 { rng.range(0.6, 1.6) } else { rng.range(-0.3, 0.4) };
+        let from = axis.lerp(top, (knee + high) / (h * 0.62)) + out * 0.3;
+        let reach = rng.range(2.8, 4.2) + high * 0.5;
+        let end = axis + out * reach - Vec3::Y * 1.5;
+        let bend = from + out * (reach * rng.range(0.55, 0.7)) + Vec3::Y * rng.range(0.6, 1.1);
+        let arch = |t: f32| from * (1.0 - t) * (1.0 - t) + bend * 2.0 * t * (1.0 - t) + end * t * t;
+        // Stout where it leaves the trunk, then a root a voxel thick.
+        s.limb(from - out * 0.2, arch(0.15), 0.32, 0.26, mat::BARK_MANGROVE);
+        root_line(s, arch, mat::BARK_MANGROVE);
+        if rng.unit() < 0.35 {
+            // A second foot, off the arch on its way down, landing further out.
+            let at = arch(rng.range(0.55, 0.7));
+            let side = Vec3::new(-out.z, 0.0, out.x) * rng.range(-0.6, 0.6);
+            let land = axis + (out + side) * (reach + rng.range(0.8, 1.4)) - Vec3::Y * 1.5;
+            let mid = at.lerp(land, 0.5) + Vec3::Y * 0.4;
+            root_line(s, |t| at * (1.0 - t) * (1.0 - t) + mid * 2.0 * t * (1.0 - t) + land * t * t, mat::BARK_MANGROVE);
+        }
+    }
+    // A few stout limbs, nearly level, carry the dome out wide.
+    let limbs = rng.int(4, 6);
+    let b0 = rng.range(0.0, std::f32::consts::TAU);
+    let spread = rng.range(2.3, 3.0);
+    for i in 0..limbs {
+        let angle = b0 + i as f32 / limbs as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
+        let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let start = top - Vec3::Y * rng.range(0.0, 1.2);
+        let end = start + out * spread * rng.range(0.8, 1.1) + Vec3::Y * rng.range(0.6, 1.6);
+        s.limb(start, end, 0.36, 0.26, mat::BARK_MANGROVE);
+        let r = rng.range(2.1, 2.8);
+        s.blob(end + Vec3::Y * 0.4, Vec3::new(r, r * 0.6, r), mat::LEAVES_MANGROVE, rng.next_u32(), 0.3);
+    }
+    let r = rng.range(3.0, 3.7);
+    s.blob(top + Vec3::Y * 1.4, Vec3::new(r, (h - h * 0.62).max(2.4) * 0.75, r), mat::LEAVES_MANGROVE, rng.next_u32(), 0.3);
+    // The gloss: here and there a leaf on the top of the dome catches the light. And the
+    // stilts are dark with the wet as far as the tide comes up them.
+    for p in s.snapshot() {
+        match s.get(p) {
+            Some(mat::LEAVES_MANGROVE) if s.get(p + IVec3::Y).is_none() && rng.unit() < 0.22 => s.paint(p, mat::LEAVES_MANGROVE_LIT),
+            Some(mat::BARK_MANGROVE) if p.y < MANGROVE_TIDE => s.paint(p, mat::BARK_MANGROVE_WET),
+            _ => {}
+        }
+    }
+}
+
 fn palm(s: &mut Shape, rng: &mut Rng) {
     // A curved trunk, drawn in bending sections, with fronds arching from the top.
     let h = rng.range(9.0, 15.0);
@@ -851,6 +949,28 @@ mod tests {
             // Chunks only look this far for trees: wider, and a crown is cut off at a border.
             let widest = *reach.iter().max().unwrap();
             assert!(widest <= super::super::TREES.reach, "{species:?} reaches {widest}");
+        }
+    }
+
+    #[test]
+    fn mangroves_stand_on_stilts_above_the_water() {
+        let lib = super::super::Library::build();
+        for variant in 0..Species::Mangrove.variants() {
+            let t = lib.get(Species::Mangrove, variant);
+            assert!(t.reach <= super::super::TREES.reach, "mangrove {variant} reaches {}", t.reach);
+            // Over the deepest water it stands in, nothing but its roots: no trunk in the
+            // middle and no leaves down to it.
+            let deepest = super::super::MANGROVE_DEEPEST.ceil() as i32;
+            let low: Vec<_> = t.voxels.iter().filter(|(p, _)| (0..deepest).contains(&p.y)).collect();
+            assert!(low.iter().all(|(_, v)| matches!(*v, mat::BARK_MANGROVE | mat::BARK_MANGROVE_WET)), "mangrove {variant} has leaves near the water");
+            assert!(!low.iter().any(|(p, _)| p.x.abs() <= 1 && p.z.abs() <= 1), "mangrove {variant} has a foot");
+            // And those roots come down in a ring round it, on every side.
+            let sides = low.iter().fold([false; 4], |mut s, (p, _)| {
+                s[(p.x > 0) as usize * 2 + (p.z > 0) as usize] = true;
+                s
+            });
+            assert!(sides.iter().all(|s| *s), "mangrove {variant} stands on one side only");
+            assert!(low.iter().any(|(p, _)| p.x.abs().max(p.z.abs()) >= 5), "mangrove {variant}'s roots keep to the trunk");
         }
     }
 }

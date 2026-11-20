@@ -109,12 +109,12 @@ pub fn ground_of(v: Voxel) -> Ground {
         | mat::GRANITE | mat::GRANITE_GREY | mat::GRANITE_PALE | mat::RED_ROCK | mat::RED_ROCK_DARK | mat::BASALT => Ground::Stone,
         mat::SAND | mat::DESERT_SAND | mat::DUNE_SAND | mat::BLACK_SAND | mat::PATH_SAND => Ground::Sand,
         mat::GRAVEL | mat::SCREE | mat::PATH_GRAVEL => Ground::Gravel,
-        mat::DIRT | mat::MUD | mat::PATH_DIRT | mat::PATH_DARK | mat::PATH_LITTER | mat::PATH_NEEDLES => Ground::Earth,
+        mat::DIRT | mat::MUD | mat::PATH_DIRT | mat::PATH_DARK | mat::PATH_LITTER | mat::PATH_NEEDLES | mat::MANGROVE_MUD | mat::MUD_TIDAL => Ground::Earth,
         mat::SNOW | mat::PATH_SNOW => Ground::Snow,
         mat::PLANK | mat::PLANK_PALE | mat::PLANK_DARK | mat::PLANK_RED | mat::WOOD_DEAD
         | mat::BARK_OAK | mat::BARK_BIRCH | mat::BARK_PINE | mat::BARK_REDWOOD | mat::BARK_JUNGLE
         | mat::BARK_PALM | mat::BARK_WILLOW | mat::BARK_ACACIA | mat::BARK_BAOBAB
-        | mat::BARK_HOLLY | mat::BARK_YEW | mat::BARK_SCOTS => Ground::Wood,
+        | mat::BARK_HOLLY | mat::BARK_YEW | mat::BARK_SCOTS | mat::BARK_MANGROVE | mat::BARK_MANGROVE_WET => Ground::Wood,
         _ => Ground::Grass,
     }
 }
