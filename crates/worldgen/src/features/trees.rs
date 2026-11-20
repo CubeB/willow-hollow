@@ -150,7 +150,18 @@ impl Species {
             Species::Pollard => pollard(&mut s, &mut rng),
             Species::Mangrove => mangrove(&mut s, &mut rng),
         }
+        if let Some(wood) = self.bare_twigs() {
+            twigs(&mut s, seed, wood);
+        }
         s.build()
+    }
+
+    /// For a broadleaf that stands bare all winter, the twigs its bare crown shows.
+    fn bare_twigs(self) -> Option<Voxel> {
+        match self {
+            Species::Oak | Species::Maple | Species::Cherry | Species::ElderOak | Species::Birch | Species::Willow | Species::Acacia => Some(mat::TWIG_FINE),
+            _ => None,
+        }
     }
 }
 
@@ -239,6 +250,70 @@ fn forks(s: &mut Shape, rng: &mut Rng, at: Vec3, out: Vec3, len: f32, r: f32, ba
     }
 }
 
+/// A mass of leaves (see [`Shape::blob`]) on the wood at `from`, noted as a crown for the
+/// twigs of winter to fill.
+fn leafy(s: &mut Shape, from: Vec3, centre: Vec3, radii: Vec3, leaves: Voxel, seed: u32, ragged: f32) {
+    s.blob(centre, radii, leaves, seed, ragged);
+    s.crown(from, centre, radii);
+}
+
+/// Sprigs grown into a crown for each unit of its size, in model units, and the fewest
+/// any crown has, so a birch's small clusters are twiggy too.
+const SPRIGS: f32 = 2.2;
+const FEWEST_SPRIGS: f32 = 4.0;
+/// Times a sprig forks, each fork shorter and thinner: once less in a small crown, which
+/// would otherwise be a solid tangle.
+const SPRIG_FORKS: i32 = 3;
+const SMALL_CROWN: f32 = 2.5;
+
+/// The fine twigs of a bare crown: from the wood each mass of leaves grows on, sprigs that
+/// fork and fork again out to the edge of the leaves, so a broadleaf wood in winter is a
+/// haze of fine twigs and not a few blocky limbs. They are kept only inside the tree's
+/// own leaves, and pulled back a cell from where the leaves give onto the air: hidden
+/// while the leaves are on, they show as each leaf falls, on the tree's own date, with
+/// nothing more for the seasons to work out. From a random stream of their own, so the
+/// voxels of the tree are as they were.
+fn twigs(s: &mut Shape, seed: u32, wood: Voxel) {
+    let mut rng = Rng::new(seed ^ 0x7c19_5e11);
+    let crowns = s.crowns().to_vec();
+    for c in &crowns {
+        let size = (c.radii.x * c.radii.y * c.radii.z).cbrt();
+        for _ in 0..(size * SPRIGS).max(FEWEST_SPRIGS).round() as i32 {
+            // Toward somewhere near the edge of the leaves, mostly out and up.
+            let (out, _) = rng.heading();
+            let up = rng.range(-0.3, 0.95);
+            let dir = out * (1.0 - up * up).sqrt() + Vec3::Y * up;
+            let way = c.centre + dir * c.radii * rng.range(0.8, 1.0) - c.from;
+            let forks = if size < SMALL_CROWN { SPRIG_FORKS - 1 } else { SPRIG_FORKS };
+            sprig(s, &mut rng, c.from, way.normalize_or_zero(), way.length() * 0.5, forks, wood);
+        }
+    }
+    s.finish_sticks(hides_twigs);
+}
+
+/// The leaves of the broadleaves, which hide the twigs of their bare crowns until they
+/// fall.
+pub fn hides_twigs(v: Voxel) -> bool {
+    matches!(v, mat::LEAVES_OAK | mat::LEAVES_BIRCH | mat::LEAVES_WILLOW | mat::LEAVES_ACACIA | mat::LEAVES_CHERRY | mat::LEAVES_MAPLE | mat::LEAVES_MAPLE_RED)
+}
+
+/// One sprig of a bare crown from `at` along `dir`, forking `forks` times more.
+fn sprig(s: &mut Shape, rng: &mut Rng, at: Vec3, dir: Vec3, len: f32, forks: i32, wood: Voxel) {
+    let end = at + dir * len;
+    // Stouter where it leaves the limb.
+    s.stick(at, end, if forks == SPRIG_FORKS { 2 } else { 1 }, wood);
+    if forks == 0 {
+        return;
+    }
+    for k in 0..2 {
+        let bend = Vec3::new(rng.range(-1.0, 1.0), rng.range(-0.5, 1.0), rng.range(-1.0, 1.0));
+        let d = (dir + bend * 0.6).normalize_or_zero();
+        let from = if k == 0 { end } else { at.lerp(end, rng.range(0.45, 0.8)) };
+        let len = len * rng.range(0.5, 0.7);
+        sprig(s, rng, from, d, len, forks - 1, wood);
+    }
+}
+
 fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
     // A wood holds trees of every age: squat young ones with a few limbs beside tall old
     // ones with many. `size` is this tree against the middling one of its kind.
@@ -264,10 +339,10 @@ fn oak(s: &mut Shape, rng: &mut Rng, leaves: Voxel, scale: f32) {
         let fork = rng.range(1.8, 2.8) * scale;
         forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
         let r = rng.range(3.0, 4.4) * spread;
-        s.blob(end + Vec3::Y * 0.5, Vec3::new(r, r * 0.72, r), leaves, rng.next_u32(), 0.4);
+        leafy(s, end, end + Vec3::Y * 0.5, Vec3::new(r, r * 0.72, r), leaves, rng.next_u32(), 0.4);
     }
     let r = rng.range(3.8, 5.2) * spread;
-    s.blob(top + Vec3::Y * (h * 0.22), Vec3::new(r, r * 0.75, r), leaves, rng.next_u32(), 0.4);
+    leafy(s, top, top + Vec3::Y * (h * 0.22), Vec3::new(r, r * 0.75, r), leaves, rng.next_u32(), 0.4);
 }
 
 fn elder_oak(s: &mut Shape, rng: &mut Rng) {
@@ -292,12 +367,12 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
         let fork = rng.range(2.5, 4.0);
         forks(s, rng, end, out, fork, 0.45, mat::BARK_OAK);
         let r = rng.range(6.5, 8.5);
-        s.blob(mid + Vec3::Y * 2.0, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
+        leafy(s, mid, mid + Vec3::Y * 2.0, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
         let r = rng.range(5.0, 7.0);
-        s.blob(end + Vec3::Y, Vec3::new(r, r * 0.65, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
+        leafy(s, end, end + Vec3::Y, Vec3::new(r, r * 0.65, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
     }
     let r = rng.range(7.0, 9.0);
-    s.blob(top + Vec3::Y * (h * 0.3), Vec3::new(r, r * 0.7, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
+    leafy(s, top, top + Vec3::Y * (h * 0.3), Vec3::new(r, r * 0.7, r), mat::LEAVES_OAK, rng.next_u32(), 0.4);
     // Two or three low limbs, heavy and reaching out level a few metres up before they turn
     // up into leaf, as an oak grown old in the open keeps them: what people sit under, and
     // tie ribbons to. Last, so the rest of the tree is as it was.
@@ -311,7 +386,7 @@ fn elder_oak(s: &mut Shape, rng: &mut Rng) {
         let fork = rng.range(2.0, 3.0);
         forks(s, rng, end, out, fork, 0.4, mat::BARK_OAK);
         let r = rng.range(4.0, 5.5);
-        s.blob(end + Vec3::Y, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
+        leafy(s, end, end + Vec3::Y, Vec3::new(r, r * 0.6, r), mat::LEAVES_OAK, rng.next_u32(), 0.45);
     }
 }
 
@@ -344,15 +419,15 @@ fn birch(s: &mut Shape, rng: &mut Rng) {
             let tip = from + (out + side * 0.8 + Vec3::Y).normalize_or_zero() * rng.range(1.4, 2.2);
             s.limb(from, tip, 0.34, 0.34, mat::BARK_BIRCH);
             let r = rng.range(1.3, 1.8);
-            s.blob(tip + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
+            leafy(s, tip, tip + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
         }
         let r = rng.range(1.7, 2.5);
-        s.blob(end + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
+        leafy(s, end, end + Vec3::Y * 0.3, Vec3::new(r, r * 0.85, r), mat::LEAVES_BIRCH, rng.next_u32(), 0.55);
     }
     // The leader runs on a little past the trunk into the top cluster.
     let tip = top + Vec3::Y * 1.6 + Vec3::new(rng.range(-0.4, 0.4), 0.0, rng.range(-0.4, 0.4));
     s.limb(top, tip, 0.45, 0.34, mat::BARK_BIRCH);
-    s.blob(tip, Vec3::new(2.0, 2.3, 2.0), mat::LEAVES_BIRCH, rng.next_u32(), 0.5);
+    leafy(s, tip, tip, Vec3::new(2.0, 2.3, 2.0), mat::LEAVES_BIRCH, rng.next_u32(), 0.5);
 }
 
 fn spruce(s: &mut Shape, rng: &mut Rng, scale: f32) {
@@ -473,7 +548,7 @@ fn acacia(s: &mut Shape, rng: &mut Rng) {
         let end = fork + dir * rng.range(3.0, 6.0) + Vec3::Y * rng.range(2.0, 3.5);
         s.limb(fork, end, 0.55, 0.3, mat::BARK_ACACIA);
         let r = rng.range(4.5, 6.5);
-        s.blob(end + Vec3::Y * 0.5, Vec3::new(r, 1.3, r), mat::LEAVES_ACACIA, rng.next_u32(), 0.45);
+        leafy(s, end, end + Vec3::Y * 0.5, Vec3::new(r, 1.3, r), mat::LEAVES_ACACIA, rng.next_u32(), 0.45);
     }
 }
 
@@ -503,10 +578,10 @@ fn willow(s: &mut Shape, rng: &mut Rng) {
         let end = top + dir * rng.range(3.0, 5.0) + Vec3::Y * rng.range(1.0, 3.0);
         s.limb(top, end, 0.5, 0.3, mat::BARK_WILLOW);
         let r = rng.range(2.5, 3.5);
-        s.blob(end, Vec3::new(r, r * 0.8, r), mat::LEAVES_WILLOW, rng.next_u32(), 0.4);
+        leafy(s, end, end, Vec3::new(r, r * 0.8, r), mat::LEAVES_WILLOW, rng.next_u32(), 0.4);
     }
     let r = rng.range(4.0, 5.5);
-    s.blob(top + Vec3::Y * 2.0, Vec3::new(r, r * 0.7, r), mat::LEAVES_WILLOW, rng.next_u32(), 0.4);
+    leafy(s, top, top + Vec3::Y * 2.0, Vec3::new(r, r * 0.7, r), mat::LEAVES_WILLOW, rng.next_u32(), 0.4);
     // The curtains.
     s.hang(mat::LEAVES_WILLOW, mat::LEAVES_WILLOW, rng, 0.55, (3, 8));
 }

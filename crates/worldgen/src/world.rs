@@ -1611,6 +1611,9 @@ impl GameWorld {
             };
             features::tree_detail::grow(&voxels, &self.materials, &grove, &mut plants);
         }
+        // The twigs of bare crowns, inside the leaves that hide them till they fall. Last,
+        // as nothing else grows in a leaf.
+        features::tree_detail::bare_crowns(lib, &placements, &voxels, &mut plants);
         // Nor has a home going up again any ivy or moss on it (#207): judged by where each
         // part is, so every chunk agrees.
         let rising: Vec<(IVec3, IVec3)> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.rising(s)).collect();
