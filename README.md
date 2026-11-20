@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/images/logo.png" alt="Willow Hollow" width="720"></p>
 
-Willow Hollow is a first-person game about wandering around a huge, quiet world made of coloured cubes. There's nothing to fight and nothing to build. You follow a river to see where it goes, climb a watchtower, jump off it with a glider, and borrow a boat when you run out of land. If you like, you can pick the wild flowers on the way.
+Willow Hollow is a first-person game about wandering around a huge, quiet world made of coloured cubes. There's nothing to fight and nothing to build. You follow a river to see where it goes, climb a watchtower, jump off it with a glider, and borrow a boat when you run out of land. Now and then the river brings you to a village, where people are getting on with their day. If you like, you can pick the wild flowers on the way.
 
 There are no textures anywhere in it. Every cube is a flat colour, and the rest comes from shape, sunlight, mist and water.
 
@@ -11,6 +11,22 @@ There are no textures anywhere in it. Every cube is a flat colour, and the rest 
 Rivers are the heart of this project. Each landmass is run through an erosion simulation before you ever see it, so the valleys are there because water cut them. A stream starts high in the hills, picks up tributaries on the way down, and ends in a lake or the sea. If you pick any trickle and follow it downhill, you will get somewhere.
 
 The simulation is much coarser than the voxels, so rivers aren't read straight off its grid. They're smooth curves traced through the drainage network and carved into the ground afterwards, with the water stepping down in flat pools. Lowland rivers run long and calm. Hill streams come down in little waterfalls. Water never runs uphill and never leaks out of its bed, and the tests check both.
+
+## Villages and towns
+
+People live along the rivers. Each continent has a handful of villages, a town or two and a scatter of hamlets, about one village for every quarter of an hour's walk. Each stands where a village would: at a confluence, a ford or a bend, by a spring or on the coast, and it has a history, so an ancient town still has its old walls, half tumbled, and a young village is only a few homes. Its name, the names of its people and the names of its fields all sound like the region they're in.
+
+Nobody draws the houses by hand. They come from a kit of rules for each region, so a temperate village is stone, timber and thatch, a desert one is mud brick under sail shades, and a marsh village stands on stilts joined by boardwalks. Every building can be walked into, and every one is furnished for whoever lives there, with beds, a hearth, lit windows after dark and smoke from the chimney when the fire is in. A village is laid out round its green, with a well and a great old tree hung with ribbons. Towns have a paved market square, gates on the roads in, a smithy, a sawmill, a granary and a market hall, and the biggest has a guild house. Read a tavern's notice board and what's asked for goes in your journal; read a guild's roll and the places it knows are marked on your map. A town on the coast has a harbour wall with a beacon. Stop at a tavern and you can sleep the night in a guest bed.
+
+Everyone in a village has a name, a home, a household and a trade, and keeps to it through the day. Say hello and they stop, turn and say a word back, and the journal remembers who you've met. Farmers walk out in the morning to work the fields, sowing, hoeing, reaping and carrying the sheaves as the season has it. Herders drive the cattle and sheep out to pasture and fold them at night, loggers stay out at the camp through the working week, masons cut stone at the quarry, and fishers stand along the bank. On market day the hamlets come in to buy at the stalls, and there are lanterns at midwinter and garlands at midsummer. Boats carry goods down the rivers between villages that trade, and carts go along the roads.
+
+The land round a village is worked. Fields with hedges, orchards, terraces on the slopes and paddies on wet warm valley floors change with the year and the crop rotation, with haystacks, scarecrows, troughs, dovecotes and hives about them, and pollarded willows along the ditches. Beyond an ancient place lie the fields it gave up long ago, gone back to rough grass. Hens, ducks, pigs, sheep, goats and cattle are kept in yards and pens, oxen and donkeys pull the carts, and out in the wild their shy cousins, such as the wild boar, wild sheep and junglefowl, keep their distance. The years pass as well, so a new house goes up in scaffolding and is lived in a year or two later.
+
+| | |
+|---|---|
+| ![A street in Brynell, a coastal town](docs/images/town.png) | ![The village tree over a market square](docs/images/village_tree.png) |
+
+![Fields at harvest by a river](docs/images/fields.png)
 
 ## What else is out there
 
@@ -76,7 +92,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 | Shift | Sprint |
 | Space | Jump, or swim up |
 | G, or Space in mid-air | Open or fold the glider. Look down to dive, up to slow down |
-| E | Pick what's in front of you (a flower, or sticks lying under the trees), light a fire, rest by a fire, or get in or out of a boat at a landing. W sails, Shift for full sail |
+| E | Pick what's in front of you (a flower, or sticks lying under the trees), light a fire, rest by a fire or sleep in a tavern bed, greet someone, read a notice board, or get in or out of a boat at a landing. W sails, Shift for full sail |
 | 1 to 7, or the wheel | Choose which slot of the hotbar is in your hand |
 | Right click | Use what's in your hand where you're looking: lay a fire with three sticks, or set a thing down |
 | Left click | Pick up what was set down, such as a flower. Put out a fire that's burning, or take apart one that isn't for what's left of its sticks |
@@ -90,7 +106,7 @@ The first launch takes a few seconds, because the starting continent has to be s
 | F11 | Fullscreen |
 | `` ` `` or / | The console, for typed commands: `weather storm`, `time dusk`, `tp 42186 30679`, `spawn camp lit` and more. `help` lists them all; Esc closes it. See [the console](docs/DEVELOPMENT.md#the-console) |
 
-The settings menu covers field of view, mouse sensitivity, volume, how far terrain loads, the length of a day and of a year, window size, fullscreen, vsync, light shafts and the corner map. If you push the load radius further than your graphics card can hold, the game pulls it back in by itself.
+The settings menu covers your figure's looks, field of view, mouse sensitivity, volume, how far terrain loads, the length of a day and of a year, window size, fullscreen, vsync, light shafts and the corner map. If you push the load radius further than your graphics card can hold, the game pulls it back in by itself.
 
 A plain run starts a new, random world each time. The game remembers your settings and where you were standing in each world, boat included, along with the time of year, the map you've drawn, what's in your pack, what you've set down and your journal, so `--seed N` takes you back to world N where you left it. Use `--fresh` to go back to the start of a world. `--time H` picks the hour and `--season` the time of year for one run, and the debug panel has sliders for both.
 
@@ -106,9 +122,11 @@ cargo run --release -p game -- --seed 1 --screenshot shot.png --over 31776,43030
 ## How it's put together
 
 ```
-crates/worldgen   continents, climate, biomes, rivers, trees, plants, trails, landmarks and names
+crates/worldgen   continents, climate, biomes, rivers, trees, plants, trails, landmarks, names,
+                  and settlements: siting, the house kit, layouts, farmland, trade and the years
 crates/voxel      chunk storage and the mesher
-crates/game       renderer, chunk streaming, player, weather and seasons, map, pack, sound
+crates/game       renderer, chunk streaming, player, villagers, animals, weather and seasons,
+                  map, pack, journal, sound
 tools/mapgen      draws a continent's simulation as PNG maps
 tools/bench       times chunk generation and checksums what it made
 ```
