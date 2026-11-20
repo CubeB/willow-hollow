@@ -985,6 +985,7 @@ impl Town {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(p, _)| p.name.clone());
         town.people(c, tongue, s, &door_of, lives);
+        town.fishers();
         town.keepers();
         town.feeders(c, world_seed);
         town.visitors(s, tongue);
@@ -1021,6 +1022,24 @@ impl Town {
                 let jobs = vec![Job { place: hamlet.away, spot: bed }];
                 self.residents.push(Resident { n, id: VISITOR_IDS + h * 256 + j, person, home: AWAY, member: j, bed, role: Role::Visitor, jobs, stall: None, from: Some(h) });
             }
+        }
+    }
+
+    /// Each fisher's own place along the bank (#206), the first two either side of those
+    /// who stand at the water and clear of them, the next two a little further along,
+    /// and so on: nobody fishing stands on the way up the middle that everyone coming to
+    /// the water walks, and each comes to their place from behind the others (see
+    /// [`Town::last_steps`]).
+    fn fishers(&mut self) {
+        let Some(w) = self.water else { return };
+        let (at, face) = (self.places[w].at, self.places[w].face);
+        let mut k = 0;
+        for r in self.residents.iter_mut().filter(|r| r.person.trade == Trade::Fisher) {
+            let Some(job) = r.jobs.iter_mut().find(|j| j.place == w && j.spot.task == Task::Fish) else { continue };
+            let side = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let along = face.perp() * side * (3.6 + 2.5 * (k / 2) as f32);
+            job.spot = Spot::new(at + Vec3::new(along.x, 0.0, along.y), face, Task::Fish);
+            k += 1;
         }
     }
 
@@ -1391,12 +1410,10 @@ impl Town {
                     }
                 }
                 Trade::Fisher => {
+                    // On the bank, at their own place along it once all the fishers are
+                    // known (see `fishers`).
                     if let Some(w) = self.water {
-                        // Each fisher has their own place along the bank.
-                        let toward = self.places[w].face;
-                        let along = toward.perp() * (((r.n % 5) as f32 - 2.0) * 2.5);
-                        let at = self.places[w].at + Vec3::new(along.x, 0.0, along.y);
-                        out.push(Job { place: w, spot: Spot::new(at, toward, Task::Fish) });
+                        out.push(Job { place: w, spot: Spot::new(self.places[w].at, self.places[w].face, Task::Fish) });
                     }
                     for t in thing(&[Fitting::NetRack, Fitting::FishRack]).iter().take(1) {
                         let mut s = before(t, Task::Sit, 1.3);
@@ -1534,18 +1551,27 @@ impl Town {
     /// then step aside into it, so as not to walk through those in front (#206).
     pub fn last_steps(&self, p: usize, s: &Spot) -> (usize, Vec<Vec3>) {
         let q = &self.places[p];
+        let face3 = Vec3::new(q.face.x, 0.0, q.face.y);
         let deep = (flat(q.at) - flat(s.at)).dot(q.face);
-        if q.what.crowd() && deep > 0.01 {
-            let up = |d: f32| q.at - Vec3::new(q.face.x, 0.0, q.face.y) * d;
-            let short = deep.min(q.aisle);
+        // Further out to the side than those either side of the way up the middle, as the
+        // fishers along the bank are, they come along a row behind and then forward, so
+        // as to pass behind anyone nearer the middle rather than before them.
+        let aside = (flat(s.at) - flat(q.at)).dot(q.face.perp()).abs() > 2.5;
+        let back = if aside { deep.max(0.0) + 1.9 } else { deep };
+        if q.what.crowd() && back > 0.01 {
+            let up = |d: f32| q.at - face3 * d;
+            let short = back.min(q.aisle);
             let cut = if short > 0.01 { q.spur.iter().rev().take_while(|&&r| (flat(q.at) - flat(r)).dot(q.face) < short + 0.01).count() } else { 0 };
             let mut out = Vec::new();
             if cut > 0 {
                 out.push(up(short));
             }
             // Further back than the way comes up, they go on back along it.
-            if deep > short + 0.01 {
-                out.push(up(deep));
+            if back > short + 0.01 {
+                out.push(up(back));
+            }
+            if back > deep + 0.01 {
+                out.push(s.at - face3 * (back - deep));
             }
             out.push(s.at);
             return (cut, out);

@@ -1060,6 +1060,9 @@ fn walkers_keep_out_of_each_others_way() {
             // Those coming to a crowd before a well or a stall, or leaving one, keep to the way
             // up its middle and hardly ever go deep into anyone standing in it (#206).
             assert!(after.crowd[2] <= 2, "{on}: walkers go deep into those standing before a well or a stall {} times ({:?})", after.crowd[2], after.crowd);
+            // Going their own way regardless, they do not come near them at all: the ways in
+            // and out keep clear of everyone standing there, the fishers on the bank too.
+            assert!(before.crowd[0] == 0, "{on}: the ways to and from a crowd go by those standing in it {} times ({:?})", before.crowd[0], before.crowd);
             // Nor does anyone come to a spot in it that someone is still standing on.
             assert!(before.shared + after.shared == 0, "{on}: walkers come to the spot of someone still standing on it {} times", after.shared);
             // Nobody darts across the ground much faster than a quick step aside; and the
@@ -1110,6 +1113,7 @@ fn nobody_in_a_crowd_stands_in_the_way_of_the_others() {
     // the shrine or the water, or leaving it, nobody comes nearer anyone else standing
     // there than to pass them with the gap kept between two people (#206).
     let clear = avoid::BODY * 2.0 + avoid::GAP;
+    let mut near: Vec<String> = Vec::new();
     for town in towns() {
         let from = town::Spot::new(town.centre, Vec2::X, Task::Stand);
         let crowds: Vec<usize> = (0..town.places.len()).filter(|&p| town.places[p].what.crowd()).collect();
@@ -1132,5 +1136,25 @@ fn nobody_in_a_crowd_stands_in_the_way_of_the_others() {
         // Each is come to up the middle, from behind or from before them.
         let before = |p: usize| (flat(town.places[p].at) - flat(town.lanes.nodes[town.places[p].anchor as usize])).dot(town.places[p].face) <= 0.0;
         assert!(crowds.iter().all(|&p| town.places[p].aisle > 0.0 || before(p)), "{}: a crowd is come to through its middle", town.name);
+        // Nor does anyone fishing from the bank stand on the way that those coming to stand
+        // at the water walk, nor in the way of another fisher coming to their own place
+        // further along it.
+        if let Some(w) = town.water {
+            let fishers: Vec<town::Spot> = town.residents.iter().flat_map(|r| &r.jobs).filter(|j| j.place == w && j.spot.task == Task::Fish).map(|j| j.spot).collect();
+            let crowd = (0..6).map(|k| day::around(town, w, k, Task::Stand));
+            let before = near.len();
+            for (k, s) in fishers.iter().copied().chain(crowd).enumerate() {
+                let walk = town.walk((town.green_place, &from), (w, &s));
+                let legs: Vec<(Vec2, Vec2)> = walk.pts.windows(2).map(|w| (flat(w[0]), flat(w[1]))).collect();
+                for (j, f) in fishers.iter().enumerate().filter(|&(j, _)| j != k) {
+                    let by = off(&legs, flat(f.at));
+                    if by < clear - 0.01 {
+                        near.push(format!("{}: going to the {k}th place at the water, they come {by:.2} voxels from the {j}th fisher", town.name));
+                    }
+                }
+            }
+            println!("{}: {} fishers, {} walks to the water past one", town.name, fishers.len(), near.len() - before);
+        }
     }
+    assert!(near.is_empty(), "{}", near.join("; "));
 }
