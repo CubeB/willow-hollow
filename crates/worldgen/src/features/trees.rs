@@ -293,7 +293,7 @@ fn twigs(s: &mut Shape, seed: u32, wood: Voxel) {
             sprig(s, &mut rng, c.from, way.normalize_or_zero(), way.length() * 0.5, forks, wood);
         }
     }
-    s.finish_sticks(hides_twigs);
+    s.finish_sticks(hides_twigs, super::tree_detail::is_wood);
 }
 
 /// The leaves of the broadleaves, which hide the twigs of their bare crowns until they

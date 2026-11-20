@@ -70,6 +70,9 @@ pub struct Shape {
     /// Boxes of model voxels (inclusive) that must be left open to walk through: doors,
     /// stairs and the like. Props keep out of them.
     clear: Vec<(IVec3, IVec3)>,
+    /// For each of `fine` made from sticks, the one before it in `fine` that it grows
+    /// from, or [`ON_WOOD`]; short of `fine` where the rest were added otherwise.
+    fine_from: Vec<u32>,
     /// Fine sticks laid so far, in model cells, before they are made into boxes.
     sticks: Raster,
     /// The crowns of leaves laid so far, for what grows inside them.
@@ -101,6 +104,7 @@ impl Shape {
             axis: None,
             fine: Vec::new(),
             clear: Vec::new(),
+            fine_from: Vec::new(),
             sticks: Raster::new(),
             crowns: Vec::new(),
         }
@@ -115,6 +119,7 @@ impl Shape {
             axis: None,
             fine: Vec::new(),
             clear: Vec::new(),
+            fine_from: Vec::new(),
             sticks: Raster::new(),
             crowns: Vec::new(),
         }
@@ -268,9 +273,11 @@ impl Shape {
     }
 
     /// Makes the sticks laid so far into fine parts, a voxel's worth at a time, keeping
-    /// only those in voxels of the model that `keep` takes, and pulled back a cell from
-    /// any side of one that gives onto empty space.
-    pub fn finish_sticks(&mut self, keep: impl Fn(Voxel) -> bool) {
+    /// only those in voxels of the model that `keep` takes, pulled back a cell from any
+    /// side of one that gives onto empty space, and joined to voxels that `wood` takes,
+    /// face to face or through others kept. Each is noted with the one it grows from (see
+    /// [`Template::fine_from`]).
+    pub fn finish_sticks(&mut self, keep: impl Fn(Voxel) -> bool, wood: impl Fn(Voxel) -> bool) {
         let mut sticks = std::mem::take(&mut self.sticks);
         let open: HashMap<IVec3, [bool; 6]> = sticks
             .voxels()
@@ -285,6 +292,7 @@ impl Shape {
         // Back into a box a voxel, as merging ran some on through the next: each is kept or
         // hidden with its own leaf.
         let mut boxes = Vec::new();
+        let mut kept = Vec::new();
         for m in merged {
             let (lo, hi) = (IVec3::from_array(m.lo), IVec3::from_array(m.hi));
             let (first, last) = (lo.div_euclid(IVec3::splat(CELLS)), (hi - 1).div_euclid(IVec3::splat(CELLS)));
@@ -314,8 +322,19 @@ impl Shape {
                 }
             }
             if (0..3).all(|a| b.lo[a] < b.hi[a]) {
-                self.fine.push(b);
+                kept.push(b);
             }
+        }
+        // What is left of a stick past a voxel it was not kept in (a hole in the leaves, or
+        // a limb it ran through), or past a side pulled back, would hang in the air with
+        // nothing to hold it once the leaves are down: only what is joined to the wood is kept.
+        let spans: Vec<(IVec3, IVec3)> = kept.iter().map(|b| (IVec3::from_array(b.lo), IVec3::from_array(b.hi))).collect();
+        let order = joined(&spans, |lo, hi| on_faces(lo, hi).any(|f| self.get(lo.div_euclid(IVec3::splat(CELLS)) + f).is_some_and(&wood)));
+        let start = self.fine.len() as u32;
+        self.fine_from.resize(self.fine.len(), ON_WOOD);
+        for (i, from) in order {
+            self.fine.push(kept[i]);
+            self.fine_from.push(if from == ON_WOOD { ON_WOOD } else { start + from });
         }
     }
 
@@ -333,6 +352,7 @@ impl Shape {
 
     /// Takes the fine parts added so far, in the order they were added.
     pub fn take_fine(&mut self) -> Vec<PlantBox> {
+        self.fine_from.clear();
         std::mem::take(&mut self.fine)
     }
 
@@ -388,6 +408,11 @@ impl Shape {
             base,
             top: hi.y,
             axis,
+            fine_from: {
+                let mut from = self.fine_from;
+                from.resize(self.fine.len(), ON_WOOD);
+                from
+            },
             fine: self.fine,
         }
     }
@@ -408,6 +433,72 @@ pub struct Template {
     /// inside one voxel of its leaves, so they are hidden while the leaves are on and show
     /// as each leaf falls (see `trees::twigs`).
     pub fine: Vec<PlantBox>,
+    /// For each of `fine`, the one before it that it grows from and meets face to face,
+    /// or [`ON_WOOD`] for one that meets the wood of the model itself. A twig is drawn
+    /// only while the whole way back to the wood is.
+    pub fine_from: Vec<u32>,
+}
+
+/// In [`Template::fine_from`]: a fine part that grows from the wood.
+pub const ON_WOOD: u32 = u32::MAX;
+
+/// Whether two boxes of cells meet face to face: side by side across one axis and
+/// overlapping over the other two. Boxes that meet only along an edge or at a corner
+/// do not, as nothing would be seen to join them.
+pub fn boxes_meet(a: (IVec3, IVec3), b: (IVec3, IVec3)) -> bool {
+    let mut sides = 0;
+    for k in 0..3 {
+        if a.1[k] == b.0[k] || b.1[k] == a.0[k] {
+            sides += 1;
+        } else if a.0[k] > b.1[k] || b.0[k] > a.1[k] {
+            return false;
+        }
+    }
+    sides == 1
+}
+
+/// The faces of the voxel holding the box of cells `lo..hi` (inside one voxel) that the
+/// box reaches, as steps to the voxel beyond.
+pub fn on_faces(lo: IVec3, hi: IVec3) -> impl Iterator<Item = IVec3> {
+    let base = lo.div_euclid(IVec3::splat(CELLS)) * CELLS;
+    FACES.into_iter().enumerate().filter(move |&(face, _)| {
+        let axis = face / 2;
+        if face % 2 == 0 { hi[axis] == base[axis] + CELLS } else { lo[axis] == base[axis] }
+    }).map(|(_, f)| f)
+}
+
+/// Of boxes of cells each inside one voxel, those joined to something `rooted` takes
+/// through others met face to face: each as its index with the place in the list of the
+/// one it was reached from, or [`ON_WOOD`], so each comes after what it grows from.
+pub fn joined(boxes: &[(IVec3, IVec3)], rooted: impl Fn(IVec3, IVec3) -> bool) -> Vec<(usize, u32)> {
+    let cells = IVec3::splat(CELLS);
+    let mut by_voxel: HashMap<IVec3, Vec<usize>> = HashMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        by_voxel.entry(b.0.div_euclid(cells)).or_default().push(i);
+    }
+    let mut seen = vec![false; boxes.len()];
+    let mut order = Vec::new();
+    for (i, b) in boxes.iter().enumerate() {
+        if rooted(b.0, b.1) {
+            seen[i] = true;
+            order.push((i, ON_WOOD));
+        }
+    }
+    let mut next = 0;
+    while next < order.len() {
+        let i = order[next].0;
+        let at = boxes[i].0.div_euclid(cells);
+        for step in [IVec3::ZERO].into_iter().chain(FACES) {
+            for &j in by_voxel.get(&(at + step)).into_iter().flatten() {
+                if !seen[j] && boxes_meet(boxes[i], boxes[j]) {
+                    seen[j] = true;
+                    order.push((j, next as u32));
+                }
+            }
+        }
+        next += 1;
+    }
+    order
 }
 
 /// The six neighbours of a voxel, in the order of a box's faces: +x, -x, +y, -y, +z, -z.
