@@ -37,6 +37,7 @@ pub fn stands_tall(species: Species) -> bool {
             | Species::HollyBush
             | Species::Laurel
             | Species::Gorse
+            | Species::MangroveShrub
     )
 }
 

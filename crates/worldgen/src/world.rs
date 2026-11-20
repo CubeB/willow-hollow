@@ -1614,6 +1614,17 @@ impl GameWorld {
         // The twigs of bare crowns, inside the leaves that hide them till they fall. Last,
         // as nothing else grows in a leaf.
         features::tree_detail::bare_crowns(lib, &placements, &voxels, &mut plants);
+        // The fine roots dropping from the mangroves' stilts, clear of everything else.
+        if placements.iter().any(|p| p.species == features::trees::Species::Mangrove) {
+            let taken: HashSet<IVec3> = plants
+                .iter()
+                .flat_map(|p| {
+                    let (lo, hi) = (IVec3::from_array(p.lo).div_euclid(cells), (IVec3::from_array(p.hi) - 1).div_euclid(cells));
+                    (lo.y..=hi.y).flat_map(move |y| (lo.z..=hi.z).flat_map(move |z| (lo.x..=hi.x).map(move |x| IVec3::new(x, y, z))))
+                })
+                .collect();
+            features::mangrove::grow(&placements, &voxels, &self.materials, self.seed, &taken, &mut plants);
+        }
         // Nor has a home going up again any ivy or moss on it (#207): judged by where each
         // part is, so every chunk agrees.
         let rising: Vec<(IVec3, IVec3)> = continent.trails.stamps_at(local_chunk.0, local_chunk.1).filter_map(|s| lives.rising(s)).collect();
