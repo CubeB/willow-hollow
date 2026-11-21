@@ -19,6 +19,8 @@ const FADES: f32 = 0.5;
 
 /// A night's sleep by a fire or in a bed: as rested as can be, for a day.
 pub const NIGHT: (f32, f32) = (1.0, 24.0);
+/// A stick of incense burned at a shrine (#40): a light rest, for a morning or so.
+pub const INCENSE: (f32, f32) = (0.35, 8.0);
 /// Hours of sleep that count for nothing, and that count for a whole night.
 const DOZE: f32 = 2.0;
 const SLEEP: f32 = 6.0;

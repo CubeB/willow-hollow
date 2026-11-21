@@ -101,7 +101,9 @@ impl Running {
         let named = self.map.shrine_named(here, m64(12.0));
         self.journal.light(here, burner.wayside, named.as_deref(), told);
         self.map.told = self.journal.told();
-        // TODO(#37): grant a light rest here, once the rested status is in.
+        // A little of the ease of a night's sleep, and never less than the player has: a
+        // reason to stop at a shrine on the way, not a substitute for a night by the fire.
+        self.rested.grant(crate::rested::INCENSE.0, crate::rested::INCENSE.1);
         log::info!("incense lit at {:.1} {:.1} {:.1}; it tells of {:?}", at.x, at.y, at.z, told);
         self.say(match told {
             Some((place, shrine)) => format!("The incense catches   \u{b7}   its smoke drifts away {}, toward {}", crate::journal::compass(here, place), if shrine { "a shrine" } else { "a spring" }),
