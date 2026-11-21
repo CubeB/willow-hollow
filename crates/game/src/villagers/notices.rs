@@ -615,7 +615,7 @@ mod tests {
             }
         }
         // A settlement is never taken for a quarry, nor a quarry for a settlement charted.
-        let settlement = marks::Mark { kind: marks::Kind::Settlement, at: middle, reach: 1.0, name: None, hint: true };
+        let settlement = marks::Mark { kind: marks::Kind::Settlement, at: middle, reach: 1.0, name: None, hint: true, shrine: false };
         assert!(!told_of(&settlement, true, &[], &quarried));
         assert!(!told_of(&marks[0], false, &quarried, &[]));
 

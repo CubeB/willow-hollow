@@ -8,6 +8,9 @@
 //! it go. Seven more slots are the hotbar, always in view along the foot of the screen:
 //! one of them is held, and what is in it is what is set down or laid when the player
 //! uses their hands. A pack is kept with its world's save.
+//!
+//! Two things gathered make a third: resin dragged onto a sweet herb, or the herb onto
+//! the resin, rolls them into sticks of incense (#40), to be lit at a shrine.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -39,11 +42,15 @@ pub enum Shape {
     Stick,
     Fire,
     Lantern,
+    /// Beads of resin from a trunk (#40).
+    Resin,
+    /// Sticks of incense.
+    Incense,
 }
 
 impl Shape {
     // There were tents once: a thing saved as one no longer reads, and is left out.
-    const ALL: [(Shape, &'static str); 9] = [
+    const ALL: [(Shape, &'static str); 11] = [
         (Shape::Flower, "flower"),
         (Shape::Spike, "spike"),
         (Shape::Sprig, "sprig"),
@@ -53,6 +60,8 @@ impl Shape {
         (Shape::Stick, "stick"),
         (Shape::Fire, "fire"),
         (Shape::Lantern, "lantern"),
+        (Shape::Resin, "resin"),
+        (Shape::Incense, "incense"),
     ];
 
     pub(crate) fn word(self) -> &'static str {
@@ -77,6 +86,8 @@ impl Shape {
             Shape::Stick => ["........", "......l.", ".d...c..", "..c.c...", "...cd...", "..c..d..", ".c....d.", "........"],
             Shape::Fire => ["........", "...y....", "..yy.y..", "..yyyy..", ".cyyyyc.", ".dccccd.", "wdwddwdw", "........"],
             Shape::Lantern => ["...dd...", "..d..d..", "..dddd..", "..lyyc..", "..lyyc..", "..lyyc..", "..dddd..", "........"],
+            Shape::Resin => ["........", "...l....", "..lcc...", "..ccd...", "...d..l.", ".....lc.", "....ccd.", ".....d.."],
+            Shape::Incense => ["..l..l.l", "..c.c..c", "..cc..c.", "...c.c..", "...ccc..", "...bbb..", "...b.b..", "..b...b."],
         }
     }
 }
@@ -154,6 +165,28 @@ pub fn sticks() -> Item {
     Item::new("sticks", "Sticks", "Dry wood from under a tree. Three will lay a fire.", [150, 116, 80], Shape::Stick)
 }
 
+/// Resin from a wounded trunk (#40): a bead of it here and there on the pines and the
+/// junipers, the acacias of the dry country and the great trees of the rainforest.
+pub fn resin() -> Item {
+    Item::new("resin", "Resin", "A bead of gum from a wounded trunk, sticky and sweet-smelling. Rolled with a sweet herb it makes incense.", [214, 150, 52], Shape::Resin)
+}
+
+/// Sticks of incense, made in the pack from resin and a sweet herb (#40), to be lit at
+/// a shrine's burner.
+pub fn incense() -> Item {
+    Item::new("incense", "Incense", "Resin rolled with a sweet herb onto slips of wood. It is lit at a shrine.", [150, 84, 62], Shape::Incense)
+}
+
+/// The herbs sweet enough to make incense with: violets and heather and gorse blossom
+/// in most country, marigolds where it is dry, as people lay at a shrine, and orchids in
+/// the rainforest, where one of them is vanilla.
+pub fn sweet(id: &str) -> bool {
+    matches!(id, "violet" | "heather" | "gorse-blossom" | "desert_marigold" | "orchid")
+}
+
+/// How many sticks of incense one resin and one sweet herb make.
+pub const INCENSE_MADE: u32 = 2;
+
 /// The lantern every wanderer sets out with, to light the way after dark.
 pub fn lantern() -> Item {
     Item::new("lantern", "Lantern", "Brass and glass about a candle: a warm light to walk by at night.", [176, 136, 72], Shape::Lantern)
@@ -177,6 +210,8 @@ pub fn use_of(id: &str) -> &'static str {
     match id {
         "sticks" => "right click to lay a fire",
         "lantern" => "lit while it is held; right click to shutter it",
+        "incense" => "right click at a shrine's burner to light a stick",
+        "resin" => "drag it onto a sweet herb in the pack to make incense",
         _ => "right click to set it down",
     }
 }
@@ -333,9 +368,13 @@ impl Pack {
     }
 
     /// Moves what is in slot `from` to slot `to`: onto a stack of the same kind as far
-    /// as it has room, else changing places with what is there.
+    /// as it has room, else changing places with what is there. Resin onto a sweet herb,
+    /// or a sweet herb onto resin, makes incense instead (see [`Self::blend`]).
     pub fn shift(&mut self, from: usize, to: usize) {
         if from == to || from >= ALL || to >= ALL || self.slots[from].is_none() {
+            return;
+        }
+        if self.blend(from, to) {
             return;
         }
         let same = matches!((&self.slots[from], &self.slots[to]), (Some(a), Some(b)) if a.item.id == b.item.id);
@@ -348,6 +387,36 @@ impl Pack {
             self.slots.swap(from, to);
         }
         self.unsaved = true;
+    }
+
+    /// Rolls one of the resin and one of the sweet herb in slots `from` and `to` (either
+    /// way round) into [`INCENSE_MADE`] sticks of incense: into the slot dragged onto if
+    /// that has been used up, else wherever they fit. Whether they were made; nothing is
+    /// used if there is no room for them.
+    pub fn blend(&mut self, from: usize, to: usize) -> bool {
+        let (Some(Some(a)), Some(Some(b))) = (self.slots.get(from), self.slots.get(to)) else { return false };
+        let (a, b) = (a.item.id.as_str(), b.item.id.as_str());
+        if !(a == "resin" && sweet(b) || sweet(a) && b == "resin") {
+            return false;
+        }
+        let before = self.slots.clone();
+        self.drop_from(from, 1);
+        self.drop_from(to, 1);
+        if self.slots[to].is_none() {
+            self.slots[to] = Some(Stack { item: incense(), count: 0 });
+        }
+        let made = match &mut self.slots[to] {
+            Some(s) if s.item.id == "incense" => {
+                s.count += INCENSE_MADE;
+                true
+            }
+            _ => self.add_many(&incense(), INCENSE_MADE) == 0,
+        };
+        if !made {
+            self.slots = before;
+        }
+        self.unsaved = true;
+        made
     }
 
     /// Whether the column at `(x, z)` has been gathered from.
@@ -717,6 +786,33 @@ mod tests {
 
     fn thing(id: &str) -> Item {
         Item::new(id, "A thing", "About it.", [200, 100, 50], Shape::Flower)
+    }
+
+    #[test]
+    fn resin_dropped_on_a_sweet_herb_makes_incense_and_on_anything_else_does_not() {
+        let at = |pack: &Pack, id: &str| pack.slots.iter().position(|s| s.as_ref().is_some_and(|s| s.item.id == id));
+        let mut pack = Pack::new();
+        pack.add(&resin());
+        pack.add(&resin());
+        pack.add(&thing("violet"));
+        pack.add(&thing("poppy"));
+        let (r, v, p) = (at(&pack, "resin").unwrap(), at(&pack, "violet").unwrap(), at(&pack, "poppy").unwrap());
+        // Not with a poppy: the two only change places.
+        pack.shift(r, p);
+        assert_eq!(pack.count("incense"), 0);
+        assert_eq!((pack.count("resin"), pack.count("poppy")), (2, 1));
+        let r = at(&pack, "resin").unwrap();
+        // With the violet: the one violet and one bead of resin are gone, and in the
+        // violet's place is incense.
+        pack.shift(r, v);
+        assert_eq!((pack.count("resin"), pack.count("violet"), pack.count("incense")), (1, 0, INCENSE_MADE));
+        assert_eq!(at(&pack, "incense"), Some(v));
+        // The other way round makes it too, and it joins the incense made before.
+        pack.add(&thing("heather"));
+        let (h, r) = (at(&pack, "heather").unwrap(), at(&pack, "resin").unwrap());
+        pack.shift(h, r);
+        assert_eq!((pack.count("resin"), pack.count("heather"), pack.count("incense")), (0, 0, 2 * INCENSE_MADE));
+        assert!(use_of("incense").contains("shrine") && use_of("resin").contains("herb"));
     }
 
     #[test]

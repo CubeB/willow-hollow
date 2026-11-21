@@ -274,6 +274,16 @@ pub struct TrailLantern {
     pub footprint: Vec<glam::IVec2>,
 }
 
+/// Where a stick of incense may be lit (#40): the burner before a shrine, or the dish
+/// on a wayside shelf.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Burner {
+    /// The foot of a stick stood in it, on the sand of the bowl: continent-local voxels.
+    pub at: Vec3,
+    /// On a wayside shelf by a trail, not before a shrine.
+    pub wayside: bool,
+}
+
 /// Everything people have added to one continent.
 #[derive(Default)]
 pub struct Network {
@@ -301,6 +311,12 @@ pub struct Network {
     /// Props laid about sites, held in the same way: voxels, fine parts, and the world
     /// columns they stand in.
     pub(crate) held_props: Vec<(Vec<(IVec3, Voxel)>, Vec<PlantBox>, Vec<glam::IVec2>)>,
+    /// The burners among the held props, by their index in `held_props`, with where a
+    /// stick stands in each: they are burners once their prop is kept.
+    pub(crate) held_burners: Vec<(usize, Vec3)>,
+    /// Every burner where incense can be lit (#40): one before each shrine whose burner
+    /// was kept, and the dish of each wayside shelf.
+    pub burners: Vec<Burner>,
     /// Stamps overlapping each chunk column, by continent-local chunk coordinates.
     stamp_index: HashMap<(i32, i32), Vec<u32>>,
     /// Every milestone, bench, waymark and cairn set beside a trail, and where: the

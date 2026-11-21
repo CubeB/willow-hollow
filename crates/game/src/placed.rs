@@ -1,4 +1,5 @@
-//! Things set down in the world: a flower laid on a stone, a fire laid in its ring. Each is plain data (what it is, how many, where, which way it faces and
+//! Things set down in the world: a flower laid on a stone, a fire laid in its ring, a
+//! stick of incense burning at a shrine (#40). Each is plain data (what it is, how many, where, which way it faces and
 //! what state it is in), kept by the chunk column it stands in, so that only what is
 //! near is looked at or drawn, and so that a column's things could be sent to another
 //! player along with the column. They are saved with their world.
@@ -54,6 +55,22 @@ impl Thing {
         self.item.id == "campfire"
     }
 
+    /// Whether it is a stick of incense stood in a shrine's burner: burning, or burnt
+    /// down to its ash. It stays where it was lit, and is not taken up again.
+    pub fn is_incense(&self) -> bool {
+        self.item.id == "incense"
+    }
+
+    /// Whether it is incense, burning.
+    pub fn smoulders(&self) -> bool {
+        self.is_incense() && self.state == BURNING
+    }
+
+    /// Where the smoke leaves a stick of incense: its glowing tip.
+    pub fn tip(&self) -> DVec3 {
+        self.pos + DVec3::new(0.0, m64(INCENSE_TALL as f64), 0.0)
+    }
+
     /// Whether it is a fire, burning.
     pub fn burns(&self) -> bool {
         self.is_fire() && self.state == BURNING
@@ -82,6 +99,9 @@ impl Thing {
 
 }
 
+/// How tall a stick of incense stands in its burner, in metres.
+const INCENSE_TALL: f32 = 0.24;
+
 /// Which thing, of all those set down: its column, and its place among that column's.
 pub type Handle = ((i32, i32), usize);
 
@@ -93,6 +113,8 @@ pub struct Placed {
     years: f64,
     /// Changed since it was last saved.
     pub unsaved: bool,
+    /// How long a stick of incense burns, in years, as the last `pass` had it.
+    incense_burns: f64,
 }
 
 fn column_of(pos: DVec3) -> (i32, i32) {
@@ -169,24 +191,37 @@ impl Placed {
     /// still be picked out.
     pub fn within_reach(&self, hands: DVec3) -> Option<Handle> {
         self.near(hands, m64(3.0))
-            .filter(|(_, t)| (t.pos.y - hands.y).abs() < m64(2.0))
+            .filter(|(_, t)| (t.pos.y - hands.y).abs() < m64(2.0) && !t.is_incense())
             .map(|(at, t)| (at, (t.pos.x - hands.x).hypot(t.pos.z - hands.z) / t.reach()))
             .filter(|(_, inside)| *inside <= 1.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(at, _)| at)
     }
 
+    /// The incense lit in the burner whose stick stands at `at`, burning or burnt, if
+    /// any has been: within a hand's breadth of it.
+    pub fn incense_at(&self, at: DVec3) -> Option<Handle> {
+        self.near(at, m64(0.15)).find(|(_, t)| t.is_incense() && (t.pos.y - at.y).abs() < m64(0.3)).map(|(h, _)| h)
+    }
+
+    /// The tips of the sticks of incense burning within `radius` voxels of `pos`.
+    pub fn incense_smoking(&self, pos: DVec3, radius: f64) -> Vec<DVec3> {
+        self.near(pos, radius).filter(|(_, t)| t.smoulders()).map(|(_, t)| t.tip()).collect()
+    }
+
     /// Moves the world's clock on by `years`, and lets the fires that have burned for
-    /// `burn` years or more go out. Whether any did.
-    pub fn pass(&mut self, years: f64, burn: f64) -> bool {
+    /// `burn` years or more go out, and the incense that has burned for `incense` years.
+    /// Whether any did.
+    pub fn pass(&mut self, years: f64, burn: f64, incense: f64) -> bool {
         if self.columns.is_empty() {
             return false;
         }
         self.years += years;
+        self.incense_burns = incense;
         let now = self.years;
         let mut out = false;
         for thing in self.columns.values_mut().flatten() {
-            if thing.burns() && now - thing.since >= burn {
+            if thing.burns() && now - thing.since >= burn || thing.smoulders() && now - thing.since >= incense {
                 thing.state = BURNT;
                 thing.since = now;
                 out = true;
@@ -278,7 +313,10 @@ impl Placed {
             }
             if thing.is_fire() || d <= m64(SMALL_SIGHT) {
                 let from = out.len();
-                draw_one(thing, cam, clock, out);
+                // A stick of incense burns down as its time goes: how far it has, from
+                // the clock it is lit by.
+                let left = if thing.smoulders() { 1.0 - ((self.years - thing.since) / self.incense_burns.max(1e-9)).clamp(0.0, 0.8) as f32 } else { 1.0 };
+                draw_incense_or(thing, cam, clock, left, out);
                 let sight = if thing.is_fire() { CAMP_SIGHT } else { SMALL_SIGHT };
                 dither_since(out, from, dither_edge(d, m64(sight), m64(sight * 0.12)));
             }
@@ -291,6 +329,10 @@ const CHARRED: [f32; 3] = [0.035, 0.03, 0.028];
 const STEM: [f32; 3] = [0.10, 0.25, 0.07];
 const LEAF: [f32; 3] = [0.15, 0.33, 0.10];
 const CREAM: [f32; 3] = [0.70, 0.64, 0.50];
+const AMBER: [f32; 3] = [0.62, 0.30, 0.035];
+const INCENSE_COAT: [f32; 3] = [0.24, 0.085, 0.05];
+const INCENSE_FOOT: [f32; 3] = [0.55, 0.36, 0.18];
+const ASHEN: [f32; 3] = [0.42, 0.41, 0.39];
 
 fn linear(c: [u8; 3]) -> [f32; 3] {
     c.map(|v| (v as f32 / 255.0).powf(2.2))
@@ -343,10 +385,50 @@ impl Brush<'_> {
     }
 }
 
+/// Draws one thing, wherever it is: a stick of incense with `left` of it, 0 to 1, still
+/// to burn.
+fn draw_incense_or(thing: &Thing, cam: DVec3, clock: f32, left: f32, out: &mut Vec<ParticleInstance>) {
+    if thing.is_incense() {
+        incense(&mut Brush { out, base: (thing.pos - cam).as_vec3(), yaw: thing.yaw }, thing, clock, left);
+    } else {
+        draw_one(thing, cam, clock, out);
+    }
+}
+
+/// A stick of incense in a burner's sand: burning, its tip a glowing coal with a crumb
+/// of ash on it, or burnt down, a stub and a curl of grey ash fallen about it.
+fn incense(b: &mut Brush, thing: &Thing, clock: f32, left: f32) {
+    let tall = INCENSE_TALL * left.max(0.15);
+    if thing.state != BURNING {
+        b.piece([0.0, 0.015, 0.0], [0.018, 0.03, 0.018], INCENSE_FOOT);
+        for (x, z, turn) in [(0.035, 0.01, 0.4), (-0.02, 0.04, 1.9), (0.01, -0.04, 2.8)] {
+            b.tilted([x, 0.006, z], [0.06, 0.012, 0.022], ASHEN, turn, [0.0; 2], 0.0);
+        }
+        return;
+    }
+    // The foot is the bare slip of wood; the rest is coated.
+    b.piece([0.0, 0.03, 0.0], [0.012, 0.06, 0.012], INCENSE_FOOT);
+    b.piece([0.0, 0.06 + (tall - 0.06) / 2.0, 0.0], [0.014, tall - 0.06, 0.014], INCENSE_COAT);
+    let breath = 0.5 + 0.5 * (clock * 1.7 + thing.pos.x as f32).sin();
+    b.tilted([0.0, tall + 0.006, 0.0], [0.016, 0.014, 0.016], [1.0, 0.32, 0.06], 0.0, [0.0; 2], 1.2 + 0.6 * breath);
+    b.piece([0.0, tall - 0.012, 0.0], [0.017, 0.012, 0.017], ASHEN);
+}
+
+/// Resin on a trunk, facing out along `yaw` from the bark at `pos`: a bead where it wept,
+/// a run below it and a smaller bead over it, catching the light.
+pub fn draw_resin(pos: DVec3, yaw: f32, cam: DVec3, out: &mut Vec<ParticleInstance>) {
+    let mut b = Brush { out, base: (pos - cam).as_vec3(), yaw };
+    b.tilted([-0.015, 0.0, 0.0], [0.06, 0.08, 0.07], AMBER, 0.0, [0.0; 2], 0.12);
+    b.tilted([-0.02, -0.07, 0.01], [0.04, 0.07, 0.04], shade(AMBER, 0.8), 0.0, [0.0; 2], 0.06);
+    b.tilted([-0.02, 0.06, -0.035], [0.035, 0.035, 0.035], shade(AMBER, 1.15), 0.0, [0.0; 2], 0.12);
+}
+
 /// Draws one thing, wherever it is.
 pub fn draw_one(thing: &Thing, cam: DVec3, clock: f32, out: &mut Vec<ParticleInstance>) {
     let mut brush = Brush { out, base: (thing.pos - cam).as_vec3(), yaw: thing.yaw };
-    if thing.is_fire() {
+    if thing.is_incense() {
+        incense(&mut brush, thing, clock, 1.0);
+    } else if thing.is_fire() {
         fire(&mut brush, thing, clock);
     } else {
         // Up to three of a kind are shown, fanned out where they lie.
@@ -458,6 +540,17 @@ fn small(b: &mut Brush, item: &Item) {
             b.piece([0.0, 0.035, 0.0], [0.06, 0.06, 0.56], c);
             b.piece([0.05, 0.035, 0.12], [0.12, 0.04, 0.04], shade(c, 0.8));
         }
+        Shape::Resin => {
+            b.piece([0.0, 0.025, 0.0], [0.07, 0.05, 0.06], c);
+            b.piece([0.06, 0.015, 0.03], [0.04, 0.03, 0.04], shade(c, 0.85));
+        }
+        Shape::Incense => {
+            for k in 0..3 {
+                let f = k as f32 - 1.0;
+                b.tilted([f * 0.02, 0.01, 0.06], [0.014, 0.014, 0.2], INCENSE_COAT, f * 0.08, [0.0; 2], 0.0);
+                b.tilted([f * 0.02, 0.01, -0.07], [0.012, 0.012, 0.06], INCENSE_FOOT, f * 0.08, [0.0; 2], 0.0);
+            }
+        }
         // Not things that lie about, but a save may say anything: a bundle.
         Shape::Fire | Shape::Lantern => b.piece([0.0, 0.1, 0.0], [0.3, 0.2, 0.5], c),
     }
@@ -502,11 +595,11 @@ mod tests {
         placed.put(fire(50.0, 2.0));
         let at = placed.within_reach(DVec3::new(1.0, 12.0, 2.0)).unwrap();
         assert!(placed.camps().is_empty(), "a fire never lit is no camp");
-        assert!(!placed.pass(0.5, 0.01), "a laid fire does not burn down");
+        assert!(!placed.pass(0.5, 0.01, 1.0), "a laid fire does not burn down");
         placed.set_state(at, BURNING);
         assert!(placed.get(at).is_some_and(Thing::burns));
-        assert!(!placed.pass(0.009, 0.01));
-        assert!(placed.pass(0.002, 0.01));
+        assert!(!placed.pass(0.009, 0.01, 1.0));
+        assert!(placed.pass(0.002, 0.01, 1.0));
         assert_eq!(placed.get(at).map(|t| t.state), Some(BURNT));
         assert_eq!(placed.camps(), vec![DVec2::new(1.0, 2.0)]);
     }
@@ -520,7 +613,7 @@ mod tests {
         assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty(), "a laid fire does not smoke");
         placed.set_state(at, BURNING);
         assert_eq!(placed.smoking(DVec3::ZERO, 100.0, 0.01)[0].1, 1.0);
-        placed.pass(0.001, 1.0);
+        placed.pass(0.001, 1.0, 1.0);
         placed.set_state(at, OUT);
         assert!(!placed.get(at).unwrap().burns() && placed.camps().len() == 1);
         assert_eq!(placed.get(at).map(Thing::salvage), Some(inventory::FIRE_STICKS - 1));
@@ -528,10 +621,38 @@ mod tests {
         assert!(wisp > 0.0 && wisp < 1.0);
         // It is still put out when it is read back, and in time it is cold.
         assert_eq!(Placed::from_text(&placed.to_text()).get(at).map(|t| t.state), Some(OUT));
-        placed.pass(0.02, 1.0);
+        placed.pass(0.02, 1.0, 1.0);
         assert!(placed.smoking(DVec3::ZERO, 100.0, 0.01).is_empty());
         placed.set_state(at, BURNT);
         assert_eq!(placed.get(at).map(Thing::salvage), Some(0));
+    }
+
+    #[test]
+    fn incense_burns_down_to_ash_in_its_burner_and_is_not_taken_up() {
+        let mut placed = Placed::new();
+        let burner = DVec3::new(1.0, 12.0, 2.0);
+        placed.put(Thing::new(inventory::incense(), 1, burner, 0.0));
+        let at = placed.incense_at(burner + DVec3::new(0.05, 0.0, 0.0)).expect("it stands in the burner");
+        assert!(placed.incense_at(burner + DVec3::new(1.0, 0.0, 0.0)).is_none());
+        assert!(placed.within_reach(burner).is_none(), "it is lit, not gathered");
+        assert!(placed.incense_smoking(DVec3::ZERO, 100.0).is_empty(), "a stick not lit does not smoke");
+        placed.set_state(at, BURNING);
+        assert!(placed.get(at).is_some_and(Thing::smoulders));
+        let tip = placed.incense_smoking(DVec3::ZERO, 100.0);
+        assert!(tip.len() == 1 && tip[0].y > burner.y && tip[0].y < burner.y + 1.0, "{tip:?}");
+        assert!(placed.incense_smoking(DVec3::new(500.0, 0.0, 0.0), 100.0).is_empty(), "too far off to see");
+        // A fire's time is not a stick's.
+        placed.pass(0.009, 1.0, 0.01);
+        assert!(placed.get(at).is_some_and(Thing::smoulders));
+        // Lit when saved, lit when read back.
+        assert!(Placed::from_text(&placed.to_text()).get(at).is_some_and(Thing::smoulders));
+        placed.pass(0.002, 1.0, 0.01);
+        assert_eq!(placed.get(at).map(|t| t.state), Some(BURNT));
+        assert!(placed.incense_smoking(DVec3::ZERO, 100.0).is_empty());
+        assert!(placed.camps().is_empty(), "a stick of incense is no camp");
+        let mut out = Vec::new();
+        placed.draw(DVec3::new(0.0, 14.0, 0.0), 1.0, &mut out);
+        assert!(!out.is_empty() && out.iter().all(|b| b.glow == 0.0), "ash does not glow");
     }
 
     #[test]
@@ -540,7 +661,7 @@ mod tests {
         placed.put(flower(7, 10.25, -4.5));
         placed.put(fire(-300.0, 77.125));
         placed.put(Thing::new(inventory::sticks(), 2, DVec3::new(-296.0, 12.0, 80.0), 2.5));
-        placed.pass(0.25, 1.0);
+        placed.pass(0.25, 1.0, 1.0);
         let at = placed.within_reach(DVec3::new(-300.0, 12.0, 77.0)).unwrap();
         placed.set_state(at, BURNING);
         let text = placed.to_text();

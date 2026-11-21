@@ -44,10 +44,12 @@ pub enum Prop {
     Rubble,
     PlankHeap,
     Offerings,
+    /// The burner at a shrine, where incense is lit (#40).
+    Burner,
 }
 
 impl Prop {
-    pub const ALL: [Prop; 15] = [
+    pub const ALL: [Prop; 16] = [
         Prop::Barrel,
         Prop::Crate,
         Prop::Sack,
@@ -63,6 +65,7 @@ impl Prop {
         Prop::Rubble,
         Prop::PlankHeap,
         Prop::Offerings,
+        Prop::Burner,
     ];
 }
 
@@ -73,6 +76,10 @@ pub struct Placed {
     pub decayed: bool,
     pub voxels: Vec<(IVec3, Voxel)>,
     pub fine: Vec<PlantBox>,
+    /// For a burner, where a stick of incense stands in it: a box in cells round the
+    /// foot of the stick, turned and moved with the prop as its fine parts are, so that
+    /// its middle is the foot wherever the prop ends up.
+    pub burner: Option<(IVec3, IVec3)>,
 }
 
 impl Placed {
@@ -116,6 +123,10 @@ impl Placed {
             b.lo[1] += dy * CELLS;
             b.hi[1] += dy * CELLS;
         }
+        if let Some((lo, hi)) = &mut self.burner {
+            lo.y += dy * CELLS;
+            hi.y += dy * CELLS;
+        }
     }
 }
 
@@ -126,6 +137,7 @@ struct Kit {
     turns: u32,
     voxels: Vec<(IVec3, Voxel)>,
     fine: Vec<PlantBox>,
+    burner: Option<(IVec3, IVec3)>,
 }
 
 impl Kit {
@@ -144,6 +156,14 @@ impl Kit {
     /// A weed whose top moves in the wind.
     fn weed(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32), v: Voxel) {
         self.part(lo, hi, v, true);
+    }
+
+    /// Marks the cells `lo` to `hi` as where a stick of incense stands, turned with the
+    /// prop: their middle is its foot.
+    fn mark(&mut self, lo: (i32, i32, i32), hi: (i32, i32, i32)) {
+        let (lo, hi) = rotate_box(IVec3::from(lo), IVec3::from(hi), self.turns);
+        let at = self.at * CELLS;
+        self.burner = Some((lo + at, hi + at));
     }
 
     fn vox(&mut self, x: i32, y: i32, z: i32, v: Voxel) {
@@ -170,7 +190,7 @@ fn weed_colour(p: &Palette) -> Voxel {
 /// Builds a prop with its voxel 0 at `at` (its foot on layer `at.y`), turned by quarter
 /// turns, intact or decayed, varied by `seed`.
 pub fn build(prop: Prop, p: &Palette, at: IVec3, turns: u32, decayed: bool, seed: u32) -> Placed {
-    let mut k = Kit { at, turns, voxels: Vec::new(), fine: Vec::new() };
+    let mut k = Kit { at, turns, voxels: Vec::new(), fine: Vec::new(), burner: None };
     let mut rng = Rng::new(seed ^ 0x9a0b_5eed ^ (prop as u32).wrapping_mul(0x27d4_eb2f));
     match prop {
         Prop::Barrel => barrel(&mut k, &mut rng, p, decayed),
@@ -188,8 +208,9 @@ pub fn build(prop: Prop, p: &Palette, at: IVec3, turns: u32, decayed: bool, seed
         Prop::Rubble => rubble(&mut k, &mut rng, p, decayed),
         Prop::PlankHeap => plank_heap(&mut k, &mut rng, p, decayed),
         Prop::Offerings => offerings(&mut k, &mut rng, p, decayed),
+        Prop::Burner => burner(&mut k, &mut rng, p, decayed),
     }
-    Placed { prop, decayed, voxels: k.voxels, fine: k.fine }
+    Placed { prop, decayed, voxels: k.voxels, fine: k.fine, burner: k.burner }
 }
 
 /// A barrel 0.8 m across and tall: a voxel core in a skin of staves bellied at the middle
@@ -584,6 +605,49 @@ fn offerings(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
     k.b((2, 1, 2), (4, 2, 3), mat::TUFT_DRY);
 }
 
+/// The burner at a shrine (#40): a bowl of sand to stand a stick of incense in, at
+/// about the height of a hip, on a little pillar of the local stone in open and rocky
+/// country and on a post of its timber where the country is wooded, so that it is built
+/// of what the place is. The bowl is clay, or iron in the cold north where clay is hard
+/// to fire. All of it stands in one column, so it fits beside an altar or a gate post.
+/// Decayed, the bowl is cracked and its sand gone grey, lichen or moss on what holds it
+/// up; it still holds a stick, for someone always comes by in the end.
+fn burner(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
+    use crate::biome::Biome::*;
+    let wooded = matches!(p.biome.parent(), Deciduous | Woodland | Taiga | OldGrowth | Rainforest);
+    let bowl = if matches!(p.biome.parent(), Taiga | Alpine | Tundra) { mat::IRON } else { mat::CLAY };
+    // The top of what carries the bowl, in cells.
+    k.b((0, 0, 0), (4, 1, 4), p.stone_dark);
+    let top = if wooded {
+        // A post of the country's timber on a flat stone, with a plank tray on top.
+        k.b((1, 1, 1), (3, 7, 3), p.wood);
+        k.b((0, 7, 0), (4, 8, 4), p.plank);
+        8
+    } else {
+        // A shaft of the local stone between a foot and a capital of the darker.
+        k.b((1, 1, 1), (3, 5, 3), p.stone);
+        k.b((0, 5, 0), (4, 6, 4), p.stone_dark);
+        6
+    };
+    // The bowl: a rim a hand high round a bed of sand.
+    let gap = rng.int(0, 3);
+    let rims = [((0, 0), (4, 1)), ((0, 3), (4, 4)), ((0, 1), (1, 3)), ((3, 1), (4, 3))];
+    for (i, (lo, hi)) in rims.into_iter().enumerate() {
+        if decayed && i as i32 == gap {
+            continue;
+        }
+        k.b((lo.0, top, lo.1), (hi.0, top + 2, hi.1), bowl);
+    }
+    k.b((1, top, 1), (3, top + 1, 3), if decayed { mat::ASH } else { mat::SAND });
+    k.mark((1, top + 1, 1), (3, top + 2, 3));
+    if decayed {
+        let growth = if damp(p) { mat::MOSS_CUSHION } else { mat::LICHEN_GREY };
+        k.b((3, 2, 1), (4, 4, 2), growth);
+        // The broken piece of the bowl's rim, lying on its foot.
+        k.b((3, 1, 0), (4, 2, 1), bowl);
+    }
+}
+
 /// What to lay about a site: (prop, nearest and farthest from the middle in voxels,
 /// how many, the chance of each).
 type Plan = &'static [(Prop, f32, f32, u32, f32)];
@@ -643,6 +707,26 @@ fn solid(s: &Shape, q: IVec3) -> bool {
     s.get(q).is_some_and(|v| v != AIR)
 }
 
+/// Whether a prop standing in columns `foot` and filling `cells` can be lifted by `y`
+/// voxels onto the built site `s`: borne up under every column (by the site, or on layer
+/// 0 by the ground where the site has nothing), and every voxel it takes, and the one
+/// over it, open, so nothing is wedged under an overhang, nor in a way kept clear.
+fn fits(s: &Shape, foot: &[IVec2], cells: &[IVec3], y: i32) -> bool {
+    let supported = foot.iter().all(|c| {
+        let below = IVec3::new(c.x, y - 1, c.y);
+        solid(s, below) || (y == 0 && s.get(below).is_none())
+    });
+    supported && cells.iter().all(|q| {
+        let q = *q + IVec3::Y * y;
+        !solid(s, q) && !solid(s, q + IVec3::Y) && !s.must_stay_clear(q)
+    })
+}
+
+/// Where a shrine's burner is tried, in turn: at one side of its altar, or of a gate's
+/// post, else on its platform before it to one side. Never in the middle of the -Z
+/// side, where the trail runs in to the altar and the burner would be dropped from it.
+const BURNER_SPOTS: [(i32, i32); 10] = [(4, 0), (-4, 0), (5, 4), (-5, 4), (3, 0), (-3, 0), (4, -4), (-4, -4), (5, -6), (-5, -6)];
+
 /// The chance a prop at a site with this history is in its decayed form: none at a site
 /// that is kept, all at an old and forgotten one.
 pub fn decay_chance(h: History) -> f32 {
@@ -666,6 +750,25 @@ pub fn dress(kind: Landmark, p: &Palette, seed: u32, h: History, s: &Shape, leng
     if kind == Landmark::Lookout {
         if let Some(lamp) = (0..80).rev().find(|&y| s.get(IVec3::new(0, y, 0)) == Some(mat::LANTERN)) {
             plans.push((LOOKOUT_TOP, lamp, lamp));
+        }
+    }
+    // Every shrine has its burner (#40), laid first so that nothing else takes its
+    // place, from a stream of its own.
+    if kind == Landmark::Shrine {
+        let mut own = Rng::new(seed ^ 0x1ce5_0b0e);
+        let (decayed, pseed) = (own.unit() < decay, own.next_u32());
+        for (x, z) in BURNER_SPOTS {
+            let mut placed = build(Prop::Burner, p, IVec3::new(x, 0, z), 0, decayed, pseed);
+            let (foot, cells) = (placed.footprint(), placed.cells());
+            if foot.iter().any(|c| c.as_vec2().length() > radius) {
+                continue;
+            }
+            if let Some(y) = (0..=2).find(|&y| fits(s, &foot, &cells, y)) {
+                placed.lift(y);
+                taken.extend(foot);
+                out.push(placed);
+                break;
+            }
         }
     }
     for (list, ylo, yhi) in plans {
@@ -693,18 +796,7 @@ pub fn dress(kind: Landmark, p: &Palette, seed: u32, h: History, s: &Shape, leng
                         continue;
                     }
                     let cells = placed.cells();
-                    let fits = |y: i32| {
-                        let supported = foot.iter().all(|c| {
-                            let below = IVec3::new(c.x, y - 1, c.y);
-                            solid(s, below) || (y == 0 && s.get(below).is_none())
-                        });
-                        supported && cells.iter().all(|q| {
-                            let q = *q + IVec3::Y * y;
-                            // The voxel and the one above it open: nothing is wedged under an overhang.
-                            !solid(s, q) && !solid(s, q + IVec3::Y) && !s.must_stay_clear(q)
-                        })
-                    };
-                    let Some(y) = (ylo..=yhi).find(|&y| fits(y)) else { continue };
+                    let Some(y) = (ylo..=yhi).find(|&y| fits(s, &foot, &cells, y)) else { continue };
                     placed.lift(y);
                     taken.extend(foot);
                     out.push(placed);
@@ -785,6 +877,30 @@ mod tests {
             let (_, _, ruins) = landmarks::build_site(Landmark::Ruins, &palette, seed, 0);
             assert!(ruins.iter().all(|p| p.decayed), "seed {seed}: ruins have kept props");
             assert!(ruins.iter().any(|p| p.prop == Prop::Rubble), "seed {seed}: ruins have no rubble");
+        }
+    }
+
+    /// Every shrine, of whatever variant and country, has its burner, and nothing else
+    /// does; the place a stick stands is in the middle of the bowl's sand, open above.
+    #[test]
+    fn every_shrine_has_a_burner_with_room_for_a_stick() {
+        for biome in [Biome::Deciduous, Biome::Desert, Biome::Taiga, Biome::Grassland] {
+            let palette = Palette::of(biome);
+            for seed in 0..30 {
+                let (_, _, props) = landmarks::build_site(Landmark::Shrine, &palette, seed, 0);
+                let burners: Vec<&Placed> = props.iter().filter(|p| p.prop == Prop::Burner).collect();
+                assert_eq!(burners.len(), 1, "{biome:?} {seed}");
+                let b = burners[0];
+                let (lo, hi) = b.burner.expect("a burner has a place for a stick");
+                let foot = (lo + hi) / 2;
+                assert!(b.fine.iter().any(|f| f.voxel == mat::SAND || f.voxel == mat::ASH), "{biome:?} {seed}: no bed in the bowl");
+                assert!(b.fine.iter().any(|f| f.hi[1] == foot.y && (f.lo[0]..f.hi[0]).contains(&foot.x) && (f.lo[2]..f.hi[2]).contains(&foot.z)), "{biome:?} {seed}: the stick stands on nothing");
+                assert!(!b.fine.iter().any(|f| f.lo[1] >= foot.y && f.lo[1] < foot.y + 3 && (f.lo[0]..f.hi[0]).contains(&foot.x) && (f.lo[2]..f.hi[2]).contains(&foot.z)), "{biome:?} {seed}: no room for the stick");
+            }
+            for kind in Landmark::ALL.into_iter().filter(|&k| k != Landmark::Shrine) {
+                let (_, _, props) = landmarks::build_site(kind, &palette, 3, 12);
+                assert!(props.iter().all(|p| p.prop != Prop::Burner && p.burner.is_none()), "{kind:?}");
+            }
         }
     }
 

@@ -48,6 +48,8 @@ pub struct Environment {
     pub year: u32,
     /// How bright the northern lights are, 0 to 1 (see aurora.rs); 0 unless set.
     pub aurora: f32,
+    /// The world's constellations, for the sky to draw (see stars.rs); none unless set.
+    pub stars: Option<std::sync::Arc<crate::stars::Lights>>,
 }
 
 /// Height of the cloud base above sea level over low country, in voxels.
@@ -162,6 +164,7 @@ impl Environment {
             date,
             year: 0,
             aurora: 0.0,
+            stars: None,
         }
     }
 

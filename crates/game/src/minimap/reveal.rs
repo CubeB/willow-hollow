@@ -17,6 +17,13 @@ pub const TEXEL: f32 = MACRO_SIZE as f32 / TEX as f32;
 /// How far the player sees on level ground, and at most, in voxels.
 pub const NEAR_SIGHT: f32 = m(250.0);
 pub const FAR_SIGHT: f32 = m(1500.0);
+/// How far a camp shows of the country about it, at most (#37): a night spent looking out
+/// from a hill takes in far more than a glance in passing.
+pub const CAMP_SIGHT: f32 = m(4000.0);
+/// How much further the land is seen for each voxel stood above it, walking by and from
+/// a camp.
+const SIGHT_PER_HEIGHT: f32 = 2.5;
+const CAMP_PER_HEIGHT: f32 = 10.0;
 /// How far around the ground is looked at to judge how high the player stands.
 const LOOKOUT: [f32; 2] = [m(500.0), m(1400.0)];
 /// Radius of the walked trail, in texels.
@@ -165,6 +172,23 @@ pub fn write(path: &Path, data: &[u8]) -> bool {
 /// How far the player sees from continent-local `at`, eye `eye` voxels up: more the
 /// higher they stand above the land around them, as from a hill or in the air.
 pub fn sight(c: &Continent, at: Vec2, eye: f32) -> f32 {
+    reach(above(c, at, eye))
+}
+
+/// How far the land shows from someone `above` voxels over the land round about.
+pub fn reach(above: f32) -> f32 {
+    (NEAR_SIGHT + above.max(0.0) * SIGHT_PER_HEIGHT).min(FAR_SIGHT)
+}
+
+/// How far the land shows from a camp `above` voxels over the land round about (#37):
+/// as far as in passing on level ground, and far further from a hill.
+pub fn camp_reach(above: f32) -> f32 {
+    (NEAR_SIGHT + above.max(0.0) * CAMP_PER_HEIGHT).min(CAMP_SIGHT).max(reach(above))
+}
+
+/// How far an eye `eye` voxels up at continent-local `at` stands above the land around
+/// it, in voxels: nothing below it.
+pub fn above(c: &Continent, at: Vec2, eye: f32) -> f32 {
     let n = c.size;
     let cs = c.cell_size();
     let ground = |p: Vec2| {
@@ -183,8 +207,7 @@ pub fn sight(c: &Continent, at: Vec2, eye: f32) -> f32 {
         .map(ground)
         .sum::<f32>()
         / (12 * LOOKOUT.len()) as f32;
-    let above = (eye - around).max(0.0);
-    (NEAR_SIGHT + above * 2.5).min(FAR_SIGHT)
+    (eye - around).max(0.0)
 }
 
 #[cfg(test)]
@@ -223,6 +246,34 @@ mod tests {
         assert!((NEAR_SIGHT..=FAR_SIGHT).contains(&low) && (NEAR_SIGHT..=FAR_SIGHT).contains(&high));
         // Far up in the air, it is as far as it goes.
         assert_eq!(sight(&c, at(shore), m(3000.0)), FAR_SIGHT);
+    }
+
+    #[test]
+    fn a_camp_on_high_ground_opens_the_map_further_the_higher_it_stands() {
+        // On level ground a camp shows what passing by would; above the land, more and
+        // more, up to its most.
+        assert_eq!(camp_reach(0.0), reach(0.0));
+        assert_eq!(camp_reach(-m(30.0)), NEAR_SIGHT);
+        let mut last = camp_reach(0.0);
+        for metres in [20.0, 60.0, 150.0, 300.0, 450.0] {
+            let (camp, passing) = (camp_reach(m(metres)), reach(m(metres)));
+            assert!(camp > last && camp > passing, "{metres} m up: camp {camp}, passing {passing}");
+            last = camp;
+        }
+        assert!(camp_reach(m(200.0)) > m(1400.0) && reach(m(200.0)) < m(800.0));
+        assert_eq!(camp_reach(m(5000.0)), CAMP_SIGHT);
+        assert!(CAMP_SIGHT > FAR_SIGHT);
+        // Read from a real continent: a summit is far above the land about it, a shore not.
+        let world = worldgen::world::GameWorld::with_config(3, worldgen::continent::SimConfig { size: 256 });
+        let c = world.continent(0, 0);
+        let (n, cs) = (c.size, c.cell_size());
+        let at = |i: usize| Vec2::new((i % n) as f32 + 0.5, (i / n) as f32 + 0.5) * cs;
+        let top = (0..n * n).max_by(|&a, &b| c.height[a].total_cmp(&c.height[b])).expect("cells");
+        let shore = (0..n * n).find(|&i| !c.ocean[i] && c.height[i] < 2.0).expect("a shore");
+        let high = above(&c, at(top), c.height[top] * OLD_VOXEL + 2.0);
+        let low = above(&c, at(shore), c.height[shore] * OLD_VOXEL + 2.0);
+        assert!(high > m(100.0) && low < m(20.0), "summit {high}, shore {low}");
+        assert!(camp_reach(high) > sight(&c, at(top), c.height[top] * OLD_VOXEL + 2.0) + m(300.0));
     }
 
     #[test]

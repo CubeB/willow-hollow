@@ -1158,6 +1158,13 @@ fn place_sites(c: &Continent, seed: u32, comp: &[u32], net: &mut Network) -> (Ve
 /// Keeps a site's props back until the trails are down, so none is left on one.
 fn hold_props(net: &mut Network, props: Vec<crate::features::props::Placed>, origin: IVec3, turns: u32) {
     for prop in props {
+        if let Some((lo, hi)) = prop.burner {
+            // The middle of the cells marked, on their floor: the foot of the stick.
+            let (lo, hi) = parts::rotate_box(lo, hi, turns);
+            let cells = (lo + hi).as_vec3() * 0.5;
+            let at = origin.as_vec3() + glam::vec3(cells.x, lo.y as f32, cells.z) / voxel::mesh::CELLS as f32;
+            net.held_burners.push((net.held_props.len(), at));
+        }
         let foot = prop.footprint().into_iter().map(|c| {
             let r = rotate(IVec3::new(c.x, 0, c.y), turns);
             IVec2::new(origin.x + r.x, origin.z + r.z)
@@ -1977,6 +1984,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
     });
 
     // Site props, except any standing where a trail runs.
+    let burners = std::mem::take(&mut net.held_burners);
     for (n, (voxels, fine, foot)) in std::mem::take(&mut net.held_props).into_iter().enumerate() {
         let Some(first) = foot.first() else { continue };
         if n < held_before && foot.iter().any(|&c| on_plot(c)) {
@@ -1989,6 +1997,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             near.iter().any(|&n| walked[n].distance_squared(c) < (widths[n] + 0.5).powi(2))
         });
         if !on_way {
+            net.burners.extend(burners.iter().filter(|b| b.0 == n).map(|&(_, at)| super::Burner { at, wayside: false }));
             // What was set about a plot keeps its tag for the years (#207).
             match net.years.held.remove(&n) {
                 Some(tag) => net.add_stamp_tagged(voxels, fine, tag),
@@ -2028,6 +2037,7 @@ pub fn build(c: &Continent, world_seed: u32) -> Network {
             gap < APART || (o.kind == d.kind && gap < APART_SAME)
         });
         if !on_way && !by_site && !crowded {
+            net.burners.extend(d.burner.map(|at| super::Burner { at, wayside: true }));
             net.delights.push(Standing { kind: d.kind, at: d.origin, footprint: d.footprint });
             net.add_stamp_with(d.voxels, d.fine);
         }

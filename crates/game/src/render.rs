@@ -279,6 +279,15 @@ const _: () = assert!(SEASON_SLOTS == 128);
 const SNOW_SLOTS: usize = 24;
 const _: () = assert!(worldgen::biome::Biome::ALL.len() <= SNOW_SLOTS);
 
+/// The sky's own uniform: the northern lights, and the constellations (`AuroraLights` in
+/// sky.wgsl).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SkyLights {
+    aurora: [f32; 4],
+    stars: crate::stars::Lights,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Shadows {
@@ -964,7 +973,7 @@ impl Renderer {
         // they ask nothing of the scene's globals.
         let aurora = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("aurora"),
-            size: 16,
+            size: std::mem::size_of::<SkyLights>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1945,7 +1954,7 @@ impl Renderer {
             sky_glow: v4(env.sky_glow, env.glow),
             // w: how far the stars have wheeled round, radians: once a day, and once
             // more over the year, so each season has its own evening sky.
-            sun_pos: v4(env.sun_pos, (env.time / 24.0 + env.date) * std::f32::consts::TAU),
+            sun_pos: v4(env.sun_pos, crate::stars::wheel(env.time, env.date)),
             air: [env.haze, env.haze_height, shafts, env.haziness()],
             snow: std::array::from_fn(|k| {
                 let g = scene.ground.biomes.get(k).unwrap_or(&scene.ground.here);
@@ -1966,8 +1975,10 @@ impl Renderer {
         globals.cam_fwd[3] = snow_floor(&globals.snow);
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         // The lights: drawn by the sky alone (see aurora.rs). Their curtains change
-        // shape with the time, so they need no other number.
-        gpu.queue.write_buffer(&self.aurora, 0, bytemuck::bytes_of(&[env.aurora, 0.0f32, 0.0, 0.0]));
+        // shape with the time, so they need no other number. With them go the world's
+        // constellations, which wheel with the other stars (see stars.rs).
+        let lights = SkyLights { aurora: [env.aurora, 0.0, 0.0, 0.0], stars: env.stars.as_deref().copied().unwrap_or_default() };
+        gpu.queue.write_buffer(&self.aurora, 0, bytemuck::bytes_of(&lights));
 
         // Visible chunks, with their camera-relative offsets computed in f64.
         let frustum = Frustum::new(view_proj);

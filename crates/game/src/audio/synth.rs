@@ -1,4 +1,5 @@
-//! Footsteps, made as they play from noise and a low tone.
+//! Footsteps, made as they play from noise and a low tone, and the soft chime of a small
+//! bell when incense is lit at a shrine (#40).
 //!
 //! [`Mixer`] is plain arithmetic with no audio device behind it, so it can be tested,
 //! and it never allocates, so it is safe on the audio thread.
@@ -108,12 +109,48 @@ impl Footfall {
     }
 }
 
+/// A small bell struck once: a few partials of a bowl's uneven ring, each dying away in
+/// its own time, the high ones soonest, so that it starts bright and fades to a hum.
+/// Each partial is two tones a hair apart, which beat slowly as a real bell's do.
+#[derive(Clone, Copy, Default)]
+struct Chime {
+    phase: [f32; 8],
+    step: [f32; 8],
+    level: [f32; 8],
+    decay: [f32; 8],
+    /// The strike: a few milliseconds of rise, so it is a touch and not a click.
+    attack: f32,
+    attack_step: f32,
+}
+
+/// The partials of a small bell, from its hum: (pitch as a multiple of the hum, loudness,
+/// seconds to die away to a third).
+const BELL: [(f32, f32, f32); 4] = [(1.0, 1.0, 2.6), (2.76, 0.42, 1.5), (5.4, 0.16, 0.8), (8.93, 0.06, 0.4)];
+
+impl Chime {
+    fn next(&mut self) -> f32 {
+        self.attack = (self.attack + self.attack_step).min(1.0);
+        let mut s = 0.0;
+        for k in 0..8 {
+            self.phase[k] = (self.phase[k] + self.step[k]).rem_euclid(TAU);
+            s += self.phase[k].sin() * self.level[k];
+            self.level[k] *= self.decay[k];
+        }
+        s * self.attack
+    }
+
+    fn done(&self) -> bool {
+        self.level.iter().all(|l| *l < 1e-4)
+    }
+}
+
 /// Plays footsteps, one buffer at a time.
 pub struct Mixer {
     rate: f32,
     rng: Rng,
     volume: f32,
     steps: [Footfall; 4],
+    chimes: [Chime; 2],
 }
 
 impl Mixer {
@@ -123,7 +160,27 @@ impl Mixer {
             rng: Rng(seed.wrapping_mul(0x9e37_79b9) | 1),
             volume,
             steps: [Footfall::default(); 4],
+            chimes: [Chime::default(); 2],
         }
+    }
+
+    /// Strikes the bell; `loud` is 0 to 1.
+    pub fn chime(&mut self, loud: f32) {
+        // A hum about the E above middle C, never quite the same twice.
+        let hum = 660.0 * self.rng.range(0.985, 1.015);
+        let mut bell = Chime { attack_step: 1.0 / (0.004 * self.rate), ..Default::default() };
+        for (k, (ratio, level, seconds)) in BELL.into_iter().enumerate() {
+            for (n, beat) in [(0, 1.0), (1, 1.0016)] {
+                let i = 2 * k + n;
+                bell.step[i] = hum * ratio * beat / self.rate * TAU;
+                bell.level[i] = loud * level * 0.06;
+                bell.decay[i] = (-1.0 / (seconds * self.rate)).exp();
+                bell.phase[i] = self.rng.range(0.0, TAU);
+            }
+        }
+        // A free one, or over the first if both still ring.
+        let k = self.chimes.iter().position(Chime::done).unwrap_or(0);
+        self.chimes[k] = bell;
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -168,6 +225,9 @@ impl Mixer {
             let mut feet = 0.0;
             for s in self.steps.iter_mut().filter(|s| !s.done()) {
                 feet += s.next(&mut self.rng);
+            }
+            for c in self.chimes.iter_mut().filter(|c| !c.done()) {
+                feet += c.next();
             }
             let sample = (feet * self.volume).tanh();
             *frame = [sample, sample];
@@ -241,6 +301,22 @@ mod tests {
     fn volume_scales_the_output() {
         let (quiet, loud) = (rms(&footstep(Ground::Earth, 0.2)), rms(&footstep(Ground::Earth, 0.8)));
         assert!(loud > quiet * 3.0, "{quiet} against {loud}");
+    }
+
+    #[test]
+    fn a_chime_rings_softly_at_its_pitch_and_dies_away() {
+        let mut mixer = Mixer::new(RATE, 9, 1.0);
+        mixer.chime(1.0);
+        let mut out = vec![0.0; 2 * (10.0 * RATE) as usize];
+        mixer.render(&mut out);
+        let s: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+        let start = &s[..(0.3 * RATE) as usize];
+        assert!(rms(start) > 5e-3 && start.iter().all(|v| v.abs() < 0.2), "{}", rms(start));
+        // Its hum is where the sound is, not in the footsteps' low thump.
+        assert!(band(start, 640.0, 680.0) > band(start, 60.0, 300.0) * 20.0);
+        assert!(rms(&s[(9.5 * RATE) as usize..]) < rms(start) * 0.05, "still ringing");
+        // The strike is soft: no click in the first sample.
+        assert!(s[0].abs() < 1e-3);
     }
 
     #[test]

@@ -343,6 +343,24 @@ impl GameWorld {
         out
     }
 
+    /// The burners where incense may be lit (#40; see [`trails::Network::burners`]) within
+    /// `reach` voxels of the column at `(x, z)`, each where the foot of a stick stands in
+    /// it, in world voxels. Never blocks, as [`Self::delights_near`].
+    pub fn burners_near(&self, x: i32, z: i32, reach: i32) -> Vec<trails::Burner> {
+        let mut out = Vec::new();
+        let (lo, hi) = (cell_of(x - reach, z - reach), cell_of(x + reach, z + reach));
+        let (centre, r2) = (glam::Vec2::new(x as f32, z as f32), (reach as f32).powi(2));
+        for mz in lo.1..=hi.1 {
+            for mx in lo.0..=hi.0 {
+                let Some(c) = self.continent_if_ready(mx, mz) else { continue };
+                let origin = Vec3::new((mx * MACRO_SIZE) as f32, 0.0, (mz * MACRO_SIZE) as f32);
+                let moved = c.trails.burners.iter().map(|b| trails::Burner { at: b.at + origin, ..*b });
+                out.extend(moved.filter(|b| (glam::Vec2::new(b.at.x, b.at.z) - centre).length_squared() <= r2));
+            }
+        }
+        out
+    }
+
     /// The tops of the chimneys and smoke holes of lived-in homes within `reach` voxels
     /// of the column at `(x, z)`, in world voxels. Never blocks: nothing from a continent
     /// not yet simulated. This is where the game sends chimney smoke up from.

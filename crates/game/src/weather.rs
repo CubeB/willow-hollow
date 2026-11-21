@@ -82,6 +82,48 @@ pub struct Sky {
     pub stir: f32,
 }
 
+impl Sky {
+    /// What the sky is doing, as the journal says it of a camp being made: "under a
+    /// clear sky", "in the rain".
+    pub fn under(&self) -> &'static str {
+        match self.word() {
+            0 => "in a gale",
+            1 => "with snow falling",
+            2 => "in the rain",
+            3 => "in fog",
+            4 => "under a grey sky",
+            5 => "under broken cloud",
+            _ => "under a clear sky",
+        }
+    }
+
+    /// The same of a night gone by: "a clear, starry night".
+    pub fn night(&self) -> &'static str {
+        match self.word() {
+            0 => "a wild night of wind",
+            1 => "snow in the night",
+            2 => "rain in the night",
+            3 => "a night of fog",
+            4 => "a cloudy night",
+            5 => "a night of passing cloud",
+            _ => "a clear, starry night",
+        }
+    }
+
+    /// Which of the words above, the one that most marks the weather first.
+    fn word(&self) -> u8 {
+        match self {
+            s if s.storm > 0.5 => 0,
+            s if s.snow > 0.3 => 1,
+            s if s.rain > 0.3 => 2,
+            s if s.fog > 0.4 => 3,
+            s if s.cloud > 0.75 => 4,
+            s if s.cloud > 0.35 => 5,
+            _ => 6,
+        }
+    }
+}
+
 /// The clouds' slow cycle of forming and clearing (see cloud_mix in common.wgsl), in
 /// radians a second: a stretch of sky goes from one cloud to another and back in about
 /// sixteen minutes, in steady weather.

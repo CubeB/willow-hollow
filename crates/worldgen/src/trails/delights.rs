@@ -364,7 +364,13 @@ pub struct Placed {
     pub fine: Vec<voxel::mesh::PlantBox>,
     /// The columns where it stands on the ground.
     pub footprint: Vec<IVec2>,
+    /// For a shelf, where a stick of incense stands in its dish (#40): the foot of it, in
+    /// continent-local voxels.
+    pub burner: Option<glam::Vec3>,
 }
+
+/// The cells of a shelf's model a stick of incense stands in, over its clay dish.
+const SHELF_STICK: ((i32, i32, i32), (i32, i32, i32)) = ((2, 10, 2), (4, 11, 3));
 
 /// A delight standing in the world.
 #[derive(Clone, Debug)]
@@ -618,7 +624,12 @@ fn stand(
     if !level || !under.iter().all(|c| ground(c.x, c.y).is_some_and(|y| y <= want(c).max(highest))) {
         return None;
     }
-    Some(Placed { kind, at: q, origin, voxels, fine, footprint })
+    let burner = (kind == Delight::Shelf).then(|| {
+        let (lo, hi) = parts::rotate_box(IVec3::from(SHELF_STICK.0), IVec3::from(SHELF_STICK.1), turns);
+        let middle = (lo + hi).as_vec3() * 0.5;
+        origin.as_vec3() + glam::vec3(middle.x, lo.y as f32, middle.z) / CELLS as f32
+    });
+    Some(Placed { kind, at: q, origin, voxels, fine, footprint, burner })
 }
 
 #[cfg(test)]
@@ -667,6 +678,36 @@ mod tests {
             let moves = model(kind, &Palette::of(Biome::Grassland), 3, 6, 0).fine.iter().filter(|b| b.sway_lo || b.sway_hi).count();
             assert_eq!(moves > 0, matches!(kind, Delight::Chimes | Delight::Flags), "{kind:?}");
         }
+    }
+
+    /// Every shrine has its burner on its pad, and every wayside shelf its dish, where a
+    /// stick of incense can be lit (#40); and the world finds them about a place.
+    #[test]
+    fn every_shrine_and_wayside_shelf_has_a_burner() {
+        use crate::features::landmarks::Landmark;
+        let w = GameWorld::with_config(1, SimConfig { size: 1024 });
+        let c = w.continent(0, 0);
+        let net = &c.trails;
+        let shrines: Vec<_> = net.sites.iter().filter(|s| s.kind == Landmark::Shrine).collect();
+        let shelves = net.delights.iter().filter(|d| d.kind == Delight::Shelf).count();
+        let (wayside, before): (Vec<&super::super::Burner>, Vec<_>) = net.burners.iter().partition(|b| b.wayside);
+        println!("{} burners before {} shrines, {} on {shelves} shelves", before.len(), shrines.len(), wayside.len());
+        assert!(!shrines.is_empty());
+        assert_eq!(wayside.len(), shelves);
+        assert!(before.len() * 10 >= shrines.len() * 9, "{} burners before {} shrines", before.len(), shrines.len());
+        for b in &before {
+            let pad = shrines.iter().map(|s| vec2(s.x as f32 + 0.5, s.z as f32 + 0.5).distance(vec2(b.at.x, b.at.z))).fold(f32::MAX, f32::min);
+            assert!(pad < Landmark::Shrine.radius(), "a burner {pad:.1} voxels from any shrine");
+            // At about knee height over the shrine's ground.
+            let s = shrines.iter().min_by(|a, s| vec2(a.x as f32, a.z as f32).distance(vec2(b.at.x, b.at.z)).total_cmp(&vec2(s.x as f32, s.z as f32).distance(vec2(b.at.x, b.at.z)))).unwrap();
+            assert!((0.0..m(2.2)).contains(&(b.at.y - s.y as f32)), "a burner {:.1} voxels over its shrine's floor", b.at.y - s.y as f32);
+        }
+        for d in net.delights.iter().filter(|d| d.kind == Delight::Shelf) {
+            assert!(wayside.iter().any(|b| vec2(b.at.x, b.at.z).distance(vec2(d.at.x as f32, d.at.z as f32)) < 2.0 && b.at.y > d.at.y as f32), "{:?}", d.at);
+        }
+        let b = before[0];
+        let found = w.burners_near(b.at.x as i32, b.at.z as i32, 8);
+        assert!(found.iter().any(|f| f.at == b.at), "{found:?}");
     }
 
     #[test]

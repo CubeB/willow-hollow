@@ -346,6 +346,9 @@ pub struct Minimap {
     pub hour: f32,
     /// Where the player has camped, in world voxels: each is marked.
     pub camps: Vec<DVec2>,
+    /// How rested the player is, 0 to 1 (see rested.rs): a quiet word under the corner
+    /// map while it lasts.
+    pub rested: f32,
     /// Where the parties of settlers the player has met have got to, in world voxels.
     pub met: Vec<DVec2>,
     /// The country a guild house's wayfarers have charted (#207), its middle in world
@@ -353,6 +356,9 @@ pub struct Minimap {
     pub charted: Vec<(DVec2, f64)>,
     /// The same for the quarries a guild house's masons have marked (#207).
     pub quarried: Vec<(DVec2, f64)>,
+    /// The places incense lit at a shrine has told of (#40), in world voxels: each has a
+    /// faint mark until it is come to, seen or not.
+    pub told: Vec<DVec2>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -488,6 +494,8 @@ impl Minimap {
             aim: None,
             hour: 12.0,
             camps: Vec::new(),
+            told: Vec::new(),
+            rested: 0.0,
             met: Vec::new(),
             charted: Vec::new(),
             quarried: Vec::new(),
@@ -745,6 +753,31 @@ impl Minimap {
                 self.version += 1;
             }
         }
+    }
+
+    /// The nearest spring or shrine to `at` (world x and z) that has not been come to,
+    /// nor told of already, and is more than `beyond` voxels off (not the shrine stood
+    /// at): its place, and whether it is a shrine. From the continents the map knows,
+    /// which are those about the player. This is what lighting incense tells of (#40).
+    pub fn unfound_near(&self, at: DVec2, beyond: f64) -> Option<(DVec2, bool)> {
+        let told = |p: DVec2| self.told.iter().any(|t| t.distance(p) < 2.0);
+        self.known
+            .values()
+            .flat_map(|k| k.sheet.marks.iter().zip(&k.visited))
+            .filter(|(m, visited)| !**visited && (m.kind == Kind::Spring || m.shrine) && m.at.distance(at) > beyond && !told(m.at))
+            .min_by(|a, b| a.0.at.distance(at).total_cmp(&b.0.at.distance(at)))
+            .map(|(m, _)| (m.at, m.shrine))
+    }
+
+    /// The name of the shrine within `within` voxels of `at` (world x and z), if there is
+    /// one and it has a name: for the journal, of the shrine incense was lit at (#40).
+    pub fn shrine_named(&self, at: DVec2, within: f64) -> Option<String> {
+        self.known
+            .values()
+            .flat_map(|k| k.sheet.marks.iter())
+            .filter(|m| m.shrine && m.at.distance(at) <= within)
+            .min_by(|a, b| a.at.distance(at).total_cmp(&b.at.distance(at)))
+            .and_then(|m| m.name.clone())
     }
 
     /// Reads which of a continent's places were visited from the trail in its mask.
@@ -1022,6 +1055,38 @@ impl Minimap {
         self.version += 1;
     }
 
+    /// Opens the map about a camp made with its fire at `fire` (world voxels), as far as
+    /// can be seen from there (#37): the further, the higher it stands above the land
+    /// about it. How far above that is, in voxels.
+    pub fn camp(&mut self, fire: DVec3) -> f32 {
+        let at = xz(fire);
+        let here = key_of(at);
+        let c = match self.known.get(&here) {
+            Some(k) => k.sheet.continent.clone(),
+            None => self.world.continent(here.0, here.1),
+        };
+        let eye = fire.y as f32 + crate::player::EYE_HEIGHT as f32;
+        let above = reveal::above(&c, (at - origin(here)).as_vec2(), eye);
+        let radius = reveal::camp_reach(above);
+        log::info!("a camp {:.0} m above the land about it shows the map {:.0} m round", above / VOXELS_PER_METRE, radius / VOXELS_PER_METRE);
+        let (lo, hi) = (key_of(at - radius as f64), key_of(at + radius as f64));
+        for kz in lo.1..=hi.1 {
+            for kx in lo.0..=hi.0 {
+                let local = (at - origin((kx, kz))).as_vec2();
+                match self.reveal_mut((kx, kz)) {
+                    Some(r) => r.see(local, radius, false),
+                    None => {
+                        if let Some(q) = self.loading.get_mut(&(kx, kz)) {
+                            q.push((local, radius, false));
+                        }
+                    }
+                }
+            }
+        }
+        self.version += 1;
+        above
+    }
+
     /// As if the player had walked along `path` (world x, z), for screenshots.
     pub fn walk(&mut self, path: &[DVec2]) {
         for pair in path.windows(2) {
@@ -1104,6 +1169,14 @@ impl Minimap {
         if let Some(name) = self.near.as_ref().or(self.region.as_ref()) {
             let size = (12.5 * f.s).min(f.half.x * 1.8 / names::width(name, 1.0).max(1.0));
             labels.push(Label { pos: [f.centre.x, f.centre.y + f.half.y - 10.0 * f.s], text: name.clone(), size, color: [INK[0], INK[1], INK[2], 235], left: false, right: false });
+        }
+
+        // Rested (#37): a word in the warm of firelight under the map's corner, fading as
+        // it wears off, and nothing at all once it has.
+        if self.rested > 0.01 {
+            let fade = (self.rested * 1.6).min(1.0);
+            let at = [f.centre.x - f.half.x + 4.0 * f.s, f.centre.y + f.half.y + 16.0 * f.s];
+            labels.push(Label { pos: at, text: "Rested".into(), size: 13.0 * f.s, color: [255, 214, 150, (235.0 * fade) as u8], left: true, right: false });
         }
 
         // The player, always facing up the map, and where north has got to.
@@ -1304,6 +1377,16 @@ impl Minimap {
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
+                // Told of by incense lit at a shrine (#40): a faint ring where it lies,
+                // over ground seen or not, until it is come to; beyond the corner map, a
+                // hint at its rim, however far off.
+                if !visited && self.told.iter().any(|t| t.distance(mark.at) < 2.0) {
+                    match at {
+                        Some((p, _)) if f.edge(p) < -3.0 => icons.push(Instance::new(gpu::RING, p.into(), icon * 1.15, [0.98, 0.90, 0.70, 0.55])),
+                        _ => hints.push((mark.at.distance(me).min(HINT * 0.5), mark.at)),
+                    }
+                    continue;
+                }
                 // What stands there as a model of itself is its own mark.
                 let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Tor);
                 let mut on_water = false;
