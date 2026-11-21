@@ -432,8 +432,12 @@ fn vs(in: VIn) -> VOut {
     var local = vertex_local(in.a);
     out.face = (in.a >> 18u) & 7u;
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
-    // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags.
-    let tag = season_tag(in.b);
+    // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags, and a
+    // flower's row of the table of seasons (season_row).
+    var tag = season_tag(in.b);
+    if ((in.b >> 29u) == PLANT_FLOWER) {
+        tag = season_row(in.b);
+    }
     out.flags = (in.b >> 24u) | (tag << 8u);
     if ((out.flags & FLAG_WASH) == FLAG_WASH) {
         local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
@@ -544,7 +548,7 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
     let cell = floor(in.local - n * INWARD);
     let voxel = vec3<i32>(cell) + ch.origin;
     let kind = (in.flags >> 5u) & 7u;
-    let tag = (in.flags >> 8u) & 63u;
+    let tag = (in.flags >> 8u) & 127u;
     let grass = kind == PLANT_GRASS || kind == PLANT_GROUND;
     // Grass takes most of its variety from where it grows (see `sward`), not at random.
     var jitter = f32((in.flags >> 1u) & 3u);

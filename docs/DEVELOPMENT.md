@@ -563,7 +563,9 @@ it cannot yet. The parsing and the console's history and completion have tests t
   number of its season (`PlantBox::season`, a row of `plants::seasons()`: when it starts,
   how long it lasts, how long it is in bud before and in seed after). The number rides
   to the shader in the low bits of the vertex colour, where a leaf carries its tree's
-  tag, and `season_phase` in `season.wgsl` decides from the date and the plant's column
+  tag, and its seventh bit in the third bit of blue (`voxel::mesh::season_bits`, read back
+  by `season_row`), so there are 127 rows: the flowers, the crops, the trees' fruit
+  (`tree_detail::seasons`) and the flowers added since. `season_phase` in `season.wgsl` decides from the date and the plant's column
   whether it is there and what colour it is. `Season::phase` in Rust is the same sum,
   which is how picking and the butterflies know which flowers are out. Change one and
   change the other.

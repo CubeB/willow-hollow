@@ -215,6 +215,8 @@ pub struct Leaf {
     pub tree: f32,
     /// The date it falls.
     pub fall_at: f32,
+    /// A cherry's: 1 in blossom, easing to 0 as it comes into leaf.
+    pub blossom: f32,
 }
 
 /// The leaf at voxel `vox` on a tree tagged `tag` (features::tree_tag, 0 if unknown):
@@ -232,6 +234,7 @@ pub fn leaf(s: f32, vox: IVec3, maple: bool, tag: u8) -> Leaf {
     let bud_at = 0.02 + 0.10 * tree + 0.03 * h;
     let fall_at = 0.625 + 0.05 * tree + 0.016 * (branch - 0.5) + 0.03 * (h - 0.5) - early;
     let turn_at = 0.47 + 0.06 * tree + 0.02 * (branch - 0.5) - early;
+    let leafed_at = 0.06 + 0.10 * tree;
     Leaf {
         // Midsummer: every leaf is on (season_gone).
         keep: (s > 0.27 && s < 0.40) || (s >= bud_at && s < fall_at),
@@ -239,25 +242,38 @@ pub fn leaf(s: f32, vox: IVec3, maple: bool, tag: u8) -> Leaf {
         bud: 1.0 - smoothstep(bud_at, bud_at + 0.12, s),
         tree,
         fall_at,
+        blossom: 1.0 - smoothstep(leafed_at, leafed_at + 0.03, s),
     }
+}
+
+/// Whether a broadleaf leaf of linear colour `c` is a cherry's, modelled pink, in its
+/// blossom: season.wgsl's `season_blossom`.
+fn cherry(c: Vec3) -> bool {
+    let q = Vec3::new(c.x.max(0.0).sqrt(), c.y.max(0.0).sqrt(), c.z.max(0.0).sqrt());
+    q.x > q.y * 1.2 && q.z > q.y * 1.05 && q.x > 0.6
 }
 
 /// The colour of a broadleaf leaf still on, from its modelled linear colour `c`:
 /// season.wgsl's `season_apply` for a deciduous or maple leaf.
 pub fn leaf_colour(c: Vec3, leaf: &Leaf, maple: bool, s: f32) -> Vec3 {
-    if !maple && s > 0.27 && s < 0.40 {
+    let blossom = !maple && cherry(c);
+    if !maple && s > 0.27 && s < 0.40 && !blossom {
         return c;
     }
-    let mut o = c;
+    // A cherry is modelled in blossom, and comes into leaf as it goes over.
+    let base = if blossom { (Vec3::new(0.06, 0.20, 0.035) * c.dot(Vec3::new(0.3, 0.59, 0.11)) / 0.58).lerp(c, leaf.blossom) } else { c };
+    // The pale of a new leaf, which blossom does not have.
+    let bud = if blossom { leaf.bud * (1.0 - leaf.blossom) } else { leaf.bud };
+    let mut o = base;
     if maple {
         o = Vec3::new(0.30, 0.95, 0.20) * c.dot(Vec3::new(0.3, 0.59, 0.11)) * 1.1;
     }
-    o = o.lerp(o * Vec3::new(1.45, 1.3, 0.6) + Vec3::new(0.02, 0.03, 0.0), leaf.bud * 0.7);
+    o = o.lerp(o * Vec3::new(1.45, 1.3, 0.6) + Vec3::new(0.02, 0.03, 0.0), bud * 0.7);
     if maple {
         return o.lerp(c, leaf.turn);
     }
     let (gold, red) = (Vec3::new(0.62, 0.36, 0.04), Vec3::new(0.5, 0.1, 0.03));
-    let tint = gold.lerp(red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + c.y * 2.0);
+    let tint = gold.lerp(red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + base.y * 2.0);
     o.lerp(tint, leaf.turn * 0.92)
 }
 
@@ -316,6 +332,21 @@ mod tests {
         // Gone by early winter; one tree drops later than another.
         assert!(!leaf(0.7, v, false, 9).keep);
         assert!(leaf(0.6, v, false, 60).fall_at > leaf(0.6, v, false, 2).fall_at);
+    }
+
+    #[test]
+    fn a_cherry_is_pink_in_blossom_and_green_in_summer() {
+        let pink = Vec3::new(0.888, 0.423, 0.565);
+        let v = IVec3::new(40, 80, -12);
+        let april = leaf_colour(pink, &leaf(0.06, v, false, 9), false, 0.06);
+        assert!(april.x > april.y && april.z > april.y, "{april}");
+        for s in [0.25, 0.32, 0.45] {
+            let c = leaf_colour(pink, &leaf(s, v, false, 9), false, s);
+            assert!(c.y > c.x && c.y > c.z, "{s}: {c}");
+        }
+        // Nothing else is taken for a cherry.
+        let green = Vec3::new(0.05, 0.22, 0.03);
+        assert!(cherry(pink) && !cherry(green) && !cherry(Vec3::new(0.49, 0.05, 0.03)));
     }
 
     #[test]

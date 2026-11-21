@@ -267,9 +267,9 @@ struct Globals {
     flowering: [[f32; 4]; SEASON_SLOTS],
 }
 
-/// Rows in the table of seasons, which the shaders keep as 64.
+/// Rows in the table of seasons, which the shaders keep as 128.
 const SEASON_SLOTS: usize = worldgen::features::plants::SEASON_SLOTS;
-const _: () = assert!(SEASON_SLOTS == 64);
+const _: () = assert!(SEASON_SLOTS == 128);
 
 /// Entries in the globals' snow table: every biome, rounded up.
 const SNOW_SLOTS: usize = 24;
@@ -2923,7 +2923,9 @@ mod tests {
             // The flowers' season rides above their kind, and both come back out whole.
             let w = &worldgen::features::plants::washes()[i - 1];
             assert_eq!((bloom[i][3] as u32) >> 3, w.season as u32);
-            assert!((bloom[i][3] as u32 & 7) < 8 && (w.season as usize) < SEASON_SLOTS);
+            // far.wgsl and terrain.wgsl read it back in six bits: a wash keeps one of the
+            // first 64 rows.
+            assert!((bloom[i][3] as u32 & 7) < 8 && w.season < 64);
             assert!(body[i][..3].iter().all(|c| (0.0..=1.0).contains(c)));
         }
     }

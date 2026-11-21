@@ -113,6 +113,8 @@ pub fn of_flower(f: Flower) -> Item {
         Flower::WaterLily => ("Lifted dripping from the still water.", Shape::Flower),
         Flower::FlyAgaric => ("Red and white-spotted. For looking at, not for eating.", Shape::Mushroom),
         Flower::PennyBun => ("Fat and brown as a loaf, and as good.", Shape::Mushroom),
+        Flower::StGeorge => ("A firm cream cap, up in the grass when the year is young.", Shape::Mushroom),
+        Flower::Chanterelle => ("Gold as an egg yolk, and smelling of apricots.", Shape::Mushroom),
         Flower::Bluebell => ("One bell from a wood that was blue with them.", Shape::Spike),
         Flower::Foxglove => ("A spire of speckled bells. The bees climb right inside.", Shape::Spike),
         Flower::Primrose => ("Pale as butter, and among the first of the year.", Shape::Flower),

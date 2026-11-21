@@ -202,7 +202,7 @@ impl Town<'_> {
 
         // Beds of the country's wild flowers round the tree's ground, a kerb about each
         // and the bed raised on it, two kinds to a bed.
-        let kinds: Vec<Flower> = fittings::herbs_of(self.s.region).iter().copied().filter(|f| !matches!(f, Flower::PennyBun | Flower::FlyAgaric)).collect();
+        let kinds: Vec<Flower> = fittings::herbs_of(self.s.region).iter().copied().filter(|f| !f.is_mushroom()).collect();
         if !kinds.is_empty() {
             for k in 0..8 {
                 let a = u.to_angle() + std::f32::consts::FRAC_PI_4 * k as f32 + 0.4;

@@ -67,7 +67,7 @@ struct Globals {
     wash_bloom: array<vec4<f32>, 128>,
     // The seasons of the plants that have their own, by the number their vertices carry:
     // start, length, bud, seed (see season_phase in season.wgsl).
-    flowering: array<vec4<f32>, 64>,
+    flowering: array<vec4<f32>, 128>,
 };
 
 struct Shadows {

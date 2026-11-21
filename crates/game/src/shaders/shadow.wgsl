@@ -5,7 +5,7 @@ struct Cascade {
     // x: the date.
     season: vec4<f32>,
     // The seasons of the plants that have their own (see season_phase in season.wgsl).
-    flowering: array<vec4<f32>, 64>,
+    flowering: array<vec4<f32>, 128>,
 };
 
 @group(0) @binding(0) var<uniform> C: Cascade;
@@ -62,7 +62,7 @@ fn vs(in: VIn) -> @builtin(position) vec4<f32> {
     if (kind == PLANT_FLOWER) {
         // A flower that is not there casts nothing. Flowers go a column at a time.
         let col = in.origin / i32(scale) + vec3<i32>(floor(local)) - vertex_corner(in.a);
-        let tag = season_tag(in.b);
+        let tag = season_row(in.b);
         var gone = false;
         if (tag != 0u) {
             gone = season_phase(C.flowering[tag], C.season.x, col.xz).x < 0.5;

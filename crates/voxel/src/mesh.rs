@@ -69,7 +69,7 @@ pub struct PlantBox {
     /// 7/8 of a voxel can be drawn (see [`Vertex`]); a skin flush against the voxel's
     /// near or far face always does.
     pub thin: u8,
-    /// 0, or the number (1..=63) of the season this box keeps: a row of a table the
+    /// 0, or the number (1..=127) of the season this box keeps: a row of a table the
     /// renderer holds, which says between which dates the box is there and when it is in
     /// bud, in flower and gone to seed (a flower's bloom, its leaves, a berry). A box with
     /// one is drawn as a [`plant::FLOWER`](crate::plant::FLOWER) whatever its material,
@@ -196,12 +196,18 @@ fn box_kind(b: &PlantBox, mats: &Materials) -> u8 {
 }
 
 /// A season's number (see [`PlantBox::season`]) spread over the low two bits of each
-/// colour channel, where a broadleaf leaf carries its tree tag: the shader reads both
-/// the same way (`season_tag` in season.wgsl).
+/// colour channel, where a broadleaf leaf carries its tree tag, and its seventh bit in
+/// the third bit of blue, which a flower gives up as well ([`SEASON_HIGH`]): the shader
+/// reads them back the same way (`season_row` in season.wgsl). The table filled its
+/// first 64 rows with the flowers and the crops; the fruit of the trees came after.
 pub fn season_bits(season: u8) -> u32 {
-    let s = (season & 63) as u32;
-    (s & 3) | (s & 12) << 6 | (s & 48) << 12
+    let s = (season & 127) as u32;
+    (s & 3) | (s & 12) << 6 | (s & 112) << 12
 }
+
+/// The bit of a flower's colour that holds the seventh bit of its season's number: the
+/// third of blue, a change of 4/255 at most.
+pub const SEASON_HIGH: u32 = 1 << 18;
 
 /// The quarter and half-step bit that put a vertex `r` eighths of a voxel into its voxel,
 /// for odd `r`, or `None` for 3/8, which the format cannot hold.
@@ -1089,12 +1095,17 @@ fn color_bits(c: [u8; 3]) -> u64 {
 const TAG_BITS: u32 = 0x03_0303;
 
 /// A colour as packed into a vertex: a broadleaf leaf's with its tree tag cleared, to be
-/// filled in by [`tag_trees`], and a flower's with the same bits cleared for the number
-/// of its season (0, the common year of flowers, unless a [`PlantBox`] names one).
+/// filled in by [`tag_trees`], and a flower's with the same bits and [`SEASON_HIGH`]
+/// cleared for the number of its season (0, the common year of flowers, unless a
+/// [`PlantBox`] names one).
 #[inline]
 fn leaf_color_bits(c: [u8; 3], kind: u8) -> u64 {
     let bits = color_bits(c);
-    if matches!(kind, plant::DECIDUOUS | plant::AUTUMN | plant::FLOWER | plant::GRASS | plant::GROUND) { bits & !(TAG_BITS as u64) } else { bits }
+    match kind {
+        plant::FLOWER => bits & !((TAG_BITS | SEASON_HIGH) as u64),
+        plant::DECIDUOUS | plant::AUTUMN | plant::GRASS | plant::GROUND => bits & !(TAG_BITS as u64),
+        _ => bits,
+    }
 }
 
 /// Six bits as a vertex carries them in the low two bits of each colour channel: a leaf
@@ -1332,6 +1343,27 @@ mod tests {
     /// The bits `season_tag` in season.wgsl reads from a vertex.
     fn tag_of(b: u32) -> u8 {
         ((b & 3) | (b >> 6 & 12) | (b >> 12 & 48)) as u8
+    }
+
+    /// The number `season_row` in season.wgsl reads from a flower's vertex.
+    fn row_of(b: u32) -> u8 {
+        tag_of(b) | (b >> 12 & 64) as u8
+    }
+
+    #[test]
+    fn a_flower_carries_every_row_of_the_table_and_nothing_else_in_its_colour() {
+        let (m, stone, _) = mats();
+        let c = PaddedChunk::new();
+        for season in [1u8, 9, 63, 64, 65, 100, 127] {
+            let b = PlantBox { lo: [9, 5, 2], hi: [10, 6, 3], voxel: stone, sway_lo: false, sway_hi: false, thin: 0, season, flap: 0 };
+            let mut mesh = ChunkMesh::default();
+            add_plants(&mut mesh, [b].iter(), &c, [0, 0, 0], &m, &[]);
+            assert!(!mesh.opaque.is_empty());
+            for v in &mesh.opaque {
+                assert_eq!((v.b >> 24) as u8 >> flags::PLANT_SHIFT, plant::FLOWER);
+                assert_eq!(row_of(v.b), season, "row {season}");
+            }
+        }
     }
 
     #[test]

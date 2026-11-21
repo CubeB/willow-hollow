@@ -815,7 +815,7 @@ pub fn catalogue(materials: &voxel::Materials) -> Vec<Item> {
 pub fn months(id: &str) -> Option<String> {
     use worldgen::features::plants::MONTHS;
     let f = Flower::ALL.iter().find(|f| f.id() == id)?;
-    let word = if matches!(f, Flower::FlyAgaric | Flower::PennyBun) { "Up" } else { "In flower" };
+    let word = if f.is_mushroom() { "Up" } else { "In flower" };
     let (first, last) = f.months();
     Some(if f.all_year() {
         format!("{word} all the year round.")
@@ -836,7 +836,10 @@ pub fn country(id: &str) -> Option<&'static str> {
             Flower::Campion => "Open ground in most country, in drifts of pink.",
             Flower::Heather => "The heath and the open moor.",
             Flower::WaterLily => "Still water, a little way out from a lake's shore.",
-            Flower::FlyAgaric | Flower::PennyBun => "The floor of old forest, taiga and rainforest.",
+            Flower::FlyAgaric => "The floor of old forest, taiga and rainforest, and birch groves.",
+            Flower::PennyBun => "The floor of old forest, taiga and rainforest, and broadleaf woods.",
+            Flower::Chanterelle => "In patches in the moss of woods and forest, out of the tropics.",
+            Flower::StGeorge => "Grassland and steppe, and broadleaf woods.",
             Flower::Bluebell => "Broadleaf woods and birch groves, in carpets.",
             Flower::Foxglove => "The edges of woods, and the moor.",
             Flower::Primrose => "Broadleaf woods.",

@@ -229,6 +229,13 @@ pub enum Flower {
     DesertMarigold,
     /// A purple brush on a spiny stem, on the steppe.
     Thistle,
+    // The kinds added since keep rows of their own in the table of seasons: see
+    // `Flower::bloom_code`.
+    /// A cream cap in the grass and at the edges of woods, the one mushroom of spring:
+    /// it is said to come up on St George's day.
+    StGeorge,
+    /// An egg-yolk funnel in the moss of the woods, from midsummer into autumn.
+    Chanterelle,
 }
 
 impl Flower {
@@ -260,7 +267,14 @@ impl Flower {
         Flower::Heliconia,
         Flower::DesertMarigold,
         Flower::Thistle,
+        Flower::StGeorge,
+        Flower::Chanterelle,
     ];
+
+    /// Whether it is a mushroom, which comes up rather than flowers, and draws no bees.
+    pub fn is_mushroom(self) -> bool {
+        matches!(self, Flower::FlyAgaric | Flower::PennyBun | Flower::StGeorge | Flower::Chanterelle)
+    }
 
     /// Its name, in plain English.
     pub fn name(self) -> &'static str {
@@ -292,6 +306,8 @@ impl Flower {
             Flower::Heliconia => "Heliconia",
             Flower::DesertMarigold => "Desert marigold",
             Flower::Thistle => "Thistle",
+            Flower::StGeorge => "St George's mushroom",
+            Flower::Chanterelle => "Chanterelle",
         }
     }
 
@@ -325,6 +341,8 @@ impl Flower {
             Flower::Heliconia => "heliconia",
             Flower::DesertMarigold => "desert_marigold",
             Flower::Thistle => "thistle",
+            Flower::StGeorge => "st_georges_mushroom",
+            Flower::Chanterelle => "chanterelle",
         }
     }
 
@@ -353,6 +371,8 @@ impl Flower {
             Flower::Orchid => mat::BLOOM_ORCHID,
             Flower::Heliconia => mat::BLOOM_RED,
             Flower::Thistle => mat::BLOOM_THISTLE,
+            Flower::StGeorge => mat::MUSHROOM_PALE,
+            Flower::Chanterelle => mat::MUSHROOM_GOLD,
         }
     }
 
@@ -376,6 +396,8 @@ impl Flower {
             mat::BLOOM_GENTIAN => [38, 66, 200],
             mat::BLOOM_FELT => [232, 232, 218],
             mat::BLOOM_ORCHID => [242, 200, 230],
+            mat::MUSHROOM_PALE => [238, 230, 212],
+            mat::MUSHROOM_GOLD => [230, 166, 54],
             _ => [170, 84, 178],
         }
     }
@@ -470,11 +492,20 @@ impl Season {
 }
 
 /// Rows in the table of seasons: what a [`voxel::mesh::PlantBox::season`] can name.
-pub const SEASON_SLOTS: usize = 64;
+pub const SEASON_SLOTS: usize = 128;
+
+/// How many kinds of flower there were when the table was laid out: their blooms keep
+/// rows 1 to 27 and their leaves 28 to 54, in the order of [`Flower::ALL`].
+const FIRST_KINDS: u8 = 27;
+
+/// The first row of the kinds of flower added since, two to a kind (bloom, then leaves),
+/// after the crops (55 to 63) and the fruit of the trees (64 to 71).
+const LATER_KINDS: u8 = 72;
 
 /// The table of seasons, by the number a plant's box carries: `[start, length, bud,
 /// seed]` of a [`Season`]. Row 0 is unused (a box with no season of its own); then come
-/// the blooms of the flowers in the order of [`Flower::ALL`], then their leaves.
+/// the blooms of the flowers in the order of [`Flower::ALL`], then their leaves, the
+/// crops, the fruit of the trees, and the flowers added since.
 pub fn seasons() -> [[f32; 4]; SEASON_SLOTS] {
     let mut rows = [[0.0; 4]; SEASON_SLOTS];
     for &f in Flower::ALL {
@@ -483,6 +514,10 @@ pub fn seasons() -> [[f32; 4]; SEASON_SLOTS] {
     }
     // Then the crops of the fields, sown, ripe and cut (see settlements::farmland::crops).
     for (code, s) in crate::settlements::farmland::crops::seasons() {
+        rows[code as usize] = s.row();
+    }
+    // And what the trees bear (see features::tree_detail).
+    for (code, s) in super::tree_detail::seasons() {
         rows[code as usize] = s.row();
     }
     rows
@@ -509,6 +544,8 @@ impl Flower {
             Flower::Heather => (8, 9),
             Flower::PennyBun => (8, 10),
             Flower::FlyAgaric => (9, 11),
+            Flower::StGeorge => (4, 5),
+            Flower::Chanterelle => (7, 10),
             // The desert flowers whenever it has rained, and the rainforest has no winter.
             Flower::DesertMarigold => (3, 11),
             Flower::Orchid | Flower::Heliconia => (1, 12),
@@ -562,7 +599,7 @@ impl Flower {
         let length = self.span() - STAGGER;
         let (bud, seed) = match self {
             // A mushroom comes up overnight and rots away.
-            Flower::FlyAgaric | Flower::PennyBun => (0.0, 0.0),
+            f if f.is_mushroom() => (0.0, 0.0),
             // Spent heather stays on the plant, rusty, until it buds again.
             Flower::Heather => (0.04, 1.0 - 0.04 - length),
             // The white heads are the seed, and blow away; a lily sinks; these are small.
@@ -579,7 +616,7 @@ impl Flower {
             return Season::ALWAYS;
         }
         // A mushroom's stem goes with its cap.
-        if matches!(self, Flower::FlyAgaric | Flower::PennyBun) {
+        if self.is_mushroom() {
             return self.bloom();
         }
         let (first, end) = self.season();
@@ -592,12 +629,14 @@ impl Flower {
 
     /// The row of [`seasons`] its bloom keeps.
     pub fn bloom_code(self) -> u8 {
-        self as u8 + 1
+        let k = self as u8;
+        if k < FIRST_KINDS { k + 1 } else { LATER_KINDS + 2 * (k - FIRST_KINDS) }
     }
 
     /// The row of [`seasons`] its stems and leaves keep.
     pub fn leaf_code(self) -> u8 {
-        self as u8 + 1 + Flower::ALL.len() as u8
+        let k = self as u8;
+        if k < FIRST_KINDS { k + 1 + FIRST_KINDS } else { self.bloom_code() + 1 }
     }
 }
 
@@ -723,12 +762,32 @@ fn decide(col: &Column, surface: Voxel, x: i32, z: i32, seed: u32, a: f32) -> Op
                 return species(col.biome, surface, swathe(seed, x, z)).map(Growth::Flower);
             }
             let forest = matches!(col.biome, Biome::OldGrowth | Biome::Rainforest | Biome::Taiga);
-            if forest && a < 0.012 && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
-                let red = unit(hash3(seed ^ 0x3052, x, 0, z)) < 0.5;
-                return Some(Growth::Flower(if red { Flower::FlyAgaric } else { Flower::PennyBun }));
+            // The broadleaf woods have theirs too, fewer than the old forest.
+            let broadleaf = matches!(col.biome, Biome::Deciduous | Biome::Woodland | Biome::BirchGrove);
+            if ((forest && a < 0.012) || (broadleaf && a < 0.006)) && patch(seed, 0x3051, x, z, 6.4) > 0.15 {
+                let roll = unit(hash3(seed ^ 0x3052, x, 0, z));
+                // Chanterelles come up in patches of their own in the moss, out of the
+                // tropics; fly agaric under birch and conifers, penny buns under oak, and in
+                // spring the odd ring of St George's mushrooms in a broadleaf wood.
+                let kind = if col.biome != Biome::Rainforest && patch(seed, 0x3054, x, z, 9.0) > 0.4 {
+                    Flower::Chanterelle
+                } else if forest {
+                    if roll < 0.5 { Flower::FlyAgaric } else { Flower::PennyBun }
+                } else if roll < 0.3 {
+                    Flower::StGeorge
+                } else if col.biome == Biome::BirchGrove {
+                    Flower::FlyAgaric
+                } else {
+                    Flower::PennyBun
+                };
+                return Some(Growth::Flower(kind));
             }
             if surface != mat::ground_cover(col.biome) {
                 return None;
+            }
+            // St George's mushrooms come up in the grass in spring, in rings and drifts.
+            if matches!(col.biome, Biome::Grassland | Biome::Steppe) && a < 0.004 && patch(seed, 0x3055, x, z, 4.0) > 0.45 {
+                return Some(Growth::Flower(Flower::StGeorge));
             }
             // Foxgloves stand in loose groups at the edges of woods and on the moor, and
             // edelweiss is found alone, high up where the grass is short.
@@ -819,7 +878,7 @@ fn wash_of(growth: &Growth) -> Option<Wash> {
         Growth::Wintergreen(Wintergreen::Rush) => w((mat::WOODRUSH, mat::WOODRUSH, 0.0), none, 0.8),
         Growth::Wintergreen(Wintergreen::Heather) => w((mat::HEATHER_GREEN, mat::HEATHER_RUST, 0.3), none, 0.9),
         Growth::Flower(f) => match f {
-            Flower::WaterLily | Flower::FlyAgaric | Flower::PennyBun => None,
+            f if f == Flower::WaterLily || f.is_mushroom() => None,
             Flower::Heather => w((mat::HEATHER_GREEN, mat::HEATHER_RUST, 0.15), (mat::BLOOM_PURPLE, 0.4), 0.9),
             Flower::CottonGrass => w((mat::TUFT_SEDGE, mat::TUFT_DRY, 0.3), (mat::BLOOM_WHITE, 0.35), 0.5),
             Flower::Thrift => w((mat::TUFT_ALPINE, mat::TUFT, 0.3), (mat::BLOOM_PINK, 0.45), 0.7),
@@ -937,6 +996,8 @@ fn is_bloom(voxel: Voxel) -> bool {
             | mat::MUSHROOM_STEM
             | mat::MUSHROOM_RED
             | mat::MUSHROOM_TAN
+            | mat::MUSHROOM_PALE
+            | mat::MUSHROOM_GOLD
             | mat::BLOOM_BLUEBELL
             | mat::BLOOM_FOXGLOVE
             | mat::BLOOM_PRIMROSE
@@ -1582,7 +1643,7 @@ fn build_flower(p: &mut Plot, rng: &mut Rng, kind: Flower) {
             flower(p, rng, kind.petals())
         }
         Flower::Heather => heather(p, rng, true),
-        Flower::FlyAgaric | Flower::PennyBun => mushroom(p, rng, kind.petals()),
+        Flower::FlyAgaric | Flower::PennyBun | Flower::StGeorge | Flower::Chanterelle => mushroom(p, rng, kind.petals()),
         // Built by `grow`, which knows where the water is.
         Flower::WaterLily => {}
         Flower::Bluebell => bluebell(p, rng),
@@ -1888,9 +1949,11 @@ mod tests {
                     grow(&col, surface, x, z, 7, &mut out);
                     let code = wash_at(&col, surface, x, z, 7);
                     assert!(usize::from(code) <= washes().len());
-                    // Everything these grow shows from afar, so a wash goes with every plant.
-                    // (Now and then a heather comes up with no cushions at all.)
-                    assert!(code != 0 || out.is_empty(), "{biome:?} at {x},{z}");
+                    // Everything these grow shows from afar, so a wash goes with every plant,
+                    // but the mushrooms of a wood, too few to colour it. (Now and then a
+                    // heather comes up with no cushions at all.)
+                    let mushroom = flower_at(&col, surface, x, z, 7).is_some_and(|f| f.is_mushroom());
+                    assert!(code != 0 || out.is_empty() || mushroom, "{biome:?} at {x},{z}");
                     if code != 0 { washed += 1 } else { bare += 1 }
                 }
             }
@@ -2221,7 +2284,7 @@ mod tests {
         }
         assert!(biomes >= 13, "only {biomes} biomes grow flowers");
         // Every kind is to be found somewhere: in the drifts, or in its own place.
-        let elsewhere = [Flower::WaterLily, Flower::FlyAgaric, Flower::PennyBun, Flower::Thrift, Flower::Edelweiss];
+        let elsewhere = [Flower::WaterLily, Flower::FlyAgaric, Flower::PennyBun, Flower::StGeorge, Flower::Chanterelle, Flower::Thrift, Flower::Edelweiss];
         for &f in Flower::ALL {
             assert!(placed.contains(&f) || elsewhere.contains(&f), "{f:?} grows nowhere");
         }
@@ -2230,6 +2293,43 @@ mod tests {
         for m in 2..=11 {
             assert!(Flower::ALL.iter().any(|f| !f.all_year() && f.in_bloom(mid(m))), "nothing in {}", MONTHS[m as usize - 1]);
         }
+    }
+
+    #[test]
+    fn every_season_keeps_a_row_of_its_own() {
+        let mut rows: Vec<(u8, &str)> = Vec::new();
+        for &f in Flower::ALL {
+            rows.push((f.bloom_code(), f.id()));
+            rows.push((f.leaf_code(), f.id()));
+        }
+        rows.extend(crate::settlements::farmland::crops::seasons().iter().map(|&(r, _)| (r, "a crop")));
+        rows.extend(super::super::tree_detail::seasons().iter().map(|&(r, _)| (r, "a tree's fruit")));
+        let mut seen = std::collections::HashMap::new();
+        for (row, what) in rows {
+            assert!(row != 0 && (row as usize) < SEASON_SLOTS, "{what} keeps row {row}");
+            assert!(seen.insert(row, what).is_none(), "row {row} is kept by {what} and {}", seen[&row]);
+        }
+        // The first kinds keep the rows they always had, so the world is drawn as it was.
+        assert_eq!((Flower::Pimpernel.bloom_code(), Flower::Thistle.bloom_code(), Flower::Thistle.leaf_code()), (1, 27, 54));
+    }
+
+    #[test]
+    fn the_mushrooms_come_up_at_their_own_times() {
+        let up = |f: Flower, m: u8| (0..400).filter(|&k| f.blooming_at(mid(m), k * 7, 1000 - k * 3)).count() > 300;
+        let mushrooms: Vec<Flower> = Flower::ALL.iter().copied().filter(|f| f.is_mushroom()).collect();
+        assert!(mushrooms.len() >= 4);
+        // Most in autumn, one in spring, and none in the dead of winter.
+        assert!(up(Flower::StGeorge, 5) && !up(Flower::StGeorge, 8));
+        assert!(mushrooms.iter().filter(|&&f| up(f, 10)).count() >= 3);
+        assert!(mushrooms.iter().all(|&f| (0..400).all(|k| !f.blooming_at(mid(1), k, k * 3))));
+        // Each comes up where the woods or the grass say, and nowhere else.
+        for (biome, f) in [(Biome::Deciduous, Flower::PennyBun), (Biome::BirchGrove, Flower::FlyAgaric), (Biome::Taiga, Flower::Chanterelle), (Biome::Grassland, Flower::StGeorge), (Biome::Deciduous, Flower::StGeorge)] {
+            let col = column(Cover::Land, biome);
+            let found = (0..400_000).any(|k| flower_at(&col, mat::ground_cover(biome), k % 800 * 3, k / 800 * 3, 5) == Some(f));
+            assert!(found, "no {f:?} in {biome:?}");
+        }
+        let col = column(Cover::Land, Biome::Rainforest);
+        assert!((0..200_000).all(|k| flower_at(&col, mat::ground_cover(Biome::Rainforest), k % 500 * 3, k / 500 * 3, 5) != Some(Flower::Chanterelle)));
     }
 
     #[test]
@@ -2261,8 +2361,10 @@ mod tests {
                 assert!(kind == Flower::Heather || boxes.iter().any(|b| b.season == kind.bloom_code()), "{kind:?} has no bloom");
             }
         }
-        // Grass and the other small plants have no season of their own.
-        assert!(grown(&column(Cover::Land, Biome::Grassland), mat::GRASS_MEADOW).iter().all(|b| b.season == 0));
+        // Grass and the other small plants have no season of their own (the grassland's
+        // spring mushrooms aside).
+        let spring = Flower::StGeorge.bloom_code();
+        assert!(grown(&column(Cover::Land, Biome::Grassland), mat::GRASS_MEADOW).iter().all(|b| b.season == 0 || b.season == spring));
         assert!(grown(&column(Cover::Land, Biome::Heath), mat::ground_cover(Biome::Heath)).iter().all(|b| b.season == 0));
         // A water lily's flower keeps its season, and its pad none.
         let mut lake = column(Cover::LakeBed, Biome::Deciduous);
