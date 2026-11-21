@@ -127,6 +127,52 @@ pub fn humidity(biome: Biome) -> f32 {
     }
 }
 
+/// A share of the year that comes and goes about the turn of it: 0 before `from`, rising
+/// to 1 by `full`, holding until `until` and gone again by `gone`. Dates from late spring
+/// to the end of autumn are as they are; those of winter count back from the equinox, so
+/// a window can open in February (-0.1) and close in April.
+fn window(date: f32, from: f32, full: f32, until: f32, gone: f32) -> f32 {
+    let d = if date > 0.75 { date - 1.0 } else { date };
+    smoothstep(from, full, d) * (1.0 - smoothstep(until, gone, d))
+}
+
+/// When the late summer drought holds the streams lowest, and the bare earth of dry
+/// country dustiest: from the end of June, deepest from mid July to mid September, over
+/// with the autumn rain by the middle of October, so November is as it always was.
+fn drought(date: f32, from: f32) -> f32 {
+    window(date, from, from + 0.10, 0.52, 0.60)
+}
+
+/// How full a river runs on this date, and how low, each 0 to 1, by its regime (worldgen's
+/// `continent::Regime` as u8, 0 steady, 1 dry country, 2 rain, 3 snow). The water stands
+/// where it always does (#142): the shaders draw it by these, as `G.streams`, and the
+/// spray off a fall follows them. A river fed by snow swells most, and latest, from the end
+/// of March until the melt is over in June; one fed by rain is fullest in March and April
+/// after the winter's rain; one of dry country barely rises and is lowest of all by
+/// August. Winter and autumn are as they were before the seasons touched the water.
+pub fn stream(regime: u8, date: f32) -> [f32; 2] {
+    match regime {
+        1 => [0.3 * window(date, -0.07, 0.0, 0.04, 0.12), drought(date, 0.24)],
+        2 => [0.65 * window(date, -0.07, 0.0, 0.07, 0.17), 0.85 * drought(date, 0.28)],
+        3 => [window(date, -0.03, 0.06, 0.17, 0.27), 0.6 * drought(date, 0.32)],
+        _ => [0.0, 0.0],
+    }
+}
+
+/// How muddy bare earth and paths are in a biome on this date, from the thaw, and how
+/// dusty from a dry summer, each 0 to 1 (#117), as `G.soil`. The thaw comes wherever it
+/// snows, a little later the colder the biome: about March in the temperate lowlands,
+/// May on the tundra. Dust is for dry country that is warm in summer: the steppe and the
+/// savanna, the desert's few patches of earth, a little on the heath.
+pub fn soil(biome: Biome, date: f32) -> [f32; 2] {
+    let warm = warmth(biome);
+    let thaw = ((NEVER_SNOWS - warm) / (NEVER_SNOWS - 0.25)).clamp(0.0, 1.0);
+    let late = (0.25 - warm).max(0.0) * 0.15;
+    let mud = thaw * window(date, -0.06 + late, late, 0.06 + late, 0.13 + late);
+    let dry = ((1.0 - humidity(biome)) / 0.4).clamp(0.0, 1.0) * smoothstep(-0.1, 0.45, warm);
+    [mud, dry * drought(date, 0.28)]
+}
+
 /// What the ground carries, for the shaders: snow cover and ice on still water, with how
 /// wet it is (the rain's doing, see weather.rs).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -405,5 +451,27 @@ mod tests {
         for b in [Biome::Tundra, Biome::Alpine, Biome::Taiga, Biome::SnowyPine, Biome::Deciduous, Biome::Bog, Biome::Steppe] {
             assert!(warmth(b) < NEVER_SNOWS, "{b:?}");
         }
+    }
+
+    /// Streams run full in spring and low in late summer, snow-fed ones fullest, and from
+    /// the autumn rain to the end of winter they are as they always were (#142); bare
+    /// earth muds in the thaw and dusts in a dry summer, and is plain earth in November.
+    #[test]
+    fn streams_and_earth_keep_the_year() {
+        let (april, august) = (month("april").unwrap(), month("august").unwrap());
+        assert!(stream(3, april)[0] > 0.9 && stream(2, april)[0] > 0.5 && stream(1, april)[0] < 0.3);
+        assert_eq!(stream(0, april), [0.0, 0.0]);
+        assert!(stream(2, august)[1] > 0.7 && stream(1, august)[1] > 0.9);
+        assert!(stream(3, august)[0] == 0.0 && stream(2, august)[0] == 0.0);
+        for m in ["november", "december", "january"] {
+            for regime in 0..4 {
+                assert_eq!(stream(regime, month(m).unwrap()), [0.0, 0.0], "{m} {regime}");
+            }
+            for b in Biome::ALL {
+                assert_eq!(soil(b, month(m).unwrap()), [0.0, 0.0], "{m} {b:?}");
+            }
+        }
+        assert!(soil(Biome::Deciduous, april)[0] > 0.5 && soil(Biome::Deciduous, august)[1] < 0.2);
+        assert!(soil(Biome::Steppe, august)[1] > 0.9 && soil(Biome::Rainforest, april)[0] == 0.0);
     }
 }

@@ -675,5 +675,10 @@ fn classify(m: &mut Materials) {
     }
     // A turf roof is grass, and dries and yellows with the grass round about.
     m.set_plant(ROOF_TURF, pk::GROUND);
+    // Bare earth and the paths worn into the ground, which muddy in the thaw and go to
+    // dust in a dry summer. Sand and gravel only darken in the wet, as all ground does.
+    for v in [DIRT, MUD, PATH_DIRT, PATH_GRAVEL, PATH_SAND, PATH_DARK, PATH_LITTER, PATH_NEEDLES, PLOUGH, PLOUGH_DRY] {
+        m.set_soil(v);
+    }
     crate::settlements::farmland::crops::classify(m);
 }

@@ -68,6 +68,14 @@ struct Globals {
     // The seasons of the plants that have their own, by the number their vertices carry:
     // start, length, bud, seed (see season_phase in season.wgsl).
     flowering: array<vec4<f32>, 128>,
+    // How the rivers run today by their regime (voxel::mesh::Current::regime, 0 steady to
+    // 3 fed by snow): x how full with the spring's melt and rain, y how low in the late
+    // summer's drought, each 0..1 (season::stream). The water's level never changes; only
+    // how it is drawn (see fs_water in terrain.wgsl).
+    streams: array<vec4<f32>, 4>,
+    // Bare earth today, by biome id: x how muddy in the thaw, y how dusty in a dry
+    // summer, 0..1 (season::soil).
+    soil: array<vec4<f32>, 24>,
 };
 
 struct Shadows {

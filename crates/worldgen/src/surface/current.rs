@@ -45,9 +45,10 @@ fn speed(fall: f32, half_width: f32) -> f32 {
 impl Sampler<'_> {
     /// The current in the water of column `(lx, lz)` (continent-local voxels), which
     /// [`column`](Self::column) sampled as `col`: velocity in metres per second along x
-    /// and z. `None` where the water is still: off the rivers, and where a lake stands
-    /// over a river's channel. Water the sea holds back in a tidal reach still runs, slowly.
-    pub fn current(&self, lx: i32, lz: i32, col: &Column) -> Option<Vec2> {
+    /// and z, and the river's [`Regime`](crate::continent::Regime) as u8. `None` where the
+    /// water is still: off the rivers, and where a lake stands over a river's channel.
+    /// Water the sea holds back in a tidal reach still runs, slowly.
+    pub fn current(&self, lx: i32, lz: i32, col: &Column) -> Option<(Vec2, u8)> {
         let water = col.water_surface()?;
         let p = vec2(lx as f32 + 0.5, lz as f32 + 0.5);
         // The piece whose channel edge is nearest, chosen as `column` chooses it.
@@ -92,7 +93,12 @@ impl Sampler<'_> {
                 }
             }
         }
-        Some(piece.tangent(t) * v)
+        // The first half of a piece carries the water of the node it comes from, the
+        // second that of the node it passes, joined by whatever feeds in there; a mouth
+        // runs on into the sea with its river's.
+        let [from, past, _] = piece.nodes;
+        let node = if t < 0.5 || self.c.ocean[past] { from } else { past };
+        Some((piece.tangent(t) * v, self.c.regime[node]))
     }
 }
 

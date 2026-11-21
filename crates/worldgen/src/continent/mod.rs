@@ -9,6 +9,7 @@ mod biomes;
 mod border;
 pub mod climate;
 pub mod flow;
+pub mod regime;
 pub mod scarp;
 pub mod shape;
 
@@ -18,6 +19,7 @@ use crate::{
     noise::{hash2, unit},
     structures::{self, Field},
 };
+pub use regime::Regime;
 pub use scarp::Scarp;
 use flow::Flow;
 use shape::Shape;
@@ -64,6 +66,9 @@ pub struct Continent {
     pub temperature: Vec<f32>,
     /// [`Biome`] as u8.
     pub biome: Vec<u8>,
+    /// [`Regime`] as u8: how the water passing through each cell comes and goes through
+    /// the year, from the climate of the ground it drains.
+    pub regime: Vec<u8>,
     /// Trails and landmarks. Filled in after simulation, since building them needs the
     /// finished voxel surface; empty for a continent fresh from [`generate`].
     pub trails: crate::trails::Network,
@@ -396,6 +401,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         held[p.i as usize] = true;
     }
     biomes::dunes(&level, &shape, &flow, &biome, &held, &lake, &mut height, &mut water_level);
+    let regime = regime::regimes(&flow.rcv, &level.ocean, &rain, &temperature);
     Continent {
         desc,
         size: cfg.size,
@@ -412,6 +418,7 @@ pub fn generate(desc: CellDesc, cfg: SimConfig) -> Continent {
         rain,
         temperature,
         biome,
+        regime,
         trails: Default::default(),
         scarps,
         land: Default::default(),
@@ -485,6 +492,7 @@ fn open_sea(desc: CellDesc, size: usize, shape: &Shape) -> Continent {
         rain: vec![desc.wetness; n],
         temperature: vec![desc.temperature; n],
         biome: vec![Biome::Ocean as u8; n],
+        regime: vec![Regime::Steady as u8; n],
         trails: Default::default(),
         scarps: Default::default(),
         land: Default::default(),

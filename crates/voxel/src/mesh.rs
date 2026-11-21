@@ -19,10 +19,19 @@ use crate::{CHUNK, Kind, Materials, PAD, PaddedChunk, flags, plant};
 ///      Broadleaf leaves (plant kinds `DECIDUOUS` and `AUTUMN`) give up the low two bits
 ///      of each colour channel to a 6-bit tree tag; see [`tag_trees`].
 ///
+/// A whole voxel's face that is not a plant the shader drops a voxel at a time has no
+/// fractions or corner bits, so it keeps two things of the year in `a` instead (#142):
+/// bits 30 and 31 the [`Current::regime`] of the river it is the bank of, 0 for none
+/// ([`BANK_SHIFT`]), and bit 29, but for a washed face (whose colour's number reaches
+/// it), set on bare earth and paths ([`SOIL_BIT`], see [`Materials::set_soil`]), which
+/// muddy in the thaw and go to dust in a dry summer.
+///
 /// Water faces (those with [`flags::WATER`](crate::flags::WATER)) have no fractions or
 /// corner bits, so `a` bits 23..=31 hold the current instead (see [`pack_current`]):
 /// direction << 23 (5 bits) | speed << 28 (3 bits) | river << 31. `b` is laid out as for
-/// any face, with plant kind 0. All nine bits are zero on still water. The two AO bits of
+/// any face, with plant kind 0, and two of the flags no water has (foliage and emissive)
+/// holding the river's regime at the corner instead ([`REGIME_SHIFT`]). All nine bits of
+/// the current, and the regime, are zero on still water. The two AO bits of
 /// a water surface say instead where it meets a fall: bit 21 set at a corner at the foot
 /// of one (foam), bit 22 at a corner on the lip of one, which the shader draws lower so
 /// the surface bends over into the fall.
@@ -234,7 +243,20 @@ pub struct Current {
     pub z: f32,
     /// Part of a river, which runs even where it is slow, rather than a lake or the sea.
     pub river: bool,
+    /// How the river's water comes and goes through the year, 0 to 3 (worldgen's
+    /// `continent::Regime`): the shader draws it fuller in spring and lower in late summer
+    /// by this, from the date, on its surface, its falls and its banks.
+    pub regime: u8,
 }
+
+/// First of the two bits of a water vertex's `b` that hold the river's regime: the flags'
+/// foliage and emissive bits, which water never has.
+pub const REGIME_SHIFT: u32 = 24 + flags::FOLIAGE.trailing_zeros();
+/// First of the two bits of a bank voxel's face's `a` that hold the regime of the river
+/// beside it (see [`Vertex`]).
+pub const BANK_SHIFT: u32 = 30;
+/// The bit of a face's `a` set on bare earth and paths (see [`Vertex`]).
+pub const SOIL_BIT: u32 = 29;
 
 /// Fastest current a water vertex can carry, metres per second. The water shader keeps
 /// the same number.
@@ -270,6 +292,7 @@ pub fn unpack_current(a: u32) -> Current {
         x: angle.cos() * speed,
         z: angle.sin() * speed,
         river: (bits >> 8) & 1 != 0,
+        regime: 0,
     }
 }
 
@@ -291,13 +314,46 @@ fn corner_current(currents: &[Current], x: usize, z: usize) -> u32 {
     pack_current(vx * 0.25, vz * 0.25, rivers >= 2)
 }
 
+/// The regime of the river at one corner of a water face, as [`corner_current`] finds the
+/// current: the most seasonal of the four columns around it, so the faces that share the
+/// corner agree, and the shader blends from one river's year to another's across a voxel.
+fn corner_regime(currents: &[Current], x: usize, z: usize) -> u32 {
+    let mut most = 0;
+    for px in x..=x + 1 {
+        for pz in z..=z + 1 {
+            most = most.max(currents[px * PAD + pz].regime);
+        }
+    }
+    most as u32
+}
+
+/// Which levels of the column `(x, z)` (padded) are the bank of a river, and the most
+/// seasonal regime among the rivers there: the levels of a voxel beside, or diagonally
+/// beside, the top voxel of a river's water, and of one a level above it, so the ground
+/// flush with the water and the step up from it. 0 for none. `surface` is each column's
+/// top water voxels.
+fn bank(currents: &[Current], surface: &[[u64; PAD]; PAD], x: usize, z: usize) -> (u64, u8) {
+    let (mut levels, mut most) = (0u64, 0u8);
+    for i in x.saturating_sub(1)..=(x + 1).min(PAD - 1) {
+        for j in z.saturating_sub(1)..=(z + 1).min(PAD - 1) {
+            let c = currents[i * PAD + j];
+            if c.river && c.regime != 0 && surface[i][j] != 0 {
+                levels |= surface[i][j] | surface[i][j] << 1;
+                most = most.max(c.regime);
+            }
+        }
+    }
+    (levels, most)
+}
+
 const N: usize = CHUNK as usize;
 
 /// A visible face awaiting merging. Zero means "no face"; equal non-zero keys can merge.
 /// bit 0: present, bit 1: water, bit 2: mergeable (uniform AO), bit 3: water surface
 /// beside a river, which carries the current at each corner (and so never merges),
-/// bits 8..32: colour, 32..40: flags, 40..48: four 2-bit AO values, 48..57: the colour
-/// a plant gives the voxel from afar (see `mesh_chunk_under_sky`), 0 for none.
+/// bits 4 and 5: the regime of the river a bank voxel is beside, 6: bare earth (see
+/// [`Vertex`]), bits 8..32: colour, 32..40: flags, 40..48: four 2-bit AO values, 48..57:
+/// the colour a plant gives the voxel from afar (see `mesh_chunk_under_sky`), 0 for none.
 type FaceKey = u64;
 
 thread_local! {
@@ -348,7 +404,7 @@ fn spill_vertex(p: [usize; 3], dir: usize, code: u32, foot: u32, flat: bool, b: 
 /// it, curves out and down through that air, and ends on the first water or ground under
 /// it. `falls` brings in the sheets that come down from the chunk above and takes out
 /// those that go on into the chunk below.
-fn add_spills(mesh: &mut ChunkMesh, chunk: &PaddedChunk, mats: &Materials, solid: &[[u64; PAD]; PAD], water: &[[u64; PAD]; PAD], falls: &mut Falls) {
+fn add_spills(mesh: &mut ChunkMesh, chunk: &PaddedChunk, mats: &Materials, currents: &[Current], solid: &[[u64; PAD]; PAD], water: &[[u64; PAD]; PAD], falls: &mut Falls) {
     let entering = std::mem::take(&mut falls.through);
     if entering.is_empty() && water.iter().all(|row| row.iter().all(|&w| w == 0)) {
         return;
@@ -418,7 +474,11 @@ fn add_spills(mesh: &mut ChunkMesh, chunk: &PaddedChunk, mats: &Materials, solid
         let own = voxels[(x * PAD + z) * PAD..][..PAD].iter().rev().copied().find(|&v| mats.get(v).kind == Kind::Water);
         let Some(v) = own.or(any_water) else { continue };
         let m = mats.get(v);
-        let b = color_bits(m.color) as u32 | ((flags::WATER | ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)) as u32) << 24;
+        // The river's year, from the column it falls from or else the one it lands in.
+        let regime = currents.get(x * PAD + z).filter(|c| c.river).or(currents.get(nx * PAD + nz)).map_or(0, |c| c.regime);
+        let b = color_bits(m.color) as u32
+            | ((flags::WATER | ((m.jitter << flags::JITTER_SHIFT) & flags::JITTER_MASK)) as u32) << 24
+            | (regime as u32) << REGIME_SHIFT;
         // The face of the column the water leaves, and the two ends of the sheet along
         // it, in local voxels.
         let along_x = dx == 0;
@@ -577,6 +637,18 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
         }
     }
     let is_solid = |p: [usize; 3]| ((solid[p[0]][p[2]] >> p[1]) & 1) as u32;
+    // The banks of the rivers, per padded column (see `bank`); none without currents.
+    let banks: Vec<(u64, u8)> = if currents.iter().any(|c| c.river && c.regime != 0) {
+        let mut surface = [[0u64; PAD]; PAD];
+        for x in 0..PAD {
+            for z in 0..PAD {
+                surface[x][z] = water[x][z] & !(water[x][z] >> 1);
+            }
+        }
+        (0..PAD * PAD).map(|i| bank(currents, &surface, i / PAD, i % PAD)).collect()
+    } else {
+        Vec::new()
+    };
 
     FACE_MASK.with_borrow_mut(|mask| {
         mask.resize(N * N * N, 0);
@@ -665,7 +737,21 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
                         if m.plant == plant::GROUND {
                             colour |= tag_bits((washed >> 16) as u8) as u64;
                         }
+                        // Bare earth, and the bank of a river, which the seasons wet and
+                        // dry (see `Vertex`); never on a plant the shader drops by the voxel.
+                        let mut year = 0u64;
+                        if !single && m.kind == Kind::Solid {
+                            if let Some(&(levels, regime)) = banks.get(x * PAD + z)
+                                && levels >> y & 1 != 0
+                            {
+                                year |= (regime as u64) << 4;
+                            }
+                            if tint == 0 && mats.is_soil(voxels[PaddedChunk::idx(x, y, z)]) {
+                                year |= 1 << 6;
+                            }
+                        }
                         let key = 1
+                            | year
                             | tint << 48
                             | (uniform && !single) as u64 * 4
                             | colour << 8
@@ -761,7 +847,7 @@ pub fn mesh_chunk_under_sky(chunk: &PaddedChunk, mats: &Materials, currents: &[C
         mesh.faces[6..].fill((mesh.opaque.len() / 4) as u32);
     });
     // After the surfaces, so that a fall is drawn over the water behind it.
-    add_spills(&mut mesh, chunk, mats, &solid, &water, falls);
+    add_spills(&mut mesh, chunk, mats, currents, &solid, &water, falls);
     mesh
 }
 
@@ -1227,8 +1313,16 @@ fn emit_quad(
             shade = spill(i);
         }
         let wash = ((key >> 48) & 0x1FF) as u32;
+        // A bank's river's regime and bare earth (key bits 4..=6), on opaque faces; the
+        // regime at each corner of running water.
+        let (mut year, mut b) = (0, b);
+        if key & 2 == 0 {
+            year = (((key >> 4) & 3) as u32) << BANK_SHIFT | (((key >> 6) & 1) as u32) << SOIL_BIT;
+        } else if key & 8 != 0 && !currents.is_empty() {
+            b |= corner_regime(currents, p[0] as usize, p[2] as usize) << REGIME_SHIFT;
+        }
         Vertex {
-            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | shade << 21 | corner << 29 | current | wash << 23,
+            a: p[0] | p[1] << 6 | p[2] << 12 | (face as u32) << 18 | shade << 21 | corner << 29 | current | wash << 23 | year,
             b,
         }
     };
@@ -1833,7 +1927,7 @@ mod tests {
     #[test]
     fn currents_survive_packing() {
         assert_eq!(pack_current(0.0, 0.0, false), 0, "still water carries no bits");
-        assert_eq!(unpack_current(pack_current(0.0, 0.0, true)), Current { x: 0.0, z: 0.0, river: true });
+        assert_eq!(unpack_current(pack_current(0.0, 0.0, true)), Current { x: 0.0, z: 0.0, river: true, regime: 0 });
         for (x, z) in [(1.0, 0.0), (0.0, -0.5), (-1.3, 0.7), (0.3, 0.2), (1.5, -1.5), (-0.15, -0.25)] {
             let c = unpack_current(pack_current(x, z, true));
             assert!(c.river);
@@ -1859,7 +1953,7 @@ mod tests {
                 col[..5].fill(stone);
                 col[5..11].fill(water);
                 if (10..=12).contains(&z) {
-                    currents[x * PAD + z] = Current { x: 1.2, z: 0.0, river: true };
+                    currents[x * PAD + z] = Current { x: 1.2, z: 0.0, river: true, regime: 0 };
                 }
             }
         }
