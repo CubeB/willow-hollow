@@ -995,9 +995,8 @@ fn scan_surroundings(
     // flower is no longer there.
     let reach = m(BUTTERFLY_REACH) as i32;
     for (at, flower) in world.flowers_standing(cx - reach, cz - reach, 2 * reach + 1) {
-        use worldgen::features::plants::Flower;
         let out = flower.blooming_at(date, at.x, at.z);
-        if out && !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) && (at.y as f64 - camera.y).abs() < m64(12.0) {
+        if out && !flower.is_mushroom() && (at.y as f64 - camera.y).abs() < m64(12.0) {
             flowers.push((at.as_dvec3(), to_linear(flower.color())));
         }
     }
@@ -1013,8 +1012,7 @@ fn scan_surroundings(
     for n in nests.iter().filter(|n| n.kind == worldgen::features::nests::NestKind::Bees && insects::on_the_wing(n.kind, date)).take(3) {
         let reach = m(insects::FORAGE as f32) as i32;
         for (at, flower) in world.flowers_standing(n.door.x - reach, n.door.z - reach, 2 * reach + 1) {
-            use worldgen::features::plants::Flower;
-            if flower.blooming_at(date, at.x, at.z) && !matches!(flower, Flower::FlyAgaric | Flower::PennyBun) {
+            if flower.blooming_at(date, at.x, at.z) && !flower.is_mushroom() {
                 forage.push((at.as_dvec3(), to_linear(flower.color())));
             }
         }
@@ -1705,10 +1703,14 @@ impl Running {
             }
         }
         // What the bushes, the ivy and the reeds bear, from a step below the feet to as
-        // high as a hand goes.
+        // high as a hand goes. A berry with a season of its own can be taken only while it
+        // is ripe, as it is drawn: not green, nor once it has gone.
         for &(p, v) in &growing {
             let d = DVec3::new(p.x as f64 + 0.5 - centre.x, 0.0, p.z as f64 + 0.5 - centre.z).length();
             if d > reach || !(feet - 3..=feet + 5).contains(&p.y) || self.pack.gathered(p.x, p.z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+                continue;
+            }
+            if worldgen::features::tree_detail::fruit(v).is_some_and(|s| s.phase(self.env.date, p.x, p.z) != worldgen::features::plants::Phase::Bloom) {
                 continue;
             }
             if let Some(item) = inventory::of_voxel(v, mats) {

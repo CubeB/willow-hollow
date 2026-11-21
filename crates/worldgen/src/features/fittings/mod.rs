@@ -452,8 +452,8 @@ pub fn herbs_of(region: Region) -> &'static [Flower] {
 pub fn dried(f: Flower) -> Voxel {
     match f.petals() {
         mat::BLOOM_RED | mat::BLOOM_POPPY | mat::MUSHROOM_RED => mat::DRIED_RED,
-        mat::BLOOM_YELLOW | mat::BLOOM_GOLD | mat::BLOOM_PRIMROSE => mat::DRIED_GOLD,
-        mat::BLOOM_WHITE | mat::BLOOM_FELT => mat::DRIED_WHITE,
+        mat::BLOOM_YELLOW | mat::BLOOM_GOLD | mat::BLOOM_PRIMROSE | mat::MUSHROOM_GOLD => mat::DRIED_GOLD,
+        mat::BLOOM_WHITE | mat::BLOOM_FELT | mat::MUSHROOM_PALE => mat::DRIED_WHITE,
         mat::BLOOM_BLUE | mat::BLOOM_BLUEBELL | mat::BLOOM_LUPIN | mat::BLOOM_GENTIAN => mat::DRIED_BLUE,
         mat::BLOOM_PINK | mat::BLOOM_ORCHID => mat::DRIED_PINK,
         mat::MUSHROOM_TAN => mat::DRIED_BROWN,

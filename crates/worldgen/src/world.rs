@@ -1351,11 +1351,11 @@ impl GameWorld {
                 continue;
             }
             let (px, pz) = ((i / PAD) as i32, (i % PAD) as i32);
-            if let Some(v) = sampler.current(lx0 + px, lz0 + pz, col) {
+            if let Some((v, regime)) = sampler.current(lx0 + px, lz0 + pz, col) {
                 if currents.is_empty() {
                     currents = vec![Current::default(); PAD * PAD];
                 }
-                currents[i] = Current { x: v.x, z: v.y, river: true };
+                currents[i] = Current { x: v.x, z: v.y, river: true, regime };
             }
         }
 
@@ -1393,6 +1393,7 @@ impl GameWorld {
                         dir,
                         drop: total,
                         speed: current.length(),
+                        regime: currents.get(px * PAD + pz).map_or(0, |c| c.regime),
                     });
                 }
             }

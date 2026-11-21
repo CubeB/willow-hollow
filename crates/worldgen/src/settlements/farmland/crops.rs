@@ -320,9 +320,9 @@ mod tests {
 
     #[test]
     fn the_crops_keep_their_own_rows_and_washes() {
-        let flowers = crate::features::plants::Flower::ALL.len() as u8;
+        use crate::features::plants::Flower;
         for (row, _) in seasons() {
-            assert!(row > 2 * flowers, "row {row} is a flower's");
+            assert!(Flower::ALL.iter().all(|f| f.bloom_code() != row && f.leaf_code() != row), "row {row} is a flower's");
             assert!((row as usize) < crate::features::plants::SEASON_SLOTS);
         }
         let table = crate::features::plants::seasons();

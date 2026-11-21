@@ -382,14 +382,17 @@ impl Particles {
             // Rates and speeds were tuned against the drop in old voxels.
             let drop = c.drop / U;
             let near = 1.0 - dist / (150.0 * U);
-            // Finer voxels mean more lips along the same waterfall.
-            let rate = (drop.min(6.0) * 2.5 + 1.0) * near / U;
+            // Finer voxels mean more lips along the same waterfall. A river in spate throws
+            // far more spray, and one run low in late summer little (#142).
+            let [high, low] = crate::season::stream(c.regime, s.date);
+            let spate = 1.0 + 1.5 * high - 0.8 * low;
+            let rate = (drop.min(6.0) * 2.5 + 1.0) * near * spate / U;
             let n = (rate * dt + self.unit()).floor() as u32;
             for _ in 0..n {
                 let side = Vec3::new(-c.dir.z, 0.0, c.dir.x) * self.range(-0.5, 0.5) * U;
                 // A fast river throws its spray further out over the drop, but only a
                 // little: it stays close to the sheet of falling water.
-                let speed = (0.6 + drop * 0.15 + 0.5 * c.speed * VOXELS_PER_METRE / U).min(2.2);
+                let speed = (0.6 + drop * 0.15 + 0.5 * c.speed * VOXELS_PER_METRE / U).min(2.2) * (1.0 + 0.3 * high - 0.25 * low);
                 let particle = Particle {
                     kind: PKind::Spray,
                     pos: c.pos.as_dvec3() + side.as_dvec3() + DVec3::new(0.0, 0.1 * U as f64, 0.0),
@@ -406,7 +409,7 @@ impl Particles {
                 };
                 self.spawn(particle);
             }
-            if drop >= 3.0 && self.unit() < dt * drop * 0.6 * near / U {
+            if drop >= 3.0 && self.unit() < dt * drop * 0.6 * near * spate / U {
                 let foot = c.pos + c.dir * (1.5 + drop * 0.3) * U - Vec3::Y * c.drop;
                 let particle = Particle {
                     kind: PKind::Mist,

@@ -430,6 +430,13 @@ palette! {
     // The fine twigs of a bare winter crown (features::trees::twigs), added last so
     // existing ids keep their numbers: darker than a limb's twigs, as a haze of them is.
     TWIG_FINE         = ( 60,  50,  46), Foliage, 1;
+    // What the trees bear and the mushrooms of their own times (#117), added last so
+    // existing ids keep their numbers: wild cherries, ripe acorns, the cream cap of St
+    // George's mushroom in spring and the egg-yolk of a chanterelle.
+    CHERRY            = (148,  22,  34), Foliage, 1;
+    ACORN             = (150, 110,  52), Foliage, 1;
+    MUSHROOM_PALE     = (238, 230, 212), Foliage, 1;
+    MUSHROOM_GOLD     = (230, 166,  54), Foliage, 1;
 }
 
 /// The materials the house kit roofs with: what keeps the rain and the light off a room,
@@ -633,7 +640,10 @@ fn classify(m: &mut Materials) {
             pk::GROUND,
         ),
         (
-            &[BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN, VINE_FLOWER],
+            &[
+                BLOOM_RED, BLOOM_YELLOW, BLOOM_WHITE, BLOOM_PURPLE, BLOOM_BLUE, BLOOM_PINK, MUSHROOM_STEM, MUSHROOM_RED, MUSHROOM_TAN, VINE_FLOWER,
+                MUSHROOM_PALE, MUSHROOM_GOLD, CHERRY, ACORN,
+            ],
             pk::FLOWER,
         ),
         // The wild flowers die back whole, stems and leaves with the petals, so no bare
@@ -665,5 +675,10 @@ fn classify(m: &mut Materials) {
     }
     // A turf roof is grass, and dries and yellows with the grass round about.
     m.set_plant(ROOF_TURF, pk::GROUND);
+    // Bare earth and the paths worn into the ground, which muddy in the thaw and go to
+    // dust in a dry summer. Sand and gravel only darken in the wet, as all ground does.
+    for v in [DIRT, MUD, PATH_DIRT, PATH_GRAVEL, PATH_SAND, PATH_DARK, PATH_LITTER, PATH_NEEDLES, PLOUGH, PLOUGH_DRY] {
+        m.set_soil(v);
+    }
     crate::settlements::farmland::crops::classify(m);
 }

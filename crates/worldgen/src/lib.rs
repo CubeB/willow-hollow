@@ -33,6 +33,9 @@ pub struct Cascade {
     pub drop: f32,
     /// How fast the river runs over the lip, metres per second (0 for still water).
     pub speed: f32,
+    /// The river's [`Regime`](continent::Regime) as u8, which says how much spray it
+    /// throws in spring and in late summer.
+    pub regime: u8,
 }
 
 /// Where a stream wells up out of the ground into a small pool. Bubbles come from here.

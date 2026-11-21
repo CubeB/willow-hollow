@@ -148,6 +148,8 @@ pub struct Material {
 /// Lookup from voxel id to material. Id 0 is always air.
 pub struct Materials {
     list: Vec<Material>,
+    /// Which materials are bare earth (see [`Materials::set_soil`]), by id.
+    soil: Vec<bool>,
 }
 
 impl Default for Materials {
@@ -166,7 +168,19 @@ impl Materials {
                 emissive: false,
                 plant: plant::NONE,
             }],
+            soil: vec![false],
         }
+    }
+
+    /// Marks a material as bare earth: soil and the paths worn into it, which the shader
+    /// darkens in the thaw and after rain and pales in a dry summer (see `mesh::SOIL_BIT`).
+    pub fn set_soil(&mut self, v: Voxel) {
+        self.soil[v as usize] = true;
+    }
+
+    #[inline]
+    pub fn is_soil(&self, v: Voxel) -> bool {
+        self.soil[v as usize]
     }
 
     /// Marks a material as a kind of plant, one of the [`plant`] constants.
@@ -176,6 +190,7 @@ impl Materials {
 
     pub fn add(&mut self, m: Material) -> Voxel {
         self.list.push(m);
+        self.soil.push(false);
         (self.list.len() - 1) as Voxel
     }
 

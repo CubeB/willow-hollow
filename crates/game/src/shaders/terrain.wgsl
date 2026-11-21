@@ -102,8 +102,9 @@ struct WOut {
     @location(12) @interpolate(flat) grid1: vec4<u32>,
     // Water only, where it falls. x: how near the foot of a fall, 0..1. y: on a surface,
     // 1 at the lip of a fall; on the falling sheet, how far below the surface it fell
-    // from, in voxels of its chunk's mesh.
-    @location(13) spill: vec2<f32>,
+    // from, in voxels of its chunk's mesh. zw: how full and how low the river runs today
+    // (its row of G.streams), blended between the corners where two rivers meet.
+    @location(13) spill: vec4<f32>,
     // Where this point is with no wind: `rel` before leaf_sway. The shadow maps draw every
     // leaf and plant standing still, so shadows are looked up here. It is passed down
     // rather than worked out again per pixel, because only the vertex shader knows which
@@ -322,6 +323,27 @@ fn grass_face(t: vec3<i32>, n: vec3<f32>, fine: f32, coarse: f32) -> vec3<f32> {
     return vec3<f32>(1.0);
 }
 
+// The bank of a river through the year (#142): `run` is its row of G.streams, how full
+// the river runs and how low. The water never rises or falls, so the ground beside it
+// shows the season instead: dark with the wet while the river runs full in spring, and
+// where it has drawn back in late summer a pale, dry strip, the bed's silt bleached in
+// the sun.
+fn bank_year(c: vec3<f32>, run: vec2<f32>) -> vec3<f32> {
+    let wet = c * vec3<f32>(0.42, 0.43, 0.47);
+    let dry = mix(c, vec3<f32>(0.44, 0.40, 0.32), 0.8);
+    return mix(mix(c, wet, run.x), dry, run.y * 0.9);
+}
+
+// Bare earth and paths through the year (#117): `soil` is its biome's row of G.soil, how
+// muddy from the thaw and how dusty from a dry summer. Rain muds it too, a little more
+// than the wet darkens all the ground (block_weather), and lays the dust.
+fn soil_year(c: vec3<f32>, soil: vec2<f32>) -> vec3<f32> {
+    let mud = max(soil.x, G.weather.x * 0.7);
+    let dust = soil.y * (1.0 - G.weather.x);
+    let o = mix(c, c * vec3<f32>(0.5, 0.48, 0.48), mud * 0.8);
+    return mix(o, vec3<f32>(0.46, 0.40, 0.29), dust * 0.55);
+}
+
 const NEAR: f32 = 0.08 * VOXELS_PER_METRE;
 // How far in from a face its voxel is looked for, in voxels: less than the thinnest
 // thing drawn (a skin an eighth of a voxel thick), and well clear of rounding.
@@ -432,12 +454,17 @@ fn vs(in: VIn) -> VOut {
     var local = vertex_local(in.a);
     out.face = (in.a >> 18u) & 7u;
     out.ao = f32((in.a >> 21u) & 3u) / 3.0;
-    // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags.
-    let tag = season_tag(in.b);
+    // A broadleaf leaf's tree tag (season_tag) rides above the vertex flags, and a
+    // flower's row of the table of seasons (season_row).
+    var tag = season_tag(in.b);
+    if ((in.b >> 29u) == PLANT_FLOWER) {
+        tag = season_row(in.b);
+    }
     out.flags = (in.b >> 24u) | (tag << 8u);
-    if ((out.flags & FLAG_WASH) == FLAG_WASH) {
+    let washed = (out.flags & FLAG_WASH) == FLAG_WASH;
+    if (washed) {
         local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
-        out.flags = (out.flags & ~FLAG_WASH) | (((in.a >> 23u) & 511u) << 16u);
+        out.flags = (out.flags & ~FLAG_WASH) | (((in.a >> 23u) & 127u) << 16u);
     }
     let scale = abs(in.scale);
     out.local = local;
@@ -504,6 +531,22 @@ fn vs(in: VIn) -> VOut {
     }
     let rgb = vec3<f32>(f32(in.b & 255u), f32((in.b >> 8u) & 255u), f32((in.b >> 16u) & 255u));
     out.color = srgb_to_linear(rgb / 255.0);
+    // A voxel's face, but for a plant dropped a voxel at a time, keeps the regime of the
+    // river it is the bank of and whether it is bare earth where others keep corner bits
+    // (see `Vertex` in mesh.rs). Their year is the same all over a face, so it is put on
+    // its colour here, once a corner: in the fragment shader the same few lines slowed
+    // the whole terrain pass by some 5%.
+    let plant_kind = (in.b >> 29u) & 7u;
+    if (in.scale > 0.0 && plant_kind != PLANT_DECIDUOUS && plant_kind != PLANT_AUTUMN && plant_kind != PLANT_GRASS && plant_kind != PLANT_FLOWER) {
+        let bank = (in.a >> 30u) & 3u;
+        if (bank != 0u) {
+            out.color = bank_year(out.color, G.streams[bank].xy);
+        }
+        if (!washed && ((in.a >> 29u) & 1u) != 0u) {
+            let at = vec2<u32>(round(clamp(local.xz / 32.0, vec2<f32>(0.0), vec2<f32>(1.0)) * 4.0));
+            out.color = soil_year(out.color, G.soil[min(grid_biome(in.grid0, in.grid1, at.y * 5u + at.x), 23u)].xy);
+        }
+    }
     return out;
 }
 
@@ -544,7 +587,7 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
     let cell = floor(in.local - n * INWARD);
     let voxel = vec3<i32>(cell) + ch.origin;
     let kind = (in.flags >> 5u) & 7u;
-    let tag = (in.flags >> 8u) & 63u;
+    let tag = (in.flags >> 8u) & 127u;
     let grass = kind == PLANT_GRASS || kind == PLANT_GROUND;
     // Grass takes most of its variety from where it grows (see `sward`), not at random.
     var jitter = f32((in.flags >> 1u) & 3u);
@@ -565,7 +608,7 @@ fn shade(in: VOut, ch: Chunk) -> vec4<f32> {
     }
     // The middle of the voxel, camera-relative, for snow that is the same all over it.
     let centre = in.rel + (cell + 0.5 - in.local) * ch.scale;
-    let washed = (in.flags >> 16u) & 511u;
+    let washed = (in.flags >> 16u) & 127u;
     if (washed != 0u) {
         base = wash(base, washed, voxel, centre, ch.scale);
     }
@@ -722,6 +765,8 @@ fn vs_water(in: VIn) -> WOut {
     var local = vec3<f32>(f32(in.a & 63u), f32((in.a >> 6u) & 63u), f32((in.a >> 12u) & 63u));
     out.face = (in.a >> 18u) & 7u;
     out.ao = 1.0;
+    // The river's year (see REGIME_SHIFT in mesh.rs): 0 on still water, which keeps none.
+    let run = G.streams[(in.b >> 27u) & 3u].xy;
     if (out.face == 6u) {
         // Rows of a sheet are quarter voxels apart for the first two voxels of the fall,
         // then whole voxels.
@@ -733,17 +778,19 @@ fn vs_water(in: VIn) -> WOut {
         }
         let d = (in.a >> 21u) & 3u;
         if ((in.a >> 31u) == 0u) {
-            local += spill_dir(d) * spill_reach(s);
+            // A river in spate shoots further out over the lip, a low one barely clears it.
+            local += spill_dir(d) * min(spill_reach(s) * (1.0 + 0.6 * run.x - 0.4 * run.y), 0.95);
         }
         out.face = FACE_SPILL + d;
-        out.spill = vec2<f32>(f32((in.a >> 29u) & 3u) / 3.0, s);
+        out.spill = vec4<f32>(f32((in.a >> 29u) & 3u) / 3.0, s, run);
     } else {
         out.current = water_current(in.a);
         let lip = f32((in.a >> 22u) & 1u);
         local.y -= lip * LIP_DIP;
-        out.spill = vec2<f32>(f32((in.a >> 21u) & 1u), lip);
+        out.spill = vec4<f32>(f32((in.a >> 21u) & 1u), lip, run);
     }
-    out.flags = in.b >> 24u;
+    // Less the two that hold the regime.
+    out.flags = (in.b >> 24u) & ~24u;
     out.local = local;
     out.band = in.band;
     out.snow = grid_snow(in.grid0, in.grid1, local.xz / 32.0);
@@ -870,7 +917,9 @@ fn fs_water(in: WOut) -> @location(0) vec4<f32> {
         // Ripples are far finer than a pixel out in the coarser rings, and would only
         // sparkle there.
         let calm = smoothstep(80.0 * VOXELS_PER_METRE, 300.0 * VOXELS_PER_METRE, length(in.rel.xz));
-        let flow = in.current.xy;
+        // How full and how low the river runs today (#142): faster in spate, slower low.
+        let run = in.spill.zw;
+        let flow = in.current.xy * (1.0 + 0.8 * run.x - 0.5 * run.y);
         var lie = up;
         if (in.spill.y > 0.0 && abs(slope.y) > 0.0) {
             lie = normalize(slope * sign(slope.y));
@@ -878,24 +927,26 @@ fn fs_water(in: WOut) -> @location(0) vec4<f32> {
         let n = normalize(mix(ripple_normal(world_xz, flow, t), up, calm) + lie - up);
         let fresnel = 0.03 + 0.97 * pow5(1.0 - clamp(dot(-view, n), 0.0, 1.0));
         let reflected = sky_color(reflect(view, n));
-        // Clear and bright-bedded in the shallows, deep blue-green further out.
-        let shallow = in.color * 1.35;
-        let deep = vec3<f32>(0.02, 0.09, 0.14);
-        let body = mix(shallow, deep, 1.0 - exp(-thickness / VOXELS_PER_METRE * 0.2))
+        // Clear and bright-bedded in the shallows, deep blue-green further out. In spate the
+        // water is clouded with silt and the bed hard to see; run low it is clearer still.
+        let shallow = mix(in.color * 1.35, vec3<f32>(0.17, 0.16, 0.09), run.x * 0.6);
+        let deep = mix(vec3<f32>(0.02, 0.09, 0.14), vec3<f32>(0.06, 0.07, 0.035), run.x * 0.6);
+        let murk = (1.0 + 2.5 * run.x) * (1.0 - 0.45 * run.y);
+        let body = mix(shallow, deep, 1.0 - exp(-thickness / VOXELS_PER_METRE * 0.2 * murk))
             * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(n_face));
         color = mix(body, reflected, fresnel);
-        alpha = mix(1.0 - exp(-thickness / VOXELS_PER_METRE * 0.5625), 1.0, fresnel);
+        alpha = mix(1.0 - exp(-thickness / VOXELS_PER_METRE * 0.5625 * murk), 1.0, fresnel);
         // Sun glitter.
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
         color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, n_face) * (1.0 - calm);
         // Foam streaks on fast water.
-        let foam = foam_streaks(world_xz, flow, t) * 0.6 * (1.0 - calm);
+        let foam = foam_streaks(world_xz, flow, t) * min(0.6 * (1.0 + run.x), 0.9) * (1.0 - calm);
         if (foam > 0.0) {
             color = mix(color, white, foam);
             alpha = mix(alpha, 0.95, foam);
         }
         // Where a fall lands the water is churned white, thinning out away from it.
-        let foot = in.spill.x;
+        let foot = in.spill.x * (1.0 + 0.7 * run.x - 0.5 * run.y);
         if (foot > 0.0) {
             let p = world_xz / VOXELS_PER_METRE;
             let churn = vnoise(p * 7.0 + vec2<f32>(t * 1.3, -t * 0.9)) * 0.6 + vnoise(p * 15.0 - vec2<f32>(t * 1.7, t * 1.1)) * 0.4;
@@ -933,9 +984,10 @@ fn fs_water(in: WOut) -> @location(0) vec4<f32> {
             n = -n;
         }
         let fresnel = 0.03 + 0.97 * pow5(1.0 - clamp(dot(-view, n), 0.0, 1.0));
+        let run = in.spill.zw;
         let body = in.color * 1.2 * (G.sun_color.rgb * 0.5 * max(G.sun_dir.y, 0.0) + ambient(up));
         color = mix(body, sky_color(reflect(view, n)), fresnel);
-        alpha = mix(0.3, 1.0, fresnel);
+        alpha = mix(0.3 + 0.25 * run.x, 1.0, fresnel);
         let glint = pow(max(dot(reflect(view, n), G.sun_dir.xyz), 0.0), 240.0);
         color += G.sun_color.rgb * glint * 3.0 * sun_visibility(in.rel, up);
         // The streaks ride down with the water: each is drawn where water that left the
@@ -944,10 +996,19 @@ fn fs_water(in: WOut) -> @location(0) vec4<f32> {
         let left = (sqrt(0.64 + 19.6 * fall) - 0.8) / 9.8 - t;
         let along = select(world_xz.x, world_xz.y, abs(d.x) > 0.5) / VOXELS_PER_METRE;
         let streak = vnoise(vec2<f32>(along * 16.0, left * 6.0)) * 0.6 + vnoise(vec2<f32>(along * 37.0 + 9.0, left * 10.0)) * 0.4;
-        let broken = 0.2 * smoothstep(0.0, 1.5, fall) + 0.25 * smoothstep(1.5, 6.0, fall) + 0.15 * in.spill.x;
+        // In spate a fall is white nearly from the lip.
+        let broken = 0.2 * smoothstep(0.0, 1.5, fall) + 0.25 * smoothstep(1.5, 6.0, fall) + 0.15 * in.spill.x + 0.22 * run.x;
         // At the foot it is all thrown up as spray, to a ragged, shifting edge.
         let spray = smoothstep(0.45, 0.95, in.spill.x + (vnoise(vec2<f32>(along * 9.0, t * 2.5)) - 0.5) * 0.5);
-        let foam = max(smoothstep(0.66 - broken, 0.86 - broken, streak), spray) * 0.9;
+        var foam = max(smoothstep(0.66 - broken, 0.86 - broken, streak), spray) * 0.9;
+        // Run low, the sheet thins to a few strands of water over the lip, with the rock
+        // showing between them.
+        if (run.y > 0.0) {
+            let strands = smoothstep(0.42, 0.62, vnoise(vec2<f32>(along * 3.0, fall * 0.35 + 5.0)));
+            let thin = mix(1.0, strands, run.y * 0.9);
+            alpha *= mix(1.0, thin, 1.0 - fresnel * 0.5) * (1.0 - 0.3 * run.y);
+            foam *= thin;
+        }
         color = mix(color, white, foam);
         alpha = mix(alpha, 0.95, foam);
         // In deep cold a fall freezes over too, with a little water still running down it.

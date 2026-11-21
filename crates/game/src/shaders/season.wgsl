@@ -33,6 +33,8 @@ struct Leaf {
     bud: f32,
     // Per-tree random, for varying the autumn colour.
     tree: f32,
+    // A cherry's: 1 in blossom, easing to 0 as it comes into leaf (season_leaf_colour).
+    blossom: f32,
 }
 
 // A tree's own random, 0..1. `tag` is the tree's number, 1..63, worked out from its trunk
@@ -49,6 +51,13 @@ fn season_tree(vox: vec3<i32>, tag: u32) -> f32 {
 // The tree tag a terrain vertex carries in the two low bits of each colour channel of `b`.
 fn season_tag(b: u32) -> u32 {
     return (b & 3u) | ((b >> 6u) & 12u) | ((b >> 12u) & 48u);
+}
+
+// The row of the table of seasons a flower's vertex carries: where a leaf has its tree
+// tag, and one more bit in the third bit of blue, which only a flower gives up (voxel's
+// season_bits).
+fn season_row(b: u32) -> u32 {
+    return season_tag(b) | ((b >> 12u) & 64u);
 }
 
 // The year of a broadleaf: it turns from late summer, and every leaf is down by early
@@ -71,6 +80,10 @@ fn season_leaf(s: f32, vox: vec3<i32>, maple: bool, tag: u32) -> Leaf {
     let turn_at = 0.47 + 0.06 * out.tree + 0.02 * (branch - 0.5) - early;
     out.turn = smoothstep(turn_at, turn_at + 0.10, s);
     out.bud = 1.0 - smoothstep(bud_at, bud_at + 0.12, s);
+    // A tree's blossom is over a little after its buds break, by the end of April on the
+    // earliest and late in May on the latest.
+    let leafed_at = 0.06 + 0.10 * out.tree;
+    out.blossom = 1.0 - smoothstep(leafed_at, leafed_at + 0.03, s);
     return out;
 }
 
@@ -146,20 +159,35 @@ fn season_bloom(c: vec3<f32>, phase: vec2<f32>) -> vec3<f32> {
     return c;
 }
 
+// Whether a broadleaf leaf of linear colour `c` is a cherry's, which is modelled in
+// blossom (see season_blossom), so it is never left as modelled through the summer.
+fn season_cherry(kind: u32, c: vec3<f32>) -> bool {
+    return kind == PLANT_DECIDUOUS && season_blossom(sqrt(c));
+}
+
 // Colour of a leaf still on: new and pale in spring, gold and red in autumn. A maple is
-// modelled in its autumn colours, so it is green until its own autumn.
+// modelled in its autumn colours, so it is green until its own autumn; a cherry in its
+// blossom, so it is pink until it comes into leaf, and green from then until it turns.
 fn season_leaf_colour(c: vec3<f32>, leaf: Leaf, maple: bool) -> vec3<f32> {
-    var o = c;
+    var base = c;
+    // The pale of a new leaf, which blossom does not have.
+    var bud = leaf.bud;
+    if (!maple && season_blossom(sqrt(c))) {
+        let green = vec3<f32>(0.06, 0.20, 0.035) * dot(c, vec3<f32>(0.3, 0.59, 0.11)) / 0.58;
+        base = mix(green, c, leaf.blossom);
+        bud *= 1.0 - leaf.blossom;
+    }
+    var o = base;
     if (maple) {
         o = vec3<f32>(0.30, 0.95, 0.20) * dot(c, vec3<f32>(0.3, 0.59, 0.11)) * 1.1;
     }
-    o = mix(o, o * vec3<f32>(1.45, 1.3, 0.6) + vec3<f32>(0.02, 0.03, 0.0), leaf.bud * 0.7);
+    o = mix(o, o * vec3<f32>(1.45, 1.3, 0.6) + vec3<f32>(0.02, 0.03, 0.0), bud * 0.7);
     if (maple) {
         return mix(o, c, leaf.turn);
     }
     let gold = vec3<f32>(0.62, 0.36, 0.04);
     let red = vec3<f32>(0.5, 0.1, 0.03);
-    let tint = mix(gold, red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + c.g * 2.0);
+    let tint = mix(gold, red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + base.g * 2.0);
     return mix(o, tint, leaf.turn * 0.92);
 }
 
@@ -178,8 +206,9 @@ fn season_grass(c: vec3<f32>, s: f32) -> vec3<f32> {
 // The colour of a surface of this plant kind this date. `vox` is its voxel, `tag` its
 // tree's (season_tree).
 fn season_apply(c: vec3<f32>, vox: vec3<i32>, kind: u32, s: f32, tag: u32) -> vec3<f32> {
-    // Midsummer is the colours as modelled (a maple, modelled in autumn, aside).
-    if (kind != PLANT_AUTUMN && s > 0.27 && s < 0.40) {
+    // Midsummer is the colours as modelled (a maple, modelled in autumn, and a cherry,
+    // in blossom, aside).
+    if (kind != PLANT_AUTUMN && s > 0.27 && s < 0.40 && !season_cherry(kind, c)) {
         return c;
     }
     if (kind == PLANT_DECIDUOUS || kind == PLANT_AUTUMN) {
@@ -199,7 +228,7 @@ fn season_box_leaf(c: vec3<f32>, lo: vec3<i32>, kind: u32, s: f32, tag: u32) -> 
         return vec4<f32>(c, 1.0);
     }
     let maple = kind == PLANT_AUTUMN;
-    if (!maple && s > 0.27 && s < 0.40) {
+    if (!maple && s > 0.27 && s < 0.40 && !season_cherry(kind, c)) {
         return vec4<f32>(c, 1.0);
     }
     let leaf = season_leaf(s, lo, maple, tag);
@@ -236,7 +265,7 @@ fn season_far_leaf(c: vec3<f32>, world: vec2<f32>, s: f32) -> vec4<f32> {
     if (!((season_green(q) && !season_evergreen(q)) || maple || season_blossom(q))) {
         return vec4<f32>(c, 1.0);
     }
-    if (s > 0.27 && s < 0.40 && !maple) {
+    if (s > 0.27 && s < 0.40 && !maple && !season_blossom(q)) {
         return vec4<f32>(c, 1.0);
     }
     let cell = vec3<i32>(i32(floor(world.x / 40.0)) * 10, 0, i32(floor(world.y / 40.0)) * 10);

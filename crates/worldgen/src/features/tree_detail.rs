@@ -11,6 +11,9 @@
 //!   palm has no branches, only fronds on a bare trunk.
 //! - **Leaf clusters** hang under canopies and tuft their sides, in the leaf's own
 //!   material, so they turn, fall and sway exactly as the leaves they sit on.
+//! - **Fruit**: holly berries, wild cherries and acorns among the leaves, each keeping a
+//!   row of the table of seasons (see [`seasons`]), so they come green, ripen and are
+//!   gone in their own months without the world being built again.
 //! - **Bare crowns**: a broadleaf's model carries fine twigs inside its leaves
 //!   (`Template::fine`, grown by `trees::twigs`), hidden while the leaves are on and
 //!   showing as each falls. [`bare_crowns`] lays them into the world.
@@ -29,6 +32,7 @@ use voxel::{
 };
 
 use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, Voxels, for_each_site};
+use super::plants::Season;
 use super::shape::{FACES, ON_WOOD, Rng, boxes_meet, on_faces};
 use super::trees::{Species, hides_twigs};
 use super::{Library, Placement, parts::rotate_box};
@@ -49,6 +53,41 @@ pub const WOOD_BOXES: usize = 320;
 pub const LEAF_SITES: usize = 150;
 /// Most boxes of leaf clusters and canopy twigs in one chunk column.
 pub const LEAF_BOXES: usize = 400;
+
+// Rows of the table of seasons the trees' fruit keeps, after the crops (55 to 63; see
+// `plants::seasons`), 64 to 71.
+/// Wild cherries: green from May, dark red from midsummer, taken by the birds by August.
+pub const CHERRIES: u8 = 64;
+/// Acorns, and a holm oak's: green from July, brown in September, all fallen before the
+/// leaves are, so none hangs from a bare twig.
+pub const ACORNS: u8 = 65;
+/// Holly berries: green through the summer, red from October, and the last eaten in
+/// February; a holly is without them through the spring.
+pub const HOLLY: u8 = 66;
+
+/// The seasons the trees' fruit keeps, each with its row of the table. In bud a fruit
+/// is green and unripe, out it is ripe, and gone to seed it browns and falls.
+pub fn seasons() -> [(u8, Season); 3] {
+    let s = |start: f32, length: f32, bud: f32, seed: f32| Season { start, length, bud, seed };
+    [(CHERRIES, s(0.27, 0.06, 0.10, 0.015)), (ACORNS, s(0.47, 0.08, 0.14, 0.005)), (HOLLY, s(0.56, 0.36, 0.26, 0.0))]
+}
+
+/// The row of the table of seasons a piece of fruit keeps, or 0 for anything else.
+pub fn fruit_season(v: Voxel) -> u8 {
+    match v {
+        mat::CHERRY => CHERRIES,
+        mat::ACORN => ACORNS,
+        mat::HOLLY_BERRY => HOLLY,
+        _ => 0,
+    }
+}
+
+/// The season of a fruit that can be picked, if `v` is one: it can be taken only while
+/// it is ripe, as the shader draws it.
+pub fn fruit(v: Voxel) -> Option<Season> {
+    let row = fruit_season(v);
+    seasons().into_iter().find(|&(r, _)| r == row && row != 0).map(|(_, s)| s)
+}
 
 /// Share of the outer faces of limbs that grow a twig.
 const LIMB_TWIGS: f32 = 0.08;
@@ -369,11 +408,16 @@ pub fn grow(voxels: &ColumnVoxels, mats: &Materials, grove: &Grove, out: &mut Ve
             twig(&mut plot, &mut rng, mat::TWIG);
         } else {
             // Laid first, as a cell once taken is kept: the leaves then gather round them.
+            let tree = grove.above_ground(site.air) > m(2.5) as i32;
+            fruit_of(&mut plot, &mut grove.rng(site, 0xba17), site.host, site.toward, tree);
             garnish(&mut plot, &mut rng, site.host);
             cluster(&mut plot, &mut rng, site.toward == Toward::Above, site.host);
         }
         piece.clear();
         raster.finish(&mut piece, |_| (true, true));
+        for b in &mut piece {
+            b.season = fruit_season(b.voxel);
+        }
         if count + piece.len() > LEAF_BOXES {
             break;
         }
@@ -403,6 +447,27 @@ fn garnish(plot: &mut FacePlot, rng: &mut Rng, leaf: Voxel) {
     let (piece, chance, most) = match leaf {
         mat::LEAVES_HOLLY => (mat::HOLLY_BERRY, 0.3, 2),
         mat::GORSE => (mat::GORSE_BLOOM, 0.6, 3),
+        _ => return,
+    };
+    if rng.unit() >= chance {
+        return;
+    }
+    for _ in 0..rng.int(1, most) {
+        let (u, v, d) = (rng.int(0, 3), rng.int(0, 3), rng.int(0, 1));
+        plot.fill(u, u + 1, v, v + 1, d, d + 1, piece);
+        plot.fill(u, u + 1, v, v + 1, 0, d, leaf);
+    }
+}
+
+/// The fruit of a broadleaf among its leaves, 0.1 m pieces: wild cherries in twos and
+/// threes hanging under a cherry, and acorns on an oak or a holm oak high enough to be a
+/// tree and not a bush. Sat on a leaf as [`garnish`] sets its berries, and rolled with
+/// a die of its own, so the leaves about them grow as they did before there was fruit.
+fn fruit_of(plot: &mut FacePlot, rng: &mut Rng, leaf: Voxel, toward: Toward, tree: bool) {
+    let (piece, chance, most) = match leaf {
+        // Hanging under the boughs; few on top, where they are only seen from above.
+        mat::LEAVES_CHERRY => (mat::CHERRY, if toward == Toward::Below { 0.1 } else { 0.35 }, 3),
+        mat::LEAVES_OAK | mat::LEAVES_HOLM if tree => (mat::ACORN, 0.22, 2),
         _ => return,
     };
     if rng.unit() >= chance {
@@ -665,8 +730,27 @@ mod tests {
     }
 
     #[test]
+    fn the_fruit_ripens_in_its_own_months_and_is_gone_before_the_leaves() {
+        use crate::features::plants::{Phase, month_start};
+        let mid = |m: u8| (month_start(m) + 1.0 / 24.0).rem_euclid(1.0);
+        let ripe = |v: Voxel, m: u8| (0..400).filter(|&k| fruit(v).unwrap().phase(mid(m), k * 7, 1000 - k * 3) == Phase::Bloom).count() as f32 / 400.0;
+        let there = |v: Voxel, date: f32| (0..400).filter(|&k| fruit(v).unwrap().phase(date, k * 7, 1000 - k * 3) != Phase::Gone).count();
+        // Cherries in July, acorns in September and October, holly berries in winter.
+        assert!(ripe(mat::CHERRY, 7) > 0.8 && ripe(mat::CHERRY, 5) == 0.0 && there(mat::CHERRY, mid(9)) == 0);
+        assert!(ripe(mat::ACORN, 9) > 0.3 && ripe(mat::ACORN, 10) > 0.3 && ripe(mat::ACORN, 8) == 0.0 && there(mat::ACORN, mid(4)) == 0);
+        assert!(ripe(mat::HOLLY_BERRY, 12) > 0.9 && ripe(mat::HOLLY_BERRY, 1) > 0.9 && there(mat::HOLLY_BERRY, mid(4)) == 0);
+        // Nothing hangs on into the leaf fall, from a twig the leaves have left (see
+        // season_leaf in season.wgsl: the first leaf of the earliest tree goes at 0.602).
+        for v in [mat::CHERRY, mat::ACORN] {
+            assert_eq!(there(v, 0.606), 0, "{v} still hangs as the leaves fall");
+        }
+        // Nothing but fruit has a season of its own.
+        assert!(fruit(mat::GORSE_BLOOM).is_none() && fruit(mat::LEAVES_OAK).is_none());
+    }
+
+    #[test]
     fn berries_and_blooms_never_hang_in_the_air() {
-        for (leaf, piece) in [(mat::LEAVES_HOLLY, mat::HOLLY_BERRY), (mat::GORSE, mat::GORSE_BLOOM)] {
+        for (leaf, piece) in [(mat::LEAVES_HOLLY, mat::HOLLY_BERRY), (mat::GORSE, mat::GORSE_BLOOM), (mat::LEAVES_CHERRY, mat::CHERRY), (mat::LEAVES_OAK, mat::ACORN)] {
             let mut seen = 0;
             for seed in 0..4000 {
                 for toward in [Toward::NegX, Toward::PosZ, Toward::Above, Toward::Below] {
@@ -674,6 +758,7 @@ mod tests {
                     let mut raster = Raster::new();
                     let mut plot = site.plot(&mut raster);
                     let mut rng = Rng::new(seed);
+                    fruit_of(&mut plot, &mut rng, leaf, toward, true);
                     garnish(&mut plot, &mut rng, leaf);
                     // Not the tufts: they are what used to hold a berry up only by chance.
                     let mut boxes = Vec::new();
@@ -820,6 +905,8 @@ mod tests {
                     | mat::BARK_YEW_FLAKE
                     | mat::HOLLY_BERRY
                     | mat::GORSE_BLOOM
+                    | mat::CHERRY
+                    | mat::ACORN
             ) || is_leaf(p.voxel)
         };
         let (centre, stride) = (crate::macro_layout::MACRO_SIZE / CHUNK / 2, 3);

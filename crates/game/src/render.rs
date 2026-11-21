@@ -265,11 +265,15 @@ struct Globals {
     wash_bloom: [[f32; 4]; WASH_SLOTS],
     /// The seasons of the plants that have their own: `plants::seasons`.
     flowering: [[f32; 4]; SEASON_SLOTS],
+    /// How full and how low the rivers of each regime run today: `season::stream`.
+    streams: [[f32; 4]; 4],
+    /// How muddy and how dusty bare earth is today in each biome: `season::soil`.
+    soil: [[f32; 4]; SNOW_SLOTS],
 }
 
-/// Rows in the table of seasons, which the shaders keep as 64.
+/// Rows in the table of seasons, which the shaders keep as 128.
 const SEASON_SLOTS: usize = worldgen::features::plants::SEASON_SLOTS;
-const _: () = assert!(SEASON_SLOTS == 64);
+const _: () = assert!(SEASON_SLOTS == 128);
 
 /// Entries in the globals' snow table: every biome, rounded up.
 const SNOW_SLOTS: usize = 24;
@@ -1950,6 +1954,14 @@ impl Renderer {
             wash_body: self.wash.0,
             wash_bloom: self.wash.1,
             flowering: self.flowering,
+            streams: std::array::from_fn(|k| {
+                let [high, low] = crate::season::stream(k as u8, env.date);
+                [high, low, 0.0, 0.0]
+            }),
+            soil: std::array::from_fn(|k| {
+                let [mud, dust] = worldgen::biome::Biome::ALL.get(k).map_or([0.0; 2], |&b| crate::season::soil(b, env.date));
+                [mud, dust, 0.0, 0.0]
+            }),
         };
         globals.cam_fwd[3] = snow_floor(&globals.snow);
         gpu.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -2923,7 +2935,9 @@ mod tests {
             // The flowers' season rides above their kind, and both come back out whole.
             let w = &worldgen::features::plants::washes()[i - 1];
             assert_eq!((bloom[i][3] as u32) >> 3, w.season as u32);
-            assert!((bloom[i][3] as u32 & 7) < 8 && (w.season as usize) < SEASON_SLOTS);
+            // far.wgsl and terrain.wgsl read it back in six bits: a wash keeps one of the
+            // first 64 rows.
+            assert!((bloom[i][3] as u32 & 7) < 8 && w.season < 64);
             assert!(body[i][..3].iter().all(|c| (0.0..=1.0).contains(c)));
         }
     }

@@ -127,6 +127,52 @@ pub fn humidity(biome: Biome) -> f32 {
     }
 }
 
+/// A share of the year that comes and goes about the turn of it: 0 before `from`, rising
+/// to 1 by `full`, holding until `until` and gone again by `gone`. Dates from late spring
+/// to the end of autumn are as they are; those of winter count back from the equinox, so
+/// a window can open in February (-0.1) and close in April.
+fn window(date: f32, from: f32, full: f32, until: f32, gone: f32) -> f32 {
+    let d = if date > 0.75 { date - 1.0 } else { date };
+    smoothstep(from, full, d) * (1.0 - smoothstep(until, gone, d))
+}
+
+/// When the late summer drought holds the streams lowest, and the bare earth of dry
+/// country dustiest: from the end of June, deepest from mid July to mid September, over
+/// with the autumn rain by the middle of October, so November is as it always was.
+fn drought(date: f32, from: f32) -> f32 {
+    window(date, from, from + 0.10, 0.52, 0.60)
+}
+
+/// How full a river runs on this date, and how low, each 0 to 1, by its regime (worldgen's
+/// `continent::Regime` as u8, 0 steady, 1 dry country, 2 rain, 3 snow). The water stands
+/// where it always does (#142): the shaders draw it by these, as `G.streams`, and the
+/// spray off a fall follows them. A river fed by snow swells most, and latest, from the end
+/// of March until the melt is over in June; one fed by rain is fullest in March and April
+/// after the winter's rain; one of dry country barely rises and is lowest of all by
+/// August. Winter and autumn are as they were before the seasons touched the water.
+pub fn stream(regime: u8, date: f32) -> [f32; 2] {
+    match regime {
+        1 => [0.3 * window(date, -0.07, 0.0, 0.04, 0.12), drought(date, 0.24)],
+        2 => [0.65 * window(date, -0.07, 0.0, 0.07, 0.17), 0.85 * drought(date, 0.28)],
+        3 => [window(date, -0.03, 0.06, 0.17, 0.27), 0.6 * drought(date, 0.32)],
+        _ => [0.0, 0.0],
+    }
+}
+
+/// How muddy bare earth and paths are in a biome on this date, from the thaw, and how
+/// dusty from a dry summer, each 0 to 1 (#117), as `G.soil`. The thaw comes wherever it
+/// snows, a little later the colder the biome: about March in the temperate lowlands,
+/// May on the tundra. Dust is for dry country that is warm in summer: the steppe and the
+/// savanna, the desert's few patches of earth, a little on the heath.
+pub fn soil(biome: Biome, date: f32) -> [f32; 2] {
+    let warm = warmth(biome);
+    let thaw = ((NEVER_SNOWS - warm) / (NEVER_SNOWS - 0.25)).clamp(0.0, 1.0);
+    let late = (0.25 - warm).max(0.0) * 0.15;
+    let mud = thaw * window(date, -0.06 + late, late, 0.06 + late, 0.13 + late);
+    let dry = ((1.0 - humidity(biome)) / 0.4).clamp(0.0, 1.0) * smoothstep(-0.1, 0.45, warm);
+    [mud, dry * drought(date, 0.28)]
+}
+
 /// What the ground carries, for the shaders: snow cover and ice on still water, with how
 /// wet it is (the rain's doing, see weather.rs).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -215,6 +261,8 @@ pub struct Leaf {
     pub tree: f32,
     /// The date it falls.
     pub fall_at: f32,
+    /// A cherry's: 1 in blossom, easing to 0 as it comes into leaf.
+    pub blossom: f32,
 }
 
 /// The leaf at voxel `vox` on a tree tagged `tag` (features::tree_tag, 0 if unknown):
@@ -232,6 +280,7 @@ pub fn leaf(s: f32, vox: IVec3, maple: bool, tag: u8) -> Leaf {
     let bud_at = 0.02 + 0.10 * tree + 0.03 * h;
     let fall_at = 0.625 + 0.05 * tree + 0.016 * (branch - 0.5) + 0.03 * (h - 0.5) - early;
     let turn_at = 0.47 + 0.06 * tree + 0.02 * (branch - 0.5) - early;
+    let leafed_at = 0.06 + 0.10 * tree;
     Leaf {
         // Midsummer: every leaf is on (season_gone).
         keep: (s > 0.27 && s < 0.40) || (s >= bud_at && s < fall_at),
@@ -239,25 +288,38 @@ pub fn leaf(s: f32, vox: IVec3, maple: bool, tag: u8) -> Leaf {
         bud: 1.0 - smoothstep(bud_at, bud_at + 0.12, s),
         tree,
         fall_at,
+        blossom: 1.0 - smoothstep(leafed_at, leafed_at + 0.03, s),
     }
+}
+
+/// Whether a broadleaf leaf of linear colour `c` is a cherry's, modelled pink, in its
+/// blossom: season.wgsl's `season_blossom`.
+fn cherry(c: Vec3) -> bool {
+    let q = Vec3::new(c.x.max(0.0).sqrt(), c.y.max(0.0).sqrt(), c.z.max(0.0).sqrt());
+    q.x > q.y * 1.2 && q.z > q.y * 1.05 && q.x > 0.6
 }
 
 /// The colour of a broadleaf leaf still on, from its modelled linear colour `c`:
 /// season.wgsl's `season_apply` for a deciduous or maple leaf.
 pub fn leaf_colour(c: Vec3, leaf: &Leaf, maple: bool, s: f32) -> Vec3 {
-    if !maple && s > 0.27 && s < 0.40 {
+    let blossom = !maple && cherry(c);
+    if !maple && s > 0.27 && s < 0.40 && !blossom {
         return c;
     }
-    let mut o = c;
+    // A cherry is modelled in blossom, and comes into leaf as it goes over.
+    let base = if blossom { (Vec3::new(0.06, 0.20, 0.035) * c.dot(Vec3::new(0.3, 0.59, 0.11)) / 0.58).lerp(c, leaf.blossom) } else { c };
+    // The pale of a new leaf, which blossom does not have.
+    let bud = if blossom { leaf.bud * (1.0 - leaf.blossom) } else { leaf.bud };
+    let mut o = base;
     if maple {
         o = Vec3::new(0.30, 0.95, 0.20) * c.dot(Vec3::new(0.3, 0.59, 0.11)) * 1.1;
     }
-    o = o.lerp(o * Vec3::new(1.45, 1.3, 0.6) + Vec3::new(0.02, 0.03, 0.0), leaf.bud * 0.7);
+    o = o.lerp(o * Vec3::new(1.45, 1.3, 0.6) + Vec3::new(0.02, 0.03, 0.0), bud * 0.7);
     if maple {
         return o.lerp(c, leaf.turn);
     }
     let (gold, red) = (Vec3::new(0.62, 0.36, 0.04), Vec3::new(0.5, 0.1, 0.03));
-    let tint = gold.lerp(red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + c.y * 2.0);
+    let tint = gold.lerp(red, smoothstep(0.3, 0.8, leaf.tree)) * (0.45 + base.y * 2.0);
     o.lerp(tint, leaf.turn * 0.92)
 }
 
@@ -319,6 +381,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cherry_is_pink_in_blossom_and_green_in_summer() {
+        let pink = Vec3::new(0.888, 0.423, 0.565);
+        let v = IVec3::new(40, 80, -12);
+        let april = leaf_colour(pink, &leaf(0.06, v, false, 9), false, 0.06);
+        assert!(april.x > april.y && april.z > april.y, "{april}");
+        for s in [0.25, 0.32, 0.45] {
+            let c = leaf_colour(pink, &leaf(s, v, false, 9), false, s);
+            assert!(c.y > c.x && c.y > c.z, "{s}: {c}");
+        }
+        // Nothing else is taken for a cherry.
+        let green = Vec3::new(0.05, 0.22, 0.03);
+        assert!(cherry(pink) && !cherry(green) && !cherry(Vec3::new(0.49, 0.05, 0.03)));
+    }
+
+    #[test]
     fn leaves_are_down_by_early_winter() {
         assert!(leaf_fall(0.62) > 0.99);
         assert_eq!(leaf_fall(LEAVES_DOWN), 0.0);
@@ -374,5 +451,27 @@ mod tests {
         for b in [Biome::Tundra, Biome::Alpine, Biome::Taiga, Biome::SnowyPine, Biome::Deciduous, Biome::Bog, Biome::Steppe] {
             assert!(warmth(b) < NEVER_SNOWS, "{b:?}");
         }
+    }
+
+    /// Streams run full in spring and low in late summer, snow-fed ones fullest, and from
+    /// the autumn rain to the end of winter they are as they always were (#142); bare
+    /// earth muds in the thaw and dusts in a dry summer, and is plain earth in November.
+    #[test]
+    fn streams_and_earth_keep_the_year() {
+        let (april, august) = (month("april").unwrap(), month("august").unwrap());
+        assert!(stream(3, april)[0] > 0.9 && stream(2, april)[0] > 0.5 && stream(1, april)[0] < 0.3);
+        assert_eq!(stream(0, april), [0.0, 0.0]);
+        assert!(stream(2, august)[1] > 0.7 && stream(1, august)[1] > 0.9);
+        assert!(stream(3, august)[0] == 0.0 && stream(2, august)[0] == 0.0);
+        for m in ["november", "december", "january"] {
+            for regime in 0..4 {
+                assert_eq!(stream(regime, month(m).unwrap()), [0.0, 0.0], "{m} {regime}");
+            }
+            for b in Biome::ALL {
+                assert_eq!(soil(b, month(m).unwrap()), [0.0, 0.0], "{m} {b:?}");
+            }
+        }
+        assert!(soil(Biome::Deciduous, april)[0] > 0.5 && soil(Biome::Deciduous, august)[1] < 0.2);
+        assert!(soil(Biome::Steppe, august)[1] > 0.9 && soil(Biome::Rainforest, april)[0] == 0.0);
     }
 }

@@ -269,7 +269,7 @@ pub(super) fn log_deck(k: &mut Kit, rng: &mut Rng, p: &Palette, decayed: bool) {
 fn bunch(k: &mut Kit, x: i32, top: i32, z: i32, f: Flower, old: bool) {
     let tie = if old { mat::ROPE_ROTTEN } else { mat::ROPE };
     let head = if old { mat::DRIED_BROWN } else { dried(f) };
-    if matches!(f, Flower::PennyBun | Flower::FlyAgaric) {
+    if f.is_mushroom() {
         k.hang((x, top - 6, z), (x + 1, top, z + 1), tie);
         for y in [top - 4, top - 2] {
             k.hang((x - 1, y, z - 1), (x + 2, y + 1, z + 2), head);
