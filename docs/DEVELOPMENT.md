@@ -140,7 +140,7 @@ shows. PNG files are ignored by git everywhere except under `docs/`, so shots ca
 written anywhere.
 
 The windows can be put on a shot too: `--pack` for the pack, and `--journal [PAGE]` for
-the journal open at `finds`, `places`, `walk` or `days`. A screenshot reads no save, so
+the journal open at `finds`, `places`, `walk`, `camps` or `days`. A screenshot reads no save, so
 the journal shown is one written up as if after a walk to the sixteen named places
 nearest the camera; `--journal-fill N` changes how many, and `--journal-fill 0` shows a
 journal with nothing in it yet. In a live run, `RUST_LOG=info,game::journal=debug` logs
@@ -449,6 +449,19 @@ tents once; a save from then still loads, without them.)
 ./target/release/game.exe --seed 1 --screenshot camp.png --over 42186,30679,5 --look 180,-14 --time 22 --camp lit --hotbar
 ./target/release/game.exe --seed 1 --screenshot stars.png --over 42186,30679,5 --look 180,25 --time 23 --camp lit --rest
 ```
+
+Each world has a few constellations of its own (`crates/game/src/stars.rs`), made from the
+seed and named in one of the world's tongues (`worldgen::names::sky`, which nothing in
+generation reads, so the checksum is untouched). The sky shader draws them among the other
+stars from the sky's own uniform, a little brighter. A screenshot logs where each stands
+(`the stars: NAME at --look YAW,PITCH`); with `RUST_LOG=warn,game=debug` it logs the pixels
+each figure's stars fall on, and with `--rest` it names one made out overhead, as a run
+does the first time. A night slept by a fire or in a bed leaves the player rested
+(`rested.rs`: a strength and the hours it has left, kept in `world-N.txt`; `grant` takes
+a lighter rest too, as incense might give); `--rested [F]` shows it on a screenshot. A
+camp made with `--camp` opens the map about it on `--minimap` and `--bigmap` shots as
+lighting its fire does, as far as `minimap::reveal::camp_reach` says for its height, and
+`--journal camps` shows the camps page.
 
 Sticks lie fallen under the trees (`crates/game/src/fallen.rs`). They are not part of
 the world's generation, so they leave the `bench` checksum alone: where they lie comes

@@ -1,8 +1,16 @@
 
 // The northern lights (see aurora.rs). x: how bright they are now, 0 to 1. y: where
 // their curtains start in their slow folding, kept at 0 for now.
+// And the world's constellations (see stars.rs), on the sphere the stars turn on: for
+// each figure its middle (xyz) and the cosine of how far its stars reach from it (w),
+// and its stars a group of STARS_EACH at a time, each a direction and how bright (w, 0
+// for none).
+const FIGURES: i32 = 7;
+const STARS_EACH: i32 = 8;
 struct AuroraLights {
     a: vec4<f32>,
+    groups: array<vec4<f32>, 7>,
+    stars: array<vec4<f32>, 56>,
 };
 @group(1) @binding(0) var<uniform> AURORA: AuroraLights;
 
@@ -95,12 +103,39 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     return out;
 }
 
+// The world's constellations, as the field's stars are drawn but a little brighter, at
+// `dir` on the turning sphere. A figure far from `dir` is passed over at its middle.
+fn figures(dir: vec3<f32>) -> f32 {
+    var lit = 0.0;
+    for (var k = 0; k < FIGURES; k++) {
+        let g = AURORA.groups[k];
+        if (g.w <= 0.0 || dot(dir, g.xyz) < g.w - 0.01) {
+            continue;
+        }
+        for (var i = 0; i < STARS_EACH; i++) {
+            let s = AURORA.stars[k * STARS_EACH + i];
+            if (s.w <= 0.0) {
+                continue;
+            }
+            let d = length(s.xyz - dir) * 160.0;
+            let twinkle = 0.8 + 0.2 * sin(G.sun_dir.w * 2.6 + f32(k * STARS_EACH + i) * 1.9);
+            lit += smoothstep(0.7, 0.0, d) * s.w * twinkle;
+        }
+    }
+    return lit;
+}
+
 // A sparse field of stars, wheeling about the pole the sun and moon go round: once a
 // night, and once more over the year.
 fn stars(view: vec3<f32>) -> f32 {
     let c = cos(G.sun_pos.w);
     let s = sin(G.sun_pos.w);
     let dir = vec3<f32>(view.x * c + view.y * s, view.y * c - view.x * s, view.z);
+    return field(dir) + figures(dir);
+}
+
+// The scattered stars, at `dir` on the turning sphere.
+fn field(dir: vec3<f32>) -> f32 {
     let cell = vec3<i32>(floor(dir * 160.0));
     let h = hash3(cell);
     if (h > 0.015) {

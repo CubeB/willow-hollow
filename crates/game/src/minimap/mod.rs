@@ -346,6 +346,9 @@ pub struct Minimap {
     pub hour: f32,
     /// Where the player has camped, in world voxels: each is marked.
     pub camps: Vec<DVec2>,
+    /// How rested the player is, 0 to 1 (see rested.rs): a quiet word under the corner
+    /// map while it lasts.
+    pub rested: f32,
     /// Where the parties of settlers the player has met have got to, in world voxels.
     pub met: Vec<DVec2>,
     /// The country a guild house's wayfarers have charted (#207), its middle in world
@@ -492,6 +495,7 @@ impl Minimap {
             hour: 12.0,
             camps: Vec::new(),
             told: Vec::new(),
+            rested: 0.0,
             met: Vec::new(),
             charted: Vec::new(),
             quarried: Vec::new(),
@@ -1051,6 +1055,38 @@ impl Minimap {
         self.version += 1;
     }
 
+    /// Opens the map about a camp made with its fire at `fire` (world voxels), as far as
+    /// can be seen from there (#37): the further, the higher it stands above the land
+    /// about it. How far above that is, in voxels.
+    pub fn camp(&mut self, fire: DVec3) -> f32 {
+        let at = xz(fire);
+        let here = key_of(at);
+        let c = match self.known.get(&here) {
+            Some(k) => k.sheet.continent.clone(),
+            None => self.world.continent(here.0, here.1),
+        };
+        let eye = fire.y as f32 + crate::player::EYE_HEIGHT as f32;
+        let above = reveal::above(&c, (at - origin(here)).as_vec2(), eye);
+        let radius = reveal::camp_reach(above);
+        log::info!("a camp {:.0} m above the land about it shows the map {:.0} m round", above / VOXELS_PER_METRE, radius / VOXELS_PER_METRE);
+        let (lo, hi) = (key_of(at - radius as f64), key_of(at + radius as f64));
+        for kz in lo.1..=hi.1 {
+            for kx in lo.0..=hi.0 {
+                let local = (at - origin((kx, kz))).as_vec2();
+                match self.reveal_mut((kx, kz)) {
+                    Some(r) => r.see(local, radius, false),
+                    None => {
+                        if let Some(q) = self.loading.get_mut(&(kx, kz)) {
+                            q.push((local, radius, false));
+                        }
+                    }
+                }
+            }
+        }
+        self.version += 1;
+        above
+    }
+
     /// As if the player had walked along `path` (world x, z), for screenshots.
     pub fn walk(&mut self, path: &[DVec2]) {
         for pair in path.windows(2) {
@@ -1133,6 +1169,14 @@ impl Minimap {
         if let Some(name) = self.near.as_ref().or(self.region.as_ref()) {
             let size = (12.5 * f.s).min(f.half.x * 1.8 / names::width(name, 1.0).max(1.0));
             labels.push(Label { pos: [f.centre.x, f.centre.y + f.half.y - 10.0 * f.s], text: name.clone(), size, color: [INK[0], INK[1], INK[2], 235], left: false, right: false });
+        }
+
+        // Rested (#37): a word in the warm of firelight under the map's corner, fading as
+        // it wears off, and nothing at all once it has.
+        if self.rested > 0.01 {
+            let fade = (self.rested * 1.6).min(1.0);
+            let at = [f.centre.x - f.half.x + 4.0 * f.s, f.centre.y + f.half.y + 16.0 * f.s];
+            labels.push(Label { pos: at, text: "Rested".into(), size: 13.0 * f.s, color: [255, 214, 150, (235.0 * fade) as u8], left: true, right: false });
         }
 
         // The player, always facing up the map, and where north has got to.

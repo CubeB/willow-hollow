@@ -4,8 +4,10 @@
 //! is entered with where and when it was found; each named place is entered when it is
 //! first reached on foot (or by boat, for water); the distance gone is kept by the way it
 //! was gone, with the highest ground stood on; and the notable moments are set down in
-//! a short log, a day at a time. Its window has a page for each. The shrines where
-//! incense has been lit (#40) are kept too, with what each one's smoke told of.
+//! a short log, a day at a time. Each camp made is written up with where and when, the
+//! country and the weather, and the nights slept there; and the figures made out in the
+//! stars lying back by the fire. The shrines where incense has been lit (#40) are kept
+//! too, with what each one's smoke told of. Its window has a page for each.
 //!
 //! A journal is plain data, kept with its world's save as lines of text, so that a save
 //! from an older or a newer game still reads.
@@ -18,7 +20,7 @@ use worldgen::{
     features::plants::Flower,
     materials as mat,
     names::PlaceKind,
-    scale::{OLD_VOXEL, VOXELS_PER_METRE, m},
+    scale::{OLD_VOXEL, VOXELS_PER_METRE, m, m64},
     world::GameWorld,
 };
 
@@ -42,6 +44,10 @@ const MOUTH: f32 = 150.0;
 /// The most a river must be walked down for it to count as followed to the sea, in
 /// metres; a shorter river must be walked for half its length.
 const FOLLOWED: f32 = 1500.0;
+/// How near a fire lit again must be to one written up for it to be the same camp.
+const SAME_CAMP: f64 = m64(40.0);
+/// How far above the land about it a camp must stand to be called high, in metres.
+const HIGH_CAMP: f32 = 60.0;
 /// The most that can be gone in one frame, in voxels: more is a leap from one place to
 /// another, not travel.
 const LEAP: f64 = 40.0;
@@ -148,6 +154,33 @@ pub struct River {
     pub followed: Option<Stamp>,
 }
 
+/// A camp made (#37): where a fire was lit that none of the player's had been lit near.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Camp {
+    /// Where its fire is, in world voxels: a place to come back to.
+    pub at: DVec3,
+    /// How far it stood above the land round about, in metres.
+    pub above: f32,
+    /// Where it was: "by Carn Hollow", "in the Greywater Vale", or nothing.
+    pub place: String,
+    /// The country it was in: "on the heath".
+    pub country: String,
+    /// The sky as the fire was lit, "under broken cloud", and over the last night slept
+    /// by it, "a clear, starry night", if one has been.
+    pub weather: String,
+    pub night: Option<String>,
+    /// How many nights have been slept there.
+    pub nights: u32,
+    pub when: Stamp,
+}
+
+/// A figure made out in the stars (#37), by its name in this world.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Sighting {
+    pub name: String,
+    pub when: Stamp,
+}
+
 /// A line of the log.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Note {
@@ -202,6 +235,10 @@ pub struct Journal {
     offered: Vec<Offer>,
     /// The settlements guild houses' wayfarers have marked on the map (#207).
     charted: Vec<Chart>,
+    /// The camps made, in the order they were made, and the figures made out in the
+    /// stars (#37).
+    camps: Vec<Camp>,
+    stars: Vec<Sighting>,
     /// The shrines incense has been lit at (#40), the first first.
     shrines: Vec<Shrine>,
 }
@@ -329,6 +366,78 @@ impl Journal {
 
     pub fn notes(&self) -> impl DoubleEndedIterator<Item = &Note> {
         self.notes.iter()
+    }
+
+    pub fn camps(&self) -> &[Camp] {
+        &self.camps
+    }
+
+    pub fn stars(&self) -> &[Sighting] {
+        &self.stars
+    }
+
+    /// The camp written up nearest `at`, if one is near enough to be the same.
+    fn camp_at(&mut self, at: DVec3) -> Option<&mut Camp> {
+        self.camps
+            .iter_mut()
+            .filter(|c| (c.at.x - at.x).hypot(c.at.z - at.z) <= SAME_CAMP)
+            .min_by(|a, b| a.at.distance(at).total_cmp(&b.at.distance(at)))
+    }
+
+    /// Writes up a camp made now with its fire at `at`, `above` metres over the land
+    /// about it, in `country` ("on the heath"), `weather` ("under a clear sky"). A fire
+    /// lit again at a camp already written up is noted as a return to it. Whether it was
+    /// a new camp.
+    pub fn camp(&mut self, at: DVec3, above: f32, country: &str, weather: &str) -> bool {
+        let place = if self.here.is_empty() { String::new() } else { format!(" {}", self.here) };
+        if self.camp_at(at).is_some() {
+            self.note(format!("Lit the fire again at the camp{place}."));
+            return false;
+        }
+        let high = if above >= HIGH_CAMP { " high above the country" } else { "" };
+        self.camps.push(Camp {
+            at,
+            above: above.max(0.0),
+            place: clean(&self.here),
+            country: clean(country),
+            weather: clean(weather),
+            night: None,
+            nights: 0,
+            when: self.now,
+        });
+        let country = if country.is_empty() { String::new() } else { format!(", {country}") };
+        self.note(format!("Made camp{high}{place}{country}, {weather}."));
+        true
+    }
+
+    /// Writes down a night slept, the sky over it `night` ("a clear, starry night"): by
+    /// the fire at `at` if `by_fire`, else in a bed; and that it left the player rested,
+    /// if it did.
+    pub fn slept(&mut self, at: DVec3, night: &str, by_fire: bool, rested: bool) {
+        let woke = if rested { " Woke rested." } else { "" };
+        let here = if self.here.is_empty() { String::new() } else { format!(" {}", self.here) };
+        let at_camp = by_fire.then(|| self.camp_at(at)).flatten().map(|c| {
+            c.nights += 1;
+            c.night = Some(clean(night));
+            c.place.clone()
+        });
+        let text = match at_camp {
+            Some(place) if !place.is_empty() => format!("Slept by the fire {place}: {night}.{woke}"),
+            _ if by_fire => format!("Slept by the fire{here}: {night}.{woke}"),
+            _ => format!("Slept the night in a bed{here}.{woke}"),
+        };
+        self.note(text);
+    }
+
+    /// Writes down a figure made out in the stars by its `name`, lying back by the fire,
+    /// if it is the first time. Whether it was.
+    pub fn stargazed(&mut self, name: &str) -> bool {
+        if name.is_empty() || self.stars.iter().any(|s| s.name == name) {
+            return false;
+        }
+        self.stars.push(Sighting { name: clean(name), when: self.now });
+        self.note(format!("Lying back by the fire, made out {name} in the stars."));
+        true
     }
 
     /// The find of the thing called `id`, if one has been made.
@@ -706,6 +815,13 @@ impl Journal {
             let told = s.told.map_or_else(|| "-".into(), |t| format!("{},{}", t.x, t.y));
             out += &format!("shrine = {},{}|{}|{told}|{}|{}\n", s.at.x, s.at.y, s.times, s.when.to_text(), clean(&s.name));
         }
+        for c in &self.camps {
+            let night = c.night.as_deref().map_or_else(|| "-".into(), clean);
+            out += &format!("camp = {}|{},{},{}|{}|{}|{night}|{}|{}|{}\n", c.when.to_text(), c.at.x, c.at.y, c.at.z, c.above, c.nights, clean(&c.country), clean(&c.weather), clean(&c.place));
+        }
+        for s in &self.stars {
+            out += &format!("stars = {}|{}\n", s.when.to_text(), clean(&s.name));
+        }
         out
     }
 
@@ -808,6 +924,35 @@ impl Journal {
                         j.shrines.push(Shrine { at, name: name.trim().into(), times: times.max(1), told: place(told), when });
                     }
                 }
+                "camp" => {
+                    let parts: Vec<&str> = value.splitn(8, '|').collect();
+                    let camp = (|| {
+                        let [when, at, above, nights, night, country, weather, place] = parts[..] else { return None };
+                        let at: Vec<f64> = at.split(',').filter_map(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).collect();
+                        let [x, y, z] = at[..] else { return None };
+                        let night = night.trim();
+                        Some(Camp {
+                            at: DVec3::new(x, y, z),
+                            above: number(above.trim())? as f32,
+                            place: place.trim().into(),
+                            country: country.trim().into(),
+                            weather: weather.trim().into(),
+                            night: (night != "-" && !night.is_empty()).then(|| night.into()),
+                            nights: nights.trim().parse().ok()?,
+                            when: Stamp::from_text(when)?,
+                        })
+                    })();
+                    j.camps.extend(camp);
+                }
+                "stars" => {
+                    if let Some((when, name)) = value.split_once('|')
+                        && let Some(when) = Stamp::from_text(when)
+                        && !name.trim().is_empty()
+                        && !j.stars.iter().any(|s| s.name == name.trim())
+                    {
+                        j.stars.push(Sighting { name: name.trim().into(), when });
+                    }
+                }
                 "note" => {
                     if let Some((when, text)) = value.split_once('|')
                         && let Some(when) = Stamp::from_text(when)
@@ -877,6 +1022,17 @@ impl Journal {
                 if let Some(item) = finds.next() {
                     j.found(item);
                 }
+            }
+            // A camp now and then, and a night slept by it.
+            if k % 4 == 1 {
+                const COUNTRY: [&str; 4] = ["on the heath", "in the broadleaf woods", "up on the moor", "among the birches"];
+                const SKY: [(&str, &str); 4] = [("under a clear sky", "a clear, starry night"), ("under broken cloud", "a night of passing cloud"), ("in the rain", "rain in the night"), ("under a grey sky", "a cloudy night")];
+                let o = DVec2::new(c.desc.mx as f64, c.desc.mz as f64) * worldgen::macro_layout::MACRO_SIZE as f64;
+                let fire = DVec3::new(o.x + p.at.x as f64 + m64(30.0), ground(p.at) as f64, o.y + p.at.y as f64);
+                let n = k / 4;
+                j.camp(fire, [12.0, 140.0, 35.0, 75.0][n % 4], COUNTRY[n % 4], SKY[n % 4].0);
+                j.tick(0.3, j.now.date + 0.3 / 24.0, year, j.now.hour + 7.2, false);
+                j.slept(fire, SKY[(n + 1) % 4].1, true, true);
             }
         }
         j.swum = j.walked * 0.012;
@@ -955,13 +1111,19 @@ pub enum Page {
     Finds,
     Places,
     Walk,
+    Camps,
     Days,
 }
 
 impl Page {
     /// Each page with its word on the command line and its title.
-    pub const ALL: [(Page, &'static str, &'static str); 4] =
-        [(Page::Finds, "finds", "Finds"), (Page::Places, "places", "Places"), (Page::Walk, "walk", "The walk"), (Page::Days, "days", "Days")];
+    pub const ALL: [(Page, &'static str, &'static str); 5] = [
+        (Page::Finds, "finds", "Finds"),
+        (Page::Places, "places", "Places"),
+        (Page::Walk, "walk", "The walk"),
+        (Page::Camps, "camps", "Camps"),
+        (Page::Days, "days", "Days"),
+    ];
 
     pub fn named(word: &str) -> Option<Self> {
         Self::ALL.iter().find(|p| p.1 == word).map(|p| p.0)
@@ -977,11 +1139,13 @@ pub struct View {
     /// Whose journal it is, if the player has given their name on the figure screen
     /// (#204): it goes on the cover.
     pub owner: String,
+    /// How rested the player is, 0 to 1 (see rested.rs), for the walk's page.
+    pub rested: f32,
 }
 
 impl View {
     pub fn new(materials: &voxel::Materials) -> Self {
-        Self { page: Page::default(), selected: None, catalogue: catalogue(materials), owner: String::new() }
+        Self { page: Page::default(), selected: None, catalogue: catalogue(materials), owner: String::new(), rested: 0.0 }
     }
 
     /// What the journal is headed: the journal, or the journal of whoever keeps it.
@@ -1040,6 +1204,44 @@ fn distance(metres: f64) -> String {
         d if d < 0.5 => "\u{2014}".into(),
         d if d < 1000.0 => format!("{d:.0} m"),
         d => format!("{:.1} km", d / 1000.0),
+    }
+}
+
+/// Which way `to` lies from `from` (world voxels), as the compass has it: "north-west".
+fn bearing(from: DVec3, to: DVec3) -> &'static str {
+    const WAYS: [&str; 8] = ["east", "south-east", "south", "south-west", "west", "north-west", "north", "north-east"];
+    // North is toward -z, so the angle runs from east toward the south.
+    let a = (to.z - from.z).atan2(to.x - from.x);
+    WAYS[((a / std::f64::consts::FRAC_PI_4).round() as i32).rem_euclid(8) as usize]
+}
+
+/// The country a camp is made in, as it is said of it: "on the heath".
+pub fn country_of(biome: worldgen::biome::Biome) -> &'static str {
+    use worldgen::biome::Biome as B;
+    match biome {
+        B::Ocean => "by the sea",
+        B::Alpine => "among the high rocks",
+        B::Tundra => "on the tundra",
+        B::Taiga => "in the northern forest",
+        B::Heath => "on the heath",
+        B::Grassland => "out on the grassland",
+        B::Deciduous => "in the broadleaf woods",
+        B::OldGrowth => "among the great trees",
+        B::Desert => "in the desert",
+        B::Savanna => "on the savanna",
+        B::Woodland => "in the dry woods",
+        B::Rainforest => "in the rainforest",
+        B::Marsh => "in the marshes",
+        B::BirchGrove => "among the birches",
+        B::AlpineMeadow => "in the high meadows",
+        B::SnowyPine => "among the snowy pines",
+        B::Bog => "on the bog",
+        B::Steppe => "on the steppe",
+        B::DuneSea => "among the dunes",
+        B::RedRock => "in the red rock country",
+        B::Mangrove => "among the mangroves",
+        B::Volcanic => "on the black ash",
+        B::Moor => "up on the moor",
     }
 }
 
@@ -1164,7 +1366,7 @@ fn places_page(ui: &mut egui::Ui, journal: &Journal) {
     });
 }
 
-fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
+fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize, rested: f32) {
     let now = journal.now;
     ui.label(text(format!("Day {}, {} in {}.", journal.day(), now.time_of_day(), now.when()), 15.0, INK));
     ui.add_space(14.0);
@@ -1190,6 +1392,13 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
         (p, r) => format!("{p}, in {}", plural(r, "region", "regions")),
     }));
     rows.push(("Kinds of thing found", format!("{} of {kinds}", journal.finds().len())));
+    // How the walk feels after a night's rest (#37).
+    rows.push(("Rested", match rested {
+        r if r > 0.75 => "Well rested: the going is easy".into(),
+        r if r > 0.3 => "Rested".into(),
+        r if r > 0.0 => "A little rested still".into(),
+        _ => "\u{2014}".into(),
+    }));
     let followed: Vec<&str> = journal.rivers().iter().filter(|r| r.followed.is_some()).map(|r| r.name.as_str()).collect();
     rows.push(("Rivers followed to the sea", match followed.len() {
         0 => "\u{2014}".into(),
@@ -1207,7 +1416,7 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
         [one] => one.name.clone(),
         all @ [.., last] => format!("{}, the latest {}", plural(all.len() as u32, "shrine", "shrines"), last.name),
     }));
-    ui.spacing_mut().item_spacing.y = 9.0;
+    ui.spacing_mut().item_spacing.y = 8.0;
     for (what, value) in rows {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(214.0, 20.0), egui::Sense::hover());
@@ -1215,6 +1424,73 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
             ui.add(egui::Label::new(text(value, 14.5, INK)).truncate());
         });
     }
+}
+
+fn camps_page(ui: &mut egui::Ui, journal: &Journal) {
+    let stars = match journal.stars() {
+        [] => "No figures made out in the stars yet. On a clear night, lie back by the fire and look up.".to_string(),
+        all => format!("Made out in the stars: {}.", all.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")),
+    };
+    if journal.camps().is_empty() {
+        ui.label(text("No camps made yet. Each fire you light where you have not camped before is written up here.", 14.0, FAINT));
+        ui.add_space(10.0);
+        ui.label(text(stars, 14.0, FAINT));
+        return;
+    }
+    let here = journal.last_pos;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(HEIGHT - 44.0).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 3.0;
+        // The latest first: the camps to come back to.
+        for (k, c) in journal.camps().iter().rev().enumerate() {
+            if k > 0 {
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                let place = match c.place.as_str() {
+                    "" => "A camp".to_string(),
+                    p => format!("{}{}", p[..1].to_uppercase(), &p[1..]),
+                };
+                ui.label(text(place, 15.0, PICKED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(10.0);
+                    let away = here.map(|h| ((h.x - c.at.x).hypot(h.z - c.at.z) / VOXELS_PER_METRE as f64, h));
+                    let word = match away {
+                        Some((d, _)) if d < 40.0 => "here".to_string(),
+                        Some((d, h)) => format!("{} {}", distance(d), bearing(h, c.at)),
+                        None => String::new(),
+                    };
+                    ui.label(text(word, 13.0, FAINT));
+                });
+            });
+            let mut about = format!("Made {} in {}, {}", c.when.time_of_day(), c.when.when(), c.weather);
+            if c.above >= HIGH_CAMP {
+                about += &format!(", {:.0} m above the land round about", c.above);
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.add(egui::Label::new(text(format!("{}. {about}.", capital(&c.country)), 13.5, INK)).wrap());
+            });
+            if let Some(night) = &c.night {
+                let nights = match c.nights {
+                    1 => format!("A night slept here: {night}."),
+                    n => format!("{n} nights slept here, the last {night}."),
+                };
+                ui.horizontal(|ui| {
+                    ui.add_space(14.0);
+                    ui.label(text(nights, 13.0, FAINT));
+                });
+            }
+        }
+    });
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.add(egui::Label::new(text(stars, 13.0, FAINT)).wrap());
+    });
+}
+
+/// `s` with its first letter a capital.
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
 fn days_page(ui: &mut egui::Ui, journal: &Journal) {
@@ -1282,7 +1558,8 @@ pub fn show(ctx: &egui::Context, journal: &Journal, view: &mut View) {
                 match view.page {
                     Page::Finds => finds_page(ui, journal, view),
                     Page::Places => places_page(ui, journal),
-                    Page::Walk => walk_page(ui, journal, kinds),
+                    Page::Walk => walk_page(ui, journal, kinds, view.rested),
+                    Page::Camps => camps_page(ui, journal),
                     Page::Days => days_page(ui, journal),
                 }
             });
@@ -1555,6 +1832,43 @@ mod tests {
         assert_eq!(Stamp { date: 0.62, hour: 19.0, day: 3, year: 1 }.when(), "mid-autumn of the first year");
         assert_eq!(Stamp { date: 0.9, hour: 19.0, day: 3, year: 14 }.when(), "midwinter, year 14");
         assert_eq!((Stamp { hour: 19.0, ..Stamp::default() }.time_of_day(), Stamp { hour: 5.5, ..Stamp::default() }.time_of_day()), ("at dusk", "at dawn"));
+    }
+
+    #[test]
+    fn each_camp_is_written_up_once_with_its_nights_and_the_stars_seen_from_it() {
+        let mut j = Journal::new();
+        j.tick(0.0, 0.3, 0, 20.5, false);
+        j.here = "by Carn Hollow".into();
+        let fire = DVec3::new(1000.0, 80.0, -2000.0);
+        assert!(j.camp(fire, 140.0, "up on the moor", "under a clear sky"));
+        // Lit again a few steps off, it is the same camp.
+        assert!(!j.camp(fire + DVec3::new(m64(12.0), 0.0, 0.0), 140.0, "up on the moor", "in the rain"));
+        j.slept(fire, "a clear, starry night", true, true);
+        assert!(j.stargazed("The Heron") && !j.stargazed("The Heron"));
+        // Another, far off, by night in a bed is no camp's.
+        j.here = "in Llanwen".into();
+        assert!(j.camp(fire + DVec3::new(m64(900.0), 0.0, 0.0), 3.0, "on the heath", "under broken cloud"));
+        j.slept(fire + DVec3::new(m64(5000.0), 0.0, 0.0), "rain in the night", false, false);
+        let camps = j.camps();
+        assert_eq!(camps.len(), 2);
+        assert_eq!((camps[0].place.as_str(), camps[0].nights, camps[0].night.as_deref()), ("by Carn Hollow", 1, Some("a clear, starry night")));
+        assert_eq!((camps[1].nights, camps[1].night.as_deref(), camps[1].above), (0, None, 3.0));
+        let notes: Vec<&str> = j.notes().map(|n| n.text.as_str()).collect();
+        assert_eq!(notes, [
+            "Made camp high above the country by Carn Hollow, up on the moor, under a clear sky.",
+            "Lit the fire again at the camp by Carn Hollow.",
+            "Slept by the fire by Carn Hollow: a clear, starry night. Woke rested.",
+            "Lying back by the fire, made out The Heron in the stars.",
+            "Made camp in Llanwen, on the heath, under broken cloud.",
+            "Slept the night in a bed in Llanwen.",
+        ]);
+        // All of it comes back from a save, and nonsense is left out.
+        let text = j.to_text();
+        let back = Journal::from_text(&format!("{text}camp = 0.1,2,1,1|1,2|3|0|-|a|b|c\ncamp = never\nstars = |x\n"));
+        assert_eq!((back.camps(), back.stars()), (j.camps(), j.stars()));
+        assert_eq!(back.to_text(), text);
+        assert_eq!(bearing(DVec3::ZERO, DVec3::new(-10.0, 0.0, -10.0)), "north-west");
+        assert_eq!(bearing(DVec3::ZERO, DVec3::new(0.0, 0.0, 10.0)), "south");
     }
 
     #[test]

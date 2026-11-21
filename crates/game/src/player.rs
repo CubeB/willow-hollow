@@ -158,6 +158,8 @@ pub struct Player {
     /// How many times its usual speed the body walks, runs and swims at (the console's
     /// `speed`).
     pub pace: f32,
+    /// How much of its usual rate the glider sinks at: rested, it floats longer.
+    pub sink: f32,
 }
 
 impl Player {
@@ -175,6 +177,7 @@ impl Player {
             swell: 0.0,
             thicket: 0.0,
             pace: 1.0,
+            sink: 1.0,
         }
     }
 
@@ -299,7 +302,7 @@ impl Player {
         self.airspeed = (self.airspeed + accel * dt).clamp(GLIDE_MIN_SPEED, GLIDE_MAX_SPEED);
         // Below trim the wing starts to lose its grip and sink rate climbs quickly.
         let slow = ((GLIDE_TRIM - self.airspeed) / 3.0).max(0.0);
-        let sink = GLIDE_SINK + slow * slow;
+        let sink = GLIDE_SINK * self.sink + slow * slow;
         let target = (heading * pitch.cos() + Vec3::Y * pitch.sin()) * self.airspeed - Vec3::Y * sink;
         self.vel += (target - self.vel) * (1.0 - (-3.0 * dt).exp());
     }

@@ -182,6 +182,8 @@ pub struct Progress {
     pub travel: Travel,
     /// Which way the boat points, in radians.
     pub heading: f32,
+    /// How rested the player is, and for how long yet (#37).
+    pub rested: crate::rested::Rested,
 }
 
 impl Progress {
@@ -192,8 +194,9 @@ impl Progress {
             Travel::Sailing => "sailing",
         };
         let year = self.year.map_or_else(String::new, |y| format!("year = {y}\n"));
+        let rested = self.rested.to_text().map_or_else(String::new, |r| format!("rested = {r}\n"));
         format!(
-            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\n{year}travel = {travel}\nheading = {}\n",
+            "x = {}\ny = {}\nz = {}\nyaw = {}\npitch = {}\ntime = {}\ndate = {}\n{year}travel = {travel}\nheading = {}\n{rested}",
             self.pos.x, self.pos.y, self.pos.z, self.yaw, self.pitch, self.time, self.date, self.heading
         )
     }
@@ -215,6 +218,7 @@ impl Progress {
             year: f.get("year"),
             travel,
             heading: f.finite("heading").unwrap_or(0.0) as f32,
+            rested: f.0.get("rested").map_or_else(Default::default, |r| crate::rested::Rested::from_text(r)),
         })
     }
 }
@@ -388,6 +392,12 @@ mod tests {
             year: Some(3),
             travel: Travel::Sailing,
             heading: 2.5,
+            rested: {
+                let mut r = crate::rested::Rested::default();
+                r.grant(0.75, 24.0);
+                r.pass(1.5);
+                r
+            },
         }
     }
 

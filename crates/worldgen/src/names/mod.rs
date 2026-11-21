@@ -17,6 +17,7 @@
 //! The words themselves are data, in `words.txt`.
 
 pub mod folk;
+pub mod sky;
 mod survey;
 mod words;
 

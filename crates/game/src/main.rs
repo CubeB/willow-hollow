@@ -29,9 +29,11 @@ mod placed;
 mod player;
 mod profile;
 mod reading;
+mod rested;
 mod render;
 mod season;
 mod starlings;
+mod stars;
 #[cfg(test)]
 mod sweep;
 mod settings;
@@ -182,6 +184,8 @@ struct Options {
     /// With a camp made: lying by its fire on a screenshot, or resting by it from the
     /// first frame of a run.
     rest: bool,
+    /// How rested the player is, 0 to 1, given by hand (`--rested`).
+    rested: Option<f32>,
     /// Stand a settlement building of the country (a tavern unless another is named) this
     /// many metres ahead of the camera, its door toward it, before a screenshot or a run.
     tavern: Option<(worldgen::features::designs::Special, f64)>,
@@ -257,6 +261,7 @@ impl Default for Options {
             camp_ahead: CAMP_AHEAD,
             shot_chimneys: 0,
             rest: false,
+            rested: None,
             tavern: None,
             bed: false,
             shot_lantern: false,
@@ -330,6 +335,8 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         column)
   --rest                with --camp: on a screenshot, the view lying by the fire, as
                         high as --look says; in a run, rest by the fire at once
+  --rested [F]          rested after a night's sleep, F of the way (0 to 1, default 1):
+                        the mark under the corner map and the walk's page show it
   --tavern [M]          stand a tavern of the country M metres ahead (default 3), its
                         door toward the camera, before a screenshot or a run. With
                         --rest, the night in its first guest bed: in a run, to bed at
@@ -364,8 +371,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
   --pens-ahead M        the nearest pens M metres ahead (default 12)
   --wild                on a screenshot, the wild herds of the land about
   --picked M            pick every flower within M metres before a screenshot
-  --journal [PAGE]      show the journal on a screenshot, at finds, places, walk or days,
-                        written up as if after a walk round the places near the camera
+  --journal [PAGE]      show the journal on a screenshot, at finds, places, walk, camps or
+                        days, written up as if after a walk round the places near the
+                        camera
   --journal-fill N      with --journal, a walk to the N nearest places (default 16; 0 for
                         a journal with nothing in it yet)
   --bigmap KM           draw the large map, KM across, on a screenshot
@@ -503,6 +511,7 @@ fn parse_args() -> Result<Options> {
             "--hotbar" => o.shot_hotbar = true,
             "--prompt" => o.shot_prompt = Some(value()?),
             "--rest" => o.rest = true,
+            "--rested" => o.rested = Some(args.next_if(|v| !v.starts_with("--")).map_or(Ok(1.0), |v| v.parse::<f32>())?.clamp(0.0, 1.0)),
             "--tavern" | "--stand" => {
                 use worldgen::features::designs::Special;
                 let which = if a == "--stand" {
@@ -1199,6 +1208,13 @@ struct Running {
     /// The rest being taken, if one is, and how far the eye is lowered for it, metres.
     rest: Option<camp::Rest>,
     lowered: f32,
+    /// How rested the player is from their last night's sleep (#37).
+    rested: rested::Rested,
+    /// The figures in this world's night sky, what the sky shader is given of them, and
+    /// how long until the sky is next looked at by someone lying back by a fire.
+    sky: stars::Sky,
+    sky_lights: Arc<stars::Lights>,
+    gaze_timer: f32,
     /// How long the name of what is held has left to show.
     hand_word: f32,
     /// Game years gone by since what was gathered was last looked over for regrowth,
@@ -1412,6 +1428,7 @@ impl Running {
         chimneys.extra = chimneys::ahead(opts.shot_chimneys, camera.pos, camera.yaw, opts.camp_ahead, |x, z| ground_ahead(&mut voxels, x, z, foot));
         let travellers = store.as_ref().filter(|_| opts.overrides.keeps_position()).map_or_else(travellers::Travellers::new, |s| travellers::Travellers::from_text(&s.travellers(settings.seed)));
         let map_dir = store.as_ref().filter(|_| opts.overrides.keeps_position()).map(|s| s.map_dir(settings.seed));
+        let sky = stars::Sky::of(settings.seed);
         let mut map = Minimap::new(&gpu, surface.config.format, world.clone(), map_dir);
         map.corner = settings.minimap;
         Ok(Self {
@@ -1498,6 +1515,10 @@ impl Running {
             now,
             rest,
             lowered: 0.0,
+            rested: opts.rested.map_or(progress.map_or_else(Default::default, |p| p.rested), rested::Rested::shown),
+            sky_lights: Arc::new(sky.lights()),
+            sky,
+            gaze_timer: 0.0,
             hand_word: HAND_WORD,
             grown: 0.0,
             grow_timer: 0.0,
@@ -1943,7 +1964,11 @@ impl Running {
             Some((at, thing)) if thing.is_fire() && !thing.burns() => {
                 self.placed.set_state(at, placed::BURNING);
                 self.map.camps = self.placed.camps();
-                self.say("The fire catches");
+                // A camp: the map opens about it, the more the higher it stands, and the
+                // journal writes it up.
+                let above = self.map.camp(thing.pos) / worldgen::scale::VOXELS_PER_METRE;
+                let new = self.journal.camp(thing.pos, above, journal::country_of(self.biome), self.weather.now.under());
+                self.say(if new && above >= 60.0 { "The fire catches. The country lies open below" } else { "The fire catches" });
                 true
             }
             Some((_, thing)) if thing.is_fire() => {
@@ -1971,9 +1996,36 @@ impl Running {
         }
     }
 
-    /// Gets up from a rest.
+    /// Lying back by a fire at night, looking up: the figures of the stars in sight, the
+    /// first time each is made out, go in the journal.
+    fn gaze(&mut self, dt: f32) {
+        self.gaze_timer -= dt;
+        let by_fire = self.rest.as_ref().is_some_and(|r| r.lying && !r.bed);
+        if !by_fire || self.gaze_timer > 0.0 {
+            return;
+        }
+        self.gaze_timer = 0.25;
+        let (env, sky) = (&self.env, &self.weather.now);
+        let cloud = sky.cloud.max(sky.fog).max(sky.rain).max(sky.snow);
+        log::trace!("looking up at {:.2} h: sun {:.2}, cloud {:.2}, eyes {:.2}", env.time, env.sun_elevation, cloud, self.camera.forward().y);
+        for k in self.sky.in_sight(env.time, env.date, env.sun_elevation, cloud, self.camera.forward(), self.camera.fov_y * 0.5) {
+            let name = self.sky.figures[k].name.clone();
+            if self.journal.stargazed(&name) {
+                self.say(format!("{name}, in the stars"));
+            }
+        }
+    }
+
+    /// Gets up from a rest: rested, after a night's sleep.
     fn wake(&mut self) {
-        self.rest = None;
+        let Some(rest) = self.rest.take() else { return };
+        let strength = rested::Rested::of_sleep(rest.slept);
+        if strength > 0.0 {
+            let (full, hours) = rested::NIGHT;
+            let woke = self.rested.grant(full * strength, hours);
+            log::info!("slept {:.1} h: rested {:.2}", rest.slept, self.rested.level());
+            self.journal.slept(self.player.pos, self.weather.now.night(), !rest.bed, woke);
+        }
     }
 
     /// Holds slot `k` of the hotbar, or the one `by` along from the one held, and says
@@ -2040,6 +2092,7 @@ impl Running {
                 (false, _) => Travel::Walking,
             },
             heading: self.player.heading,
+            rested: self.rested,
         }
     }
 
@@ -2266,7 +2319,9 @@ impl Running {
                 look: self.camera.forward(),
                 turn: if dt > 0.0 { turned / dt } else { 0.0 },
             };
-            self.player.pace = self.pace;
+            // Rested, the going is a little easier and the glider floats a little longer.
+            self.player.pace = self.pace * self.rested.pace();
+            self.player.sink = self.rested.sink();
             self.player.update(&mut self.voxels, controls, dt);
             self.camera.pos = self.player.eye();
             // Lying down to rest, and getting up again, the eye sinks and rises.
@@ -2356,6 +2411,10 @@ impl Running {
 
         // The day turns.
         let mut days = if self.settings.day_minutes > 0.0 { dt / (self.settings.day_minutes * 60.0) } else { 0.0 };
+        // A rest wears off with the hours up and about, not those slept or sat by a fire.
+        if self.rest.is_none() {
+            self.rested.pass(days * 24.0);
+        }
         // And faster for someone resting, until the dawn or the dark they wait for.
         if let Some(rest) = &mut self.rest {
             let on_foot = self.walking && self.player.mode == Mode::Walk;
@@ -2579,6 +2638,10 @@ impl Running {
             None => aurora::cold(self.warmth, aurora::climate_at(&self.world, self.camera.pos.x, self.camera.pos.z)) * aurora::activity(self.env.date, self.settings.year_days, self.settings.seed),
         };
         aurora::light(&mut lit, lights);
+        lit.stars = Some(self.sky_lights.clone());
+        self.gaze(dt);
+        self.map.rested = self.rested.level();
+        self.journal_view.rested = self.rested.level();
         lit.cloud_base = self.cloud_base.update(&self.world, self.camera.pos, dt);
         lit.air(self.humidity, self.weather.wet * (1.0 - (self.weather.now.rain + self.weather.now.snow).min(1.0)));
         // The eye takes a couple of seconds to open up in the dark, and less to close
@@ -3242,6 +3305,14 @@ fn main() -> Result<()> {
         let lights = if let Some(out) = opts.aurora { out as u8 as f32 } else { aurora::cold(warmth, aurora::climate_at(&world, camera.pos.x, camera.pos.z)) * aurora::activity(env.date, settings.year_days, settings.seed) };
         aurora::light(&mut env, lights);
         log::info!("northern lights {:.2}", env.aurora);
+        // The world's constellations, and where each stands at this hour, to aim a shot.
+        let sky = stars::Sky::of(settings.seed);
+        env.stars = Some(Arc::new(sky.lights()));
+        for (k, f) in sky.figures.iter().enumerate() {
+            let at = sky.place(k, env.time, env.date).unwrap_or(glam::Vec3::Y);
+            let (yaw, pitch) = (at.z.atan2(at.x).to_degrees().rem_euclid(360.0), at.y.asin().to_degrees());
+            log::info!("the stars: {} at --look {yaw:.0},{pitch:.0}, {} stars", f.name, f.stars.len());
+        }
         weather.settle(env.date, settings.year_days, warmth, settings.seed);
         env.air(season::humidity(biome), weather.wet * (1.0 - (weather.now.rain + weather.now.snow).min(1.0)));
         env.adapt(player::enclosure(camera.pos, &mut voxels));
@@ -3313,6 +3384,37 @@ fn main() -> Result<()> {
                     lit_at = Some((*b, told));
                 }
                 None => log::warn!("there is no burner within 150 m of the camera"),
+            }
+        }
+        // Lying back by the fire, a figure made out overhead is named, as it would be the
+        // first time in a run.
+        if opts.rest && camp.near(camera.pos, m64(30.0)).any(|(_, t)| t.is_fire()) {
+            let cloud = weather.now.cloud.max(weather.now.fog).max(weather.now.rain).max(weather.now.snow);
+            let seen = sky.in_sight(env.time, env.date, env.sun_elevation, cloud, camera.forward(), camera.fov_y * 0.5);
+            log::info!("made out in the stars: {:?}", seen.iter().map(|&k| &sky.figures[k].name).collect::<Vec<_>>());
+            if let Some(&k) = seen.first() {
+                prompt = prompt.or(Some(format!("{}, in the stars", sky.figures[k].name)));
+            }
+        }
+        // Where on the shot each figure's stars fall, to find them on it.
+        if log::log_enabled!(log::Level::Debug) {
+            let (fwd, right) = (camera.forward(), camera.right());
+            let up = right.cross(fwd);
+            let tan = (camera.fov_y * 0.5).tan();
+            let (w, h) = (opts.size.0 as f32, opts.size.1 as f32);
+            let angle = stars::wheel(env.time, env.date);
+            for f in &sky.figures {
+                let px: Vec<String> = f
+                    .stars
+                    .iter()
+                    .map(|(d, _)| stars::in_sky(*d, angle))
+                    .filter(|d| d.dot(fwd) > 0.0)
+                    .map(|d| {
+                        let (x, y) = (d.dot(right) / d.dot(fwd) / (tan * w / h), d.dot(up) / d.dot(fwd) / tan);
+                        format!("{:.0},{:.0}", (x + 1.0) * 0.5 * w, (1.0 - y) * 0.5 * h)
+                    })
+                    .collect();
+                log::debug!("the stars: {} at {}", f.name, px.join(" "));
             }
         }
         camp.draw(camera.pos, 0.6, &mut props);
@@ -3503,6 +3605,11 @@ fn main() -> Result<()> {
                 }
             }
             map.camps = camp.camps();
+            // A camp made opens the map about it, as lighting its fire would.
+            if let Some((_, fire)) = camp.near(camera.pos, m64(opts.camp_ahead + 30.0)).find(|(_, t)| t.is_fire() && t.state != placed::LAID) {
+                map.camp(fire.pos);
+            }
+            map.rested = opts.rested.unwrap_or(0.0);
             map.met = met.clone();
             map.charted = charted.clone();
             map.quarried = quarried.clone();
@@ -3556,6 +3663,12 @@ fn main() -> Result<()> {
                 let named = minimap::marks::find(&c, settings.seed).into_iter().filter(|m| m.shrine && m.at.distance(at) < m64(12.0)).find_map(|m| m.name);
                 written.light(at, b.wayside, named.as_deref(), told);
             }
+            // A figure or two made out in the stars on the way.
+            for f in sky.figures.iter().take(opts.journal_fill.min(32) / 8) {
+                written.stargazed(&f.name);
+            }
+            written.moved(camera.pos - DVec3::new(0.0, player::EYE_HEIGHT, 0.0), Some(journal::Way::Foot), false);
+            view.rested = opts.rested.unwrap_or(0.0);
             (written, view)
         });
         // A hotbar as it might be an hour into a walk: sticks, things picked.

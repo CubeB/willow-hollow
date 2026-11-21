@@ -56,19 +56,23 @@ pub struct Rest {
     /// Lying down by the fire to sleep the night through, not sat up by it to wait for
     /// the dark.
     pub lying: bool,
+    /// In a bed, as at an inn, not on the ground by a fire.
+    pub bed: bool,
+    /// Hours slept so far: those of a rest lying down that waits for the dawn.
+    pub slept: f32,
     age: f32,
 }
 
 impl Rest {
     pub fn begin(env: &Environment) -> Self {
         let until = Until::from(env);
-        Self { until, lying: until == Until::Dawn, age: 0.0 }
+        Self { until, lying: until == Until::Dawn, bed: false, slept: 0.0, age: 0.0 }
     }
 
     /// A rest in a bed, as at an inn: lying down, the night slept through after dark, or
     /// by day, waiting there for the dark as by a fire.
     pub fn in_bed(env: &Environment) -> Self {
-        Self { lying: true, ..Self::begin(env) }
+        Self { lying: true, bed: true, ..Self::begin(env) }
     }
 
     /// How many hours go by in the next `dt` seconds of this rest: none once it is over.
@@ -79,7 +83,11 @@ impl Rest {
         let settled = (self.age / SETTLING).clamp(0.0, 1.0);
         let settled = settled * settled * (3.0 - 2.0 * settled);
         let nearing = (left / 0.22).clamp(0.1, 1.0);
-        Some(HOURS_A_SECOND * settled * nearing * dt)
+        let hours = HOURS_A_SECOND * settled * nearing * dt;
+        if self.lying && self.until == Until::Dawn {
+            self.slept += hours;
+        }
+        Some(hours)
     }
 
     /// How far the eye is lowered from standing, in metres, this far into the rest.
@@ -122,6 +130,15 @@ mod tests {
             env = Environment::at(env.time + hours, 0.3);
         }
         assert!((5.0..10.0).contains(&env.time), "woke at {}", env.time);
+        // A night's sleep from before ten is a whole one, enough to wake rested.
+        assert!(rest.slept > 6.0 && crate::rested::Rested::of_sleep(rest.slept) == 1.0, "slept {} h", rest.slept);
+        // Lying in a bed through the afternoon to wait for the dark is no sleep.
+        let mut env = Environment::at(14.0, 0.3);
+        let mut rest = Rest::in_bed(&env);
+        while let Some(hours) = rest.hours(&env, 1.0 / 30.0) {
+            env = Environment::at(env.time + hours, 0.3);
+        }
+        assert_eq!(rest.slept, 0.0);
     }
 
     #[test]
