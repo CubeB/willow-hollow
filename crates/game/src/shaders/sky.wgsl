@@ -103,8 +103,10 @@ fn vs(@builtin(vertex_index) i: u32) -> VOut {
     return out;
 }
 
-// The world's constellations, as the field's stars are drawn but a little brighter, at
-// `dir` on the turning sphere. A figure far from `dir` is passed over at its middle.
+// The world's constellations at `dir` on the turning sphere, drawn as the field's stars
+// are but brighter, a little larger with a soft glow about them, and twinkling slowly, so
+// that a figure reads as one against the field, even under the moon. A figure far from
+// `dir` is passed over at its middle.
 fn figures(dir: vec3<f32>) -> f32 {
     var lit = 0.0;
     for (var k = 0; k < FIGURES; k++) {
@@ -118,11 +120,30 @@ fn figures(dir: vec3<f32>) -> f32 {
                 continue;
             }
             let d = length(s.xyz - dir) * 160.0;
-            let twinkle = 0.8 + 0.2 * sin(G.sun_dir.w * 2.6 + f32(k * STARS_EACH + i) * 1.9);
-            lit += smoothstep(0.7, 0.0, d) * s.w * twinkle;
+            let twinkle = 0.85 + 0.15 * sin(G.sun_dir.w * 0.7 + f32(k * STARS_EACH + i) * 1.9);
+            lit += (smoothstep(1.0, 0.0, d) + exp(-d * d * 0.3) * 0.18) * s.w * twinkle;
         }
     }
     return lit;
+}
+
+// How clear of the figures' stars a field star at `at` on the turning sphere is, 0 to 1:
+// the field is thinned out right round each of them, so the figure's shape stands alone.
+fn clear_of_figures(at: vec3<f32>) -> f32 {
+    var near = 1e4;
+    for (var k = 0; k < FIGURES; k++) {
+        let g = AURORA.groups[k];
+        if (g.w <= 0.0 || dot(at, g.xyz) < g.w - 0.03) {
+            continue;
+        }
+        for (var i = 0; i < STARS_EACH; i++) {
+            let s = AURORA.stars[k * STARS_EACH + i];
+            if (s.w > 0.0) {
+                near = min(near, length(s.xyz - at) * 160.0);
+            }
+        }
+    }
+    return smoothstep(3.5, 7.0, near);
 }
 
 // A sparse field of stars, wheeling about the pole the sun and moon go round: once a
@@ -144,8 +165,11 @@ fn field(dir: vec3<f32>) -> f32 {
     // Where in its cell the star sits, and how bright.
     let centre = (vec3<f32>(cell) + vec3<f32>(hash3(cell + 11), hash3(cell + 23), hash3(cell + 37))) / 160.0;
     let d = length(normalize(centre) - dir) * 160.0;
+    if (d > 0.5) {
+        return 0.0;
+    }
     let twinkle = 0.75 + 0.25 * sin(G.sun_dir.w * 3.0 + h * 400.0);
-    return smoothstep(0.5, 0.0, d) * (0.4 + hash3(cell + 5) * 1.2) * twinkle;
+    return smoothstep(0.5, 0.0, d) * (0.4 + hash3(cell + 5) * 1.2) * twinkle * clear_of_figures(normalize(centre));
 }
 
 @fragment

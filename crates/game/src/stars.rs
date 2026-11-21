@@ -5,7 +5,8 @@
 //! (the frame `stars()` in sky.wgsl turns the view into), so they wheel about the pole
 //! with the rest, once a night and once more over the year: at the same hour each
 //! season has its own figures overhead. They are drawn as the other stars are, only a
-//! little brighter, so they are found by looking rather than shown.
+//! little brighter and larger, with the field thinned out about them, so their shapes
+//! stand clear without a line drawn between them.
 
 use std::f32::consts::TAU;
 
@@ -130,7 +131,7 @@ impl Sky {
                 .map(|(s, p)| {
                     let p = *p - centre;
                     let dir = (middle + east * p.x + north * p.y).normalize();
-                    let bright = if s == brightest { 3.6 } else { 2.2 + r(attempt, 300 + s as i32) * 1.0 };
+                    let bright = if s == brightest { 6.5 } else { 4.0 + r(attempt, 300 + s as i32) * 1.5 };
                     (dir, bright)
                 })
                 .collect();

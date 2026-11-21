@@ -115,6 +115,8 @@ struct Options {
     /// Generated people standing in rows before a screenshot's camera.
     shot_people: Option<people::Gallery>,
     look: (f32, f32),
+    /// The look was given (`--look`): a run begun at the spawn point faces that way.
+    look_given: bool,
     /// Time of day in hours, if not the one left off at.
     time: Option<f32>,
     /// Time of year, 0 to 1 from the spring equinox, if not the one left off at.
@@ -229,6 +231,7 @@ impl Default for Options {
             shot_figure_screen: None,
             shot_people: None,
             look: (35.0, -18.0),
+            look_given: false,
             time: None,
             date: None,
             year: None,
@@ -482,6 +485,7 @@ fn parse_args() -> Result<Options> {
             "--look" => {
                 let v = list::<f32>(&value()?, ',', 2)?;
                 o.look = (v[0], v[1]);
+                o.look_given = true;
             }
             "--time" => o.time = Some(value()?.parse()?),
             "--ambient" => o.ambient = value()?.parse::<f32>()?.clamp(0.0, 600.0),
@@ -651,6 +655,9 @@ fn make_camera(opts: &Options, world: &GameWorld, saved: Option<&Progress>) -> C
     let spawn = world.spawn_point();
     let feet = surface_height(world, spawn.x, spawn.z);
     let pos = DVec3::new(spawn.x as f64 + 0.5, feet + player::EYE_HEIGHT, spawn.z as f64 + 0.5);
+    if opts.look_given {
+        return Camera::new(pos, opts.look.0, opts.look.1);
+    }
     Camera::new(pos, spawn.yaw, -4.0)
 }
 
@@ -1935,6 +1942,9 @@ impl Running {
     /// camp that was here already, in words; and what a left click would.
     fn camp_prompt(&self) -> Option<String> {
         if let Some(rest) = &self.rest {
+            if rest.gazing(&self.env, self.camera.forward().y) {
+                return Some("Looking up at the stars   \u{b7}   look down to sleep".into());
+            }
             return Some(format!("Resting until {}   \u{b7}   any step to get up", rest.until.word()));
         }
         let until = camp::Until::from(&self.env).word();
@@ -2418,7 +2428,7 @@ impl Running {
         // And faster for someone resting, until the dawn or the dark they wait for.
         if let Some(rest) = &mut self.rest {
             let on_foot = self.walking && self.player.mode == Mode::Walk;
-            match rest.hours(&self.env, dt).filter(|_| on_foot) {
+            match rest.hours(&self.env, dt, self.camera.forward().y).filter(|_| on_foot) {
                 Some(hours) => days += hours / 24.0,
                 None => {
                     let word = if rest.until == camp::Until::Dawn { "Morning" } else { "Night has come" };
@@ -3246,7 +3256,7 @@ fn main() -> Result<()> {
             let date = opts.date.unwrap_or(season::DEFAULT_DATE);
             let (mut slept, from) = (Environment::at(hour, date), hour);
             let mut rest = camp::Rest::in_bed(&slept);
-            while let Some(hours) = rest.hours(&slept, 1.0 / 30.0) {
+            while let Some(hours) = rest.hours(&slept, 1.0 / 30.0, 0.0) {
                 slept = Environment::at(slept.time + hours, date);
             }
             hour = slept.time;

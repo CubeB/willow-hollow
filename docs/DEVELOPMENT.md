@@ -453,7 +453,9 @@ tents once; a save from then still loads, without them.)
 Each world has a few constellations of its own (`crates/game/src/stars.rs`), made from the
 seed and named in one of the world's tongues (`worldgen::names::sky`, which nothing in
 generation reads, so the checksum is untouched). The sky shader draws them among the other
-stars from the sky's own uniform, a little brighter. A screenshot logs where each stands
+stars from the sky's own uniform, brighter and a little larger, with the field thinned out
+round each of their stars. Lying by a fire at night, looking more than about 40 degrees up
+holds the clock to its usual pace (`camp::Rest::gazing`); those hours are not slept. A screenshot logs where each stands
 (`the stars: NAME at --look YAW,PITCH`); with `RUST_LOG=warn,game=debug` it logs the pixels
 each figure's stars fall on, and with `--rest` it names one made out overhead, as a run
 does the first time. A night slept by a fire or in a bed leaves the player rested
