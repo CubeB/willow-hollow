@@ -11,6 +11,9 @@
 //!   palm has no branches, only fronds on a bare trunk.
 //! - **Leaf clusters** hang under canopies and tuft their sides, in the leaf's own
 //!   material, so they turn, fall and sway exactly as the leaves they sit on.
+//! - **Bare crowns**: a broadleaf's model carries fine twigs inside its leaves
+//!   (`Template::fine`, grown by `trees::twigs`), hidden while the leaves are on and
+//!   showing as each falls. [`bare_crowns`] lays them into the world.
 //!
 //! Every piece is decided from the air voxel it occupies and that voxel's neighbours,
 //! which a chunk column has in its border, so neighbouring columns agree. Each column
@@ -21,13 +24,14 @@ use std::collections::HashSet;
 
 use glam::IVec3;
 use voxel::{
-    CHUNK, Materials, PAD, Voxel,
+    AIR, CHUNK, Materials, PAD, Voxel,
     mesh::{CELLS, PlantBox},
 };
 
 use super::attach::{ColumnVoxels, FacePlot, Raster, Site, Toward, Voxels, for_each_site};
-use super::shape::Rng;
-use super::trees::Species;
+use super::shape::{FACES, ON_WOOD, Rng, boxes_meet, on_faces};
+use super::trees::{Species, hides_twigs};
+use super::{Library, Placement, parts::rotate_box};
 use crate::{
     materials as mat,
     noise::{hash2, hash3, unit},
@@ -105,7 +109,7 @@ fn bark_of(v: Voxel) -> Option<Bark> {
 }
 
 /// Tree wood: what bark and limb twigs grow on.
-fn is_wood(v: Voxel) -> bool {
+pub(super) fn is_wood(v: Voxel) -> bool {
     bark_of(v).is_some() || matches!(v, mat::BARK_BAOBAB | mat::BARK_HOLLY)
 }
 
@@ -140,6 +144,8 @@ fn is_leaf(v: Voxel) -> bool {
             | mat::NEEDLES_JUNIPER
             | mat::LEAVES_LAUREL
             | mat::GORSE
+            | mat::LEAVES_MANGROVE
+            | mat::LEAVES_MANGROVE_LIT
     )
 }
 
@@ -159,6 +165,8 @@ fn is_evergreen(v: Voxel) -> bool {
             | mat::NEEDLES_JUNIPER
             | mat::LEAVES_LAUREL
             | mat::GORSE
+            | mat::LEAVES_MANGROVE
+            | mat::LEAVES_MANGROVE_LIT
     )
 }
 
@@ -484,6 +492,86 @@ fn leaf_sites(voxels: &ColumnVoxels, mats: &Materials, mut visit: impl FnMut(Sit
     }
 }
 
+/// Lays the twigs of the bare crowns of `placements` (see `Template::fine`) that fall in
+/// the chunk column whose voxels `voxels` reads: each box is inside one voxel, and is
+/// drawn by the column that voxel is in, only where the world still holds a leaf that
+/// falls there (something built may have cleared it), and pulled back a cell from any
+/// side of that leaf open to the air. So it is never seen in leaf, nor stands in a face
+/// of the leaf it shares a plane with. And only while what it grows from is drawn too,
+/// back to the wood, so no piece of twig is left hanging in the air in winter.
+pub fn bare_crowns(lib: &Library, placements: &[Placement], voxels: &ColumnVoxels, out: &mut Vec<PlantBox>) {
+    let IVec3 { x: x0, z: z0, .. } = voxels.corner();
+    let (x1, z1) = (x0 + 1, z0 + 1);
+    let (x2, z2) = (x0 + CHUNK, z0 + CHUNK);
+    // What this column can read: its own voxels and a ring round them. A twig further off
+    // is taken to be as its tree was made; the column it is in may find otherwise, but
+    // only for what lies in the world beyond this one's ring.
+    let seen = |q: IVec3| (x0..=x2 + 1).contains(&q.x) && (z0..=z2 + 1).contains(&q.z);
+    // A leaf's face is drawn where it gives onto the air and against another tree's leaf
+    // or wood, so a twig a cell back from the air is shut in. Against anything else (the
+    // ground, which is drawn sloping, a wall, bracken) the face is left out while what is
+    // there may be drawn short of it, and a twig in that leaf could be seen: none goes there.
+    let holds = |v: Voxel| is_leaf(v) || is_wood(v);
+    let cells = IVec3::splat(CELLS);
+    // Each twig as it is drawn, or `None` where it is not, so those growing from it are not.
+    let mut placed: Vec<Option<(IVec3, IVec3)>> = Vec::new();
+    for p in placements {
+        let t = lib.get(p.species, p.variant);
+        if t.fine.is_empty() || p.lie.is_some() {
+            continue;
+        }
+        if p.pos.x + t.reach < x1 || p.pos.x - t.reach > x2 || p.pos.z + t.reach < z1 || p.pos.z - t.reach > z2 {
+            continue;
+        }
+        placed.clear();
+        for (i, b) in t.fine.iter().enumerate() {
+            let from = t.fine_from.get(i).copied().unwrap_or(ON_WOOD);
+            let parent = (from != ON_WOOD).then(|| placed[from as usize]);
+            if parent == Some(None) {
+                placed.push(None);
+                continue;
+            }
+            let (lo, hi) = rotate_box(IVec3::from_array(b.lo), IVec3::from_array(b.hi), p.turns);
+            let (mut lo, mut hi) = (lo + p.pos * cells, hi + p.pos * cells);
+            let q = lo.div_euclid(cells);
+            if !seen(q) {
+                placed.push(Some((lo, hi)));
+                continue;
+            }
+            let around = FACES.map(|step| seen(q + step).then(|| voxels.voxel(q + step)));
+            if !hides_twigs(voxels.voxel(q)) || around.iter().flatten().any(|&v| v != AIR && !holds(v)) {
+                placed.push(None);
+                continue;
+            }
+            let base = q * cells;
+            for (face, &next) in around.iter().enumerate() {
+                let axis = face / 2;
+                let touches = if face % 2 == 0 { hi[axis] == base[axis] + CELLS } else { lo[axis] == base[axis] };
+                if touches && next == Some(AIR) {
+                    if face % 2 == 0 {
+                        hi[axis] -= 1;
+                    } else {
+                        lo[axis] += 1;
+                    }
+                }
+            }
+            // Still against what it grows from, once both are pulled back from the air.
+            let held = match parent {
+                Some(Some(up)) => boxes_meet((lo, hi), up),
+                _ => on_faces(lo, hi).any(|f| !seen(q + f) || is_wood(voxels.voxel(q + f))),
+            };
+            if !lo.cmplt(hi).all() || !held {
+                placed.push(None);
+                continue;
+            }
+            placed.push(Some((lo, hi)));
+            if q.x >= x1 && q.x <= x2 && q.z >= z1 && q.z <= z2 && voxels.has_height(q.y) {
+                out.push(PlantBox { lo: lo.to_array(), hi: hi.to_array(), ..*b });
+            }
+        }
+    }
+}
+
 /// Adds every air voxel the boxes reach into to `into`.
 pub fn occupied(boxes: &[PlantBox], into: &mut HashSet<IVec3>) {
     for b in boxes {
@@ -503,7 +591,7 @@ pub fn occupied(boxes: &[PlantBox], into: &mut HashSet<IVec3>) {
 mod tests {
     use std::collections::HashMap;
 
-    use voxel::{AIR, Kind, PaddedChunk};
+    use voxel::{Kind, PaddedChunk, plant};
 
     use super::*;
     use crate::{
@@ -676,6 +764,7 @@ mod tests {
             mat::BARK_PALM_RING,
             mat::TWIG,
             mat::TWIG_PALE,
+            mat::TWIG_FINE,
         ] {
             assert_eq!(mats.get(v).plant, voxel::plant::VINE, "{v} must keep its colour all year");
         }
@@ -727,13 +816,14 @@ mod tests {
                     | mat::BARK_PALM_RING
                     | mat::TWIG
                     | mat::TWIG_PALE
+                    | mat::TWIG_FINE
                     | mat::BARK_YEW_FLAKE
                     | mat::HOLLY_BERRY
                     | mat::GORSE_BLOOM
             ) || is_leaf(p.voxel)
         };
         let (centre, stride) = (crate::macro_layout::MACRO_SIZE / CHUNK / 2, 3);
-        let mut compared = 0;
+        let (mut compared, mut crowns) = (0, 0);
         'columns: for cx in (centre - 300..centre + 300).step_by(stride) {
             for cz in (centre - 300..centre + 300).step_by(stride) {
                 let here = w.generate_column(cx, cz);
@@ -765,6 +855,14 @@ mod tests {
                     assert_eq!((b.lo[0].div_euclid(span), (b.hi[0] - 1).div_euclid(span)), (cx, cx), "{b:?} is outside its column");
                     assert_eq!((b.lo[2].div_euclid(span), (b.hi[2] - 1).div_euclid(span)), (cz, cz), "{b:?} is outside its column");
                     let cell = IVec3::from_array(b.lo).div_euclid(IVec3::splat(CELLS));
+                    if b.voxel == mat::TWIG_FINE {
+                        // A twig of a bare crown, in the leaf that hides it till it falls.
+                        let hi = (IVec3::from_array(b.hi) - 1).div_euclid(IVec3::splat(CELLS));
+                        assert_eq!(cell, hi, "{b:?} spans voxels");
+                        assert!(hides_twigs(world_voxel(cell)), "{b:?} is not in a leaf");
+                        crowns += 1;
+                        continue;
+                    }
                     assert_eq!(world_voxel(cell), AIR, "{b:?} is not in air");
                     let touching = Toward::ALL.iter().any(|t| {
                         let v = world_voxel(cell + t.step());
@@ -779,5 +877,150 @@ mod tests {
             }
         }
         assert!(compared > 0, "found no columns with tree detail to compare");
+        assert!(crowns > 0, "found no twigs of bare crowns");
+    }
+
+    #[test]
+    fn bare_crowns_stay_inside_the_leaves_that_fall() {
+        // Every twig of a bare crown is in one voxel of its own tree's falling leaves, and
+        // keeps a cell back from any side of it open to the air, where in summer it would
+        // show through or flicker in the face of the leaf.
+        let lib = crate::features::Library::build();
+        let mats = build();
+        for species in Species::ALL {
+            for variant in 0..species.variants() {
+                let t = lib.get(species, variant);
+                let model = |p: IVec3| t.voxels.binary_search_by_key(&(p.y, p.x, p.z), |(q, _)| (q.y, q.x, q.z)).ok().map(|i| t.voxels[i].1);
+                let falls = |v: Voxel| matches!(mats.get(v).plant, plant::DECIDUOUS | plant::AUTUMN);
+                let leafy = t.voxels.iter().any(|&(_, v)| hides_twigs(v));
+                if matches!(species, Species::Oak | Species::Birch | Species::Maple | Species::ElderOak) {
+                    assert!(t.fine.len() > 100, "{species:?} {variant} has a bare crown of {} twigs", t.fine.len());
+                }
+                if !leafy {
+                    assert!(t.fine.is_empty(), "{species:?} {variant} has twigs with no leaves to hide them");
+                }
+                for b in &t.fine {
+                    assert_eq!(b.voxel, mat::TWIG_FINE);
+                    let (lo, hi) = (IVec3::from_array(b.lo), IVec3::from_array(b.hi));
+                    let at = lo.div_euclid(IVec3::splat(CELLS));
+                    assert_eq!(at, (hi - 1).div_euclid(IVec3::splat(CELLS)), "{species:?} {variant}: {b:?} spans voxels");
+                    let leaf = model(at).expect("a twig in the air");
+                    assert!(hides_twigs(leaf) && falls(leaf) && mats.get(leaf).kind == Kind::Foliage, "{species:?} {variant}: {b:?} is in {leaf}");
+                    for (face, step) in FACES.iter().enumerate() {
+                        let axis = face / 2;
+                        let base = at[axis] * CELLS;
+                        let touches = if face % 2 == 0 { hi[axis] == base + CELLS } else { lo[axis] == base };
+                        assert!(!touches || model(at + *step).is_some(), "{species:?} {variant}: {b:?} reaches the open");
+                    }
+                }
+                // Each grows from the wood or from one before it, which it meets face to face.
+                assert_eq!(t.fine_from.len(), t.fine.len());
+                let span = |b: &PlantBox| (IVec3::from_array(b.lo), IVec3::from_array(b.hi));
+                for (i, (b, &from)) in t.fine.iter().zip(&t.fine_from).enumerate() {
+                    if from == ON_WOOD {
+                        assert!(touches_wood(span(b), |q| model(q).is_some_and(is_wood)), "{species:?} {variant}: {b:?} is not on the wood");
+                    } else {
+                        assert!((from as usize) < i && meets(span(b), span(&t.fine[from as usize])), "{species:?} {variant}: {b:?} is not on the twig it grows from");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether two boxes of cells share some of a face, worked out cell by cell.
+    fn meets(a: (IVec3, IVec3), b: (IVec3, IVec3)) -> bool {
+        let inside = |c: IVec3, (lo, hi): (IVec3, IVec3)| c.cmpge(lo).all() && c.cmplt(hi).all();
+        for y in a.0.y..a.1.y {
+            for z in a.0.z..a.1.z {
+                for x in a.0.x..a.1.x {
+                    let c = IVec3::new(x, y, z);
+                    if FACES.iter().any(|&f| inside(c + f, b)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether a box of cells has a cell against a voxel that `wood` takes.
+    fn touches_wood((lo, hi): (IVec3, IVec3), wood: impl Fn(IVec3) -> bool) -> bool {
+        for y in lo.y..hi.y {
+            for z in lo.z..hi.z {
+                for x in lo.x..hi.x {
+                    let c = IVec3::new(x, y, z);
+                    if FACES.iter().any(|&f| wood((c + f).div_euclid(IVec3::splat(CELLS)))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn no_twig_of_a_bare_crown_hangs_in_the_air() {
+        // In the world, each column drawing its own: every twig of a bare crown meets the
+        // wood, or a twig that does, and so on back, across the edges of the columns.
+        let w = GameWorld::with_config(11, SimConfig { size: 256 });
+        let centre = crate::macro_layout::MACRO_SIZE / CHUNK / 2;
+        let twigs = |o: &crate::ColumnOutput| o.plants.iter().filter(|p| p.voxel == mat::TWIG_FINE).count();
+        let mut columns: Vec<(usize, i32, i32)> = Vec::new();
+        for cx in (centre - 300..centre + 300).step_by(20) {
+            for cz in (centre - 300..centre + 300).step_by(20) {
+                let n = twigs(&w.generate_column(cx, cz));
+                if n > 0 {
+                    columns.push((n, cx, cz));
+                }
+            }
+        }
+        columns.sort_unstable_by(|a, b| b.cmp(a));
+        assert!(columns.len() >= 4, "found too few columns with bare crowns: {columns:?}");
+        let (mut checked, mut held) = (0, 0);
+        for &(_, cx, cz) in columns.iter().take(6) {
+            let mut outputs = HashMap::new();
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    outputs.insert((cx + dx, cz + dz), w.generate_column(cx + dx, cz + dz));
+                }
+            }
+            let world_voxel = |q: IVec3| -> Voxel {
+                let (ox, oz) = (q.x.div_euclid(CHUNK), q.z.div_euclid(CHUNK));
+                match outputs.get(&(ox, oz)) {
+                    Some(o) => ColumnVoxels::new(&o.chunks, ox * CHUNK - 1, oz * CHUNK - 1).voxel(q),
+                    None => AIR,
+                }
+            };
+            let span = |b: &PlantBox| (IVec3::from_array(b.lo), IVec3::from_array(b.hi));
+            let boxes: Vec<((IVec3, IVec3), bool)> = outputs
+                .iter()
+                .flat_map(|(&(ox, oz), o)| o.plants.iter().filter(|p| p.voxel == mat::TWIG_FINE).map(move |b| (span(b), (ox, oz) == (cx, cz))))
+                .collect();
+            let mut near: HashMap<IVec3, Vec<usize>> = HashMap::new();
+            for (i, &(b, _)) in boxes.iter().enumerate() {
+                near.entry(b.0.div_euclid(IVec3::splat(CELLS))).or_default().push(i);
+            }
+            let mut reached: Vec<bool> = boxes.iter().map(|&(b, _)| touches_wood(b, |q| is_wood(world_voxel(q)))).collect();
+            let mut queue: Vec<usize> = (0..boxes.len()).filter(|&i| reached[i]).collect();
+            while let Some(i) = queue.pop() {
+                let at = boxes[i].0.0.div_euclid(IVec3::splat(CELLS));
+                for step in [IVec3::ZERO].into_iter().chain(FACES) {
+                    for &j in near.get(&(at + step)).into_iter().flatten() {
+                        if !reached[j] && meets(boxes[i].0, boxes[j].0) {
+                            reached[j] = true;
+                            queue.push(j);
+                        }
+                    }
+                }
+            }
+            for (&(b, own), &r) in boxes.iter().zip(&reached) {
+                if own {
+                    assert!(r, "the twig {b:?} in column {cx},{cz} hangs in the air");
+                    held += 1;
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked > 0 && held > 0);
     }
 }

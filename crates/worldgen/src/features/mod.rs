@@ -14,6 +14,7 @@ pub mod cloth;
 pub mod designs;
 pub mod fittings;
 pub mod landmarks;
+pub mod mangrove;
 pub mod moorstones;
 pub mod moss;
 pub mod nests;
@@ -347,7 +348,9 @@ fn flora(biome: Biome) -> Flora {
         Biome::Steppe => f!([(ElderOak, 1.0)], 0.006, [(Oak, 1.0), (Juniper, 0.6), (Acacia, 0.3)], 0.009, [(Bush, 2.0), (Boulder, 1.5)], 0.05),
         Biome::DuneSea => f!([], 0.0, [], 0.0, [(Boulder, 1.0)], 0.004),
         Biome::RedRock => f!([], 0.0, [(Cactus, 1.0)], 0.015, [(Boulder, 3.0), (Bush, 1.0), (Cactus, 1.0)], 0.06),
-        Biome::Mangrove => f!([], 0.0, [(Willow, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
+        // The mangroves stand thickest in the water at the edge (see `mangrove_stand`);
+        // on the ground above it they thin out among palms and the first jungle trees.
+        Biome::Mangrove => f!([], 0.0, [(Mangrove, 5.0), (Jungle, 1.0), (Palm, 0.6)], 0.4, [(Fern, 3.0), (Bush, 2.0)], 0.12),
         Biome::Volcanic => f!([], 0.0, [(Palm, 1.0), (DeadSnag, 0.5)], 0.02, [(Fern, 2.0), (Boulder, 3.0)], 0.08),
         // Almost no trees: a lone rowan-like birch or a juniper here and there. Gorse in
         // clumps and boulders in the grass; the tors and their clitter are features::tor.
@@ -382,6 +385,7 @@ pub fn timber(biome: Biome) -> Option<voxel::Voxel> {
         Species::Acacia => mat::BARK_ACACIA,
         Species::Baobab => mat::BARK_BAOBAB,
         Species::Palm => mat::BARK_PALM,
+        Species::Mangrove => mat::BARK_MANGROVE,
         _ => return None,
     })
 }
@@ -399,6 +403,7 @@ pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
         Species::Birch => mat::LEAVES_BIRCH,
         Species::ScotsPine => mat::NEEDLES_PINE,
         Species::Juniper => mat::NEEDLES_JUNIPER,
+        Species::Mangrove => mat::LEAVES_MANGROVE,
         Species::Cactus | Species::DeadSnag => return None,
         _ => mat::LEAVES_OAK,
     };
@@ -407,6 +412,7 @@ pub fn canopy(biome: Biome, mats: &Materials) -> Option<([u8; 3], f32, f32)> {
         Species::Redwood => 60.0,
         Species::Kapok => 40.0,
         Species::TallPine => 30.0,
+        Species::Mangrove => 9.0,
         _ => 14.0,
     };
     Some((mats.get(leaves).color, cover, height))
@@ -462,6 +468,25 @@ fn poor_soil(seed: u32, x: i32, z: i32) -> f32 {
 
 fn ramp(a: f32, b: f32, x: f32) -> f32 {
     ((x - a) / (b - a)).clamp(0.0, 1.0)
+}
+
+/// The share of the tree layer's cells that grow a mangrove where they stand thickest.
+const MANGROVE_DENSITY: f32 = 0.65;
+/// The share of the small layer's cells that grow a shrub among the mangroves.
+const MANGROVE_SHRUBS: f32 = 0.3;
+/// The deepest water a shrub stands in, in voxels: its leaves must stay above it.
+const MANGROVE_SHRUB_WATER: f32 = m(0.5);
+/// The deepest water a mangrove stands in, in voxels: its stilts leave the trunk above it.
+pub const MANGROVE_DEEPEST: f32 = m(0.9);
+
+/// How thickly mangroves stand on a column of mangrove country, 0 to 1: thickest in the
+/// shallows at the water's edge and on the mud just above it, thinning out into deeper
+/// water and up the land.
+pub fn mangrove_stand(col: &Column) -> f32 {
+    match col.water_surface() {
+        Some(k) => 1.0 - ramp(m(0.6), MANGROVE_DEEPEST, k as f32 - 1.0 - col.ground),
+        None => 1.0 - ramp(m(0.8), m(4.0), col.ground),
+    }
 }
 
 /// The evergreen that stands in place of a broadleaf tree at a column, if one does:
@@ -914,6 +939,26 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
         _ => (fl.small, fl.small_density),
     };
     let too_cold = col.temperature < 0.13;
+    // Mangroves stand in the shallows of their coast and on the mud flats just above
+    // them, where no other tree grows, thickest at the water's edge.
+    let stand = if layer.salt != GIANTS.salt && col.biome == Biome::Mangrove { mangrove_stand(col) } else { 0.0 };
+    // Between them, low and dark, young mangroves and the bushes of the salt mud, in the
+    // shallows and on the flats both.
+    if layer.salt == SMALL.salt && stand > 0.0 {
+        let wet = col.water_surface().map(|k| k as f32 - 1.0 - col.ground);
+        if wet.is_none_or(|d| d <= MANGROVE_SHRUB_WATER) && roll_density < MANGROVE_SHRUBS * stand {
+            return Some(Species::MangroveShrub);
+        }
+        if wet.is_some() {
+            return None;
+        }
+    }
+    if layer.salt == TREES.salt && stand > 0.0 && (col.water_surface().is_some() || col.cover != Cover::Land) {
+        if !matches!(col.cover, Cover::SeaFloor | Cover::Bank | Cover::Beach | Cover::LakeBed | Cover::RiverBed | Cover::Land) {
+            return None;
+        }
+        return (roll_density < MANGROVE_DENSITY * stand * (0.55 + 0.45 * clearing)).then_some(Species::Mangrove);
+    }
     match col.cover {
         Cover::Beach if layer.salt == TREES.salt && col.temperature > 0.6 && roll_density < 0.12 => {
             return Some(Species::Palm);
@@ -930,7 +975,7 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
     if layer.salt == TREES.salt
         && col.river < m(7.2)
         && col.temperature > 0.3
-        && !matches!(col.biome, Biome::Desert | Biome::Savanna | Biome::DuneSea)
+        && !matches!(col.biome, Biome::Desert | Biome::Savanna | Biome::DuneSea | Biome::Mangrove)
         && roll_density < 0.35
     {
         return Some(if col.biome == Biome::RedRock { Species::Palm } else { Species::Willow });
@@ -939,6 +984,12 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
         return None;
     }
     let mut species = weighted(list, roll_species);
+    // Up the land from the flats the mangroves give way, a few at a time, to the palms
+    // and the jungle behind them, and the wood opens out.
+    if species == Species::Mangrove && unit(hash2(seed ^ 0x3a9f_7c, x, z)) >= stand {
+        let roll = unit(hash2(seed ^ 0x3a9f_7d, x, z));
+        return (roll < 0.5).then_some(if roll < 0.32 { Species::Jungle } else { Species::Palm });
+    }
     // Trees grow in groves of their own kind rather than evenly mixed: a slow noise
     // hands whole stretches of forest to one of the minority species.
     if layer.salt == TREES.salt && matches!(species, Species::Oak | Species::Birch | Species::Maple | Species::Cherry) {
@@ -958,7 +1009,7 @@ fn choose(col: &Column, layer: &Layer, roll_density: f32, roll_species: f32, x: 
         species = winter_green_shrub(col, clearing, x, z, seed);
     }
     // Bare tidal sand grows nothing: only boulders and driftwood lie on it.
-    let bare = col.cover == Cover::Bank && !col.biome.arid() && crate::surface::flat_is_sand(col.ground, crate::surface::ground_patch(seed, x as f64, z as f64));
+    let bare = col.cover == Cover::Bank && !col.biome.arid() && col.biome != Biome::Mangrove && crate::surface::flat_is_sand(col.ground, crate::surface::ground_patch(seed, x as f64, z as f64));
     if bare && !matches!(species, Species::Boulder | Species::FallenLog) {
         return None;
     }
@@ -1183,6 +1234,7 @@ mod tests {
             Species::HollyBush,
             Species::Laurel,
             Species::Gorse,
+            Species::MangroveShrub,
         ];
         for species in small {
             for variant in 0..species.variants() {

@@ -6,7 +6,8 @@
 //!
 //! Reeds on banks and lily pads on lake beds are the plant layer's own; this adds
 //! cattails and algae to still water, rushes, trailing weed and mossy stones to rivers,
-//! and eelgrass, kelp and mangrove roots to the sea and its river mouths.
+//! eelgrass and kelp to the sea and its river mouths, and pencil roots to the mud and the
+//! shallows of the mangroves.
 
 use voxel::{
     Voxel,
@@ -17,6 +18,7 @@ use super::shape::Rng;
 use crate::{
     materials as mat,
     noise::{hash3, perlin2, unit},
+    biome::Biome,
     scale::{BLOCK, m, m64},
     surface::{Column, Cover},
 };
@@ -38,8 +40,9 @@ pub enum Aquatic {
     Eelgrass,
     /// Tall stems rising from deeper sea floor.
     Kelp,
-    /// Stilt roots at a warm river mouth.
-    MangroveRoots,
+    /// A mangrove's pencil roots (pneumatophores), standing up out of the mud and
+    /// through the shallows round about it to breathe.
+    Pneumatophores,
 }
 
 /// Noise that varies over about `metres`, for things that grow in patches.
@@ -52,18 +55,26 @@ fn depth(col: &Column) -> f32 {
     col.water_surface().map_or(0.0, |k| k as f32 - col.ground)
 }
 
-/// Warm enough for algae and mangroves.
+/// Warm enough for algae.
 const WARM: f32 = 0.62;
-const HOT: f32 = 0.72;
 /// How deep the sea is still shallow, and where kelp stops growing.
 const SHALLOWS: f32 = m(2.0);
 const KELP_MAX: f32 = m(14.0);
+/// The deepest water pencil roots stand up through.
+const PENCIL_WATER: f32 = m(0.5);
 
 /// What grows on this column, and the share of such columns that grow it. `a` is the
 /// column's own roll in 0..1.
 pub fn kind_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Aquatic, f32)> {
     let wet = depth(col);
     match col.cover {
+        // The mud of the mangroves bristles with pencil roots in patches, on the flats and
+        // up through the shallows alike; the stilted trees themselves are features::trees.
+        Cover::Bank | Cover::Beach | Cover::SeaFloor | Cover::LakeBed | Cover::Land
+            if col.biome == Biome::Mangrove && wet <= PENCIL_WATER && col.ground < m(2.4) =>
+        {
+            (patch(seed, 0x9e07, x, z, 4.0) > -0.15).then_some((Aquatic::Pneumatophores, 0.2))
+        }
         // Beside still water, and in its shallows.
         Cover::LakeBed if wet > 0.0 && wet <= 2.0 * BLOCK as f32 => {
             if col.temperature > WARM && patch(seed, 0x16a3, x, z, 6.4) > 0.1 {
@@ -73,9 +84,6 @@ pub fn kind_at(col: &Column, seed: u32, x: i32, z: i32) -> Option<(Aquatic, f32)
             } else {
                 None
             }
-        }
-        Cover::Bank if col.water_surface().is_none() && col.temperature > HOT && col.ground < m(1.6) => {
-            Some((Aquatic::MangroveRoots, 0.12))
         }
         // Rushes in patches along the bank, none along a desert stream.
         Cover::Bank if col.water_surface().is_none() && !col.biome.arid() => {
@@ -193,13 +201,13 @@ fn build(p: &mut Plot, rng: &mut Rng, kind: Aquatic, room: i32) {
                 p.stem(qx, qz, 0, (height / 2).max(2), mat::MOSS, true);
             }
         }
-        Aquatic::MangroveRoots => {
-            // Stilts arching out of the mud: wide at the foot, narrowing as they rise.
-            let n = rng.int(2, 3) as usize;
+        Aquatic::Pneumatophores => {
+            // A few pencils a cell across, stiff and close together, each standing its own
+            // height clear of the mud or of the water over it: `room` reaches a little
+            // above whichever is higher.
+            let n = rng.int(2, 4) as usize;
             for &(qx, qz) in &pick_quarters(rng, n)[..n] {
-                let height = rng.int(6, 12);
-                p.add([qx, 0, qz], [qx + 2, 2, qz + 2], mat::BARK_JUNGLE, (false, false));
-                p.stem(qx + rng.int(0, 1), qz + rng.int(0, 1), 2, height, mat::BARK_WILLOW, false);
+                p.stem(qx + rng.int(0, 1), qz + rng.int(0, 1), 0, room - rng.int(0, 3), mat::PNEUMATOPHORE, false);
             }
         }
     }
@@ -219,6 +227,7 @@ pub fn grow(col: &Column, x: i32, z: i32, seed: u32, out: &mut Vec<PlantBox>) {
     let room = match kind {
         Aquatic::Algae => (k_of(col) - y) * CELLS,
         Aquatic::Cattail => 16,
+        Aquatic::Pneumatophores => col.water_surface().map_or(0, |k| (k - y) * CELLS) + 6,
         _ => room,
     };
     let needed = match kind {
@@ -256,6 +265,11 @@ mod tests {
         }
     }
 
+    /// The flooded mud at the edge of a mangrove coast, a voxel under the sea.
+    fn mangrove_shallows() -> Column {
+        Column { ground: -1.2, water: Some(0), ..column(Cover::SeaFloor, Biome::Mangrove, None, 0.9) }
+    }
+
     fn strewn(col: &Column) -> Vec<(i32, i32, Vec<PlantBox>)> {
         let mut all = Vec::new();
         for x in 0..160 {
@@ -290,7 +304,9 @@ mod tests {
         assert!(matches!(kind(&column(Cover::RiverBed, Biome::Deciduous, Some(m(1.0)), 0.5)), Some(Aquatic::Weed | Aquatic::MossyStone)));
         assert_eq!(kind(&column(Cover::Bank, Biome::Deciduous, None, 0.5)), Some(Aquatic::Rush));
         assert_eq!(kind(&column(Cover::Bank, Biome::Desert, None, 0.5)), None, "rushes along a desert stream");
-        assert_eq!(kind(&column(Cover::Bank, Biome::Rainforest, None, 0.9)), Some(Aquatic::MangroveRoots));
+        assert_eq!(kind(&column(Cover::Bank, Biome::Mangrove, None, 0.9)), Some(Aquatic::Pneumatophores));
+        assert_eq!(kind(&mangrove_shallows()), Some(Aquatic::Pneumatophores));
+        assert_ne!(kind(&column(Cover::Bank, Biome::Rainforest, None, 0.9)), Some(Aquatic::Pneumatophores));
         let warm_pond = column(Cover::LakeBed, Biome::Rainforest, Some(2.0), 0.9);
         let cold_pond = column(Cover::LakeBed, Biome::Taiga, Some(2.0), 0.3);
         assert!((0..4000).any(|i| kind_at(&warm_pond, 4, i * 5, i).map(|k| k.0) == Some(Aquatic::Algae)));
@@ -306,6 +322,8 @@ mod tests {
             column(Cover::RiverBed, Biome::Deciduous, Some(m(1.0)), 0.5),
             column(Cover::Bank, Biome::Deciduous, None, 0.5),
             column(Cover::Bank, Biome::Rainforest, None, 0.9),
+            column(Cover::Bank, Biome::Mangrove, None, 0.9),
+            mangrove_shallows(),
             column(Cover::LakeBed, Biome::Deciduous, Some(2.0), 0.5),
             column(Cover::LakeBed, Biome::Rainforest, Some(2.0), 0.9),
         ];
@@ -321,8 +339,8 @@ mod tests {
                         assert_eq!((a.hi[axis] - 1).div_euclid(CELLS), c, "{a:?} leaves its column");
                     }
                     assert!(a.hi[0] - a.lo[0] < CELLS + 1 && a.hi[2] - a.lo[2] < CELLS + 1);
-                    // Reeds and cattails stand up out of the water; the rest stay under it.
-                    if let Some(s) = surface.filter(|_| !matches!(a.voxel, mat::REED | mat::REED_HEAD)) {
+                    // Reeds, cattails and pencil roots stand up out of the water; the rest stay under it.
+                    if let Some(s) = surface.filter(|_| !matches!(a.voxel, mat::REED | mat::REED_HEAD | mat::PNEUMATOPHORE)) {
                         assert!(a.hi[1] <= s, "{a:?} pokes through the surface at {s}");
                     }
                     for b in &boxes[i + 1..] {
