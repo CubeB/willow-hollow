@@ -46,6 +46,8 @@ pub struct Mark {
     /// Whether the map hints at it before it has been visited. A share of what people
     /// built is left unmarked, to come on unawares.
     pub hint: bool,
+    /// A shrine, which incense lit at another may tell of (#40).
+    pub shrine: bool,
 }
 
 /// The share of landmarks the map gives no hint of.
@@ -91,25 +93,26 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
             PlaceKind::Tor => (Kind::Tor, NEAR),
             _ => continue,
         };
-        marks.push(Mark { kind, at: world(p.at), reach, name: Some(p.name.clone()), hint: true });
+        marks.push(Mark { kind, at: world(p.at), reach, name: Some(p.name.clone()), hint: true, shrine: false });
     }
     for (k, s) in c.trails.sites.iter().enumerate() {
         let at = Vec2::new(s.x as f32 + 0.5, s.z as f32 + 0.5);
         let name = c.trails.names.site(k).map(|p| p.name.clone());
         // Continent-local, so a site's luck does not change with where its continent lies.
         let hint = !surprise(world_seed, s.x, s.z);
-        marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name, hint });
+        let shrine = s.kind == worldgen::features::landmarks::Landmark::Shrine;
+        marks.push(Mark { kind: Kind::Landmark, at: world(at), reach: NEAR, name, hint, shrine });
     }
     // Settlements are visited by walking onto their green, and never kept quiet about:
     // everyone in the country knows where the villages are.
     for (k, s) in c.trails.settlements.iter().enumerate() {
         let name = c.trails.names.settlement(k).map(|p| p.name.clone());
-        marks.push(Mark { kind: Kind::Settlement, at: world(s.at()), reach: s.radius.max(NEAR), name, hint: true });
+        marks.push(Mark { kind: Kind::Settlement, at: world(s.at()), reach: s.radius.max(NEAR), name, hint: true, shrine: false });
     }
     // The quarries, by the middle of the pit's floor, where the masons' roll puts them.
     for q in &c.land.quarries {
         let at = Vec2::new(q.floor.x as f32 + 0.5, q.floor.z as f32 + 0.5);
-        marks.push(Mark { kind: Kind::Quarry, at: world(at), reach: NEAR, name: None, hint: false });
+        marks.push(Mark { kind: Kind::Quarry, at: world(at), reach: NEAR, name: None, hint: false, shrine: false });
     }
 
     let land: Vec<usize> = (0..n * n).filter(|&i| !c.ocean[i]).collect();
@@ -119,7 +122,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         .map(|&i| (c.discharge[i], i))
         .collect();
     for i in spaced(n, mouths, 8, RIVER_SPACING) {
-        marks.push(Mark { kind: Kind::Mouth, at: world(centre(i)), reach: NEAR * 2.0, name: None, hint: true });
+        marks.push(Mark { kind: Kind::Mouth, at: world(centre(i)), reach: NEAR * 2.0, name: None, hint: true, shrine: false });
     }
     // Where the second-largest river into a cell is itself a real river.
     let (mut first, mut second) = (vec![0.0f32; n * n], vec![0.0f32; n * n]);
@@ -134,7 +137,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
     }
     let joins = land.iter().filter(|&&i| second[i] >= MIN_TRIBUTARY).map(|&i| (second[i], i)).collect();
     for i in spaced(n, joins, 8, RIVER_SPACING) {
-        marks.push(Mark { kind: Kind::Confluence, at: world(centre(i)), reach: NEAR * 1.5, name: None, hint: true });
+        marks.push(Mark { kind: Kind::Confluence, at: world(centre(i)), reach: NEAR * 1.5, name: None, hint: true, shrine: false });
     }
     // The springs that well up into a pool of some size, a few to a continent.
     let springs: Vec<(f32, usize, Vec2)> = land
@@ -145,7 +148,7 @@ pub fn find(c: &Continent, world_seed: u32) -> Vec<Mark> {
         .collect();
     let at_of: std::collections::HashMap<usize, Vec2> = springs.iter().map(|s| (s.1, s.2)).collect();
     for i in spaced(n, springs.iter().map(|s| (s.0, s.1)).collect(), 10, 64.0) {
-        marks.push(Mark { kind: Kind::Spring, at: world(at_of[&i]), reach: NEAR, name: None, hint: true });
+        marks.push(Mark { kind: Kind::Spring, at: world(at_of[&i]), reach: NEAR, name: None, hint: true, shrine: false });
     }
     marks
 }

@@ -44,6 +44,8 @@ The land round a village is worked. Fields with hedges, orchards, terraces on th
 
 **Places to find.** Every landmass has a network of trails linking shrines, lookout towers, camps, ruins, standing stones and boat landings. They're built of the rock in the ground where they stand and the trees that grow there, so a tower on the moor is granite, a desert shrine is sandstone, and a shrine among the redwoods is mossy rock and red timber. The paths are worn into the ground, climb steep slopes in rough steps, and are marked by cairns, waymarks and milestones. They wander a little where the land gives them room, and cross brooks on stepping stones and streams on timber footbridges; a stone bridge took a summer to build, so a trail will go a long way round to avoid one, and only the big rivers have them. The lanterns come on at dusk. Once in a long while there's something small that somebody left beside the way: wind chimes on the brow of a hill, a candle burning on a wayside shelf where two paths meet, a log seat turned to a view, prayer flags over a high pass, stones balanced by a ford, a face carved in a boulder.
 
+**Incense.** Every shrine has a small burner beside its altar, built like the shrine of what is to hand: a post of the local timber in the woods, a little pillar of the local stone in open country, with a clay bowl, or an iron one in the cold north; the wayside shelves have their dish. Pines, spruces, junipers, acacias and the great trees of the rainforest sometimes weep a bead of resin on the bark at about chest height, which you can pick, and which grows back like the sticks do. Drag resin onto a sweet herb in the pack (violets, heather, gorse blossom, marigolds or orchids) and you have two sticks of incense. Light one in a burner with E, or by using it with it in your hand: a soft chime, a thin curl of smoke that drifts off with the wind for a couple of hours, and then ash in the bowl until the next. The smoke tells of somewhere: the map gains a faint ring at the nearest spring or shrine you haven't been to, and the journal keeps the shrine.
+
 **The journal.** Press J for a record of the walk that writes itself. The first of each kind of thing you gather is entered with where and when you found it and the sort of country it grows in; what you haven't found yet is only an outline. Each named place is entered when you first come to it, region by region. There is a page for how far you have walked, glided, sailed and swum, the highest ground you have stood on and the rivers you have followed down to the sea, and one that sets down the notable moments a day at a time: a new region, a summit at dusk, the first snow.
 
 **Getting around.** Open the glider in mid-air and ride it off anything tall. Every landing has a boat tied up, which you can take down a river or across the strait to the next island. Press V to see yourself from behind: a small figure that walks, swims and carries the glider folded on its back.
@@ -92,11 +94,11 @@ The first launch takes a few seconds, because the starting continent has to be s
 | Shift | Sprint |
 | Space | Jump, or swim up |
 | G, or Space in mid-air | Open or fold the glider. Look down to dive, up to slow down |
-| E | Pick what's in front of you (a flower, or sticks lying under the trees), light a fire, rest by a fire or sleep in a tavern bed, greet someone, read a notice board, or get in or out of a boat at a landing. W sails, Shift for full sail |
+| E | Pick what's in front of you (a flower, sticks lying under the trees, or resin on a pine), light a fire or a stick of incense at a shrine, rest by a fire or sleep in a tavern bed, greet someone, read a notice board, or get in or out of a boat at a landing. W sails, Shift for full sail |
 | 1 to 7, or the wheel | Choose which slot of the hotbar is in your hand |
-| Right click | Use what's in your hand where you're looking: lay a fire with three sticks, or set a thing down |
+| Right click | Use what's in your hand where you're looking: lay a fire with three sticks, light incense at a shrine's burner, or set a thing down |
 | Left click | Pick up what was set down, such as a flower. Put out a fire that's burning, or take apart one that isn't for what's left of its sticks |
-| I | Open the pack. Drag one thing onto another to move, join or swap them, or down to the hotbar. Click one to read about it or set it down |
+| I | Open the pack. Drag one thing onto another to move, join or swap them, or down to the hotbar; drag resin onto a sweet herb to make incense. Click one to read about it or set it down |
 | J | Open the journal. Click a page's name, or use the left and right arrows, to turn to it |
 | M | The large map. Drag to move it, right drag to turn it, the wheel to zoom |
 | N | Show or hide the corner map |
@@ -150,7 +152,7 @@ Cube World, for the scale and the feeling of it. Veloren, for showing that erosi
 
 ## Still to do
 
-The issues tab has the full list. Footsteps are the only sound for now, and the ambience will come from real recordings later.
+The issues tab has the full list. Footsteps and the chime of incense are the only sounds for now, and the ambience will come from real recordings later.
 
 ## Licence
 

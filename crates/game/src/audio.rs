@@ -1,4 +1,5 @@
-//! Sound output: plays footsteps through the default output device.
+//! Sound output: plays footsteps, and the chime of incense lit at a shrine, through the
+//! default output device.
 
 mod synth;
 
@@ -17,6 +18,7 @@ use synth::Mixer;
 enum Message {
     Volume(f32),
     Step { ground: Ground, loud: f32 },
+    Chime { loud: f32 },
 }
 
 /// A running output stream. Dropping it stops the sound.
@@ -60,6 +62,11 @@ impl Audio {
     pub fn step(&self, ground: Ground, loud: f32) {
         let _ = self.messages.send(Message::Step { ground, loud });
     }
+
+    /// Strikes a small bell, as incense is lit (#40); `loud` is 0 to 1.
+    pub fn chime(&self, loud: f32) {
+        let _ = self.messages.send(Message::Chime { loud });
+    }
 }
 
 fn open<T>(device: &cpal::Device, config: StreamConfig, volume: f32) -> Result<(Stream, Sender<Message>), cpal::Error>
@@ -77,6 +84,7 @@ where
                 match message {
                     Message::Volume(volume) => mixer.set_volume(volume),
                     Message::Step { ground, loud } => mixer.step(ground, loud),
+                    Message::Chime { loud } => mixer.chime(loud),
                 }
             }
             for block in out.chunks_mut(channels * stereo.len() / 2) {

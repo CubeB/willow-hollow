@@ -107,6 +107,9 @@ enum PKind {
     /// Rising from a chimney or a smoke hole: as a fire's smoke goes, but thinner and
     /// soon gone, a hearth banked low for a home rather than a fire built up in the open.
     Chimney,
+    /// A curl of smoke off a stick of incense (#40): a thread, pale and fine, that
+    /// wavers up a few metres and drifts off with the wind.
+    Incense,
 }
 
 /// What a falling leaf looks like, by the tree it came from.
@@ -238,6 +241,8 @@ pub struct Surroundings<'a> {
     /// The chimneys of the homes near the player that are smoking (see chimneys.rs): the
     /// top of each, and how much it smokes at this hour, 0 to 1.
     pub chimneys: &'a [(DVec3, f32)],
+    /// The tips of the sticks of incense burning near the player.
+    pub incense: &'a [DVec3],
     pub player_entered_water: Option<DVec3>,
     /// How much of the year's leaf fall is on now, 0 to 1 (see `season::leaf_fall`).
     pub leaf_fall: f32,
@@ -329,6 +334,11 @@ const MAX_SMOKE: usize = 1400;
 /// Puffs of chimney smoke in the air at once, at most: a town in view sends up a thread
 /// from each of a couple of dozen chimneys at the busiest hours and stays within this.
 const MAX_CHIMNEY: usize = 500;
+/// How far off a curl of incense smoke is drawn, in metres: it is a thread, lost in the
+/// air well before a campfire's column is.
+const INCENSE_SIGHT: f64 = 70.0;
+/// Puffs of incense smoke in the air at once, at most.
+const MAX_INCENSE: usize = 360;
 
 impl Particles {
     pub fn new() -> Self {
@@ -654,6 +664,36 @@ impl Particles {
             }
         }
 
+        // Incense: a thread of tiny puffs, close together, so that they read as one line.
+        // Each takes the curl from the moment it left the tip, so the thread wavers as a
+        // whole rather than breaking into specks.
+        let mut curls = if s.incense.is_empty() { 0 } else { self.count(PKind::Incense) };
+        for &tip in s.incense {
+            let metres = (tip - s.camera).length() / VOXELS_PER_METRE as f64;
+            if metres > INCENSE_SIGHT || curls >= MAX_INCENSE {
+                continue;
+            }
+            if self.unit() < dt * 7.0 {
+                curls += 1;
+                let shade = self.range(0.95, 1.05);
+                let particle = Particle {
+                    kind: PKind::Incense,
+                    pos: tip + (Vec3::new(self.range(-0.004, 0.004), 0.01, self.range(-0.004, 0.004)) * U).as_dvec3(),
+                    vel: Vec3::new(0.0, 0.3, 0.0),
+                    age: 0.0,
+                    life: self.range(9.0, 13.0),
+                    size: Vec3::splat(self.range(0.022, 0.03)),
+                    // Paler than wood smoke, a little blue.
+                    color: [0.80 * shade, 0.81 * shade, 0.86 * shade],
+                    phase: (s.time * 0.45) as f32 % std::f32::consts::TAU,
+                    settled: false,
+                    rot: Vec3::ZERO,
+                    spin: Vec4::ZERO,
+                };
+                self.spawn(particle);
+            }
+        }
+
         // Fireflies in warm, damp country at dusk and through the night.
         let firefly_country = matches!(
             s.biome,
@@ -834,6 +874,18 @@ impl Particles {
                     p.vel += (Vec3::new(wind.x * drift, rise, wind.z * drift) + curl - p.vel) * (0.6 * dt);
                     p.pos += (p.vel * U * dt).as_dvec3();
                     p.size += Vec3::splat(0.09 * dt);
+                }
+                PKind::Incense => {
+                    // Straight up off the tip in still air, then wavering wider as it
+                    // climbs, and leaning off with the wind once it is clear of the
+                    // shelter of the shrine; it hardly spreads at all.
+                    let up = (p.age / 6.0).min(1.0);
+                    let sway = 0.04 + 0.22 * up;
+                    let curl = Vec3::new((p.age * 1.3 + p.phase).sin(), 0.0, (p.age * 0.9 + p.phase * 1.7).cos()) * sway;
+                    let drift = 0.05 + 0.5 * up;
+                    p.vel += (Vec3::new(wind.x * drift, 0.32 - 0.12 * up, wind.z * drift) + curl - p.vel) * (1.2 * dt);
+                    p.pos += (p.vel * U * dt).as_dvec3();
+                    p.size += Vec3::splat(0.012 * dt);
                 }
                 PKind::Mist => {
                     p.vel += (wind * 0.3 - p.vel * 0.5) * dt;
@@ -1083,6 +1135,15 @@ impl Particles {
                         // A chimney's smoke is a thread, its fire out of sight below.
                         alpha *= 0.55;
                     }
+                }
+                PKind::Incense => {
+                    // Faint, and fainter as it goes; seen against the shrine more than
+                    // the sky. By night the day's light is gone from it, as from smoke.
+                    let gone = p.age / p.life;
+                    alpha = fade_in * 0.32 * (1.0 - smooth(0.25, 1.0, gone));
+                    dissolve = ((gone - 0.75) / 0.25).clamp(0.0, 1.0);
+                    let day = ((s.sun_elevation + 0.12) / 0.45).clamp(0.0, 1.0);
+                    glow = 0.15 + 0.7 * day * day * (3.0 - 2.0 * day);
                 }
                 PKind::Spark => {
                     glow = 5.5 * (1.0 - p.age / p.life).sqrt();
@@ -1593,6 +1654,7 @@ mod leaf_tests {
             flowers: &[],
             fires: &[],
             chimneys: &[],
+            incense: &[],
             player_entered_water: None,
             leaf_fall: 0.0,
             date: 0.62,

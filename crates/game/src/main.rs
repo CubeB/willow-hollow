@@ -16,6 +16,7 @@ mod farview;
 mod figure;
 mod gfx;
 mod impostors;
+mod incense;
 mod insects;
 mod inventory;
 mod journal;
@@ -170,6 +171,9 @@ struct Options {
     shot_read: bool,
     /// Make camp ahead of the camera before a screenshot: a fire in this state.
     shot_camp: Option<u8>,
+    /// A stick of incense in this state (burning or burnt) in the burner of the shrine
+    /// nearest the camera, on a screenshot (#40).
+    shot_incense: Option<u8>,
     /// How far ahead that camp is made, in metres.
     camp_ahead: f64,
     /// Chimneys set out ahead of the camera, from `camp_ahead` metres on, to see their
@@ -249,6 +253,7 @@ impl Default for Options {
             shot_greet: false,
             shot_read: false,
             shot_camp: None,
+            shot_incense: None,
             camp_ahead: CAMP_AHEAD,
             shot_chimneys: 0,
             rest: false,
@@ -316,6 +321,9 @@ Options hold for one run. Settings and your place in each world are saved betwee
                         things set down
   --camp-ahead M        make that camp M metres ahead instead (default 4.2), to see its
                         smoke from far off
+  --incense STATE       a stick of incense lit or burnt in the burner of the shrine
+                        nearest the camera, within 150 m: the smoke it sends up, the place
+                        it tells of on the map, and the journal's note of it
   --chimneys N          N chimneys smoking ahead, four to a row from --camp-ahead metres
                         on, as if a village stood there: to see chimney smoke at the hour
                         --time gives (give --ambient 30 or so on a screenshot for a full
@@ -522,6 +530,13 @@ fn parse_args() -> Result<Options> {
             "--camp" => {
                 let word = value()?;
                 o.shot_camp = Some(commands::fire_state(&word).ok_or_else(|| anyhow::anyhow!("unknown fire '{word}': laid, lit, out or burnt"))?);
+            }
+            "--incense" => {
+                o.shot_incense = Some(match value()?.as_str() {
+                    "lit" => placed::BURNING,
+                    "burnt" => placed::BURNT,
+                    word => bail!("unknown incense '{word}': lit or burnt"),
+                })
             }
             "--picked" => o.picked = Some(value()?.parse()?),
             "--journal" => {
@@ -752,7 +767,7 @@ fn sample_camp(camp: &mut placed::Placed, voxels: &mut WorldVoxels, eye: DVec3, 
         }
         // A fire burnt down has long since stopped smoking; one put out has only just.
         if state == placed::BURNT {
-            camp.pass(1.0, f64::MAX);
+            camp.pass(1.0, f64::MAX, f64::MAX);
         }
         for (item, count, along, aside, turn) in [
             (inventory::sticks(), 3, 3.6, -1.3, 0.4),
@@ -1170,6 +1185,8 @@ struct Running {
     chimneys: chimneys::Chimneys,
     /// The guest beds of the taverns near the player: the middle of each, on its boards.
     beds: Vec<DVec3>,
+    /// The burners at the shrines near the player, where incense is lit (#40).
+    burners: Vec<worldgen::trails::Burner>,
     /// The people of the settlements near the player (#204).
     villagers: villagers::Villagers,
     /// The campers, settlers and boats about the player, as their timetables have them (#205).
@@ -1473,6 +1490,7 @@ impl Running {
             embers: Vec::new(),
             chimneys,
             beds: Vec::new(),
+            burners: Vec::new(),
             villagers: villagers::Villagers::new(),
             travellers,
             boons,
@@ -1717,14 +1735,16 @@ impl Running {
                 best = Some((d, (p.x, p.z), item));
             }
         }
-        // And the sticks lying on the ground, until they are picked up.
+        // And the sticks lying on the ground, until they are picked up, and the resin on
+        // the trunks, up to as high as a hand goes.
         for stick in &self.fallen {
             let (x, z) = stick.spot();
             let d = DVec3::new(stick.pos.x - centre.x, 0.0, stick.pos.z - centre.z).length();
-            if d > reach || (stick.pos.y - feet as f64).abs() > 3.0 || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
+            let up = stick.pos.y - feet as f64;
+            if d > reach || !(-3.0..=5.0).contains(&up) || (stick.what == fallen::Find::Sticks && up > 3.0) || self.pack.gathered(x, z) || best.as_ref().is_some_and(|b| b.0 <= d) {
                 continue;
             }
-            best = Some((d, (x, z), inventory::sticks()));
+            best = Some((d, (x, z), stick.item()));
         }
         best.map(|b| (b.1, b.2))
     }
@@ -1738,7 +1758,7 @@ impl Running {
                 self.world.regrow(ox, oz);
                 self.streamer.replant(ox, oz);
             }
-            if item.id == "sticks" {
+            if matches!(item.id.as_str(), "sticks" | "resin") {
                 // All that lay there, which is not part of the world: nothing to build again.
                 let more = self.fallen.iter().find(|s| s.spot() == (x, z)).map_or(0, |s| s.count.saturating_sub(1));
                 self.pack.add_many(&item, more);
@@ -1792,6 +1812,13 @@ impl Running {
         if stack.item.id == "lantern" {
             self.shuttered = !self.shuttered;
             self.say(if self.shuttered { "The lantern is shuttered" } else { "The lantern is lit" });
+            return;
+        }
+        // Nor is incense: it is lit at a shrine.
+        if stack.item.id == "incense" {
+            if !self.light_incense() {
+                self.say("Incense is lit in a shrine's burner");
+            }
             return;
         }
         let Some(at) = self.spot_ahead() else {
@@ -2097,7 +2124,7 @@ impl Running {
         } else if let Some(i) = self.fleet.nearest(self.player.pos, BOARD_REACH) {
             let boat = self.fleet.take(i);
             self.player.board(boat.pos, boat.heading);
-        } else if !self.read_board() && !self.greet() && !self.make_camp() {
+        } else if !self.read_board() && !self.greet() && !self.light_incense() && !self.make_camp() {
             self.gather();
         }
     }
@@ -2296,6 +2323,7 @@ impl Running {
             self.thing_near = if on_foot { self.placed.within_reach(self.hands()) } else { None };
             self.embers = embers_near(&self.streamer, &mut self.voxels, self.player.pos);
             self.beds = beds_near(&self.world, self.player.pos);
+            self.burners = self.world.burners_near(self.player.pos.x.floor() as i32, self.player.pos.z.floor() as i32, m(24.0) as i32);
         }
         self.hand_word = (self.hand_word - dt).max(0.0);
         if let Some((_, left)) = &mut self.notice {
@@ -2369,7 +2397,8 @@ impl Running {
                 self.streamer.replant(x, z);
             }
             // The fires burn down in their time; where one has burned is a camp.
-            self.placed.pass(years, (FIRE_BURNS / self.settings.year_days.max(1.0)) as f64);
+            let year_days = self.settings.year_days.max(1.0);
+            self.placed.pass(years, (FIRE_BURNS / year_days) as f64, (incense::BURNS / year_days) as f64);
             self.map.camps = self.placed.camps();
         }
         self.save_timer -= dt;
@@ -2416,6 +2445,7 @@ impl Running {
         let when = travellers::When { hour: self.env.time, date: self.env.date, year: self.env.year, year_days: self.settings.year_days, day_minutes: self.settings.day_minutes };
         self.travellers.update(&self.world, self.camera.pos, when, travellers::calm(&self.weather.now));
         fires.extend(self.travellers.smoking());
+        let incense = self.placed.incense_smoking(self.camera.pos, m64(100.0));
         let surroundings = Surroundings {
             camera: self.camera.pos,
             biome: self.biome,
@@ -2427,6 +2457,7 @@ impl Running {
             flowers: &self.flowers,
             fires: &fires,
             chimneys: self.chimneys.smoking(),
+            incense: &incense,
             player_entered_water: entered_water,
             leaf_fall: season::leaf_fall(self.env.date),
             date: self.env.date,
@@ -2528,6 +2559,7 @@ impl Running {
         let (quarried, charted): (Vec<_>, Vec<_>) = self.journal.charted().iter().partition(|c| villagers::notices::by_masons(&c.key));
         self.map.charted = charted.iter().map(|c| (c.at, c.reach)).collect();
         self.map.quarried = quarried.iter().map(|c| (c.at, c.reach)).collect();
+        self.map.told = self.journal.told();
         let here = if self.walking { self.player.eye() } else { self.camera.pos };
         self.map.update(&self.gpu, here, self.camera.forward(), self.walking, dt);
         self.sub.lap(10);
@@ -2619,12 +2651,13 @@ impl Running {
                 let feet = self.player.eye() - DVec3::new(0.0, player::EYE_HEIGHT, 0.0);
                 let read = self.villagers.board_in_sight(self.player.eye(), self.camera.forward()).map(|(_, name)| format!("E to read {name}"));
                 let greet = || self.villagers.within_reach(feet).map(|(_, name)| format!("E to greet {name}"));
-                read.or_else(greet).or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
+                read.or_else(greet).or_else(|| self.incense_prompt()).or_else(|| self.camp_prompt()).or_else(|| self.within_reach.as_ref().map(|(_, item)| format!("E to gather  {}", item.name)))
             }
         };
         // What has just come to hand, and what it is for, fading out.
         let hand_word = self.pack.in_hand().filter(|_| self.hand_word > 0.0).map(|s| (format!("{}   \u{b7}   {}", s.item.name, inventory::use_of(&s.item.id)), (self.hand_word / 0.6).min(1.0)));
         let mut let_go = Vec::new();
+        let incense_before = self.pack.count("incense");
         let (pack, pack_view, pack_open) = (&mut self.pack, &mut self.pack_view, self.pack_open);
         let (journal, journal_view, journal_open) = (&self.journal, &mut self.journal_view, self.journal_open);
         let page = self.reading.as_ref().map(|r| &r.0);
@@ -2722,6 +2755,11 @@ impl Running {
         }
         for stack in let_go {
             self.set_down(stack);
+        }
+        // Incense made in the pack, the first of it written in the journal (#40).
+        if self.pack.count("incense") > incense_before {
+            let first = if self.journal.found(&inventory::incense()) { "   \u{b7}   written in the journal" } else { "" };
+            self.say(format!("Incense  \u{d7} {}{first}", self.pack.count("incense")));
         }
         self.quit |= choice.quit;
         self.cpu.lap(5);
@@ -3244,6 +3282,39 @@ fn main() -> Result<()> {
             camera.pos = bed + DVec3::new(0.0, player::EYE_HEIGHT - m64(camp::Rest::begin(&env).lowered() as f64), 0.0);
             camera.yaw = (to.z.atan2(to.x) as f32).rem_euclid(std::f32::consts::TAU);
         }
+        // A stick of incense in the burner nearest, and what its smoke tells of (#40).
+        let mut lit_at = None;
+        if let Some(state) = opts.shot_incense {
+            let near = world.burners_near(camera.pos.x as i32, camera.pos.z as i32, m(150.0) as i32);
+            let off = |b: &&worldgen::trails::Burner| b.at.as_dvec3().distance(camera.pos);
+            match near.iter().min_by(|a, b| off(a).total_cmp(&off(b))) {
+                Some(b) => {
+                    let at = b.at.as_dvec3();
+                    camp.put(placed::Thing::new(inventory::incense(), 1, at, camera.yaw));
+                    if let Some(h) = camp.incense_at(at) {
+                        camp.set_state(h, state);
+                    }
+                    camp.pass(0.0, f64::MAX, (incense::BURNS / settings.year_days.max(1.0)) as f64);
+                    // Where to stand to look at it: a few steps back toward the camera.
+                    let back = (camera.pos - at).with_y(0.0).normalize_or(DVec3::X);
+                    let eye = at + back * m64(2.6);
+                    let yaw = (-back.z).atan2(-back.x).to_degrees().rem_euclid(360.0);
+                    log::info!("incense in the {} at {:.1} {:.1} {:.1}; to look at it, --over {:.0},{:.0},4 --look {yaw:.0},-22", if b.wayside { "wayside dish" } else { "shrine's burner" }, at.x, at.y, at.z, eye.x, eye.z);
+                    let c = world.continent(worldgen::macro_layout::cell_of(at.x as i32, at.z as i32).0, worldgen::macro_layout::cell_of(at.x as i32, at.z as i32).1);
+                    let told = incense::told_of(&minimap::marks::find(&c, settings.seed), glam::DVec2::new(at.x, at.z));
+                    log::info!("its smoke tells of {told:?}");
+                    if state == placed::BURNING {
+                        let word = match told {
+                            Some((place, shrine)) => format!("The incense catches   \u{b7}   its smoke drifts away {}, toward {}", journal::compass(glam::DVec2::new(at.x, at.z), place), if shrine { "a shrine" } else { "a spring" }),
+                            None => "The incense catches".into(),
+                        };
+                        prompt = prompt.or(Some(word));
+                    }
+                    lit_at = Some((*b, told));
+                }
+                None => log::warn!("there is no burner within 150 m of the camera"),
+            }
+        }
         camp.draw(camera.pos, 0.6, &mut props);
         fallen::draw(&sticks, &inventory::Pack::new(), camera.pos, &mut props);
         let fires: Vec<DVec3> = camp.near(camera.pos, m64(90.0)).filter(|(_, t)| t.burns()).map(|(_, t)| t.heart()).collect();
@@ -3255,6 +3326,7 @@ fn main() -> Result<()> {
         let when = travellers::When { hour: env.time, date: env.date, year: env.year, year_days: settings.year_days, day_minutes: settings.day_minutes };
         travellers.settle(&world, camera.pos, when, travellers::calm(&weather.now));
         smoking.extend(travellers.smoking());
+        let incense_tips = camp.incense_smoking(camera.pos, m64(100.0));
         log::info!("{} fires burning near, {} of them the player's", smoking.len(), fires.len());
         // And from the chimneys about, and any set out ahead by hand.
         let mut chimneys = chimneys::Chimneys::new();
@@ -3281,6 +3353,7 @@ fn main() -> Result<()> {
                 flowers: &flowers,
                 fires: &smoking,
                 chimneys: chimneys.smoking(),
+                incense: &incense_tips,
                 player_entered_water: None,
                 leaf_fall: season::leaf_fall(env.date),
                 date: env.date,
@@ -3433,6 +3506,7 @@ fn main() -> Result<()> {
             map.met = met.clone();
             map.charted = charted.clone();
             map.quarried = quarried.clone();
+            map.told = lit_at.and_then(|(_, told)| told).map(|t| t.0).into_iter().collect();
             map.reveal_about(&shown, m(CHARTED_LAND));
             map.settle(&gpu, camera.pos, camera.forward());
             map
@@ -3442,7 +3516,9 @@ fn main() -> Result<()> {
             use worldgen::materials as mat;
             let mut pack = inventory::Pack::new();
             use worldgen::features::plants::Flower;
-            for (k, f) in Flower::ALL.iter().enumerate() {
+            // All but the last few flowers, to leave room for the resin and the incense
+            // made of it (#40).
+            for (k, f) in Flower::ALL.iter().enumerate().take(Flower::ALL.len() - 3) {
                 for _ in 0..[12, 3, 1, 7, 2, 31, 1, 5, 4][k % 9] {
                     pack.add(&inventory::of_flower(*f));
                 }
@@ -3458,6 +3534,12 @@ fn main() -> Result<()> {
             for _ in 0..5 {
                 pack.add(&inventory::sticks());
             }
+            for _ in 0..3 {
+                pack.add(&inventory::resin());
+            }
+            for _ in 0..4 {
+                pack.add(&inventory::incense());
+            }
             pack.shift(10, 14);
             let mut view = inventory::View::default();
             view.select(1);
@@ -3468,7 +3550,13 @@ fn main() -> Result<()> {
             let mut view = journal::View::new(world.materials());
             view.page = page;
             let (c, at) = journal::continent_at(&world, camera.pos, true).expect("the continent, having waited for it");
-            (journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue(), env.year), view)
+            let mut written = journal::Journal::sample(&c, at, opts.journal_fill, view.catalogue(), env.year);
+            if let Some((b, told)) = lit_at {
+                let at = glam::DVec2::new(b.at.x as f64, b.at.z as f64);
+                let named = minimap::marks::find(&c, settings.seed).into_iter().filter(|m| m.shrine && m.at.distance(at) < m64(12.0)).find_map(|m| m.name);
+                written.light(at, b.wayside, named.as_deref(), told);
+            }
+            (written, view)
         });
         // A hotbar as it might be an hour into a walk: sticks, things picked.
         let hotbar = opts.shot_hotbar.then(|| {

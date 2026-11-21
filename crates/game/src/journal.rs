@@ -4,7 +4,8 @@
 //! is entered with where and when it was found; each named place is entered when it is
 //! first reached on foot (or by boat, for water); the distance gone is kept by the way it
 //! was gone, with the highest ground stood on; and the notable moments are set down in
-//! a short log, a day at a time. Its window has a page for each.
+//! a short log, a day at a time. Its window has a page for each. The shrines where
+//! incense has been lit (#40) are kept too, with what each one's smoke told of.
 //!
 //! A journal is plain data, kept with its world's save as lines of text, so that a save
 //! from an older or a newer game still reads.
@@ -201,6 +202,31 @@ pub struct Journal {
     offered: Vec<Offer>,
     /// The settlements guild houses' wayfarers have marked on the map (#207).
     charted: Vec<Chart>,
+    /// The shrines incense has been lit at (#40), the first first.
+    shrines: Vec<Shrine>,
+}
+
+/// A shrine where incense has been lit (#40).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shrine {
+    /// Where its burner is, world x and z.
+    pub at: DVec2,
+    /// What it is called in the journal: "the shrine by Hollin Tarn".
+    pub name: String,
+    /// How many sticks have been burned there.
+    pub times: u32,
+    /// The spring or shrine its smoke first told of, world x and z, if any.
+    pub told: Option<DVec2>,
+    /// When incense was first lit there.
+    pub when: Stamp,
+}
+
+/// Which way `to` lies from `from` (world x and z, north toward -z), in a word or two.
+pub fn compass(from: DVec2, to: DVec2) -> &'static str {
+    const WAYS: [&str; 8] = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    let d = to - from;
+    let turn = (-d.y).atan2(d.x).rem_euclid(std::f64::consts::TAU) / std::f64::consts::FRAC_PI_4;
+    WAYS[(turn.round() as usize) % 8]
 }
 
 /// A request read on a settlement's notice board (#207).
@@ -385,6 +411,47 @@ impl Journal {
     /// What the wayfarers, and the masons, have marked on the map.
     pub fn charted(&self) -> &[Chart] {
         &self.charted
+    }
+
+    /// Writes down that a stick of incense was lit, now, at the burner at `at` (world x
+    /// and z), before the shrine `named` (if it has a name) or on a `wayside` shelf, and
+    /// that its smoke drifted off toward `told` (a place, and whether it is a shrine
+    /// rather than a spring), if it told of anything. The first time at a shrine it is
+    /// entered among them; every time it goes in the notes.
+    pub fn light(&mut self, at: DVec2, wayside: bool, named: Option<&str>, told: Option<(DVec2, bool)>) {
+        let what = if wayside { "a wayside shrine" } else { "the shrine" };
+        let name = match named {
+            Some(name) if !wayside => name.to_string(),
+            _ if self.here.is_empty() => what.to_string(),
+            _ => format!("{what} {}", self.here),
+        };
+        let k = match self.shrines.iter().position(|s| s.at.distance(at) < m(8.0) as f64) {
+            Some(k) => {
+                self.shrines[k].times += 1;
+                self.shrines[k].told = self.shrines[k].told.or(told.map(|t| t.0));
+                k
+            }
+            None => {
+                self.shrines.push(Shrine { at, name: clean(&name), times: 1, told: told.map(|t| t.0), when: self.now });
+                self.shrines.len() - 1
+            }
+        };
+        let again = if self.shrines[k].times > 1 { " again" } else { "" };
+        let lit = format!("Lit incense{again} at {} {}.", self.shrines[k].name, self.now.time_of_day());
+        self.note(match told {
+            Some((place, shrine)) => format!("{lit} Its smoke drifted away {}, toward {}.", compass(at, place), if shrine { "another shrine" } else { "a spring" }),
+            None => format!("{lit} Its smoke went straight up."),
+        });
+    }
+
+    /// The shrines incense has been lit at.
+    pub fn shrines(&self) -> &[Shrine] {
+        &self.shrines
+    }
+
+    /// The places the smoke of incense has told of, for the map.
+    pub fn told(&self) -> Vec<DVec2> {
+        self.shrines.iter().filter_map(|s| s.told).collect()
     }
 
     /// Seasons that have turned since the walk began.
@@ -635,6 +702,10 @@ impl Journal {
         for c in &self.charted {
             out += &format!("charted = {}|{},{}|{}|{}\n", clean(&c.key), c.at.x, c.at.y, c.reach, clean(&c.town));
         }
+        for s in &self.shrines {
+            let told = s.told.map_or_else(|| "-".into(), |t| format!("{},{}", t.x, t.y));
+            out += &format!("shrine = {},{}|{}|{told}|{}|{}\n", s.at.x, s.at.y, s.times, s.when.to_text(), clean(&s.name));
+        }
         out
     }
 
@@ -727,6 +798,16 @@ impl Journal {
                         j.charted.push(Chart { key: key.trim().into(), town: town.trim().into(), at: DVec2::new(x, z), reach });
                     }
                 }
+                "shrine" => {
+                    let parts: Vec<&str> = value.splitn(5, '|').collect();
+                    let place = |v: &str| v.split_once(',').and_then(|(x, z)| Some(DVec2::new(x.trim().parse().ok()?, z.trim().parse().ok()?))).filter(|p| p.is_finite());
+                    if let [at, times, told, when, name] = parts[..]
+                        && let (Some(at), Ok(times), Some(when)) = (place(at), times.trim().parse::<u32>(), Stamp::from_text(when))
+                        && !j.shrines.iter().any(|s| s.at == at)
+                    {
+                        j.shrines.push(Shrine { at, name: name.trim().into(), times: times.max(1), told: place(told), when });
+                    }
+                }
                 "note" => {
                     if let Some((when, text)) = value.split_once('|')
                         && let Some(when) = Stamp::from_text(when)
@@ -804,11 +885,12 @@ impl Journal {
 }
 
 /// Everything there is to find, in the order the journal shows it: the flowers and
-/// mushrooms, then what the bushes and the reed beds bear.
+/// mushrooms, then what the bushes and the reed beds bear, then the resin of the trees
+/// and the incense made of it (#40).
 pub fn catalogue(materials: &voxel::Materials) -> Vec<Item> {
     let flowers = Flower::ALL.iter().map(|f| inventory::of_flower(*f));
     let borne = [mat::GORSE_BLOOM, mat::HOLLY_BERRY, mat::IVY_BERRY, mat::REED_HEAD].into_iter().filter_map(|v| inventory::of_voxel(v, materials));
-    flowers.chain(borne).collect()
+    flowers.chain(borne).chain([inventory::resin(), inventory::incense()]).collect()
 }
 
 /// The months the thing called `id` is to be found in, if it is a flower or a mushroom.
@@ -860,6 +942,8 @@ pub fn country(id: &str) -> Option<&'static str> {
         "holly-berries" => "On the holly trees, when the berries are red.",
         "ivy-berries" => "On old ivy, up trunks and walls, in winter.",
         "reed-mace" => "The reed beds along rivers and the shores of lakes.",
+        "resin" => "Here and there on the bark of pines and junipers, acacias, and the great trees of the rainforest.",
+        "incense" => "Made, not found: resin rolled with violets, heather, gorse blossom, marigolds or orchids.",
         _ => return None,
     })
 }
@@ -1117,6 +1201,12 @@ fn walk_page(ui: &mut egui::Ui, journal: &Journal, kinds: usize) {
         [] => "\u{2014}".into(),
         all @ [.., last] => format!("{}, the latest by {} of {}", all.len(), last.name, last.town),
     }));
+    // Where incense has been lit (#40).
+    rows.push(("Incense lit at", match journal.shrines() {
+        [] => "\u{2014}".into(),
+        [one] => one.name.clone(),
+        all @ [.., last] => format!("{}, the latest {}", plural(all.len() as u32, "shrine", "shrines"), last.name),
+    }));
     ui.spacing_mut().item_spacing.y = 9.0;
     for (what, value) in rows {
         ui.horizontal(|ui| {
@@ -1274,6 +1364,30 @@ mod tests {
         // No save at all is a new journal.
         let new = Journal::from_text("");
         assert!(new.finds().is_empty() && new.places().is_empty() && new.day() == 1 && !new.unsaved);
+    }
+
+    #[test]
+    fn a_shrine_incense_is_lit_at_is_kept_with_what_its_smoke_told_of() {
+        let mut j = Journal::new();
+        j.tick(0.0, 0.3, 0, 19.5, false);
+        j.here = "by Carn Hollow".into();
+        let shrine = DVec2::new(100.0, 100.0);
+        j.light(shrine, false, Some("Tres Sanctum"), Some((DVec2::new(100.0, -900.0), false)));
+        // Lit again a step away, at the same shrine: counted, not entered twice, and
+        // what it told of first is kept.
+        j.light(shrine + DVec2::new(2.0, 0.0), false, Some("Tres Sanctum"), Some((DVec2::new(1100.0, 100.0), true)));
+        j.light(DVec2::new(5000.0, 0.0), true, None, None);
+        assert_eq!(j.shrines().len(), 2);
+        assert_eq!((j.shrines()[0].name.as_str(), j.shrines()[0].times), ("Tres Sanctum", 2));
+        assert_eq!(j.shrines()[1].name, "a wayside shrine by Carn Hollow");
+        assert_eq!(j.told(), vec![DVec2::new(100.0, -900.0)]);
+        let notes: Vec<&str> = j.notes().map(|n| n.text.as_str()).collect();
+        assert!(notes.contains(&"Lit incense at Tres Sanctum at dusk. Its smoke drifted away north, toward a spring."), "{notes:?}");
+        assert!(notes.iter().any(|n| n.starts_with("Lit incense again at Tres Sanctum") && n.ends_with("east, toward another shrine.")), "{notes:?}");
+        let back = Journal::from_text(&j.to_text());
+        assert_eq!(back.shrines(), j.shrines());
+        assert_eq!(back.to_text(), j.to_text());
+        assert_eq!(compass(DVec2::ZERO, DVec2::new(-10.0, 10.0)), "south-west");
     }
 
     #[test]
@@ -1457,7 +1571,7 @@ mod tests {
     #[test]
     fn everything_there_is_to_find_has_its_country_and_every_page_its_word() {
         let all = catalogue(&mat::build());
-        assert_eq!(all.len(), Flower::ALL.len() + 4);
+        assert_eq!(all.len(), Flower::ALL.len() + 6);
         let ids: std::collections::HashSet<&str> = all.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids.len(), all.len());
         for item in &all {

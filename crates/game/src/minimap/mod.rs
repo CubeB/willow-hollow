@@ -353,6 +353,9 @@ pub struct Minimap {
     pub charted: Vec<(DVec2, f64)>,
     /// The same for the quarries a guild house's masons have marked (#207).
     pub quarried: Vec<(DVec2, f64)>,
+    /// The places incense lit at a shrine has told of (#40), in world voxels: each has a
+    /// faint mark until it is come to, seen or not.
+    pub told: Vec<DVec2>,
     /// The time of year the models are made for, once it is known.
     season: Option<Season>,
     /// The large map's model, the one being made, and a count of what has changed the
@@ -488,6 +491,7 @@ impl Minimap {
             aim: None,
             hour: 12.0,
             camps: Vec::new(),
+            told: Vec::new(),
             met: Vec::new(),
             charted: Vec::new(),
             quarried: Vec::new(),
@@ -745,6 +749,31 @@ impl Minimap {
                 self.version += 1;
             }
         }
+    }
+
+    /// The nearest spring or shrine to `at` (world x and z) that has not been come to,
+    /// nor told of already, and is more than `beyond` voxels off (not the shrine stood
+    /// at): its place, and whether it is a shrine. From the continents the map knows,
+    /// which are those about the player. This is what lighting incense tells of (#40).
+    pub fn unfound_near(&self, at: DVec2, beyond: f64) -> Option<(DVec2, bool)> {
+        let told = |p: DVec2| self.told.iter().any(|t| t.distance(p) < 2.0);
+        self.known
+            .values()
+            .flat_map(|k| k.sheet.marks.iter().zip(&k.visited))
+            .filter(|(m, visited)| !**visited && (m.kind == Kind::Spring || m.shrine) && m.at.distance(at) > beyond && !told(m.at))
+            .min_by(|a, b| a.0.at.distance(at).total_cmp(&b.0.at.distance(at)))
+            .map(|(m, _)| (m.at, m.shrine))
+    }
+
+    /// The name of the shrine within `within` voxels of `at` (world x and z), if there is
+    /// one and it has a name: for the journal, of the shrine incense was lit at (#40).
+    pub fn shrine_named(&self, at: DVec2, within: f64) -> Option<String> {
+        self.known
+            .values()
+            .flat_map(|k| k.sheet.marks.iter())
+            .filter(|m| m.shrine && m.at.distance(at) <= within)
+            .min_by(|a, b| a.at.distance(at).total_cmp(&b.at.distance(at)))
+            .and_then(|m| m.name.clone())
     }
 
     /// Reads which of a continent's places were visited from the trail in its mask.
@@ -1304,6 +1333,16 @@ impl Minimap {
                 let at = place(mark.at);
                 let on_map = at.is_some_and(|(p, shown)| shown && f.edge(p) < -3.0);
                 let seen = r.seen((mark.at - o).as_vec2());
+                // Told of by incense lit at a shrine (#40): a faint ring where it lies,
+                // over ground seen or not, until it is come to; beyond the corner map, a
+                // hint at its rim, however far off.
+                if !visited && self.told.iter().any(|t| t.distance(mark.at) < 2.0) {
+                    match at {
+                        Some((p, _)) if f.edge(p) < -3.0 => icons.push(Instance::new(gpu::RING, p.into(), icon * 1.15, [0.98, 0.90, 0.70, 0.55])),
+                        _ => hints.push((mark.at.distance(me).min(HINT * 0.5), mark.at)),
+                    }
+                    continue;
+                }
                 // What stands there as a model of itself is its own mark.
                 let modelled = models && matches!(mark.kind, Kind::Landmark | Kind::Tor);
                 let mut on_water = false;
